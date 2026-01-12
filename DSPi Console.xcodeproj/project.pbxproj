@@ -10,9 +10,23 @@
 		665141C52F0DF37B00093CAF /* DSPi Console.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSPi Console.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		66626F332F1487F8009BAE8A /* Exceptions for "DSPi Console" folder in "DSPi Console" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"Images/DSPi Console.png",
+				README.md,
+			);
+			target = 665141C42F0DF37B00093CAF /* DSPi Console */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		665141C72F0DF37B00093CAF /* DSPi Console */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				66626F332F1487F8009BAE8A /* Exceptions for "DSPi Console" folder in "DSPi Console" target */,
+			);
 			path = "DSPi Console";
 			sourceTree = "<group>";
 		};
