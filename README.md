@@ -48,8 +48,8 @@ The application manages five distinct audio channels grouped into logical inputs
 
 | Channel | Description | Band Count |
 | :--- | :--- | :--- |
-| **Master L/R** | USB Input (1 & 2) | 10 |
-| **Out L/R** | SPDIF Output (3 & 4) | 2 |
+| **Master L/R** | USB Input (1 & 2) | 10 + 10 |
+| **Out L/R** | SPDIF Output (3 & 4) | 2  + 2|
 | **Sub** | PDM Output (Pin 10) | 2 |
 
 ## Building the Project
