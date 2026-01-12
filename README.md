@@ -6,8 +6,7 @@
 
 **DSPi Console** is the macOS companion application for the DSPi audio processor. It is written in Swift and provides real-time control and monitoring for all functions.
 
-![Screenshot](path/to/screenshot.png)
-*(Insert Screenshot Here)*
+![Screenshot](Images/DSPi Console.png)
 
 ## Capabilities
 
@@ -19,8 +18,8 @@
 
 ### Hardware Monitoring
 * **Live Metering**: Peak level indicators for USB Inputs, SPDIF Outputs, and the PDM subwoofer channel.
-* **System Status**: Monitors the real-time load of the RP2040's cores.
-* **Device State**: Hot-plug detection and connection status management via 'IOServiceMatching'.
+* **System Status**: Displays the real-time load of the RP2040's cores.
+* **Hotplug**: Automatic device detection and connection status management via 'IOServiceMatching'.
 
 ### Visualization
 * **Response Graph**: Renders the frequency response of the active filter chain.
