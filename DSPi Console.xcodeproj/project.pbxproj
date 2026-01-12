@@ -15,7 +15,7 @@
 		66626F362F148868009BAE8A /* Exceptions for "Images" folder in "DSPi Console" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				"DSPi Console.png",
+				DSPiConsole.png,
 			);
 			target = 665141C42F0DF37B00093CAF /* DSPi Console */;
 		};

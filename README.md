@@ -6,7 +6,7 @@
 
 **DSPi Console** is the macOS companion application for the DSPi audio processor. It is written in Swift and provides real-time control and monitoring for all functions.
 
-![Screenshot](Images/DSPi Console.png)
+![Screenshot](Images/DSPiConsole.png)
 
 ## Capabilities
 
