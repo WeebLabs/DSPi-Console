@@ -1,58 +1,61 @@
-/# FoxDAC (RP2040 DSP)
+# DSPi Console
 
-![Platform](https://img.shields.io/badge/Platform-RP2040-red)
-![Language](https://img.shields.io/badge/Language-Swift_%7C_C++-orange)
+![Platform](https://img.shields.io/badge/Platform-macOS-black)
+![Language](https://img.shields.io/badge/Language-Swift_%7C_SwiftUI-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-FoxDAC is a USB Audio Class 2.0 device implementation for the Raspberry Pi Pico (RP2040). It features a hardware-accelerated DSP pipeline, active crossover capabilities, and a native macOS control utility.
+**DSPi Console** is the macOS companion application for the DSPi audio processor. It is written in Swift and provides real-time control and monitoring for all functions.
 
 ![Screenshot](path/to/screenshot.png)
 *(Insert Screenshot Here)*
 
-## Features
+## Capabilities
 
-* **USB Audio Interface**: 48kHz / 16-bit PCM playback.
-* **Active Crossover**:
-    * **Mains**: SPDIF output (Left/Right).
-    * **Subwoofer**: PDM (Pulse Density Modulation) mono output on **GPIO 10**.
-* **DSP Engine**:
-    * **Master EQ**: 10-band Parametric EQ on USB input channels.
-    * **Output Correction**: 2-band PEQ on output channels.
-    * **Filter Types**: Peaking, Low Shelf, High Shelf, Low Pass, High Pass, Flat.
-* **Time Alignment**: Per-channel delay lines (0–170ms).
+### Real-Time Control
+* **Parametric EQ**: Full control over the stereo master PEQ (10 bands per channel) and output crossover filters (2 bands per channel).
+* **Filter Types**: Peaking, Low Shelf, High Shelf, Low Pass and High Pass filters.
+* **Time Alignment**: Adjustable delay (0–170ms) for each output channel.
+* **Gain**: Global digital preamp control (-60dB to +10dB) and master PEQ bypass.
 
-## Hardware Configuration
+### Hardware Monitoring
+* **Live Metering**: Peak level indicators for USB Inputs, SPDIF Outputs, and the PDM subwoofer channel.
+* **System Status**: Monitors the real-time load of the RP2040's cores.
+* **Device State**: Hot-plug detection and connection status management via 'IOServiceMatching'.
 
-| Channel | Type | Physical Interface | Band Count |
-| :--- | :--- | :--- | :--- |
-| **Master L/R** | Input | USB (Virtual) | 10 |
-| **Out L/R** | Output | SPDIF | 2 |
-| **Sub** | Output | PDM (Pin 10) | 2 |
+### Visualization
+* **Response Graph**: Renders the frequency response of the active filter chain.
+* **Math Engine**: Implements a Swift port of the DSPi firmware's biquad coefficient logic to ensure the displayed graph represents hardware behavior.
 
-**Note**: The PDM output requires a passive RC low-pass filter to drive analog amplifier inputs.
-
-## macOS Controller
-
-The included macOS application utilizes `IOKit` for driverless communication with the device.
-
-* **Visualization**: Real-time Bode plot rendering of the complex frequency response $H(z)$.
-* **Monitoring**: Polling of CPU core load (Core 0/1) and peak levels for USB, SPDIF, and PDM rails.
-* **USB ID**: Matches VID `0x2e8a` / PID `0xfedd`.
+## Technical Architecture
 
 ### Control Protocol
+The application currently relies upon custom vendor requests to communicate with the RP2040. It interfaces with the device using `IOUSBDeviceInterface500`.
 
-The device uses Vendor-Specific USB Control Transfers to update DSP parameters in real-time.
+**Device Identification:**
+* **Vendor ID**: `0x2e8a`
+* **Product ID**: `0xfedd`
 
-| Request | ID | Description | Payload |
+| Request | ID | Payload | Description |
 | :--- | :--- | :--- | :--- |
-| `REQ_SET_EQ_PARAM` | `0x42` | Set filter coefficients | Ch(u8), Band(u8), Type(u8), Freq(f32), Q(f32), Gain(f32) |
-| `REQ_GET_EQ_PARAM` | `0x43` | Read filter coefficients | (Returns f32) |
-| `REQ_SET_PREAMP` | `0x44` | Set global gain | dB(f32) |
-| `REQ_SET_DELAY` | `0x48` | Set output delay | Channel(u16), ms(f32) |
-| `REQ_GET_STATUS` | `0x50` | System health | Peak meters (norm. u16) & CPU load (u8) |
+| `REQ_SET_EQ_PARAM` | `0x42` | `struct { ch, band, type, freq, q, gain }` | Uploads filter parameters. |
+| `REQ_GET_EQ_PARAM` | `0x43` | `(float32)` | Retrieves current filter values. |
+| `REQ_SET_PREAMP` | `0x44` | `(float32)` | Sets global input gain in dB. |
+| `REQ_SET_DELAY` | `0x48` | `(float32)` | Sets channel delay in milliseconds. |
+| `REQ_GET_STATUS` | `0x50` | `struct { peaks[5], cpu[2] }` | Polls meters and CPU usage. |
 
-## Build Instructions
+## Channel Mapping
 
-1.  Open `FoxDAC.xcodeproj` in Xcode.
-2.  Select the **My Mac** target.
-3.  Build and Run. The application handles device hot-plugging via `IOServiceAddMatchingNotification`.
+The application manages five distinct audio channels grouped into logical inputs and outputs:
+
+| Channel | Description | Band Count |
+| :--- | :--- | :--- |
+| **Master L/R** | USB Input (1 & 2) | 10 |
+| **Out L/R** | SPDIF Output (3 & 4) | 2 |
+| **Sub** | PDM Output (Pin 10) | 2 |
+
+## Building the Project
+
+1.  Clone the repository.
+2.  Open `DSPi Console.xcodeproj` in Xcode.
+3.  Target **My Mac** and run.
+4.  The application will automatically scan for the USB VID/PID and attach when the device is connected.
