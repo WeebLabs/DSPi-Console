@@ -8,14 +8,14 @@
 
 /* Begin PBXFileReference section */
 		665141C52F0DF37B00093CAF /* DSPi Console.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSPi Console.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		66626F292F1487CD009BAE8A /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		66626F332F1487F8009BAE8A /* Exceptions for "DSPi Console" folder in "DSPi Console" target */ = {
+		66626F362F148868009BAE8A /* Exceptions for "Images" folder in "DSPi Console" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				"Images/DSPi Console.png",
-				README.md,
+				"DSPi Console.png",
 			);
 			target = 665141C42F0DF37B00093CAF /* DSPi Console */;
 		};
@@ -24,10 +24,15 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		665141C72F0DF37B00093CAF /* DSPi Console */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				66626F332F1487F8009BAE8A /* Exceptions for "DSPi Console" folder in "DSPi Console" target */,
-			);
 			path = "DSPi Console";
+			sourceTree = "<group>";
+		};
+		66626F352F148868009BAE8A /* Images */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				66626F362F148868009BAE8A /* Exceptions for "Images" folder in "DSPi Console" target */,
+			);
+			path = Images;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -46,8 +51,10 @@
 		665141BC2F0DF37B00093CAF = {
 			isa = PBXGroup;
 			children = (
+				66626F292F1487CD009BAE8A /* README.md */,
 				665141C72F0DF37B00093CAF /* DSPi Console */,
 				665141C62F0DF37B00093CAF /* Products */,
+				66626F352F148868009BAE8A /* Images */,
 			);
 			sourceTree = "<group>";
 		};
@@ -76,6 +83,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				665141C72F0DF37B00093CAF /* DSPi Console */,
+				66626F352F148868009BAE8A /* Images */,
 			);
 			name = "DSPi Console";
 			packageProductDependencies = (
