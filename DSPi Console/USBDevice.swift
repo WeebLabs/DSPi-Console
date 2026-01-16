@@ -25,7 +25,7 @@ class USBDevice: ObservableObject {
     
     private var deviceInterface: DeviceInterfacePtr = nil
     private let vendorID: UInt16 = 0x2e8a
-    private let productID: UInt16 = 0xfedd
+    private let productID: UInt16 = 0xfeaa
     
     // Serial queue for thread-safe IOKit operations
     private let serialQueue = DispatchQueue(label: "com.foxdac.usb.serial")

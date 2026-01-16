@@ -11,6 +11,15 @@ let REQ_GET_BYPASS: UInt8   = 0x47
 let REQ_SET_DELAY: UInt8    = 0x48
 let REQ_GET_DELAY: UInt8    = 0x49
 let REQ_GET_STATUS: UInt8   = 0x50
+let REQ_SAVE_PARAMS: UInt8  = 0x51
+let REQ_LOAD_PARAMS: UInt8  = 0x52
+let REQ_FACTORY_RESET: UInt8 = 0x53
+
+// Flash result codes
+let FLASH_OK: UInt8           = 0
+let FLASH_ERR_WRITE: UInt8    = 1
+let FLASH_ERR_NO_DATA: UInt8  = 2
+let FLASH_ERR_CRC: UInt8      = 3
 
 // Data Structure from Firmware
 struct SystemStatus {
@@ -87,15 +96,17 @@ class DSPViewModel: ObservableObject {
     @Published var channelVisibility: [Int: Bool] = [:]
     @Published var channelDelays: [Int: Float] = [:]
     @Published var isDeviceConnected: Bool = false
-    
+
     // Live Data
     @Published var status = SystemStatus()
-    
-    let usb = USBDevice()
+
+    let usb: USBDevice
     private var cancellables = Set<AnyCancellable>()
     private var pollTimer: Timer?
-    
-    init() {
+
+    init(usb: USBDevice = AppState.shared.usb) {
+        self.usb = usb
+
         // Initialize Default Data
         for ch in Channel.allCases {
             var bands: [FilterParams] = []
@@ -286,12 +297,48 @@ class DSPViewModel: ObservableObject {
     func clearAllMaster() {
         let masterChannels = [Channel.masterLeft.rawValue, Channel.masterRight.rawValue]
         let defaultFilter = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
-        
+
         for ch in masterChannels {
             for b in 0..<9 {
                 setFilter(ch: ch, band: b, p: defaultFilter)
             }
         }
+    }
+
+    // MARK: - Flash Storage Commands
+
+    func saveParams() -> UInt8 {
+        guard isDeviceConnected else { return FLASH_ERR_WRITE }
+        if let data = usb.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1) {
+            return data[0]
+        }
+        return FLASH_ERR_WRITE
+    }
+
+    func loadParams() -> UInt8 {
+        guard isDeviceConnected else { return FLASH_ERR_WRITE }
+        if let data = usb.getControlRequest(request: REQ_LOAD_PARAMS, value: 0, index: 0, length: 1) {
+            let result = data[0]
+            if result == FLASH_OK {
+                // Re-fetch all params to update UI
+                fetchAll()
+            }
+            return result
+        }
+        return FLASH_ERR_WRITE
+    }
+
+    func factoryReset() -> UInt8 {
+        guard isDeviceConnected else { return FLASH_ERR_WRITE }
+        if let data = usb.getControlRequest(request: REQ_FACTORY_RESET, value: 0, index: 0, length: 1) {
+            let result = data[0]
+            if result == FLASH_OK {
+                // Re-fetch all params to update UI
+                fetchAll()
+            }
+            return result
+        }
+        return FLASH_ERR_WRITE
     }
 }
 
@@ -697,7 +744,7 @@ struct BodePlotView: View {
 
 // MARK: - Main Layout
 struct ContentView: View {
-    @StateObject var vm = DSPViewModel()
+    @ObservedObject var vm: DSPViewModel
     @State private var selectedChannel: Channel? = nil
     
     var body: some View {
