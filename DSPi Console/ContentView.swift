@@ -170,18 +170,17 @@ class DSPViewModel: ObservableObject {
     }
     
     func fetchStatus() {
-        guard let p0 = usb.getControlRequest(request: REQ_GET_STATUS, value: 0, index: 0, length: 4) else { return }
-        guard let p1 = usb.getControlRequest(request: REQ_GET_STATUS, value: 1, index: 0, length: 4) else { return }
-        guard let p2 = usb.getControlRequest(request: REQ_GET_STATUS, value: 2, index: 0, length: 4) else { return }
-        
-        let peak0 = Float(p0.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }) / 65535.0
-        let peak1 = Float(p0.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }) / 65535.0
-        let peak2 = Float(p1.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }) / 65535.0
-        let peak3 = Float(p1.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }) / 65535.0
-        let peak4 = Float(p2.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }) / 65535.0
-        let cpu0 = Int(p2.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt8.self) })
-        let cpu1 = Int(p2.withUnsafeBytes { $0.load(fromByteOffset: 3, as: UInt8.self) })
-        
+        // Single request for all peaks + CPU (wValue=9) - ensures synchronized meter readings
+        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 9, index: 0, length: 12) else { return }
+
+        let peak0 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }) / 65535.0
+        let peak1 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }) / 65535.0
+        let peak2 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self) }) / 65535.0
+        let peak3 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self) }) / 65535.0
+        let peak4 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt16.self) }) / 65535.0
+        let cpu0 = Int(data[10])
+        let cpu1 = Int(data[11])
+
         DispatchQueue.main.async {
             self.status.peaks = [peak0, peak1, peak2, peak3, peak4]
             self.status.cpu0 = cpu0
