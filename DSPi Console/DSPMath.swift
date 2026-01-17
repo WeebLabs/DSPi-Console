@@ -32,61 +32,67 @@ struct FilterParams: Equatable, Identifiable {
 }
 
 class DSPMath {
-    static let sampleRate: Float = 48000.0
-    
+    static let sampleRate: Double = 48000.0
+
     /// Calculates the complex frequency response H(z) magnitude in dB for a specific frequency
+    /// Uses Double precision to avoid numerical artifacts with high-Q filters at low frequencies
     static func responseAt(freq: Float, filters: [FilterParams]) -> Float {
-        var magSquaredTotal: Float = 1.0
-        
+        var magSquaredTotal: Double = 1.0
+        let freqD = Double(freq)
+
         for f in filters where f.type != .flat && f.active {
             let coeffs = calculateCoefficients(p: f)
-            let w = 2.0 * Float.pi * freq / sampleRate
-            
+            let w = 2.0 * Double.pi * freqD / sampleRate
+
             // Evaluate Transfer Function |H(e^jw)|
             // H(z) = (b0 + b1*z^-1 + b2*z^-2) / (1 + a1*z^-1 + a2*z^-2)
             // z = e^jw = cos(w) + j*sin(w)
-            
+
             let cos_w = cos(w)
             let cos_2w = cos(2.0 * w)
             let sin_w = sin(w)
             let sin_2w = sin(2.0 * w)
-            
+
             // Numerator (Real and Imaginary parts)
             let num_r = coeffs.b0 + coeffs.b1 * cos_w + coeffs.b2 * cos_2w
             let num_i = -(coeffs.b1 * sin_w + coeffs.b2 * sin_2w)
-            
+
             // Denominator (a0 is normalized to 1)
             let den_r = 1.0 + coeffs.a1 * cos_w + coeffs.a2 * cos_2w
             let den_i = -(coeffs.a1 * sin_w + coeffs.a2 * sin_2w)
-            
+
             let num_mag_sq = num_r*num_r + num_i*num_i
             let den_mag_sq = den_r*den_r + den_i*den_i
-            
-            if den_mag_sq > 1e-9 {
+
+            if den_mag_sq > 1e-15 {
                 magSquaredTotal *= (num_mag_sq / den_mag_sq)
             }
         }
-        
-        return 10.0 * log10(magSquaredTotal)
+
+        return Float(10.0 * log10(magSquaredTotal))
     }
-    
-    // Direct port of your C firmware logic
+
+    // Coefficients in Double precision for accurate frequency response calculation
     struct Coeffs {
-        let b0, b1, b2, a1, a2: Float
+        let b0, b1, b2, a1, a2: Double
     }
-    
+
     static func calculateCoefficients(p: FilterParams) -> Coeffs {
-        if p.type == .flat { return Coeffs(b0:1, b1:0, b2:0, a1:0, a2:0) }
-        
-        let omega = 2.0 * Float.pi * p.freq / sampleRate
+        if p.type == .flat { return Coeffs(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0) }
+
+        let freq = Double(p.freq)
+        let q = Double(p.q)
+        let gain = Double(p.gain)
+
+        let omega = 2.0 * Double.pi * freq / sampleRate
         let sn = sin(omega)
         let cs = cos(omega)
-        let alpha = sn / (2.0 * p.q)
-        let A = pow(10.0, p.gain / 40.0)
-        
-        var b0: Float = 1, b1: Float = 0, b2: Float = 0
-        var a0: Float = 1, a1: Float = 0, a2: Float = 0
-        
+        let alpha = sn / (2.0 * q)
+        let A = pow(10.0, gain / 40.0)
+
+        var b0: Double = 1, b1: Double = 0, b2: Double = 0
+        var a0: Double = 1, a1: Double = 0, a2: Double = 0
+
         switch p.type {
         case .lowPass:
             b0 = (1 - cs)/2; b1 = 1 - cs; b2 = (1 - cs)/2
@@ -113,7 +119,7 @@ class DSPMath {
             a2 = (A + 1) - (A - 1) * cs - 2 * sqrt(A) * alpha
         default: break
         }
-        
+
         return Coeffs(b0: b0/a0, b1: b1/a0, b2: b2/a0, a1: a1/a0, a2: a2/a0)
     }
 }
