@@ -298,7 +298,7 @@ class DSPViewModel: ObservableObject {
         let defaultFilter = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
 
         for ch in masterChannels {
-            for b in 0..<9 {
+            for b in 0..<10 {
                 setFilter(ch: ch, band: b, p: defaultFilter)
             }
         }

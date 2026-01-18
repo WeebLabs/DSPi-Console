@@ -542,6 +542,7 @@ struct ToolsMenuActions {
 @main
 struct DSPi_ConsoleApp: App {
     @StateObject private var statsWindowController = StatsWindowController()
+    @StateObject private var autoEQBrowserController = AutoEQBrowserController()
 
     var body: some Scene {
         WindowGroup {
@@ -561,6 +562,36 @@ struct DSPi_ConsoleApp: App {
                     FileMenuActions.exportFilters()
                 }
                 .keyboardShortcut("e", modifiers: .command)
+            }
+
+            // AutoEQ Menu
+            CommandMenu("AutoEQ") {
+                Button("Browse Profiles...") {
+                    autoEQBrowserController.show()
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+
+                Menu("Recent Profiles") {
+                    ForEach(AutoEQManager.shared.recentProfiles) { entry in
+                        Button("\(entry.manufacturer) \(entry.model)") {
+                            Task {
+                                await AutoEQManager.shared.applyRecent(entry)
+                            }
+                        }
+                    }
+
+                    if AutoEQManager.shared.recentProfiles.isEmpty {
+                        Text("No recent profiles")
+                            .foregroundColor(.secondary)
+                    }
+
+                    Divider()
+
+                    Button("Clear Recent") {
+                        AutoEQManager.shared.clearRecent()
+                    }
+                    .disabled(AutoEQManager.shared.recentProfiles.isEmpty)
+                }
             }
 
             // Tools Menu
