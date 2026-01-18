@@ -489,7 +489,7 @@ struct ToolsMenuActions {
     static func factoryReset() {
         let alert = NSAlert()
         alert.messageText = "Factory Reset"
-        alert.informativeText = "Reset all parameters to factory defaults?\n\nCurrent settings will be lost."
+        alert.informativeText = "Do you wish to clear all active parameters?\n\nThis will not overwrite your saved parameters unless you run 'Commit Parameters'."
         alert.alertStyle = .critical
         alert.addButton(withTitle: "Reset")
         alert.addButton(withTitle: "Cancel")
@@ -538,6 +538,180 @@ struct ToolsMenuActions {
     }
 }
 
+// MARK: - AutoEQ Menu Actions
+struct AutoEQMenuActions {
+    static var rebuildWindowController: AutoEQRebuildWindowController?
+
+    static func updateDatabase() {
+        let manager = AutoEQManager.shared
+
+        let alert = NSAlert()
+        alert.messageText = "Update AutoEQ Database"
+        alert.informativeText = "Current database: \(manager.databaseDate ?? "Unknown")\nEntries: \(manager.entries.count)\n\nChoose an update method:"
+        alert.alertStyle = .informational
+
+        alert.addButton(withTitle: "Rebuild from GitHub")
+        alert.addButton(withTitle: "Import File...")
+        if manager.hasUserDatabase {
+            alert.addButton(withTitle: "Reset to Built-in")
+        }
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+
+        switch response {
+        case .alertFirstButtonReturn:
+            // Rebuild from GitHub
+            showRebuildConfirmation()
+        case .alertSecondButtonReturn:
+            // Import File
+            importDatabase()
+        case .alertThirdButtonReturn where manager.hasUserDatabase:
+            // Reset to Built-in
+            do {
+                try manager.resetToBuiltInDatabase()
+                showSuccess("Reset to built-in database.\nEntries: \(manager.entries.count)")
+            } catch {
+                showError("Failed to reset: \(error.localizedDescription)")
+            }
+        default:
+            break
+        }
+    }
+
+    private static func showRebuildConfirmation() {
+        let alert = NSAlert()
+        alert.messageText = "Rebuild AutoEQ Database"
+        alert.informativeText = "You are about to rebuild the AutoEQ database by downloading all profiles from GitHub.\n\nThis requires an internet connection and may take several minutes.\n\nDo you wish to proceed?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Rebuild")
+        alert.addButton(withTitle: "Cancel")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            startRebuild()
+        }
+    }
+
+    private static func startRebuild() {
+        rebuildWindowController = AutoEQRebuildWindowController()
+        rebuildWindowController?.show()
+
+        Task {
+            do {
+                try await AutoEQManager.shared.rebuildDatabase()
+                await MainActor.run {
+                    // Keep window open briefly to show completion
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        rebuildWindowController?.close()
+                        rebuildWindowController = nil
+                        showSuccess("Database rebuilt successfully!\nEntries: \(AutoEQManager.shared.entries.count)")
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    rebuildWindowController?.close()
+                    rebuildWindowController = nil
+                    showError("Rebuild failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private static func importDatabase() {
+        let panel = NSOpenPanel()
+        panel.title = "Import AutoEQ Database"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.message = "Select an autoeq_database.json file."
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try AutoEQManager.shared.updateDatabaseFromFile(url)
+            showSuccess("Database updated successfully.\nEntries: \(AutoEQManager.shared.entries.count)")
+        } catch {
+            showError("Failed to import database: \(error.localizedDescription)")
+        }
+    }
+
+    private static func showSuccess(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Success"
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private static func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Error"
+        alert.informativeText = message
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}
+
+// MARK: - AutoEQ Rebuild Progress Window
+
+struct AutoEQRebuildProgressView: View {
+    @ObservedObject var manager = AutoEQManager.shared
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 40))
+                .foregroundColor(.accentColor)
+
+            Text("Rebuilding AutoEQ Database")
+                .font(.headline)
+
+            ProgressView(value: manager.rebuildProgress)
+                .progressViewStyle(.linear)
+                .frame(width: 280)
+
+            Text(manager.rebuildStatus)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(height: 20)
+
+            if manager.rebuildProgress >= 1.0 {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.title)
+                    .foregroundColor(.green)
+            }
+        }
+        .padding(30)
+        .frame(width: 340)
+    }
+}
+
+class AutoEQRebuildWindowController: NSObject {
+    private var window: NSWindow?
+
+    func show() {
+        let progressView = AutoEQRebuildProgressView()
+
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 180),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window?.title = "Updating Database"
+        window?.contentView = NSHostingView(rootView: progressView)
+        window?.isReleasedWhenClosed = false
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    func close() {
+        window?.close()
+        window = nil
+    }
+}
+
 // MARK: - App
 @main
 struct DSPi_ConsoleApp: App {
@@ -571,26 +745,30 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
 
-                Menu("Recent Profiles") {
-                    ForEach(AutoEQManager.shared.recentProfiles) { entry in
+                Menu("Favorite Profiles") {
+                    ForEach(AutoEQManager.shared.favoriteProfiles) { entry in
                         Button("\(entry.manufacturer) \(entry.model)") {
-                            Task {
-                                await AutoEQManager.shared.applyRecent(entry)
-                            }
+                            AutoEQManager.shared.applyProfile(entry)
                         }
                     }
 
-                    if AutoEQManager.shared.recentProfiles.isEmpty {
-                        Text("No recent profiles")
+                    if AutoEQManager.shared.favoriteProfiles.isEmpty {
+                        Text("No favorites yet")
                             .foregroundColor(.secondary)
                     }
 
                     Divider()
 
-                    Button("Clear Recent") {
-                        AutoEQManager.shared.clearRecent()
+                    Button("Clear Favorites") {
+                        AutoEQManager.shared.clearFavorites()
                     }
-                    .disabled(AutoEQManager.shared.recentProfiles.isEmpty)
+                    .disabled(AutoEQManager.shared.favoriteProfiles.isEmpty)
+                }
+
+                Divider()
+
+                Button("Update Database...") {
+                    AutoEQMenuActions.updateDatabase()
                 }
             }
 

@@ -10,14 +10,16 @@ import SwiftUI
 struct AutoEQBrowser: View {
     @ObservedObject var manager = AutoEQManager.shared
     @State private var searchText = ""
-    @State private var selectedEntry: HeadphoneEntry?
-    @State private var isApplying = false
-    @State private var showError = false
-    @State private var errorMessage = ""
+    @State private var selectedEntryId: String?
     @Environment(\.dismiss) private var dismiss
 
     var filteredEntries: [HeadphoneEntry] {
         manager.search(query: searchText)
+    }
+
+    var selectedEntry: HeadphoneEntry? {
+        guard let id = selectedEntryId else { return nil }
+        return filteredEntries.first { $0.id == id }
     }
 
     var body: some View {
@@ -65,11 +67,24 @@ struct AutoEQBrowser: View {
                     Spacer()
                 }
             } else {
-                List(filteredEntries, selection: $selectedEntry) { entry in
-                    HeadphoneRow(entry: entry, isSelected: selectedEntry?.id == entry.id)
-                        .tag(entry)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(filteredEntries) { entry in
+                            HeadphoneRow(
+                                entry: entry,
+                                isSelected: selectedEntryId == entry.id,
+                                isFavorite: manager.isFavorite(entry),
+                                onToggleFavorite: { manager.toggleFavorite(entry) }
+                            )
+                            .background(selectedEntryId == entry.id ? Color.accentColor : Color.clear)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedEntryId = entry.id
+                            }
+                        }
+                    }
                 }
-                .listStyle(.inset)
+                .background(Color(NSColor.textBackgroundColor))
             }
 
             Divider()
@@ -105,47 +120,29 @@ struct AutoEQBrowser: View {
                     applySelected()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(selectedEntry == nil || isApplying)
+                .disabled(selectedEntry == nil)
             }
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
         }
         .frame(minWidth: 500, minHeight: 400)
         .frame(idealWidth: 600, idealHeight: 500)
-        .alert("Error", isPresented: $showError) {
-            Button("OK") { }
-        } message: {
-            Text(errorMessage)
-        }
     }
 
     private func applySelected() {
         guard let entry = selectedEntry else { return }
-
-        isApplying = true
-
-        Task {
-            do {
-                let profile = try await manager.loadProfile(for: entry)
-                await MainActor.run {
-                    manager.applyProfile(profile, entry: entry)
-                    isApplying = false
-                    dismiss()
-                }
-            } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                    showError = true
-                    isApplying = false
-                }
-            }
-        }
+        manager.applyProfile(entry)
+        dismiss()
     }
 }
 
 struct HeadphoneRow: View {
     let entry: HeadphoneEntry
     let isSelected: Bool
+    let isFavorite: Bool
+    let onToggleFavorite: () -> Void
+
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -177,9 +174,23 @@ struct HeadphoneRow: View {
             }
 
             Spacer()
+
+            // Heart button - show on hover or if favorited
+            if isHovering || isFavorite {
+                Button(action: onToggleFavorite) {
+                    Image(systemName: isFavorite ? "heart.fill" : "heart")
+                        .font(.system(size: 14))
+                        .foregroundColor(isFavorite ? .red : (isSelected ? .white.opacity(0.7) : .secondary))
+                }
+                .buttonStyle(.plain)
+                .help(isFavorite ? "Remove from favorites" : "Add to favorites")
+            }
         }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .onHover { hovering in
+            isHovering = hovering
+        }
     }
 
     private func sourceColor(_ source: String) -> Color {
