@@ -483,7 +483,7 @@ struct DashboardOverview: View {
                 )
                 .frame(width: 220)
             }
-            
+
         }
         .padding()
     }
@@ -775,9 +775,11 @@ struct ContentView: View {
                     }
                     .listStyle(.sidebar)
                 }
-                
+
+                Spacer()
+
                 Divider()
-                
+
                 // Global Controls
                 VStack(alignment: .leading, spacing: 12) {
                     Text("GLOBAL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
@@ -867,7 +869,7 @@ struct ContentView: View {
             .background(.ultraThinMaterial)
 
             // MAIN CONTENT
-            VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 20) {
                 // Graph
                 
                 VStack(alignment: .leading, spacing: 16) { // Spacing between top text & chart
@@ -947,6 +949,8 @@ struct ContentView: View {
                             }
                             .padding()
                         }
+                        .frame(maxHeight: .infinity)
+                        //.frame(height: 400)
                     } else {
                         // --- NEW DASHBOARD VIEW ---
                         DashboardOverview(vm: vm)
@@ -1063,12 +1067,12 @@ extension DSPViewModel {
     NavigationView {
         ContentView(vm: .preview)
     }
-    //.frame(width: 1000, height: 750)
+    .frame(height: 790)
 }
 
 #Preview("Channel Selected") {
     NavigationView {
         ContentView(vm: .preview)
     }
-    //.frame(width: 1000, height: 750)
+    .frame(width: 1000, height: 780)
 }
