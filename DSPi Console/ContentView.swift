@@ -747,126 +747,120 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             // SIDEBAR
-            VStack(spacing: 0) {
-                // List of Channels
-                VStack(alignment: .leading, spacing: 0) {
-                    List {
-                        Section(header: Text("INPUTS")) {
-                            ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
-                                ChannelRow(channel: ch, isSelected: selectedChannel == ch)
-                                    .onTapGesture {
-                                        if selectedChannel == ch { selectedChannel = nil }
-                                        else { selectedChannel = ch }
-                                        vm.updateSelection(to: selectedChannel)
-                                    }
+            List {
+                Section(header: Text("INPUTS")) {
+                    ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
+                        ChannelRow(channel: ch, isSelected: selectedChannel == ch)
+                            .onTapGesture {
+                                if selectedChannel == ch { selectedChannel = nil }
+                                else { selectedChannel = ch }
+                                vm.updateSelection(to: selectedChannel)
                             }
-                        }
-                        
-                        Section(header: Text("OUTPUTS")) {
-                            ForEach(Channel.allCases.filter { $0.isOutput }, id: \.self) { ch in
-                                ChannelRow(channel: ch, isSelected: selectedChannel == ch)
-                                    .onTapGesture {
-                                        if selectedChannel == ch { selectedChannel = nil }
-                                        else { selectedChannel = ch }
-                                        vm.updateSelection(to: selectedChannel)
-                                    }
+                    }
+                }
+                
+                Section(header: Text("OUTPUTS")) {
+                    ForEach(Channel.allCases.filter { $0.isOutput }, id: \.self) { ch in
+                        ChannelRow(channel: ch, isSelected: selectedChannel == ch)
+                            .onTapGesture {
+                                if selectedChannel == ch { selectedChannel = nil }
+                                else { selectedChannel = ch }
+                                vm.updateSelection(to: selectedChannel)
                             }
-                        }
                     }
-                    .listStyle(.sidebar)
                 }
-
-                Spacer()
-
-                Divider()
-
-                // Global Controls
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("GLOBAL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+            }
+            .listStyle(.sidebar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    Divider()
                     
-                    VStack(spacing: 4) {
-                        HStack {
-                            Text("Preamp").font(.caption2).foregroundColor(.secondary)
-                            Spacer()
-                            Text("\(vm.preampDB, specifier: "%.1f") dB").font(.caption2).monospacedDigit()
-                        }
-                        Slider(value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }), in: -60...10)
-                            .controlSize(.small)
-                    }
-                    
-                    Toggle(isOn: Binding(get: { vm.bypass }, set: { vm.setBypass($0) })) {
-                        Text("Bypass Master EQ").font(.caption).fontWeight(.medium)
-                    }
-                    .toggleStyle(.button)
-                    .tint(.red)
-                    .frame(maxWidth: .infinity)
-                }
-                .padding()
-                .background(.ultraThinMaterial)
-                
-                Divider()
-                
-                // System Status (UPDATED)
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("SYSTEM STATUS").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                    
-                    HStack {
-                        CpuMeter(core: 0, load: vm.status.cpu0)
-                        Spacer()
-                        CpuMeter(core: 1, load: vm.status.cpu1)
-                    }
-                    
-                    // Vertical Stack of Horizontal Meters
+                    // Global Controls
                     VStack(alignment: .leading, spacing: 12) {
-                        // Group 1: USB IN
+                        Text("GLOBAL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                        
                         VStack(spacing: 4) {
-                            Text("USB IN").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
                             HStack {
-                                Text("L").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                    .frame(width: 8, alignment: .leading)
-                                HorizontalMeterBar(level: vm.status.peaks[0], color: Channel.masterLeft.color)
+                                Text("Preamp").font(.caption2).foregroundColor(.secondary)
+                                Spacer()
+                                Text("\(vm.preampDB, specifier: "%.1f") dB").font(.caption2).monospacedDigit()
                             }
-                            HStack {
-                                Text("R").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                    .frame(width: 8, alignment: .leading)
-                                HorizontalMeterBar(level: vm.status.peaks[1], color: Channel.masterRight.color)
-                            }
+                            Slider(value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }), in: -60...10)
+                                .controlSize(.small)
                         }
                         
-                        // Group 2: SPDIF OUT
-                        VStack(spacing: 4) {
-                            Text("SPDIF OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            HStack {
-                                Text("L").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                    .frame(width: 8, alignment: .leading)
-                                HorizontalMeterBar(level: vm.status.peaks[2], color: Channel.outLeft.color)
-                            }
-                            HStack {
-                                Text("R").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                    .frame(width: 8, alignment: .leading)
-                                HorizontalMeterBar(level: vm.status.peaks[3], color: Channel.outRight.color)
-                            }
+                        Toggle(isOn: Binding(get: { vm.bypass }, set: { vm.setBypass($0) })) {
+                            Text("Bypass Master EQ").font(.caption).fontWeight(.medium)
+                        }
+                        .toggleStyle(.button)
+                        .tint(.red)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .padding()
+                    
+                    Divider()
+                    
+                    // System Status (UPDATED)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("SYSTEM STATUS").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                        
+                        HStack {
+                            CpuMeter(core: 0, load: vm.status.cpu0)
+                            Spacer()
+                            CpuMeter(core: 1, load: vm.status.cpu1)
                         }
                         
-                        // Group 3: SUB
-                        VStack(spacing: 4) {
-                            Text("PDM OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            HStack {
-                                Text("S").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                    .frame(width: 8, alignment: .leading)
-                                HorizontalMeterBar(level: vm.status.peaks[4], color: Channel.sub.color)
+                        // Vertical Stack of Horizontal Meters
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Group 1: USB IN
+                            VStack(spacing: 4) {
+                                Text("USB IN").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                HStack {
+                                    Text("L").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+                                        .frame(width: 8, alignment: .leading)
+                                        HorizontalMeterBar(level: vm.status.peaks[0], color: Channel.masterLeft.color)
+                                }
+                                HStack {
+                                    Text("R").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+                                        .frame(width: 8, alignment: .leading)
+                                        HorizontalMeterBar(level: vm.status.peaks[1], color: Channel.masterRight.color)
+                                }
+                            }
+                            
+                            // Group 2: SPDIF OUT
+                            VStack(spacing: 4) {
+                                Text("SPDIF OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                HStack {
+                                    Text("L").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+                                        .frame(width: 8, alignment: .leading)
+                                        HorizontalMeterBar(level: vm.status.peaks[2], color: Channel.outLeft.color)
+                                }
+                                HStack {
+                                    Text("R").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+                                        .frame(width: 8, alignment: .leading)
+                                        HorizontalMeterBar(level: vm.status.peaks[3], color: Channel.outRight.color)
+                                }
+                            }
+                            
+                            // Group 3: SUB
+                            VStack(spacing: 4) {
+                                Text("PDM OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                HStack {
+                                    Text("S").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+                                        .frame(width: 8, alignment: .leading)
+                                        HorizontalMeterBar(level: vm.status.peaks[4], color: Channel.sub.color)
+                                }
                             }
                         }
                     }
+                    .padding()
                 }
-                .padding()
                 .background(.ultraThinMaterial)
             }
             .frame(minWidth: 220, maxWidth: 260)
-            .background(.ultraThinMaterial)
 
             // MAIN CONTENT
             VStack(alignment: .leading, spacing: 20) {
@@ -963,10 +957,16 @@ struct ContentView: View {
             // Main window background color
             .background(Color(NSColor.windowBackgroundColor.blended(withFraction: 0.2, of: .black) ?? .windowBackgroundColor))
         }
-        .frame(minWidth: 900, minHeight: 700)
         .navigationTitle("DSPi Console")
+        .frame(maxHeight:900)
         .onAppear {
-            NSApp.keyWindow?.isMovableByWindowBackground = true
+            DispatchQueue.main.async {
+                if let window = NSApp.keyWindow {
+                    window.isMovableByWindowBackground = true
+                    window.setContentSize(NSSize(width: 900, height: 810))
+                    window.styleMask.remove(.resizable)
+                }
+            }
         }
         //.background(Color(NSColor.controlBackgroundColor))
     }
