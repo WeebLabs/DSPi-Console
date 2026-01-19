@@ -802,7 +802,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .padding()
-                .background(Color(NSColor.controlBackgroundColor))
+                .background(.ultraThinMaterial)
                 
                 Divider()
                 
@@ -863,7 +863,7 @@ struct ContentView: View {
                     }
                 }
                 .padding()
-                .background(Color(NSColor.controlBackgroundColor))
+                .background(.ultraThinMaterial)
             }
             .frame(minWidth: 220, maxWidth: 260)
             .background(.ultraThinMaterial)
@@ -932,7 +932,7 @@ struct ContentView: View {
                                 Spacer()
                             }
                             .padding(.all, 12)
-                            .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                            //.background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                             .cornerRadius(8)
                             .padding(.horizontal)
                         }
@@ -958,12 +958,15 @@ struct ContentView: View {
                     }
                 }
             }
+            // Main window background color
+            .background(Color(NSColor.windowBackgroundColor.blended(withFraction: 0.2, of: .black) ?? .windowBackgroundColor))
         }
         .frame(minWidth: 900, minHeight: 700)
         .navigationTitle("DSPi Console")
         .onAppear {
             NSApp.keyWindow?.isMovableByWindowBackground = true
         }
+        //.background(Color(NSColor.controlBackgroundColor))
     }
 }
 
