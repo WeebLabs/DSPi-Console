@@ -450,7 +450,7 @@ struct GraphLegend: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
     }
 }
 
@@ -485,7 +485,8 @@ struct DashboardOverview: View {
             }
 
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.top, 4)
     }
 }
 
@@ -866,7 +867,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // Graph
                 
-                VStack(alignment: .leading, spacing: 16) { // Spacing between top text & chart
+                VStack(alignment: .leading, spacing: 0) { // Spacing handled manually
                     // Combined header: Filters title + connection status
                     HStack {
                         Text("Filter Response").font(.headline)
@@ -893,12 +894,13 @@ struct ContentView: View {
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)
+                    .padding(.bottom, 16)
 
                     BodePlotView(vm: vm).frame(height: 250).padding(.horizontal)
-                    GraphLegend(vm: vm).padding(.horizontal)
+                    GraphLegend(vm: vm).padding(.horizontal).padding(.top, 8)
                 }
                 
-                Divider()
+                //Divider()
                 
                 // Right Panel Content (Dynamic)
                 VStack {
@@ -963,7 +965,7 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 if let window = NSApp.keyWindow {
                     window.isMovableByWindowBackground = true
-                    window.setContentSize(NSSize(width: 900, height: 810))
+                    window.setContentSize(NSSize(width: 900, height: 770))
                     window.styleMask.remove(.resizable)
                 }
             }
