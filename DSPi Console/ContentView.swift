@@ -953,11 +953,13 @@ struct ContentView: View {
                         //.frame(height: 400)
                     } else {
                         // --- NEW DASHBOARD VIEW ---
-                        DashboardOverview(vm: vm)
-                        Spacer()
+                        ScrollView {
+                            DashboardOverview(vm: vm)
+                        }
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             // Main window background color
             .background(Color(NSColor.windowBackgroundColor.blended(withFraction: 0.2, of: .black) ?? .windowBackgroundColor))
         }
