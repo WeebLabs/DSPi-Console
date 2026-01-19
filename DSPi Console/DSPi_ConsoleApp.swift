@@ -720,8 +720,11 @@ struct DSPi_ConsoleApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(vm: AppState.shared.viewModel)
+            NavigationView {
+                ContentView(vm: AppState.shared.viewModel)
+            }
         }
+        .windowStyle(.hiddenTitleBar)
         .commands {
             // Add to native File menu
             CommandGroup(after: .newItem) {

@@ -459,7 +459,7 @@ struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
     
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 18) {
             StereoDashboardCard(
                 title: "STEREO INPUT (USB)",
                 left: .masterLeft,
@@ -467,9 +467,8 @@ struct DashboardOverview: View {
                 showDelay: false, // Delay Hidden for Inputs
                 vm: vm
             )
-            .frame(maxHeight: .infinity)
             
-            HStack(spacing: 16) {
+            HStack(alignment: .top, spacing: 18) {
                 StereoDashboardCard(
                     title: "STEREO OUTPUT (SPDIF)",
                     left: .outLeft,
@@ -477,14 +476,14 @@ struct DashboardOverview: View {
                     showDelay: true, // Delay Visible for Outputs
                     vm: vm
                 )
-                
+
                 MonoDashboardCard(
                     channel: .sub,
                     vm: vm
                 )
                 .frame(width: 220)
             }
-            .frame(height: 140)
+            
         }
         .padding()
     }
@@ -543,11 +542,10 @@ struct StereoDashboardCard: View {
                                 .background(band % 2 == 0 ? Color.white.opacity(0.03) : Color.clear)
                         }
                     }
-                    Spacer()
                 }
-                
+
                 Divider()
-                
+
                 VStack(spacing: 0) {
                     ForEach(0..<right.bandCount, id: \.self) { band in
                         if let params = vm.channelData[right.rawValue]?[band] {
@@ -555,9 +553,9 @@ struct StereoDashboardCard: View {
                                 .background(band % 2 == 0 ? Color.white.opacity(0.03) : Color.clear)
                         }
                     }
-                    Spacer()
                 }
             }
+            .frame(height: CGFloat(left.bandCount) * 24)
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(8)
@@ -594,8 +592,8 @@ struct MonoDashboardCard: View {
                             .background(band % 2 == 0 ? Color.white.opacity(0.03) : Color.clear)
                     }
                 }
-                Spacer()
             }
+            .frame(height: CGFloat(channel.bandCount) * 24)
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(8)
@@ -866,37 +864,40 @@ struct ContentView: View {
                 .background(Color(NSColor.controlBackgroundColor))
             }
             .frame(minWidth: 220, maxWidth: 260)
-            
+            .background(.ultraThinMaterial)
+
             // MAIN CONTENT
             VStack(spacing: 20) {
-                // Header (Slimmed Down)
-                HStack {
-                    Spacer()
-                    
-                    if vm.isDeviceConnected {
-                        HStack(spacing: 6) {
-                            Circle().fill(.green).frame(width: 6, height: 6)
-                            Text("Connected").font(.caption).foregroundColor(.secondary)
-                        }
-                    } else {
-                        HStack(spacing: 6) {
-                            Circle().fill(.red).frame(width: 6, height: 6)
-                            Text(vm.usb.errorMessage ?? "Disconnected").font(.caption).foregroundColor(.red)
-                        }
-                    }
-                    
-                    Button(action: { vm.usb.connect(); vm.fetchAll() }) {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.leading, 8)
-                }
-                .padding(.horizontal)
-                .padding(.top, 8)
-                
                 // Graph
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Filters").font(.headline).padding(.horizontal)
+                
+                VStack(alignment: .leading, spacing: 16) { // Spacing between top text & chart
+                    // Combined header: Filters title + connection status
+                    HStack {
+                        Text("Filter Response").font(.headline)
+
+                        Spacer()
+
+                        if vm.isDeviceConnected {
+                            HStack(spacing: 6) {
+                                Circle().fill(.green).frame(width: 6, height: 6)
+                                Text("Connected").font(.caption).foregroundColor(.secondary)
+                            }
+                        } else {
+                            HStack(spacing: 6) {
+                                Circle().fill(.red).frame(width: 6, height: 6)
+                                Text(vm.usb.errorMessage ?? "Disconnected").font(.caption).foregroundColor(.red)
+                            }
+                        }
+
+                        Button(action: { vm.usb.connect(); vm.fetchAll() }) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 8)
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
                     BodePlotView(vm: vm).frame(height: 250).padding(.horizontal)
                     GraphLegend(vm: vm).padding(.horizontal)
                 }
@@ -949,11 +950,16 @@ struct ContentView: View {
                     } else {
                         // --- NEW DASHBOARD VIEW ---
                         DashboardOverview(vm: vm)
+                        Spacer()
                     }
                 }
             }
         }
         .frame(minWidth: 900, minHeight: 700)
+        .navigationTitle("DSPi Console")
+        .onAppear {
+            NSApp.keyWindow?.isMovableByWindowBackground = true
+        }
     }
 }
 
@@ -1021,4 +1027,48 @@ struct ValueField: View {
         .onAppear { text = String(format: "%.1f", value) }
         .onChange(of: value) { newValue in if !isFocused { text = String(format: "%.1f", newValue) } }
     }
+}
+
+// MARK: - Preview Support
+
+extension DSPViewModel {
+    /// Creates a preview-safe view model with mock data (no USB connection)
+    static var preview: DSPViewModel {
+        let vm = DSPViewModel(usb: USBDevice())
+        vm.isDeviceConnected = true
+        vm.preampDB = -3.0
+        vm.status = SystemStatus(peaks: [0.6, 0.55, 0.4, 0.35, 0.25], cpu0: 42, cpu1: 38)
+
+        // Add some sample filter data for Master L
+        vm.channelData[Channel.masterLeft.rawValue] = [
+            FilterParams(type: .peaking, freq: 100, q: 0.7, gain: -5.0),
+            FilterParams(type: .peaking, freq: 400, q: 1.0, gain: 3.0),
+            FilterParams(type: .highShelf, freq: 8000, q: 0.7, gain: -2.0),
+            FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams()
+        ]
+
+        // Add some sample filter data for Master R
+        vm.channelData[Channel.masterRight.rawValue] = [
+            FilterParams(type: .peaking, freq: 100, q: 0.7, gain: -5.0),
+            FilterParams(type: .peaking, freq: 400, q: 1.0, gain: 3.0),
+            FilterParams(type: .highShelf, freq: 8000, q: 0.7, gain: -2.0),
+            FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams()
+        ]
+
+        return vm
+    }
+}
+
+#Preview("Dashboard") {
+    NavigationView {
+        ContentView(vm: .preview)
+    }
+    //.frame(width: 1000, height: 750)
+}
+
+#Preview("Channel Selected") {
+    NavigationView {
+        ContentView(vm: .preview)
+    }
+    //.frame(width: 1000, height: 750)
 }
