@@ -154,191 +154,6 @@ class DSPViewModel: ObservableObject {
             }
         }
     }
-    
-    func fetchAll() {
-        guard fetchPreamp() else { return }
-        fetchBypass()
-        
-        for ch in Channel.allCases {
-            for b in 0..<ch.bandCount {
-                fetchFilter(ch: ch.rawValue, band: b)
-            }
-            if ch.isOutput {
-                fetchDelay(ch: ch.rawValue)
-            }
-        }
-    }
-    
-    func fetchStatus() {
-        // Single request for all peaks + CPU (wValue=9) - ensures synchronized meter readings
-        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 9, index: 0, length: 12) else { return }
-
-        let peak0 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }) / 65535.0
-        let peak1 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }) / 65535.0
-        let peak2 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self) }) / 65535.0
-        let peak3 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self) }) / 65535.0
-        let peak4 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt16.self) }) / 65535.0
-        let cpu0 = Int(data[10])
-        let cpu1 = Int(data[11])
-
-        DispatchQueue.main.async {
-            self.status.peaks = [peak0, peak1, peak2, peak3, peak4]
-            self.status.cpu0 = cpu0
-            self.status.cpu1 = cpu1
-        }
-    }
-    
-    // --- USB Commands ---
-    
-    func setFilter(ch: Int, band: Int, p: FilterParams) {
-        channelData[ch]?[band] = p
-        
-        let data = NSMutableData()
-        var ch8 = UInt8(ch); data.append(&ch8, length: 1)
-        var b8 = UInt8(band); data.append(&b8, length: 1)
-        var t8 = UInt8(p.type.rawValue); data.append(&t8, length: 1)
-        var res = UInt8(0); data.append(&res, length: 1)
-        var f32 = p.freq; data.append(&f32, length: 4)
-        var q32 = p.q; data.append(&q32, length: 4)
-        var g32 = p.gain; data.append(&g32, length: 4)
-        
-        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
-    }
-    
-    func fetchFilter(ch: Int, band: Int) {
-        func getVal<T>(_ param: Int, defaultVal: T) -> T {
-            let wVal = UInt16((ch << 8) | (band << 4) | param)
-            if let d = usb.getControlRequest(request: REQ_GET_EQ_PARAM, value: wVal, index: 0, length: 4) {
-                return d.withUnsafeBytes { $0.load(as: T.self) }
-            }
-            return defaultVal
-        }
-        
-        let typeRaw: UInt32 = getVal(0, defaultVal: 0)
-        let freq: Float = getVal(1, defaultVal: 1000.0)
-        let q: Float = getVal(2, defaultVal: 0.707)
-        let gain: Float = getVal(3, defaultVal: 0.0)
-        
-        let newParams = FilterParams(
-            type: FilterType(rawValue: Int(typeRaw)) ?? .flat,
-            freq: freq,
-            q: q,
-            gain: gain
-        )
-        
-        DispatchQueue.main.async {
-            if self.channelData[ch]?[band] != newParams {
-                self.channelData[ch]?[band] = newParams
-            }
-        }
-    }
-    
-    func setDelay(ch: Int, ms: Float) {
-        self.channelDelays[ch] = ms
-        var val = ms
-        let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
-    }
-    
-    func fetchDelay(ch: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_DELAY, value: UInt16(ch), index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs((self.channelDelays[ch] ?? 0) - val) > 0.01 {
-                    self.channelDelays[ch] = val
-                }
-            }
-        }
-    }
-    
-    func setPreamp(_ db: Float) {
-        self.preampDB = db
-        var val = db
-        let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
-    }
-    
-    @discardableResult
-    func fetchPreamp() -> Bool {
-        if let d = usb.getControlRequest(request: REQ_GET_PREAMP, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.preampDB - val) > 0.1 {
-                    self.preampDB = val
-                }
-            }
-            return true
-        } else {
-            DispatchQueue.main.async { self.usb.isConnected = false }
-            return false
-        }
-    }
-    
-    func setBypass(_ enabled: Bool) {
-        self.bypass = enabled
-        var val: UInt8 = enabled ? 1 : 0
-        let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_BYPASS, value: 0, index: 0, data: data)
-    }
-    
-    @discardableResult
-    func fetchBypass() -> Bool {
-        if let d = usb.getControlRequest(request: REQ_GET_BYPASS, value: 0, index: 0, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.bypass = val }
-            return true
-        } else {
-            DispatchQueue.main.async { self.usb.isConnected = false }
-            return false
-        }
-    }
-    
-    func clearAllMaster() {
-        let masterChannels = [Channel.masterLeft.rawValue, Channel.masterRight.rawValue]
-        let defaultFilter = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
-
-        for ch in masterChannels {
-            for b in 0..<10 {
-                setFilter(ch: ch, band: b, p: defaultFilter)
-            }
-        }
-    }
-
-    // MARK: - Flash Storage Commands
-
-    func saveParams() -> UInt8 {
-        guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        if let data = usb.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1) {
-            return data[0]
-        }
-        return FLASH_ERR_WRITE
-    }
-
-    func loadParams() -> UInt8 {
-        guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        if let data = usb.getControlRequest(request: REQ_LOAD_PARAMS, value: 0, index: 0, length: 1) {
-            let result = data[0]
-            if result == FLASH_OK {
-                // Re-fetch all params to update UI
-                fetchAll()
-            }
-            return result
-        }
-        return FLASH_ERR_WRITE
-    }
-
-    func factoryReset() -> UInt8 {
-        guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        if let data = usb.getControlRequest(request: REQ_FACTORY_RESET, value: 0, index: 0, length: 1) {
-            let result = data[0]
-            if result == FLASH_OK {
-                // Re-fetch all params to update UI
-                fetchAll()
-            }
-            return result
-        }
-        return FLASH_ERR_WRITE
-    }
 }
 
 // MARK: - Custom Views
@@ -668,6 +483,83 @@ struct DashboardRow: View {
     }
 }
 
+// MARK: - Graph Animation Support
+struct AnimatableVector: VectorArithmetic {
+    var values: [Double]
+    
+    static var zero = AnimatableVector(values: [])
+    
+    var magnitudeSquared: Double {
+        values.reduce(0.0) { $0 + $1 * $1 }
+    }
+    
+    static func - (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
+        let count = max(lhs.values.count, rhs.values.count)
+        var result = [Double](repeating: 0.0, count: count)
+        for i in 0..<count {
+            let l = i < lhs.values.count ? lhs.values[i] : 0.0
+            let r = i < rhs.values.count ? rhs.values[i] : 0.0
+            result[i] = l - r
+        }
+        return AnimatableVector(values: result)
+    }
+    
+    static func + (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
+        let count = max(lhs.values.count, rhs.values.count)
+        var result = [Double](repeating: 0.0, count: count)
+        for i in 0..<count {
+            let l = i < lhs.values.count ? lhs.values[i] : 0.0
+            let r = i < rhs.values.count ? rhs.values[i] : 0.0
+            result[i] = l + r
+        }
+        return AnimatableVector(values: result)
+    }
+    
+    mutating func scale(by rhs: Double) {
+        for i in 0..<values.count {
+            values[i] *= rhs
+        }
+    }
+}
+
+struct BodeLineShape: Shape {
+    var magnitudes: [Double] // 201 points
+    
+    var animatableData: AnimatableVector {
+        get { AnimatableVector(values: magnitudes) }
+        set { magnitudes = newValue.values }
+    }
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard !magnitudes.isEmpty else { return path }
+        
+        let width = rect.width
+        let height = rect.height
+        let dbRange: Float = 20.0
+        
+        func yPos(_ db: Float) -> CGFloat {
+            let normalized = (db + dbRange) / (2.0 * dbRange)
+            return height - (CGFloat(normalized) * height)
+        }
+        
+        let count = magnitudes.count
+        for i in 0..<count {
+            let pct = CGFloat(i) / CGFloat(count - 1)
+            let x = pct * width
+            let y = yPos(Float(magnitudes[i]))
+            
+            if i == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        
+        return path
+    }
+}
+
 // MARK: - Graph View
 struct BodePlotView: View {
     @ObservedObject var vm: DSPViewModel
@@ -676,6 +568,7 @@ struct BodePlotView: View {
     let maxFreq: Float = 20000.0
     let dbRange: Float = 20.0
     
+    // Grid Helper
     func xPos(_ freq: Float, width: CGFloat) -> CGFloat {
         let logMin = log10(minFreq)
         let logMax = log10(maxFreq)
@@ -685,51 +578,60 @@ struct BodePlotView: View {
     
     func yPos(_ db: Float, height: CGFloat) -> CGFloat {
         let normalized = (db + dbRange) / (2.0 * dbRange)
-        // No clamping allows line to go off-graph naturally
         return height - (CGFloat(normalized) * height)
     }
     
-    var body: some View {
-        Canvas { context, size in
-            let gridPath = Path { path in
-                for f in [100.0, 1000.0, 10000.0] {
-                    let x = xPos(Float(f), width: size.width)
-                    path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
-                }
-                for db in [-10.0, 0.0, 10.0] {
-                    let y = yPos(Float(db), height: size.height)
-                    path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y))
-                }
+    // Calculation Helper for Animation
+    func calculateMagnitudes(for channel: Channel) -> [Double] {
+        let filters = vm.channelData[channel.rawValue] ?? []
+        var results: [Double] = []
+        results.reserveCapacity(201)
+        
+        for i in 0...200 {
+            let pct = Float(i) / 200.0
+            let logMin = log10(minFreq)
+            let logMax = log10(maxFreq)
+            let freq = pow(10, logMin + pct * (logMax - logMin))
+            
+            var mag: Float = 0
+            if (channel == .masterLeft || channel == .masterRight) && vm.bypass {
+                mag = 0
+            } else {
+                mag = DSPMath.responseAt(freq: freq, filters: filters)
             }
-            context.stroke(gridPath, with: .color(.white.opacity(0.1)))
-            
-            let zeroY = yPos(0, height: size.height)
-            var zeroPath = Path(); zeroPath.move(to: CGPoint(x: 0, y: zeroY)); zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
-            context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
-            
-            for ch in Channel.allCases {
-                if vm.channelVisibility[ch.rawValue] == true {
-                    let filters = vm.channelData[ch.rawValue] ?? []
-                    var path = Path()
-                    var first = true
-                    
-                    for i in 0...200 {
-                        let pct = Float(i) / 200.0
-                        let logMin = log10(minFreq)
-                        let logMax = log10(maxFreq)
-                        let freq = pow(10, logMin + pct * (logMax - logMin))
-                        
-                        var mag: Float = 0
-                        if (ch == .masterLeft || ch == .masterRight) && vm.bypass { mag = 0 }
-                        else { mag = DSPMath.responseAt(freq: freq, filters: filters) }
-                        
-                        let x = CGFloat(pct) * size.width
-                        let y = yPos(mag, height: size.height)
-                        
-                        if first { path.move(to: CGPoint(x: x, y: y)); first = false }
-                        else { path.addLine(to: CGPoint(x: x, y: y)) }
+            results.append(Double(mag))
+        }
+        return results
+    }
+    
+    var body: some View {
+        ZStack {
+            // Static Grid
+            Canvas { context, size in
+                let gridPath = Path { path in
+                    for f in [100.0, 1000.0, 10000.0] {
+                        let x = xPos(Float(f), width: size.width)
+                        path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
                     }
-                    context.stroke(path, with: .color(ch.color), lineWidth: 2)
+                    for db in [-10.0, 0.0, 10.0] {
+                        let y = yPos(Float(db), height: size.height)
+                        path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y))
+                    }
+                }
+                context.stroke(gridPath, with: .color(.white.opacity(0.1)))
+                
+                let zeroY = yPos(0, height: size.height)
+                var zeroPath = Path(); zeroPath.move(to: CGPoint(x: 0, y: zeroY)); zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
+                context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
+            }
+            
+            // Animated Lines
+            ForEach(Channel.allCases, id: \.self) { ch in
+                if vm.channelVisibility[ch.rawValue] == true {
+                    BodeLineShape(magnitudes: calculateMagnitudes(for: ch))
+                        .stroke(ch.color, lineWidth: 2)
+                        // Animate magnitude changes smoothly
+                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: calculateMagnitudes(for: ch))
                 }
             }
         }
