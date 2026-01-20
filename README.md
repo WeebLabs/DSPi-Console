@@ -10,7 +10,7 @@
 
 ## Features
 
-### 🎛 Real-Time Control
+### Real-Time Control
 * **Parametric EQ**: 
     * **Master Inputs (USB)**: 10 parametric bands per channel.
     * **Outputs (SPDIF & Sub)**: 2 parametric bands per channel for crossover/correction.
@@ -18,13 +18,13 @@
 * **Time Alignment**: Adjustable delay (0–170ms) for each output channel to align speakers and subwoofers.
 * **Global Preamp**: Digital gain control (-60dB to +10dB) and a master channel PEQ bypass toggle.
 
-### 🎧 AutoEQ Integration
+### AutoEQ Integration
 Support for the [AutoEQ](https://github.com/jaakkopasanen/AutoEq) project, providing immediate access to all headphone calibration profiles with a local database.
 * **One-Click Apply**: Instantly maps correction curves to the Master PEQ bands and sets preamp.
 * **Favorites**: Keeps your most frequently used headphone profiles readily accessible.
 * **Updater**: Fetches an updated copy of the AutoEQ database when necessary.
 
-### 📊 Hardware Monitoring
+### Hardware Monitoring
 * **Live Metering**: Real-time peak level indicators for:
     * USB Inputs (Left/Right)
     * SPDIF Outputs (Left/Right)
@@ -32,7 +32,7 @@ Support for the [AutoEQ](https://github.com/jaakkopasanen/AutoEq) project, provi
 * **System Status**: Monitors the load of both RP2040 cores in real-time.
 * **Hotplug**: Automatic device detection and reconnection.
 
-### 📈 Visualization
+### Visualization
 * **Response Graph**: High-fidelity Bode plot rendering of the active filter chain.
 * **Math Engine**: Swift port of the DSPi firmware's biquad logic ensures the graph exactly matches hardware behavior.
 * **Dashboard View**: A high-level overview of all active channels and their configurations.
