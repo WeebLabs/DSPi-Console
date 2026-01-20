@@ -973,15 +973,11 @@ extension DSPViewModel {
 }
 
 #Preview("Dashboard") {
-    NavigationView {
-        ContentView(vm: .preview)
-    }
+    ContentView(vm: .preview)
     .frame(height: 790)
 }
 
 #Preview("Channel Selected") {
-    NavigationView {
-        ContentView(vm: .preview)
-    }
+    ContentView(vm: .preview)
     .frame(width: 1000, height: 780)
 }

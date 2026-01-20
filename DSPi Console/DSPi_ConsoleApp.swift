@@ -719,10 +719,8 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
 
     var body: some Scene {
-        WindowGroup {
-            NavigationView {
-                ContentView(vm: AppState.shared.viewModel)
-            }
+        WindowGroup("DSPi Console") {
+            ContentView(vm: AppState.shared.viewModel)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
