@@ -4,38 +4,44 @@
 ![Language](https://img.shields.io/badge/Language-Swift_%7C_SwiftUI-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**DSPi Console** is the native macOS companion application for the [DSPi firmware](https://github.com/WeebLabs/DSPi). It provides access to all DSPi functions in real-time.
+**DSPi Console** is the native macOS companion application for the [DSPi firmware](https://github.com/WeebLabs/DSPi). It provides comprehensive control, configuration, and monitoring for the DSPi hardware platform.
 
 ![Screenshot](Images/DSPiConsole.png)
 
 ## Features
 
 ### Real-Time Control
-* **Parametric EQ**: 
+* **Parametric EQ**:
     * **Master Inputs (USB)**: 10 parametric bands per channel.
-    * **Outputs (SPDIF & Sub)**: 2 parametric bands per channel for crossover/correction.
+    * **Outputs (SPDIF & Sub)**: 2 parametric bands per channel for output correction/crossover.
 * **Filter Types**: Peaking, Low Shelf, High Shelf, Low Pass, and High Pass.
-* **Time Alignment**: Adjustable delay (0–170ms) for each output channel to align speakers and subwoofers.
-* **Global Preamp**: Digital gain control (-60dB to +10dB) and a master channel PEQ bypass toggle.
+* **Time Alignment**: Adjustable delay (0–170ms) for each output channel.
+* **Global Preamp**: Digital gain control (-60dB to +10dB) with a master hardware bypass toggle.
 
-### AutoEQ Integration
-Support for the [AutoEQ](https://github.com/jaakkopasanen/AutoEq) project, providing immediate access to all headphone calibration profiles with a local database.
-* **One-Click Apply**: Instantly maps correction curves to the Master PEQ bands and sets preamp.
-* **Favorites**: Keeps your most frequently used headphone profiles readily accessible.
-* **Updater**: Fetches an updated copy of the AutoEQ database when necessary.
+### Filter Management
+* **Import**:
+    * **DSPi Format**: Native text-based format supporting multi-channel configurations.
+    * **REW Format**: Imports Room EQ Wizard text exports. Includes a channel selector to map single-channel filters to specific device channels (L/R).
+* **Export**: Saves the full device configuration to a timestamped text file.
+* **AutoEQ Integration**:
+    * **Database**: Local database of [AutoEQ](https://github.com/jaakkopasanen/AutoEq) headphone profiles.
+    * **Application**: One-click mapping of correction curves to Master PEQ bands.
+    * **Updates**: Built-in tool to rebuild the database directly from the upstream GitHub repository.
 
-### Hardware Monitoring
-* **Live Metering**: Real-time peak level indicators for:
-    * USB Inputs (Left/Right)
-    * SPDIF Outputs (Left/Right)
-    * PDM Subwoofer Output
-* **System Status**: Monitors the load of both RP2040 cores in real-time.
-* **Hotplug**: Automatic device detection and reconnection.
+### Device Configuration
+* **Persistence**:
+    * **Commit Parameters**: Saves the current configuration to the RP2040's non-volatile flash memory.
+    * **Revert to Saved**: Reloads parameters from flash, discarding RAM changes.
+* **Factory Reset**: Restores all parameters to default safe values (flat EQ, 0dB gain).
 
-### Visualization
-* **Response Graph**: High-fidelity Bode plot rendering of the active filter chain.
-* **Math Engine**: Swift port of the DSPi firmware's biquad logic ensures the graph exactly matches hardware behavior.
-* **Dashboard View**: A high-level overview of all active channels and their configurations.
+### Monitoring & Visualization
+* **Response Graph**:
+    * **Bode Plot**: Real-time magnitude response rendering (20Hz–20kHz).
+    * **Accuracy**: Uses a Swift port of the firmware's biquad implementation to ensure the displayed curve matches hardware behavior.
+    * **Interactive**: Per-channel visibility toggles via the legend.
+* **Live Metering**: Real-time peak level monitoring for USB Inputs, SPDIF Outputs, and PDM Subwoofer.
+* **System Status**: Live CPU load monitoring for both RP2040 cores.
+* **Dashboard**: High-level overview of all active channels and filter states.
 
 ## Technical Architecture
 
