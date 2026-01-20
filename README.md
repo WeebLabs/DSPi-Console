@@ -4,7 +4,7 @@
 ![Language](https://img.shields.io/badge/Language-Swift_%7C_SwiftUI-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**DSPi Console** is the native macOS companion application for the [DSPi firmware](https://github.com/WeebLabs/DSPi). It provides comprehensive real-time control, monitoring, and headphone correction for the DSPi audio platform.
+**DSPi Console** is the native macOS companion application for the [DSPi firmware](https://github.com/WeebLabs/DSPi). It provides access to all DSPi functions in real-time.
 
 ![Screenshot](Images/DSPiConsole.png)
 
