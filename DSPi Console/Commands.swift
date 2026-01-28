@@ -16,6 +16,10 @@ extension DSPViewModel {
             }
             if ch.isOutput {
                 fetchDelay(ch: ch.rawValue)
+                // Map channel to output index (outLeft=2->0, outRight=3->1, sub=4->2)
+                let outputIdx = ch.rawValue - 2
+                fetchChannelGain(ch: outputIdx)
+                fetchChannelMute(ch: outputIdx)
             }
         }
     }
@@ -99,7 +103,49 @@ extension DSPViewModel {
             }
         }
     }
-    
+
+    // MARK: - Per-Channel Gain
+
+    func setChannelGain(ch: Int, db: Float) {
+        guard ch < 3 else { return }
+        channelGainDB[ch] = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_CHANNEL_GAIN, value: UInt16(ch), index: 0, data: data)
+    }
+
+    func fetchChannelGain(ch: Int) {
+        guard ch < 3 else { return }
+        if let d = usb.getControlRequest(request: REQ_GET_CHANNEL_GAIN, value: UInt16(ch), index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs((self.channelGainDB[ch] ?? 0) - val) > 0.01 {
+                    self.channelGainDB[ch] = val
+                }
+            }
+        }
+    }
+
+    // MARK: - Per-Channel Mute
+
+    func setChannelMute(ch: Int, muted: Bool) {
+        guard ch < 3 else { return }
+        channelMute[ch] = muted
+        var val: UInt8 = muted ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_CHANNEL_MUTE, value: UInt16(ch), index: 0, data: data)
+    }
+
+    func fetchChannelMute(ch: Int) {
+        guard ch < 3 else { return }
+        if let d = usb.getControlRequest(request: REQ_GET_CHANNEL_MUTE, value: UInt16(ch), index: 0, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async {
+                self.channelMute[ch] = val
+            }
+        }
+    }
+
     func setPreamp(_ db: Float) {
         self.preampDB = db
         var val = db

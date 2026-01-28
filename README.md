@@ -15,6 +15,10 @@
     * **Master Inputs (USB)**: 10 parametric bands per channel.
     * **Outputs (SPDIF & Sub)**: 2 parametric bands per channel for output correction/crossover.
 * **Filter Types**: Peaking, Low Shelf, High Shelf, Low Pass, and High Pass.
+* **Per-Channel Gain & Mute**:
+    * Independent gain control (-60dB to +10dB) for each output channel.
+    * Quick-mute via clickable meter labels (L/R/S) or dedicated toggle on channel pages.
+    * Visual feedback: muted channels show greyed-out labels and meters.
 * **Time Alignment**: Adjustable delay (0–170ms) for each output channel.
 * **Global Preamp**: Digital gain control (-60dB to +10dB) with a master hardware bypass toggle.
 
@@ -63,6 +67,10 @@ The application communicates with the RP2040 via raw USB bulk transfers using `I
 | `REQ_SET_DELAY` | `0x48` | `(float32)` | Sets channel delay in milliseconds. |
 | `REQ_GET_DELAY` | `0x49` | `(float32)` | Retrieves channel delay. |
 | `REQ_GET_STATUS` | `0x50` | `struct { peaks[5], cpu[2] }` | Polls meters and CPU usage. |
+| `REQ_SET_CHANNEL_GAIN` | `0x54` | `(float32)` | Sets output channel gain in dB. |
+| `REQ_GET_CHANNEL_GAIN` | `0x55` | `(float32)` | Retrieves output channel gain. |
+| `REQ_SET_CHANNEL_MUTE` | `0x56` | `(uint8)` | Mutes/unmutes output channel. |
+| `REQ_GET_CHANNEL_MUTE` | `0x57` | `(uint8)` | Retrieves output channel mute state. |
 | `REQ_SAVE_PARAMS` | `0x51` | `(none)` | Persists current configuration to flash. |
 | `REQ_LOAD_PARAMS` | `0x52` | `(none)` | Reloads configuration from flash. |
 | `REQ_FACTORY_RESET` | `0x53` | `(none)` | Resets all settings to default. |
@@ -70,11 +78,11 @@ The application communicates with the RP2040 via raw USB bulk transfers using `I
 ### Channel Mapping
 The application manages five audio channels:
 
-| Channel | Role | Band Count |
-| :--- | :--- | :--- |
-| **Master L/R** | USB Input | 10 per channel |
-| **Out L/R** | SPDIF Output | 2 per channel |
-| **Sub** | PDM Output (Pin 10) | 2 |
+| Channel | Role | Band Count | Gain/Mute |
+| :--- | :--- | :--- | :--- |
+| **Master L/R** | USB Input | 10 per channel | No |
+| **Out L/R** | SPDIF Output | 2 per channel | Yes |
+| **Sub** | PDM Output (Pin 10) | 2 | Yes |
 
 ## Building the Project
 

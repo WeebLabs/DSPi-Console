@@ -14,6 +14,10 @@ let REQ_GET_STATUS: UInt8   = 0x50
 let REQ_SAVE_PARAMS: UInt8  = 0x51
 let REQ_LOAD_PARAMS: UInt8  = 0x52
 let REQ_FACTORY_RESET: UInt8 = 0x53
+let REQ_SET_CHANNEL_GAIN: UInt8 = 0x54
+let REQ_GET_CHANNEL_GAIN: UInt8 = 0x55
+let REQ_SET_CHANNEL_MUTE: UInt8 = 0x56
+let REQ_GET_CHANNEL_MUTE: UInt8 = 0x57
 
 // Flash result codes
 let FLASH_OK: UInt8           = 0
@@ -95,6 +99,8 @@ class DSPViewModel: ObservableObject {
     @Published var channelData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
     @Published var channelDelays: [Int: Float] = [:]
+    @Published var channelGainDB: [Int: Float] = [0: 0.0, 1: 0.0, 2: 0.0]  // Output L, R, Sub
+    @Published var channelMute: [Int: Bool] = [0: false, 1: false, 2: false]
     @Published var isDeviceConnected: Bool = false
 
     // Live Data
@@ -160,7 +166,8 @@ class DSPViewModel: ObservableObject {
 struct HorizontalMeterBar: View {
     var level: Float // 0.0 to 1.0
     var color: Color
-    
+    var isMuted: Bool = false
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
@@ -172,6 +179,7 @@ struct HorizontalMeterBar: View {
             }
         }
         .frame(height: 8)
+        .opacity(isMuted ? 0.4 : 1.0)
     }
 }
 
@@ -189,6 +197,24 @@ struct CpuMeter: View {
             .frame(width: 40, height: 6)
             Text("\(load)%").font(.caption2).monospacedDigit()
         }
+    }
+}
+
+struct MuteableLabel: View {
+    let text: String
+    let isMuted: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            Text(text)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.secondary)
+                .opacity(isMuted ? 0.3 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 8, alignment: .leading)
+        .help(isMuted ? "Click to unmute" : "Click to mute")
     }
 }
 
@@ -736,25 +762,40 @@ struct ContentView: View {
                                 Text("SPDIF OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
-                                    Text("L").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                        .frame(width: 8, alignment: .leading)
-                                        HorizontalMeterBar(level: vm.status.peaks[2], color: Channel.outLeft.color)
+                                    MuteableLabel(text: "L", isMuted: vm.channelMute[0] ?? false) {
+                                        vm.setChannelMute(ch: 0, muted: !(vm.channelMute[0] ?? false))
+                                    }
+                                    HorizontalMeterBar(
+                                        level: vm.status.peaks[2],
+                                        color: Channel.outLeft.color,
+                                        isMuted: vm.channelMute[0] ?? false
+                                    )
                                 }
                                 HStack {
-                                    Text("R").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                        .frame(width: 8, alignment: .leading)
-                                        HorizontalMeterBar(level: vm.status.peaks[3], color: Channel.outRight.color)
+                                    MuteableLabel(text: "R", isMuted: vm.channelMute[1] ?? false) {
+                                        vm.setChannelMute(ch: 1, muted: !(vm.channelMute[1] ?? false))
+                                    }
+                                    HorizontalMeterBar(
+                                        level: vm.status.peaks[3],
+                                        color: Channel.outRight.color,
+                                        isMuted: vm.channelMute[1] ?? false
+                                    )
                                 }
                             }
-                            
+
                             // Group 3: SUB
                             VStack(spacing: 4) {
                                 Text("PDM OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
-                                    Text("S").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                        .frame(width: 8, alignment: .leading)
-                                        HorizontalMeterBar(level: vm.status.peaks[4], color: Channel.sub.color)
+                                    MuteableLabel(text: "S", isMuted: vm.channelMute[2] ?? false) {
+                                        vm.setChannelMute(ch: 2, muted: !(vm.channelMute[2] ?? false))
+                                    }
+                                    HorizontalMeterBar(
+                                        level: vm.status.peaks[4],
+                                        color: Channel.sub.color,
+                                        isMuted: vm.channelMute[2] ?? false
+                                    )
                                 }
                             }
                         }
@@ -817,20 +858,49 @@ struct ContentView: View {
                         .padding(.horizontal)
                         
                         if channel.isOutput {
-                            HStack {
-                                Image(systemName: "clock.arrow.circlepath").foregroundColor(.secondary)
-                                Text("Output Delay:").font(.callout).fontWeight(.medium)
-                                Slider(value: Binding(
-                                    get: { vm.channelDelays[channel.rawValue] ?? 0.0 },
-                                    set: { vm.setDelay(ch: channel.rawValue, ms: $0) }
-                                ), in: 0...170).frame(width: 200)
-                                ValueField(label: "ms", value: vm.channelDelays[channel.rawValue] ?? 0.0, width: 60) {
-                                    vm.setDelay(ch: channel.rawValue, ms: $0)
+                            let outputIdx = channel.rawValue - 2  // Map to 0, 1, 2
+
+                            VStack(spacing: 12) {
+                                // Gain Control
+                                HStack {
+                                    Image(systemName: "speaker.wave.2").foregroundColor(.secondary)
+                                    Text("Gain:").font(.callout).fontWeight(.medium)
+                                    Slider(value: Binding(
+                                        get: { vm.channelGainDB[outputIdx] ?? 0.0 },
+                                        set: { vm.setChannelGain(ch: outputIdx, db: $0) }
+                                    ), in: -60...10).frame(width: 200)
+                                    ValueField(label: "dB", value: vm.channelGainDB[outputIdx] ?? 0.0, width: 60) {
+                                        vm.setChannelGain(ch: outputIdx, db: $0)
+                                    }
+
+                                    Spacer()
+
+                                    // Mute Toggle
+                                    Toggle(isOn: Binding(
+                                        get: { vm.channelMute[outputIdx] ?? false },
+                                        set: { vm.setChannelMute(ch: outputIdx, muted: $0) }
+                                    )) {
+                                        Label("Mute", systemImage: vm.channelMute[outputIdx] ?? false ? "speaker.slash.fill" : "speaker.fill")
+                                    }
+                                    .toggleStyle(.button)
+                                    .tint(vm.channelMute[outputIdx] ?? false ? .red : .secondary)
                                 }
-                                Spacer()
+
+                                // Delay Control
+                                HStack {
+                                    Image(systemName: "clock.arrow.circlepath").foregroundColor(.secondary)
+                                    Text("Delay:").font(.callout).fontWeight(.medium)
+                                    Slider(value: Binding(
+                                        get: { vm.channelDelays[channel.rawValue] ?? 0.0 },
+                                        set: { vm.setDelay(ch: channel.rawValue, ms: $0) }
+                                    ), in: 0...170).frame(width: 200)
+                                    ValueField(label: "ms", value: vm.channelDelays[channel.rawValue] ?? 0.0, width: 60) {
+                                        vm.setDelay(ch: channel.rawValue, ms: $0)
+                                    }
+                                    Spacer()
+                                }
                             }
                             .padding(.all, 12)
-                            //.background(Color(NSColor.controlBackgroundColor).opacity(0.5))
                             .cornerRadius(8)
                             .padding(.horizontal)
                         }
