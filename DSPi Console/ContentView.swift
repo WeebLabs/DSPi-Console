@@ -1074,13 +1074,60 @@ struct FilterListView: View {
     }
 }
 
+struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
+    let items: [T]
+    let titleForItem: (T) -> String
+    @Binding var selection: T
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.isBordered = true
+        button.showsBorderOnlyWhileMouseInside = true
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.selectionChanged(_:))
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        // Update coordinator's reference to current parent (fixes stale binding issue)
+        context.coordinator.parent = self
+
+        button.removeAllItems()
+        for item in items {
+            button.addItem(withTitle: titleForItem(item))
+        }
+        if let index = items.firstIndex(of: selection) {
+            button.selectItem(at: index)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject {
+        var parent: BorderlessPopUpButton
+
+        init(_ parent: BorderlessPopUpButton) {
+            self.parent = parent
+        }
+
+        @objc func selectionChanged(_ sender: NSPopUpButton) {
+            let index = sender.indexOfSelectedItem
+            if index >= 0 && index < parent.items.count {
+                parent.selection = parent.items[index]
+            }
+        }
+    }
+}
+
 struct FilterRowView: View {
     let index: Int
     var params: FilterParams
     var onChange: (FilterParams) -> Void
-    
+
     var isActive: Bool { params.type != .flat }
-    
+
     var body: some View {
         HStack(spacing: 12) {
             // Index
@@ -1088,17 +1135,24 @@ struct FilterRowView: View {
                 .font(.system(.body))
                 .foregroundColor(isActive ? .primary : .secondary.opacity(0.5))
                 .frame(width: 24, alignment: .leading)
-            
+
             // Type Selector
-            Picker("", selection: Binding(
-                get: { params.type },
-                set: { var p = params; p.type = $0; onChange(p) }
-            )) {
-                ForEach(FilterType.allCases) { t in Text(t.name).tag(t) }
+            BorderlessPopUpButton(
+                items: FilterType.allCases,
+                titleForItem: { $0.name },
+                selection: Binding(
+                    get: { params.type },
+                    set: { var p = params; p.type = $0; onChange(p) }
+                )
+            )
+            .frame(width: 100, height: 20)
+            .overlay(alignment: .trailing) {
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(.trailing, 4)
+                    .allowsHitTesting(false)
             }
-            .labelsHidden()
-            .frame(width: 100)
-            .scaleEffect(0.9) // Make standard picker slightly smaller
             
             // Controls
             if isActive {
@@ -1114,16 +1168,16 @@ struct FilterRowView: View {
                             var p = params; p.gain = $0; onChange(p)
                         }
                     } else {
-                        Spacer().frame(width: 60 + 34) // Placeholder
+                        Spacer().frame(width: 60 + 24) // Placeholder
                     }
                     
                     // Q
-                    if params.type == .peaking || params.type == .lowPass || params.type == .highPass {
+                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
                         ValueField(label: "Q", value: params.q, width: 50) {
                             var p = params; p.q = $0; onChange(p)
                         }
                     } else {
-                        Spacer().frame(width: 50 + 34)
+                        Spacer().frame(width: 50 + 24)
                     }
                 }
             } else {
