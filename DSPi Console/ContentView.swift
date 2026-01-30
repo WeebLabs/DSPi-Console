@@ -164,77 +164,57 @@ class DSPViewModel: ObservableObject {
 
 // MARK: - Custom Views
 
-/// Custom NSSlider subclass to handle right-clicks without interfering with drag gestures
-class ResettableSlider: NSSlider {
-    var onRightClick: (() -> Void)?
-    var isDragging: Bool = false
+/// Invisible overlay that detects right-clicks via local event monitor
+struct RightClickHandler: NSViewRepresentable {
+    let action: () -> Void
 
-    override func rightMouseDown(with event: NSEvent) {
-        onRightClick?()
+    func makeNSView(context: Context) -> RightClickMonitorView {
+        let view = RightClickMonitorView()
+        view.action = action
+        return view
     }
-    
-    override func mouseDown(with event: NSEvent) {
-        isDragging = true
-        super.mouseDown(with: event)
-        isDragging = false
+
+    func updateNSView(_ nsView: RightClickMonitorView, context: Context) {
+        nsView.action = action
+    }
+
+    class RightClickMonitorView: NSView {
+        var action: (() -> Void)?
+        var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil && monitor == nil {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
+                    guard let self = self, let window = self.window else { return event }
+                    let locationInWindow = event.locationInWindow
+                    let locationInView = self.convert(locationInWindow, from: nil)
+                    if self.bounds.contains(locationInView) {
+                        self.action?()
+                        return nil
+                    }
+                    return event
+                }
+            }
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            super.viewWillMove(toWindow: newWindow)
+            if newWindow == nil, let monitor = monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            return nil
+        }
     }
 }
 
-/// Slider that resets to a value on right-click
-struct RightClickSlider: NSViewRepresentable {
-    @Binding var value: Float
-    let range: ClosedRange<Float>
-    let resetValue: Float
-
-    func makeNSView(context: Context) -> ResettableSlider {
-        let slider = ResettableSlider(
-            value: Double(value),
-            minValue: Double(range.lowerBound),
-            maxValue: Double(range.upperBound),
-            target: context.coordinator,
-            action: #selector(Coordinator.valueChanged(_:))
-        )
-        slider.isContinuous = true
-        
-        slider.onRightClick = {
-            slider.doubleValue = Double(self.resetValue)
-            context.coordinator.handleReset()
-        }
-
-        return slider
-    }
-
-    func updateNSView(_ nsView: ResettableSlider, context: Context) {
-        // Only update the slider visual if we are NOT dragging to avoid fighting the user's interaction
-        if !nsView.isDragging && nsView.doubleValue != Double(value) {
-            nsView.doubleValue = Double(value)
-        }
-        
-        // Ensure closure captures latest state
-        nsView.onRightClick = {
-            nsView.doubleValue = Double(self.resetValue)
-            context.coordinator.handleReset()
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-
-    class Coordinator: NSObject {
-        var parent: RightClickSlider
-
-        init(_ parent: RightClickSlider) {
-            self.parent = parent
-        }
-
-        @objc func valueChanged(_ sender: NSSlider) {
-            parent.value = Float(sender.doubleValue)
-        }
-
-        func handleReset() {
-            parent.value = parent.resetValue
-        }
+extension View {
+    func onRightClick(perform action: @escaping () -> Void) -> some View {
+        self.overlay(RightClickHandler(action: action))
     }
 }
 
@@ -790,12 +770,9 @@ struct ContentView: View {
                                 // Using ValueField for direct Preamp Entry if desired, or keep as display
                                 ValueField(label: "dB", value: vm.preampDB, width: 60) { vm.setPreamp($0) }
                             }
-                            RightClickSlider(
-                                value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }),
-                                range: -60...10,
-                                resetValue: 0
-                            )
-                            .controlSize(.small)
+                            Slider(value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }), in: -60...10)
+                                .controlSize(.small)
+                                .onRightClick { vm.setPreamp(0) }
                         }
                         
                         Toggle(isOn: Binding(get: { vm.bypass }, set: { vm.setBypass($0) })) {
@@ -1008,11 +985,8 @@ struct ChannelSettingsView: View {
                 }
                 .frame(width: 80, alignment: .leading)
 
-                RightClickSlider(
-                    value: Binding(get: { gainDB }, set: { gainDB = $0 }),
-                    range: -60...10,
-                    resetValue: 0
-                )
+                Slider(value: Binding(get: { gainDB }, set: { gainDB = $0 }), in: -60...10)
+                    .onRightClick { gainDB = 0 }
             }
             .padding(12)
             .frame(maxWidth: .infinity)
@@ -1029,7 +1003,8 @@ struct ChannelSettingsView: View {
                 }
                 .frame(width: 80, alignment: .leading)
 
-                RightClickSlider(value: $delayMS, range: 0.0...170.0, resetValue: 0)
+                Slider(value: $delayMS, in: 0...170)
+                    .onRightClick { delayMS = 0 }
             }
             .padding(12)
             .frame(maxWidth: .infinity)
