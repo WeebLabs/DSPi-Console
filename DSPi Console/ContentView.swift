@@ -163,6 +163,81 @@ class DSPViewModel: ObservableObject {
 }
 
 // MARK: - Custom Views
+
+/// Custom NSSlider subclass to handle right-clicks without interfering with drag gestures
+class ResettableSlider: NSSlider {
+    var onRightClick: (() -> Void)?
+    var isDragging: Bool = false
+
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
+    }
+    
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        super.mouseDown(with: event)
+        isDragging = false
+    }
+}
+
+/// Slider that resets to a value on right-click
+struct RightClickSlider: NSViewRepresentable {
+    @Binding var value: Float
+    let range: ClosedRange<Float>
+    let resetValue: Float
+
+    func makeNSView(context: Context) -> ResettableSlider {
+        let slider = ResettableSlider(
+            value: Double(value),
+            minValue: Double(range.lowerBound),
+            maxValue: Double(range.upperBound),
+            target: context.coordinator,
+            action: #selector(Coordinator.valueChanged(_:))
+        )
+        slider.isContinuous = true
+        
+        slider.onRightClick = {
+            slider.doubleValue = Double(self.resetValue)
+            context.coordinator.handleReset()
+        }
+
+        return slider
+    }
+
+    func updateNSView(_ nsView: ResettableSlider, context: Context) {
+        // Only update the slider visual if we are NOT dragging to avoid fighting the user's interaction
+        if !nsView.isDragging && nsView.doubleValue != Double(value) {
+            nsView.doubleValue = Double(value)
+        }
+        
+        // Ensure closure captures latest state
+        nsView.onRightClick = {
+            nsView.doubleValue = Double(self.resetValue)
+            context.coordinator.handleReset()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject {
+        var parent: RightClickSlider
+
+        init(_ parent: RightClickSlider) {
+            self.parent = parent
+        }
+
+        @objc func valueChanged(_ sender: NSSlider) {
+            parent.value = Float(sender.doubleValue)
+        }
+
+        func handleReset() {
+            parent.value = parent.resetValue
+        }
+    }
+}
+
 struct HorizontalMeterBar: View {
     var level: Float // 0.0 to 1.0
     var color: Color
@@ -400,8 +475,8 @@ struct StereoDashboardCard: View {
             .frame(height: CGFloat(left.bandCount) * 24)
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        .cornerRadius(8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
     }
 }
 
@@ -438,8 +513,8 @@ struct MonoDashboardCard: View {
             .frame(height: CGFloat(channel.bandCount) * 24)
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        .cornerRadius(8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(channel.color.opacity(0.3), lineWidth: 1))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(channel.color.opacity(0.3), lineWidth: 1))
     }
 }
 
@@ -712,10 +787,15 @@ struct ContentView: View {
                             HStack {
                                 Text("Preamp").font(.caption2).foregroundColor(.secondary)
                                 Spacer()
-                                Text("\(vm.preampDB, specifier: "%.1f") dB").font(.caption2).monospacedDigit()
+                                // Using ValueField for direct Preamp Entry if desired, or keep as display
+                                ValueField(label: "dB", value: vm.preampDB, width: 60) { vm.setPreamp($0) }
                             }
-                            Slider(value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }), in: -60...10)
-                                .controlSize(.small)
+                            RightClickSlider(
+                                value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }),
+                                range: -60...10,
+                                resetValue: 0
+                            )
+                            .controlSize(.small)
                         }
                         
                         Toggle(isOn: Binding(get: { vm.bypass }, set: { vm.setBypass($0) })) {
@@ -726,6 +806,10 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .padding()
+                    // ADDED GESTURE HERE FOR SIDEBAR CONTROLS
+                    .onTapGesture {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                    }
                     
                     Divider()
                     
@@ -805,12 +889,15 @@ struct ContentView: View {
                 .background(.ultraThinMaterial)
             }
             .frame(minWidth: 220, maxWidth: 260)
+            // ADDED GESTURE FOR THE REST OF THE SIDEBAR
+            .onTapGesture {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+            }
 
             // MAIN CONTENT
             VStack(alignment: .leading, spacing: 20) {
                 // Graph
-                
-                VStack(alignment: .leading, spacing: 0) { // Spacing handled manually
+                VStack(alignment: .leading, spacing: 0) { 
                     // Combined header: Filters title + connection status
                     HStack {
                         Text("Filter Response").font(.headline)
@@ -843,93 +930,50 @@ struct ContentView: View {
                     GraphLegend(vm: vm).padding(.horizontal).padding(.top, 8)
                 }
                 
-                //Divider()
-                
                 // Right Panel Content (Dynamic)
                 VStack {
                     if let channel = selectedChannel {
-                        HStack {
-                            Text("\(channel.name) Filters").font(.title2)
-                            Spacer()
-                            if channel == .masterLeft || channel == .masterRight {
-                                Button("Clear All Master PEQ", role: .destructive) { vm.clearAllMaster() }
-                            }
-                        }
-                        .padding(.horizontal)
-                        
-                        if channel.isOutput {
-                            let outputIdx = channel.rawValue - 2  // Map to 0, 1, 2
+                        VStack(spacing: 16) {
 
-                            VStack(spacing: 12) {
-                                // Gain Control
-                                HStack {
-                                    Image(systemName: "speaker.wave.2").foregroundColor(.secondary)
-                                    Text("Gain:").font(.callout).fontWeight(.medium)
-                                    Slider(value: Binding(
+                            if channel.isOutput {
+                                let outputIdx = channel.rawValue - 2  // Map to 0, 1, 2
+                                ChannelSettingsView(
+                                    gainDB: Binding(
                                         get: { vm.channelGainDB[outputIdx] ?? 0.0 },
                                         set: { vm.setChannelGain(ch: outputIdx, db: $0) }
-                                    ), in: -60...10).frame(width: 200)
-                                    ValueField(label: "dB", value: vm.channelGainDB[outputIdx] ?? 0.0, width: 60) {
-                                        vm.setChannelGain(ch: outputIdx, db: $0)
-                                    }
-
-                                    Spacer()
-
-                                    // Mute Toggle
-                                    Toggle(isOn: Binding(
-                                        get: { vm.channelMute[outputIdx] ?? false },
-                                        set: { vm.setChannelMute(ch: outputIdx, muted: $0) }
-                                    )) {
-                                        Label("Mute", systemImage: vm.channelMute[outputIdx] ?? false ? "speaker.slash.fill" : "speaker.fill")
-                                    }
-                                    .toggleStyle(.button)
-                                    .tint(vm.channelMute[outputIdx] ?? false ? .red : .secondary)
-                                }
-
-                                // Delay Control
-                                HStack {
-                                    Image(systemName: "clock.arrow.circlepath").foregroundColor(.secondary)
-                                    Text("Delay:").font(.callout).fontWeight(.medium)
-                                    Slider(value: Binding(
+                                    ),
+                                    delayMS: Binding(
                                         get: { vm.channelDelays[channel.rawValue] ?? 0.0 },
                                         set: { vm.setDelay(ch: channel.rawValue, ms: $0) }
-                                    ), in: 0...170).frame(width: 200)
-                                    ValueField(label: "ms", value: vm.channelDelays[channel.rawValue] ?? 0.0, width: 60) {
-                                        vm.setDelay(ch: channel.rawValue, ms: $0)
-                                    }
-                                    Spacer()
-                                }
-                            }
-                            .padding(.all, 12)
-                            .cornerRadius(8)
-                            .padding(.horizontal)
-                        }
-                        
-                        ScrollView {
-                            VStack(spacing: 12) {
-                                ForEach(0..<channel.bandCount, id: \.self) { band in
-                                    FilterRow(
-                                        bandIndex: band,
-                                        params: vm.channelData[channel.rawValue]?[band] ?? FilterParams(),
-                                        onChange: { newParams in vm.setFilter(ch: channel.rawValue, band: band, p: newParams) }
+                                    ),
+                                    isMuted: Binding(
+                                        get: { vm.channelMute[outputIdx] ?? false },
+                                        set: { vm.setChannelMute(ch: outputIdx, muted: $0) }
                                     )
-                                }
-                            }
-                            .padding()
-                        }
-                        .frame(maxHeight: .infinity)
-                        //.frame(height: 400)
-                    } else {
-                        // --- NEW DASHBOARD VIEW ---
-                        ScrollView {
+                                                                    )
+                                                                    .padding(.horizontal)
+                                                                }
+                                                                
+                                                                FilterListView(
+                                                                    bands: vm.channelData[channel.rawValue] ?? [],
+                                                                    channelId: channel.rawValue,
+                                                                    onUpdate: { band, params in
+                                                                        vm.setFilter(ch: channel.rawValue, band: band, p: params)
+                                                                    },
+                                                                    onClear: (channel == .masterLeft || channel == .masterRight) ? { vm.clearAllMaster() } : nil
+                                                                )
+                                                            }
+                                                        } else {                        ScrollView {
                             DashboardOverview(vm: vm)
                         }
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            // Main window background color
             .background(Color(NSColor.windowBackgroundColor.blended(withFraction: 0.2, of: .black) ?? .windowBackgroundColor))
+            .onTapGesture {
+                NSApp.keyWindow?.makeFirstResponder(nil)
+            }
         }
         .navigationTitle("DSPi Console")
         .frame(maxHeight:900)
@@ -942,52 +986,189 @@ struct ContentView: View {
                 }
             }
         }
-        //.background(Color(NSColor.controlBackgroundColor))
     }
 }
 
-// MARK: - Subviews
-struct FilterRow: View {
-    let bandIndex: Int
+// MARK: - New Control Views
+
+struct ChannelSettingsView: View {
+    @Binding var gainDB: Float
+    @Binding var delayMS: Float
+    @Binding var isMuted: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // GAIN
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Gain", systemImage: "speaker.wave.2.fill")
+                        .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
+                    // Numeric Entry for Gain
+                    ValueField(label: "dB", value: gainDB, width: 60) { gainDB = $0 }
+                }
+                .frame(width: 80, alignment: .leading)
+
+                RightClickSlider(
+                    value: Binding(get: { gainDB }, set: { gainDB = $0 }),
+                    range: -60...10,
+                    resetValue: 0
+                )
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity)
+            
+            Divider()
+            
+            // DELAY
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Delay", systemImage: "clock.arrow.circlepath")
+                        .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
+                    // Numeric Entry for Delay
+                    ValueField(label: "ms", value: delayMS, width: 60) { delayMS = $0 }
+                }
+                .frame(width: 80, alignment: .leading)
+
+                RightClickSlider(value: $delayMS, range: 0.0...170.0, resetValue: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity)
+            
+            Divider()
+            
+            // MUTE
+            Toggle(isOn: $isMuted) {
+                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.title2)
+                    .foregroundColor(isMuted ? .red : .secondary)
+            }
+            .toggleStyle(.button)
+            .buttonStyle(.plain)
+            .frame(width: 60)
+            .background(isMuted ? Color.red.opacity(0.1) : Color.clear)
+        }
+        .frame(height: 60)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+    }
+}
+
+struct FilterListView: View {
+    let bands: [FilterParams]
+    let channelId: Int
+    let onUpdate: (Int, FilterParams) -> Void
+    var onClear: (() -> Void)? = nil
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack(spacing: 12) {
+                Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
+                Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 100, alignment: .leading)
+                Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center)
+                Text("GAIN").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 84, alignment: .center)
+                Text("WIDTH").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 74, alignment: .center)
+                Spacer()
+                if let onClear = onClear {
+                    Button("Clear All", role: .destructive, action: onClear)
+                        .controlSize(.mini)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.controlBackgroundColor))
+            
+            ScrollView {
+                LazyVStack(spacing: 1) {
+                    ForEach(0..<bands.count, id: \.self) { index in
+                        FilterRowView(
+                            index: index,
+                            params: bands[index],
+                            onChange: { onUpdate(index, $0) }
+                        )
+                    }
+                }
+            }
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+        .padding(.horizontal)
+        .padding(.bottom)
+    }
+}
+
+struct FilterRowView: View {
+    let index: Int
     var params: FilterParams
     var onChange: (FilterParams) -> Void
     
+    var isActive: Bool { params.type != .flat }
+    
     var body: some View {
         HStack(spacing: 12) {
-            Text("Band \(bandIndex + 1)")
-                .font(.system(.caption, design: .monospaced))
-                .frame(width: 50, alignment: .leading)
-                .foregroundColor(.secondary)
+            // Index
+            Text("\(index + 1)")
+                .font(.system(.body))
+                .foregroundColor(isActive ? .primary : .secondary.opacity(0.5))
+                .frame(width: 24, alignment: .leading)
             
+            // Type Selector
             Picker("", selection: Binding(
                 get: { params.type },
                 set: { var p = params; p.type = $0; onChange(p) }
             )) {
                 ForEach(FilterType.allCases) { t in Text(t.name).tag(t) }
             }
+            .labelsHidden()
             .frame(width: 100)
+            .scaleEffect(0.9) // Make standard picker slightly smaller
             
-            switch params.type {
-            case .highPass:
-                ValueField(label: "Hz", value: params.freq, width: 70) { var p = params; p.freq = $0; onChange(p) }
-            case .lowPass:
-                ValueField(label: "Hz", value: params.freq, width: 70) { var p = params; p.freq = $0; onChange(p) }
-            case .highShelf:
-                ValueField(label: "Hz", value: params.freq, width: 70) { var p = params; p.freq = $0; onChange(p) }
-                ValueField(label: "dB", value: params.gain, width: 50) { var p = params; p.gain = $0; onChange(p) }
-            case .lowShelf:
-                ValueField(label: "Hz", value: params.freq, width: 70) { var p = params; p.freq = $0; onChange(p) }
-                ValueField(label: "dB", value: params.gain, width: 50) { var p = params; p.gain = $0; onChange(p) }
-            case .peaking:
-                ValueField(label: "Hz", value: params.freq, width: 70) { var p = params; p.freq = $0; onChange(p) }
-                ValueField(label: "Q", value: params.q, width: 50) { var p = params; p.q = $0; onChange(p) }
-                ValueField(label: "dB", value: params.gain, width: 50) { var p = params; p.gain = $0; onChange(p) }
-            case .flat:
-                EmptyView()
+            // Controls
+            if isActive {
+                HStack(spacing: 12) {
+                    // Freq
+                    ValueField(label: "Hz", value: params.freq, width: 80) {
+                        var p = params; p.freq = $0; onChange(p)
+                    }
+                    
+                    // Gain
+                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
+                        ValueField(label: "dB", value: params.gain, width: 60) {
+                            var p = params; p.gain = $0; onChange(p)
+                        }
+                    } else {
+                        Spacer().frame(width: 60 + 34) // Placeholder
+                    }
+                    
+                    // Q
+                    if params.type == .peaking || params.type == .lowPass || params.type == .highPass {
+                        ValueField(label: "Q", value: params.q, width: 50) {
+                            var p = params; p.q = $0; onChange(p)
+                        }
+                    } else {
+                        Spacer().frame(width: 50 + 34)
+                    }
+                }
+            } else {
+                Text("Filter Disabled")
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.5))
+                    .frame(width: 104, alignment: .center)
             }
+            
             Spacer()
         }
-        .padding(8).background(Color(NSColor.controlBackgroundColor)).cornerRadius(6)
+        .frame(height: 24) // Fixed height to prevent jumping
+        .padding(.vertical, 6)
+        .padding(.horizontal, 16)
+        .background(
+            ZStack {
+                if index % 2 == 0 { Color.white.opacity(0.03) }
+            }
+        )
+        .contentShape(Rectangle())
     }
 }
 
@@ -1001,14 +1182,33 @@ struct ValueField: View {
     
     var body: some View {
         HStack(spacing: 4) {
-            TextField(label, text: $text)
-                .frame(width: width).textFieldStyle(.roundedBorder).focused($isFocused)
-                .onSubmit { if let v = Float(text) { onCommit(v) } else { text = String(format: "%.1f", value) } }
-                .onChange(of: isFocused) { focused in if !focused { if let v = Float(text) { onCommit(v) } else { text = String(format: "%.1f", value) } } }
-            Text(label).font(.caption).foregroundColor(.secondary)
+            ZStack(alignment: .trailing) {
+                Text(text + " ")
+                    .font(.system(.body).monospacedDigit())
+                    .opacity(0)
+                    .padding(4)
+                
+                TextField("", text: $text)
+                    .textFieldStyle(.plain)
+                    .font(.system(.body).monospacedDigit())
+                    .foregroundColor(isFocused ? .accentColor : .primary)
+                    .tint(.accentColor)
+                    .multilineTextAlignment(.trailing)
+                    .padding(4)
+                    .frame(width: width) // Enforce fixed width
+                    .focused($isFocused)
+                    .onSubmit { if let v = Float(text) { onCommit(v) } else { text = String(format: "%.1f", value) } }
+                    .onChange(of: isFocused) { focused in if !focused { if let v = Float(text) { onCommit(v) } else { text = String(format: "%.1f", value) } } }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 20, alignment: .leading)
         }
         .onAppear { text = String(format: "%.1f", value) }
-        .onChange(of: value) { newValue in if !isFocused { text = String(format: "%.1f", newValue) } }
+        .onChange(of: value) { newValue in text = String(format: "%.1f", newValue) }
     }
 }
 
