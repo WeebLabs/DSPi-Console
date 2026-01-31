@@ -399,7 +399,7 @@ struct StereoDashboardCard: View {
             HStack(spacing: 0) {
                 HStack {
                     Circle().fill(left.color).frame(width: 6, height: 6)
-                    Text(left.name).font(.system(size: 11, weight: .bold)).foregroundColor(left.color)
+                    Text(left.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     if showDelay {
                         Text("Delay: \(vm.channelDelays[left.rawValue] ?? 0.0, specifier: "%.0f")ms")
@@ -409,13 +409,14 @@ struct StereoDashboardCard: View {
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity)
-                .background(left.color.opacity(0.1))
-                
+                // Color of the left table header
+                .background(Color.white.opacity(0.01))
+
                 Divider()
-                
+
                 HStack {
                     Circle().fill(right.color).frame(width: 6, height: 6)
-                    Text(right.name).font(.system(size: 11, weight: .bold)).foregroundColor(right.color)
+                    Text(right.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     if showDelay {
                         Text("Delay: \(vm.channelDelays[right.rawValue] ?? 0.0, specifier: "%.0f")ms")
@@ -425,11 +426,12 @@ struct StereoDashboardCard: View {
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity)
-                .background(right.color.opacity(0.1))
+                // Color the right table header
+                .background(Color.white.opacity(0.01))
             }
             .frame(height: 32)
             
-            Divider().overlay(Color.gray.opacity(0.2))
+            Divider().overlay(Color.gray.opacity(0.1))
             
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
@@ -456,7 +458,20 @@ struct StereoDashboardCard: View {
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(10)
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    LinearGradient(
+                        stops: [
+                            .init(color: left.color.opacity(0.3), location: 0.4),
+                            .init(color: right.color.opacity(0.3), location: 0.6)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    lineWidth: 1
+                )
+        )
     }
 }
 
@@ -469,18 +484,18 @@ struct MonoDashboardCard: View {
         VStack(spacing: 0) {
             HStack {
                 Circle().fill(channel.color).frame(width: 6, height: 6)
-                Text(channel.name).font(.system(size: 11, weight: .bold)).foregroundColor(channel.color)
+                Text(channel.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
-                // Updated Specifier to %.0f (No Decimals)
                 Text("Delay: \(vm.channelDelays[channel.rawValue] ?? 0.0, specifier: "%.0f")ms")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(.secondary)
             }
             .padding(8)
-            .background(channel.color.opacity(0.1))
+            // Color of the table header
+            .background(Color.white.opacity(0.01))
             .frame(height: 32)
-            
-            Divider().overlay(channel.color.opacity(0.2))
+
+            Divider().overlay(Color.gray.opacity(0.2))
             
             VStack(spacing: 0) {
                 ForEach(0..<channel.bandCount, id: \.self) { band in
@@ -534,22 +549,24 @@ struct DashboardRow: View {
             if isActive {
                 HStack(spacing: 2) {
                     Text("\(params.freq, specifier: "%.0f")")
-                        .foregroundColor(.primary)
-                    Text("Hz").foregroundColor(.secondary).font(.system(size: 8))
-                    
+                        // Hz value color
+                        .foregroundColor(.primary.opacity(0.8))
+                    // Hz unit color
+                    Text("Hz").foregroundColor(.secondary.opacity(0.7)).font(.system(size: 8))
+
                     Spacer().frame(width: 4)
-                    
+
                     if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
                         Text("\(params.gain, specifier: "%+.1f")")
-                            .foregroundColor(.primary)
-                        Text("dB").foregroundColor(.secondary).font(.system(size: 8))
+                            .foregroundColor(.primary.opacity(0.8))
+                        Text("dB").foregroundColor(.secondary.opacity(0.7)).font(.system(size: 8))
                     }
-                    
+
                     if params.type == .peaking {
                         Spacer().frame(width: 4)
                         Text("\(params.q, specifier: "%.1f")")
-                            .foregroundColor(.secondary)
-                        Text("Q").foregroundColor(.secondary).font(.system(size: 8))
+                            .foregroundColor(.primary.opacity(0.8))
+                        Text("Q").foregroundColor(.secondary.opacity(0.7)).font(.system(size: 8))
                     }
                 }
                 .font(.system(size: 10, design: .monospaced))
