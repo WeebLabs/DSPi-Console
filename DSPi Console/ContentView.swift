@@ -661,11 +661,11 @@ struct BodeLineShape: Shape {
 // MARK: - Graph View
 struct BodePlotView: View {
     @ObservedObject var vm: DSPViewModel
-    
+
     let minFreq: Float = 20.0
     let maxFreq: Float = 20000.0
     let dbRange: Float = 20.0
-    
+
     // Grid Helper
     func xPos(_ freq: Float, width: CGFloat) -> CGFloat {
         let logMin = log10(minFreq)
@@ -673,24 +673,24 @@ struct BodePlotView: View {
         let logVal = log10(freq)
         return CGFloat((logVal - logMin) / (logMax - logMin)) * width
     }
-    
+
     func yPos(_ db: Float, height: CGFloat) -> CGFloat {
         let normalized = (db + dbRange) / (2.0 * dbRange)
         return height - (CGFloat(normalized) * height)
     }
-    
+
     // Calculation Helper for Animation
     func calculateMagnitudes(for channel: Channel) -> [Double] {
         let filters = vm.channelData[channel.rawValue] ?? []
         var results: [Double] = []
         results.reserveCapacity(201)
-        
+
         for i in 0...200 {
             let pct = Float(i) / 200.0
             let logMin = log10(minFreq)
             let logMax = log10(maxFreq)
             let freq = pow(10, logMin + pct * (logMax - logMin))
-            
+
             var mag: Float = 0
             if (channel == .masterLeft || channel == .masterRight) && vm.bypass {
                 mag = 0
@@ -701,8 +701,26 @@ struct BodePlotView: View {
         }
         return results
     }
-    
+
+    // Group visible channels by identical magnitudes
+    func groupedChannels() -> [[[Double]: [Channel]]] {
+        var groups: [[Double]: [Channel]] = [:]
+        for ch in Channel.allCases {
+            if vm.channelVisibility[ch.rawValue] == true {
+                let mags = calculateMagnitudes(for: ch)
+                if groups[mags] != nil {
+                    groups[mags]!.append(ch)
+                } else {
+                    groups[mags] = [ch]
+                }
+            }
+        }
+        return [groups]
+    }
+
     var body: some View {
+        let groups = groupedChannels()[0]
+
         ZStack {
             // Static Grid
             Canvas { context, size in
@@ -717,19 +735,32 @@ struct BodePlotView: View {
                     }
                 }
                 context.stroke(gridPath, with: .color(.white.opacity(0.1)))
-                
+
                 let zeroY = yPos(0, height: size.height)
                 var zeroPath = Path(); zeroPath.move(to: CGPoint(x: 0, y: zeroY)); zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
                 context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
             }
-            
-            // Animated Lines
-            ForEach(Channel.allCases, id: \.self) { ch in
-                if vm.channelVisibility[ch.rawValue] == true {
-                    BodeLineShape(magnitudes: calculateMagnitudes(for: ch))
-                        .stroke(ch.color, lineWidth: 2)
-                        // Animate magnitude changes smoothly
-                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: calculateMagnitudes(for: ch))
+
+            // Animated Lines - grouped by identical curves
+            ForEach(Array(groups.keys), id: \.self) { mags in
+                let channels = groups[mags] ?? []
+                if channels.count == 1 {
+                    // Single channel - solid color
+                    BodeLineShape(magnitudes: mags)
+                        .stroke(channels[0].color, lineWidth: 2)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
+                } else {
+                    // Multiple overlapping channels - gradient
+                    BodeLineShape(magnitudes: mags)
+                        .stroke(
+                            LinearGradient(
+                                stops: gradientStops(for: channels),
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ),
+                            lineWidth: 2.5
+                        )
+                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 }
             }
         }
@@ -737,6 +768,46 @@ struct BodePlotView: View {
         .cornerRadius(8)
         .clipped()
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+    }
+
+    // Create smooth gradient stops for overlapping channels
+    func gradientStops(for channels: [Channel]) -> [Gradient.Stop] {
+        guard !channels.isEmpty else { return [] }
+        guard channels.count > 1 else {
+            return [.init(color: channels[0].color, location: 0.0),
+                    .init(color: channels[0].color, location: 1.0)]
+        }
+
+        var stops: [Gradient.Stop] = []
+        let count = channels.count
+
+        // Transition width is larger for fewer channels (smoother blend)
+        // 2 channels: 40% transition, 3 channels: 25%, 4+: 15%
+        let transitionWidth: Double = count == 2 ? 0.4 : (count == 3 ? 0.25 : 0.15)
+
+        // Calculate segment size (solid color portion + transition)
+        let segmentWidth = 1.0 / Double(count)
+
+        for (index, channel) in channels.enumerated() {
+            let segmentCenter = (Double(index) + 0.5) * segmentWidth
+            let solidStart = segmentCenter - (segmentWidth - transitionWidth) / 2
+            let solidEnd = segmentCenter + (segmentWidth - transitionWidth) / 2
+
+            // Clamp to valid range
+            let clampedStart = max(0.0, solidStart)
+            let clampedEnd = min(1.0, solidEnd)
+
+            if index == 0 {
+                stops.append(.init(color: channel.color, location: 0.0))
+            }
+            stops.append(.init(color: channel.color, location: clampedStart))
+            stops.append(.init(color: channel.color, location: clampedEnd))
+            if index == count - 1 {
+                stops.append(.init(color: channel.color, location: 1.0))
+            }
+        }
+
+        return stops.sorted { $0.location < $1.location }
     }
 }
 
