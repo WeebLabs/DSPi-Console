@@ -661,6 +661,7 @@ struct BodeLineShape: Shape {
 // MARK: - Graph View
 struct BodePlotView: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
 
     let minFreq: Float = 20.0
     let maxFreq: Float = 20000.0
@@ -744,23 +745,50 @@ struct BodePlotView: View {
             // Animated Lines - grouped by identical curves
             ForEach(Array(groups.keys), id: \.self) { mags in
                 let channels = groups[mags] ?? []
+                let lineWidth = settings.graphLineWidth
                 if channels.count == 1 {
                     // Single channel - solid color
-                    BodeLineShape(magnitudes: mags)
-                        .stroke(channels[0].color, lineWidth: 2)
-                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
+                    ZStack {
+                        if settings.showGraphGlow {
+                            // Outer glow
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(channels[0].color.opacity(0.3), lineWidth: lineWidth * 4)
+                                .blur(radius: 6)
+                            // Inner glow
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(channels[0].color.opacity(0.6), lineWidth: lineWidth * 2)
+                                .blur(radius: 3)
+                        }
+                        // Main line
+                        BodeLineShape(magnitudes: mags)
+                            .stroke(channels[0].color, lineWidth: lineWidth)
+                    }
+                    .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 } else {
                     // Multiple overlapping channels - gradient
-                    BodeLineShape(magnitudes: mags)
-                        .stroke(
-                            LinearGradient(
-                                stops: gradientStops(for: channels),
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            ),
-                            lineWidth: 2.5
-                        )
-                        .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
+                    let gradient = LinearGradient(
+                        stops: gradientStops(for: channels),
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    ZStack {
+                        if settings.showGraphGlow {
+                            // Outer glow
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(gradient, lineWidth: lineWidth * 5)
+                                .blur(radius: 8)
+                                .opacity(0.07)
+                            // Inner glow
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(gradient, lineWidth: lineWidth * 2.5)
+                                .blur(radius: 5)
+                                .opacity(0.07)
+                        }
+                        // Main line
+                        BodeLineShape(magnitudes: mags)
+                            .stroke(gradient, lineWidth: lineWidth * 1.25)
+                    }
+                    .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 }
             }
         }

@@ -16,6 +16,172 @@ class AppState: ObservableObject {
     private init() {}
 }
 
+// MARK: - App Settings
+class AppSettings: ObservableObject {
+    static let shared = AppSettings()
+
+    // Appearance
+    @AppStorage("showGraphGlow") var showGraphGlow: Bool = true
+
+    // Graphing
+    @AppStorage("graphLineWidth") var graphLineWidth: Double = 2.0
+    @AppStorage("graphAnimationSpeed") var graphAnimationSpeed: Double = 0.2
+
+    // Advanced
+    @AppStorage("showDebugInfo") var showDebugInfo: Bool = false
+
+    private init() {}
+}
+
+// MARK: - Settings View
+struct SettingsView: View {
+    private enum Tabs: Hashable {
+        case general, appearance, graphing, advanced
+    }
+
+    var body: some View {
+        TabView {
+            GeneralSettingsTab()
+                .tabItem {
+                    Label("General", systemImage: "gear")
+                }
+                .tag(Tabs.general)
+
+            AppearanceSettingsTab()
+                .tabItem {
+                    Label("Appearance", systemImage: "paintbrush")
+                }
+                .tag(Tabs.appearance)
+
+            GraphingSettingsTab()
+                .tabItem {
+                    Label("Graphing", systemImage: "waveform.path.ecg")
+                }
+                .tag(Tabs.graphing)
+
+            AdvancedSettingsTab()
+                .tabItem {
+                    Label("Advanced", systemImage: "gearshape.2")
+                }
+                .tag(Tabs.advanced)
+        }
+        .frame(width: 450, height: 280)
+    }
+}
+
+struct GeneralSettingsTab: View {
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Image(systemName: "speaker.wave.3.fill")
+                            .font(.system(size: 32))
+                            .foregroundColor(.accentColor)
+                        VStack(alignment: .leading) {
+                            Text("DSPi Console")
+                                .font(.headline)
+                            Text("USB Audio DSP Controller")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Divider()
+
+                    Text("General settings will appear here as they are added.")
+                        .foregroundColor(.secondary)
+                        .font(.callout)
+                }
+                .padding(.vertical, 8)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+struct AppearanceSettingsTab: View {
+    @ObservedObject private var settings = AppSettings.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $settings.showGraphGlow) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Graph Line Glow")
+                            .font(.body)
+                        Text("Add a neon glow effect to frequency response curves")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+            } header: {
+                Label("Graph Appearance", systemImage: "sparkles")
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+struct GraphingSettingsTab: View {
+    @ObservedObject private var settings = AppSettings.shared
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Line Width: \(settings.graphLineWidth, specifier: "%.1f")pt")
+                            .font(.body)
+                        Slider(value: $settings.graphLineWidth, in: 1.0...4.0, step: 0.5)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Animation Speed: \(settings.graphAnimationSpeed, specifier: "%.2f")s")
+                            .font(.body)
+                        Slider(value: $settings.graphAnimationSpeed, in: 0.1...0.5, step: 0.05)
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Label("Response Curve", systemImage: "waveform.path")
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+struct AdvancedSettingsTab: View {
+    @ObservedObject private var settings = AppSettings.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $settings.showDebugInfo) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Debug Information")
+                            .font(.body)
+                        Text("Display additional diagnostic data in the UI")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+            } header: {
+                Label("Diagnostics", systemImage: "ladybug")
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
 // MARK: - Stats Window Controller
 class StatsWindowController: NSObject, ObservableObject {
     private var window: NSWindow?
@@ -795,6 +961,10 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("T", modifiers: [.command, .shift])
             }
+        }
+
+        Settings {
+            SettingsView()
         }
     }
 }
