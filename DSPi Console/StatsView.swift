@@ -11,6 +11,12 @@ class StatsViewModel: ObservableObject {
     @Published var spdifUnderruns: UInt32 = 0
     @Published var isConnected: Bool = false
 
+    // System monitoring values
+    @Published var systemClockHz: UInt32 = 0
+    @Published var coreVoltageMillivolts: UInt32 = 0
+    @Published var sampleRateHz: UInt32 = 0
+    @Published var systemTempCentiC: Int32 = 0
+
     private var pollTimer: Timer?
     private weak var usb: USBDevice?
     private var cancellables = Set<AnyCancellable>()
@@ -26,8 +32,8 @@ class StatsViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Poll once per second
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Poll every 2 seconds
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.fetchStats()
         }
 
@@ -77,6 +83,30 @@ class StatsViewModel: ObservableObject {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.spdifUnderruns = value }
         }
+
+        // wValue=13: system clock frequency (Hz)
+        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 13, index: 0, length: 4) {
+            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            DispatchQueue.main.async { self.systemClockHz = value }
+        }
+
+        // wValue=14: core voltage (millivolts)
+        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 14, index: 0, length: 4) {
+            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            DispatchQueue.main.async { self.coreVoltageMillivolts = value }
+        }
+
+        // wValue=15: sample rate (Hz)
+        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4) {
+            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            DispatchQueue.main.async { self.sampleRateHz = value }
+        }
+
+        // wValue=16: system temperature (centi-degrees C)
+        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 16, index: 0, length: 4) {
+            let value = data.withUnsafeBytes { $0.load(as: Int32.self) }
+            DispatchQueue.main.async { self.systemTempCentiC = value }
+        }
     }
 }
 
@@ -88,7 +118,7 @@ struct StatsView: View {
         VStack(alignment: .leading, spacing: 12) {
             // Header
             HStack {
-                Text("Buffer Statistics")
+                Text("System Statistics")
                     .font(.headline)
                 Spacer()
                 Circle()
@@ -97,6 +127,32 @@ struct StatsView: View {
                 Text(vm.isConnected ? "Connected" : "Disconnected")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            // System Information Section
+            Text("System Information")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                SystemInfoRow(
+                    title: "Clock Frequency",
+                    value: "\(String(format: "%.1f", Double(vm.systemClockHz) / 1_000_000.0)) MHz"
+                )
+                SystemInfoRow(
+                    title: "Core Voltage",
+                    value: "\(String(format: "%.2f", Double(vm.coreVoltageMillivolts) / 1000.0)) V"
+                )
+                SystemInfoRow(
+                    title: "Sample Rate",
+                    value: "\(String(format: "%.1f", Double(vm.sampleRateHz) / 1000.0)) kHz"
+                )
+                SystemInfoRow(
+                    title: "Temperature",
+                    value: "\(String(format: "%.1f", Double(vm.systemTempCentiC) / 100.0)) °C"
+                )
             }
 
             Divider()
@@ -139,12 +195,31 @@ struct StatsView: View {
             Spacer()
 
             // Footer
-            Text("Updated every second")
+            Text("Updated every 2 seconds")
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
         .padding()
-        .frame(width: 300, height: 280)
+        .frame(width: 320, height: 420)
+    }
+}
+
+// MARK: - System Info Row
+struct SystemInfoRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.primary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundColor(.primary)
+        }
+        .padding(.vertical, 2)
     }
 }
 

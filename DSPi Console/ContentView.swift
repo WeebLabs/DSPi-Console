@@ -68,10 +68,7 @@ enum Channel: Int, CaseIterable {
     }
     
     var bandCount: Int {
-        switch self {
-        case .masterLeft, .masterRight: return 10 // Matches firmware 10
-        default: return 2
-        }
+        return 10
     }
     
     var isOutput: Bool {

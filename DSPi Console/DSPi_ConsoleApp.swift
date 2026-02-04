@@ -202,12 +202,12 @@ class StatsWindowController: NSObject, ObservableObject {
             let statsView = StatsView(vm: statsVM!)
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 300, height: 280),
+                contentRect: NSRect(x: 0, y: 0, width: 320, height: 420),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
             )
-            window?.title = "Buffer Statistics"
+            window?.title = "System Statistics"
             window?.contentView = NSHostingView(rootView: statsView)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
