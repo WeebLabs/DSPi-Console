@@ -18,6 +18,12 @@ let REQ_SET_CHANNEL_GAIN: UInt8 = 0x54
 let REQ_GET_CHANNEL_GAIN: UInt8 = 0x55
 let REQ_SET_CHANNEL_MUTE: UInt8 = 0x56
 let REQ_GET_CHANNEL_MUTE: UInt8 = 0x57
+let REQ_SET_LOUDNESS: UInt8           = 0x58
+let REQ_GET_LOUDNESS: UInt8           = 0x59
+let REQ_SET_LOUDNESS_REF: UInt8       = 0x5A
+let REQ_GET_LOUDNESS_REF: UInt8       = 0x5B
+let REQ_SET_LOUDNESS_INTENSITY: UInt8 = 0x5C
+let REQ_GET_LOUDNESS_INTENSITY: UInt8 = 0x5D
 
 // Flash result codes
 let FLASH_OK: UInt8           = 0
@@ -98,6 +104,9 @@ class DSPViewModel: ObservableObject {
     @Published var channelDelays: [Int: Float] = [:]
     @Published var channelGainDB: [Int: Float] = [0: 0.0, 1: 0.0, 2: 0.0]  // Output L, R, Sub
     @Published var channelMute: [Int: Bool] = [0: false, 1: false, 2: false]
+    @Published var loudnessEnabled: Bool = false
+    @Published var loudnessRefSPL: Float = 83.0
+    @Published var loudnessIntensity: Float = 100.0
     @Published var isDeviceConnected: Bool = false
 
     // Live Data

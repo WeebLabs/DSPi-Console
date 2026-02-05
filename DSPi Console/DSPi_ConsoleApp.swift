@@ -882,6 +882,7 @@ class AutoEQRebuildWindowController: NSObject {
 @main
 struct DSPi_ConsoleApp: App {
     @StateObject private var statsWindowController = StatsWindowController()
+    @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
 
     var body: some Scene {
@@ -954,6 +955,11 @@ struct DSPi_ConsoleApp: App {
                 }
 
                 Divider()
+
+                Button("Loudness Compensation...") {
+                    loudnessWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("L", modifiers: [.command, .shift])
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)

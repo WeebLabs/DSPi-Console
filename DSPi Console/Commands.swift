@@ -9,7 +9,10 @@ extension DSPViewModel {
     func fetchAll() {
         guard fetchPreamp() else { return }
         fetchBypass()
-        
+        fetchLoudness()
+        fetchLoudnessRef()
+        fetchLoudnessIntensity()
+
         for ch in Channel.allCases {
             for b in 0..<ch.bandCount {
                 fetchFilter(ch: ch.rawValue, band: b)
@@ -195,6 +198,58 @@ extension DSPViewModel {
         for ch in masterChannels {
             for b in 0..<10 {
                 setFilter(ch: ch, band: b, p: defaultFilter)
+            }
+        }
+    }
+
+    // MARK: - Loudness Compensation
+
+    func setLoudness(_ enabled: Bool) {
+        self.loudnessEnabled = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_LOUDNESS, value: 0, index: 0, data: data)
+    }
+
+    func fetchLoudness() {
+        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS, value: 0, index: 0, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.loudnessEnabled = val }
+        }
+    }
+
+    func setLoudnessRef(_ spl: Float) {
+        self.loudnessRefSPL = spl
+        var val = spl
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_LOUDNESS_REF, value: 0, index: 0, data: data)
+    }
+
+    func fetchLoudnessRef() {
+        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS_REF, value: 0, index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.loudnessRefSPL - val) > 0.01 {
+                    self.loudnessRefSPL = val
+                }
+            }
+        }
+    }
+
+    func setLoudnessIntensity(_ pct: Float) {
+        self.loudnessIntensity = pct
+        var val = pct
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_LOUDNESS_INTENSITY, value: 0, index: 0, data: data)
+    }
+
+    func fetchLoudnessIntensity() {
+        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS_INTENSITY, value: 0, index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.loudnessIntensity - val) > 0.01 {
+                    self.loudnessIntensity = val
+                }
             }
         }
     }
