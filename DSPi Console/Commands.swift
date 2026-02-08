@@ -12,6 +12,11 @@ extension DSPViewModel {
         fetchLoudness()
         fetchLoudnessRef()
         fetchLoudnessIntensity()
+        fetchCrossfeed()
+        fetchCrossfeedPreset()
+        fetchCrossfeedFreq()
+        fetchCrossfeedFeed()
+        fetchCrossfeedITD()
 
         for ch in Channel.allCases {
             for b in 0..<ch.bandCount {
@@ -251,6 +256,97 @@ extension DSPViewModel {
                     self.loudnessIntensity = val
                 }
             }
+        }
+    }
+
+    // MARK: - Headphone Crossfeed
+
+    func setCrossfeed(_ enabled: Bool) {
+        self.crossfeedEnabled = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_CROSSFEED, value: 0, index: 0, data: data)
+    }
+
+    func fetchCrossfeed() {
+        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED, value: 0, index: 0, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.crossfeedEnabled = val }
+        }
+    }
+
+    private static let presetValues: [(freq: Float, feed: Float)] = [
+        (700, 4.5),   // Default
+        (700, 6.0),   // Chu Moy
+        (650, 9.5),   // Jan Meier
+    ]
+
+    func setCrossfeedPreset(_ preset: Int) {
+        self.crossfeedPreset = preset
+        var val = UInt8(preset)
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_CROSSFEED_PRESET, value: 0, index: 0, data: data)
+        // Apply known preset values locally so the graph updates immediately
+        if preset < DSPViewModel.presetValues.count {
+            self.crossfeedFreq = DSPViewModel.presetValues[preset].freq
+            self.crossfeedFeed = DSPViewModel.presetValues[preset].feed
+        }
+    }
+
+    func fetchCrossfeedPreset() {
+        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_PRESET, value: 0, index: 0, length: 1) {
+            let val = Int(d[0])
+            DispatchQueue.main.async { self.crossfeedPreset = val }
+        }
+    }
+
+    func setCrossfeedFreq(_ freq: Float) {
+        self.crossfeedFreq = freq
+        var val = freq
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_CROSSFEED_FREQ, value: 0, index: 0, data: data)
+    }
+
+    func fetchCrossfeedFreq() {
+        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_FREQ, value: 0, index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.crossfeedFreq - val) > 0.01 {
+                    self.crossfeedFreq = val
+                }
+            }
+        }
+    }
+
+    func setCrossfeedFeed(_ feed: Float) {
+        self.crossfeedFeed = feed
+        var val = feed
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_CROSSFEED_FEED, value: 0, index: 0, data: data)
+    }
+
+    func fetchCrossfeedFeed() {
+        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_FEED, value: 0, index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.crossfeedFeed - val) > 0.01 {
+                    self.crossfeedFeed = val
+                }
+            }
+        }
+    }
+
+    func setCrossfeedITD(_ enabled: Bool) {
+        self.crossfeedITD = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_CROSSFEED_ITD, value: 0, index: 0, data: data)
+    }
+
+    func fetchCrossfeedITD() {
+        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_ITD, value: 0, index: 0, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.crossfeedITD = val }
         }
     }
 

@@ -883,6 +883,7 @@ class AutoEQRebuildWindowController: NSObject {
 struct DSPi_ConsoleApp: App {
     @StateObject private var statsWindowController = StatsWindowController()
     @StateObject private var loudnessWindowController = LoudnessWindowController()
+    @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
 
     var body: some Scene {
@@ -960,6 +961,11 @@ struct DSPi_ConsoleApp: App {
                     loudnessWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("L", modifiers: [.command, .shift])
+
+                Button("Headphone Crossfeed...") {
+                    crossfeedWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("X", modifiers: [.command, .shift])
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)

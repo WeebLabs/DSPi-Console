@@ -24,6 +24,16 @@ let REQ_SET_LOUDNESS_REF: UInt8       = 0x5A
 let REQ_GET_LOUDNESS_REF: UInt8       = 0x5B
 let REQ_SET_LOUDNESS_INTENSITY: UInt8 = 0x5C
 let REQ_GET_LOUDNESS_INTENSITY: UInt8 = 0x5D
+let REQ_SET_CROSSFEED: UInt8           = 0x5E
+let REQ_GET_CROSSFEED: UInt8           = 0x5F
+let REQ_SET_CROSSFEED_PRESET: UInt8    = 0x60
+let REQ_GET_CROSSFEED_PRESET: UInt8    = 0x61
+let REQ_SET_CROSSFEED_FREQ: UInt8      = 0x62
+let REQ_GET_CROSSFEED_FREQ: UInt8      = 0x63
+let REQ_SET_CROSSFEED_FEED: UInt8      = 0x64
+let REQ_GET_CROSSFEED_FEED: UInt8      = 0x65
+let REQ_SET_CROSSFEED_ITD: UInt8       = 0x66
+let REQ_GET_CROSSFEED_ITD: UInt8       = 0x67
 
 // Flash result codes
 let FLASH_OK: UInt8           = 0
@@ -107,6 +117,11 @@ class DSPViewModel: ObservableObject {
     @Published var loudnessEnabled: Bool = false
     @Published var loudnessRefSPL: Float = 83.0
     @Published var loudnessIntensity: Float = 100.0
+    @Published var crossfeedEnabled: Bool = false
+    @Published var crossfeedPreset: Int = 0
+    @Published var crossfeedFreq: Float = 700.0
+    @Published var crossfeedFeed: Float = 4.5
+    @Published var crossfeedITD: Bool = true
     @Published var isDeviceConnected: Bool = false
 
     // Live Data

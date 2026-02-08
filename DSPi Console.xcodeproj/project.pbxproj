@@ -6,9 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		667C67492F350A0100264C32 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 667C67482F350A0100264C32 /* LICENSE */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		665141C52F0DF37B00093CAF /* DSPi Console.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DSPi Console.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		66626F292F1487CD009BAE8A /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		667C67482F350A0100264C32 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -55,6 +60,7 @@
 				665141C72F0DF37B00093CAF /* DSPi Console */,
 				665141C62F0DF37B00093CAF /* Products */,
 				66626F352F148868009BAE8A /* Images */,
+				667C67482F350A0100264C32 /* LICENSE */,
 			);
 			sourceTree = "<group>";
 		};
@@ -131,6 +137,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				667C67492F350A0100264C32 /* LICENSE in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
