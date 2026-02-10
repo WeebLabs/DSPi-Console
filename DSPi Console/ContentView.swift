@@ -35,6 +35,18 @@ let REQ_GET_CROSSFEED_FEED: UInt8      = 0x65
 let REQ_SET_CROSSFEED_ITD: UInt8       = 0x66
 let REQ_GET_CROSSFEED_ITD: UInt8       = 0x67
 
+// Matrix mixer request codes
+let REQ_SET_MATRIX_ROUTE: UInt8    = 0x70
+let REQ_GET_MATRIX_ROUTE: UInt8    = 0x71
+let REQ_SET_OUTPUT_ENABLE: UInt8   = 0x72
+let REQ_GET_OUTPUT_ENABLE: UInt8   = 0x73
+let REQ_SET_OUTPUT_GAIN: UInt8     = 0x74
+let REQ_GET_OUTPUT_GAIN: UInt8     = 0x75
+let REQ_SET_OUTPUT_MUTE: UInt8     = 0x76
+let REQ_GET_OUTPUT_MUTE: UInt8     = 0x77
+let REQ_SET_OUTPUT_DELAY: UInt8    = 0x78
+let REQ_GET_OUTPUT_DELAY: UInt8    = 0x79
+
 // Flash result codes
 let FLASH_OK: UInt8           = 0
 let FLASH_ERR_WRITE: UInt8    = 1
@@ -122,6 +134,16 @@ class DSPViewModel: ObservableObject {
     @Published var crossfeedFreq: Float = 700.0
     @Published var crossfeedFeed: Float = 4.5
     @Published var crossfeedITD: Bool = true
+
+    // Matrix mixer state (2 inputs x 9 outputs)
+    @Published var matrixRouting = Array(repeating: Array(repeating: false, count: 9), count: 2)
+    @Published var matrixGain = Array(repeating: Array(repeating: Float(0.0), count: 9), count: 2)
+    @Published var matrixInvert = Array(repeating: Array(repeating: false, count: 9), count: 2)
+    @Published var outputEnabled = Array(repeating: false, count: 9)
+    @Published var outputGainDB = Array(repeating: Float(0.0), count: 9)
+    @Published var outputMuted = Array(repeating: false, count: 9)
+    @Published var outputDelayMS = Array(repeating: Float(0.0), count: 9)
+
     @Published var isDeviceConnected: Bool = false
 
     // Live Data
@@ -860,33 +882,75 @@ struct BodePlotView: View {
     }
 }
 
+// Add this before ContentView
+enum SidebarSelection: Hashable {
+    case overview
+    case channel(Channel)
+}
+
 // MARK: - Main Layout
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
-    @State private var selectedChannel: Channel? = nil
+    @ObservedObject var matrixMixerController: MatrixMixerWindowController
+    @State private var selection: SidebarSelection = .overview
     
     var body: some View {
         HSplitView {
             // SIDEBAR
             List {
+                // Matrix Mixer (opens separate window)
+                HStack(spacing: 0) {
+                    if matrixMixerController.isVisible {
+                        Rectangle().fill(Color.accentColor).frame(width: 3).padding(.vertical, 4)
+                    } else {
+                        Rectangle().fill(Color.clear).frame(width: 3).padding(.vertical, 4)
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.triangle.swap")
+                            .font(.system(size: 11))
+                            .foregroundColor(matrixMixerController.isVisible ? .secondary : .secondary.opacity(0.6))
+
+                        Text("Matrix Router")
+                            .font(.body)
+                            .foregroundColor(matrixMixerController.isVisible ? .primary : .primary.opacity(0.9))
+                    }
+                    .padding(.leading, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 28)
+                .contentShape(Rectangle())
+                .background(matrixMixerController.isVisible ? Color.primary.opacity(0.05) : Color.clear)
+                .onTapGesture {
+                    matrixMixerController.toggle()
+                }
+
                 Section(header: Text("INPUTS")) {
                     ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
-                        ChannelRow(channel: ch, isSelected: selectedChannel == ch)
+                        ChannelRow(channel: ch, isSelected: selection == .channel(ch))
                             .onTapGesture {
-                                if selectedChannel == ch { selectedChannel = nil }
-                                else { selectedChannel = ch }
-                                vm.updateSelection(to: selectedChannel)
+                                if selection == .channel(ch) {
+                                    selection = .overview
+                                    vm.updateSelection(to: nil)
+                                } else {
+                                    selection = .channel(ch)
+                                    vm.updateSelection(to: ch)
+                                }
                             }
                     }
                 }
                 
                 Section(header: Text("OUTPUTS")) {
                     ForEach(Channel.allCases.filter { $0.isOutput }, id: \.self) { ch in
-                        ChannelRow(channel: ch, isSelected: selectedChannel == ch)
+                        ChannelRow(channel: ch, isSelected: selection == .channel(ch))
                             .onTapGesture {
-                                if selectedChannel == ch { selectedChannel = nil }
-                                else { selectedChannel = ch }
-                                vm.updateSelection(to: selectedChannel)
+                                if selection == .channel(ch) {
+                                    selection = .overview
+                                    vm.updateSelection(to: nil)
+                                } else {
+                                    selection = .channel(ch)
+                                    vm.updateSelection(to: ch)
+                                }
                             }
                     }
                 }
@@ -1046,9 +1110,9 @@ struct ContentView: View {
                 
                 // Right Panel Content (Dynamic)
                 VStack {
-                    if let channel = selectedChannel {
+                    switch selection {
+                    case .channel(let channel):
                         VStack(spacing: 16) {
-
                             if channel.isOutput {
                                 let outputIdx = channel.rawValue - 2  // Map to 0, 1, 2
                                 ChannelSettingsView(
@@ -1064,20 +1128,22 @@ struct ContentView: View {
                                         get: { vm.channelMute[outputIdx] ?? false },
                                         set: { vm.setChannelMute(ch: outputIdx, muted: $0) }
                                     )
-                                                                    )
-                                                                    .padding(.horizontal)
-                                                                }
-                                                                
-                                                                FilterListView(
-                                                                    bands: vm.channelData[channel.rawValue] ?? [],
-                                                                    channelId: channel.rawValue,
-                                                                    onUpdate: { band, params in
-                                                                        vm.setFilter(ch: channel.rawValue, band: band, p: params)
-                                                                    },
-                                                                    onClear: (channel == .masterLeft || channel == .masterRight) ? { vm.clearAllMaster() } : nil
-                                                                )
-                                                            }
-                                                        } else {                        ScrollView {
+                                )
+                                .padding(.horizontal)
+                            }
+                            
+                            FilterListView(
+                                bands: vm.channelData[channel.rawValue] ?? [],
+                                channelId: channel.rawValue,
+                                onUpdate: { band, params in
+                                    vm.setFilter(ch: channel.rawValue, band: band, p: params)
+                                },
+                                onClear: (channel == .masterLeft || channel == .masterRight) ? { vm.clearAllMaster() } : nil
+                            )
+                        }
+                        
+                    case .overview:
+                        ScrollView {
                             DashboardOverview(vm: vm)
                         }
                     }
@@ -1409,11 +1475,11 @@ extension DSPViewModel {
 }
 
 #Preview("Dashboard") {
-    ContentView(vm: .preview)
+    ContentView(vm: .preview, matrixMixerController: MatrixMixerWindowController())
     .frame(height: 790)
 }
 
 #Preview("Channel Selected") {
-    ContentView(vm: .preview)
+    ContentView(vm: .preview, matrixMixerController: MatrixMixerWindowController())
     .frame(width: 1000, height: 780)
 }

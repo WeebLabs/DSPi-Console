@@ -182,6 +182,55 @@ struct AdvancedSettingsTab: View {
     }
 }
 
+// MARK: - Matrix Mixer Window Controller
+class MatrixMixerWindowController: NSObject, ObservableObject {
+    private var window: NSWindow?
+    @Published var isVisible: Bool = false
+
+    func toggle() {
+        if isVisible {
+            hide()
+        } else {
+            show()
+        }
+    }
+
+    func show() {
+        if window == nil {
+            let mixerView = MatrixMixerView(vm: AppState.shared.viewModel)
+
+            let hostingView = NSHostingView(rootView: mixerView)
+            hostingView.setFrameSize(hostingView.fittingSize)
+
+            window = NSWindow(
+                contentRect: NSRect(origin: .zero, size: hostingView.fittingSize),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window?.title = "Matrix Mixer"
+            window?.contentView = hostingView
+            window?.isReleasedWhenClosed = false
+            window?.delegate = self
+        }
+
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        isVisible = true
+    }
+
+    func hide() {
+        window?.orderOut(nil)
+        isVisible = false
+    }
+}
+
+extension MatrixMixerWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        isVisible = false
+    }
+}
+
 // MARK: - Stats Window Controller
 class StatsWindowController: NSObject, ObservableObject {
     private var window: NSWindow?
@@ -885,10 +934,11 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
+    @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
 
     var body: some Scene {
         WindowGroup("DSPi Console") {
-            ContentView(vm: AppState.shared.viewModel)
+            ContentView(vm: AppState.shared.viewModel, matrixMixerController: matrixMixerWindowController)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

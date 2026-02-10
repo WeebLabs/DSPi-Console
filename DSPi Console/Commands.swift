@@ -30,6 +30,19 @@ extension DSPViewModel {
                 fetchChannelMute(ch: outputIdx)
             }
         }
+
+        // Fetch matrix mixer state
+        for input in 0..<2 {
+            for output in 0..<9 {
+                fetchMatrixRoute(input: input, output: output)
+            }
+        }
+        for output in 0..<9 {
+            fetchOutputEnable(output: output)
+            fetchOutputGainDB(output: output)
+            fetchOutputMute(output: output)
+            fetchOutputDelay(output: output)
+        }
     }
     
     func fetchStatus() {
@@ -347,6 +360,111 @@ extension DSPViewModel {
         if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_ITD, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async { self.crossfeedITD = val }
+        }
+    }
+
+    // MARK: - Matrix Mixer
+
+    func setMatrixRoute(input: Int, output: Int, enabled: Bool, gain: Float, invert: Bool) {
+        matrixRouting[input][output] = enabled
+        matrixGain[input][output] = gain
+        matrixInvert[input][output] = invert
+
+        var packet = Data(count: 9)
+        packet[0] = UInt8(input)
+        packet[1] = UInt8(output)
+        packet[2] = enabled ? 1 : 0
+        packet[3] = invert ? 1 : 0
+        var g = gain
+        withUnsafeBytes(of: &g) { packet.replaceSubrange(4..<8, with: $0) }
+
+        usb.sendControlRequest(request: REQ_SET_MATRIX_ROUTE, value: 0, index: 2, data: packet)
+    }
+
+    func fetchMatrixRoute(input: Int, output: Int) {
+        let wValue = UInt16((input << 8) | output)
+        guard let data = usb.getControlRequest(request: REQ_GET_MATRIX_ROUTE, value: wValue, index: 2, length: 9) else { return }
+
+        let enabled = data[2] != 0
+        let invert = data[3] != 0
+        let gain = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
+
+        DispatchQueue.main.async {
+            self.matrixRouting[input][output] = enabled
+            self.matrixGain[input][output] = gain
+            self.matrixInvert[input][output] = invert
+        }
+    }
+
+    // MARK: - Per-Output Enable
+
+    func setOutputEnable(output: Int, enabled: Bool) {
+        outputEnabled[output] = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_ENABLE, value: UInt16(output), index: 2, data: data)
+    }
+
+    func fetchOutputEnable(output: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_ENABLE, value: UInt16(output), index: 2, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.outputEnabled[output] = val }
+        }
+    }
+
+    // MARK: - Per-Output Gain
+
+    func setOutputGain(output: Int, db: Float) {
+        outputGainDB[output] = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
+    }
+
+    func fetchOutputGainDB(output: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_GAIN, value: UInt16(output), index: 2, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.outputGainDB[output] - val) > 0.01 {
+                    self.outputGainDB[output] = val
+                }
+            }
+        }
+    }
+
+    // MARK: - Per-Output Mute
+
+    func setOutputMute(output: Int, muted: Bool) {
+        outputMuted[output] = muted
+        var val: UInt8 = muted ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_MUTE, value: UInt16(output), index: 2, data: data)
+    }
+
+    func fetchOutputMute(output: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_MUTE, value: UInt16(output), index: 2, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.outputMuted[output] = val }
+        }
+    }
+
+    // MARK: - Per-Output Delay
+
+    func setOutputDelay(output: Int, ms: Float) {
+        outputDelayMS[output] = ms
+        var val = ms
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
+    }
+
+    func fetchOutputDelay(output: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_DELAY, value: UInt16(output), index: 2, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.outputDelayMS[output] - val) > 0.01 {
+                    self.outputDelayMS[output] = val
+                }
+            }
         }
     }
 
