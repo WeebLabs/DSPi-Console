@@ -4,17 +4,8 @@ import SwiftUI
 
 extension DSPViewModel {
 
-    // Dashboard channel ↔ matrix output index mapping
-    // Channel delay keys: outLeft=2, outRight=3, sub=4
-    // Channel gain indices: 0=outLeft, 1=outRight, 2=sub
-    // Matrix output indices: 0=Out1, 1=Out2, ... 8=PDM
-    static let channelDelayToOutput: [Int: Int] = [2: 0, 3: 1, 4: 8]
-    static let channelGainToOutput: [Int: Int]  = [0: 0, 1: 1, 2: 8]
-    static let outputToChannelDelay: [Int: Int]  = [0: 2, 1: 3, 8: 4]
-    static let outputToChannelGain: [Int: Int]   = [0: 0, 1: 1, 8: 2]
-
     // --- USB Commands ---
-    
+
     func fetchAll() {
         guard fetchPreamp() else { return }
         fetchBypass()
@@ -27,16 +18,17 @@ extension DSPViewModel {
         fetchCrossfeedFeed()
         fetchCrossfeedITD()
 
-        for ch in Channel.allCases {
-            for b in 0..<ch.bandCount {
+        // Fetch master EQ (channels 0, 1)
+        for ch in [Channel.masterLeft, Channel.masterRight] {
+            for b in 0..<10 {
                 fetchFilter(ch: ch.rawValue, band: b)
             }
-            if ch.isOutput {
-                fetchDelay(ch: ch.rawValue)
-                // Map channel to output index (outLeft=2->0, outRight=3->1, sub=4->2)
-                let outputIdx = ch.rawValue - 2
-                fetchChannelGain(ch: outputIdx)
-                fetchChannelMute(ch: outputIdx)
+        }
+
+        // Fetch output EQ (channels 2-10)
+        for outputIdx in 0..<9 {
+            for b in 0..<10 {
+                fetchFilter(ch: outputIdx + 2, band: b)
             }
         }
 
@@ -120,10 +112,6 @@ extension DSPViewModel {
     
     func setDelay(ch: Int, ms: Float) {
         self.channelDelays[ch] = ms
-        // Mirror to matrix output delay
-        if let outIdx = Self.channelDelayToOutput[ch] {
-            self.outputDelayMS[outIdx] = ms
-        }
         var val = ms
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
@@ -135,68 +123,6 @@ extension DSPViewModel {
             DispatchQueue.main.async {
                 if abs((self.channelDelays[ch] ?? 0) - val) > 0.01 {
                     self.channelDelays[ch] = val
-                }
-                // Mirror to matrix output delay
-                if let outIdx = Self.channelDelayToOutput[ch] {
-                    self.outputDelayMS[outIdx] = val
-                }
-            }
-        }
-    }
-
-    // MARK: - Per-Channel Gain
-
-    func setChannelGain(ch: Int, db: Float) {
-        guard ch < 3 else { return }
-        channelGainDB[ch] = db
-        // Mirror to matrix output gain
-        if let outIdx = Self.channelGainToOutput[ch] {
-            self.outputGainDB[outIdx] = db
-        }
-        var val = db
-        let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_CHANNEL_GAIN, value: UInt16(ch), index: 0, data: data)
-    }
-
-    func fetchChannelGain(ch: Int) {
-        guard ch < 3 else { return }
-        if let d = usb.getControlRequest(request: REQ_GET_CHANNEL_GAIN, value: UInt16(ch), index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs((self.channelGainDB[ch] ?? 0) - val) > 0.01 {
-                    self.channelGainDB[ch] = val
-                }
-                // Mirror to matrix output gain
-                if let outIdx = Self.channelGainToOutput[ch] {
-                    self.outputGainDB[outIdx] = val
-                }
-            }
-        }
-    }
-
-    // MARK: - Per-Channel Mute
-
-    func setChannelMute(ch: Int, muted: Bool) {
-        guard ch < 3 else { return }
-        channelMute[ch] = muted
-        // Send the matrix output mute command (the one that actually mutes)
-        if let outIdx = Self.channelGainToOutput[ch] {
-            self.outputMuted[outIdx] = muted
-            var val: UInt8 = muted ? 1 : 0
-            let data = Data(bytes: &val, count: 1)
-            usb.sendControlRequest(request: REQ_SET_OUTPUT_MUTE, value: UInt16(outIdx), index: 2, data: data)
-        }
-    }
-
-    func fetchChannelMute(ch: Int) {
-        guard ch < 3 else { return }
-        if let d = usb.getControlRequest(request: REQ_GET_CHANNEL_MUTE, value: UInt16(ch), index: 0, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async {
-                self.channelMute[ch] = val
-                // Mirror to matrix output mute
-                if let outIdx = Self.channelGainToOutput[ch] {
-                    self.outputMuted[outIdx] = val
                 }
             }
         }
@@ -451,10 +377,6 @@ extension DSPViewModel {
 
     func setOutputGain(output: Int, db: Float) {
         outputGainDB[output] = db
-        // Mirror to dashboard channel gain
-        if let chIdx = Self.outputToChannelGain[output] {
-            self.channelGainDB[chIdx] = db
-        }
         var val = db
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
@@ -467,10 +389,6 @@ extension DSPViewModel {
                 if abs(self.outputGainDB[output] - val) > 0.01 {
                     self.outputGainDB[output] = val
                 }
-                // Mirror to dashboard channel gain
-                if let chIdx = Self.outputToChannelGain[output] {
-                    self.channelGainDB[chIdx] = val
-                }
             }
         }
     }
@@ -479,10 +397,6 @@ extension DSPViewModel {
 
     func setOutputMute(output: Int, muted: Bool) {
         outputMuted[output] = muted
-        // Mirror to dashboard channel mute
-        if let chIdx = Self.outputToChannelGain[output] {
-            self.channelMute[chIdx] = muted
-        }
         var val: UInt8 = muted ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_MUTE, value: UInt16(output), index: 2, data: data)
@@ -493,10 +407,6 @@ extension DSPViewModel {
             let val = d[0] != 0
             DispatchQueue.main.async {
                 self.outputMuted[output] = val
-                // Mirror to dashboard channel mute
-                if let chIdx = Self.outputToChannelGain[output] {
-                    self.channelMute[chIdx] = val
-                }
             }
         }
     }
@@ -505,10 +415,6 @@ extension DSPViewModel {
 
     func setOutputDelay(output: Int, ms: Float) {
         outputDelayMS[output] = ms
-        // Mirror to dashboard channel delay
-        if let chKey = Self.outputToChannelDelay[output] {
-            self.channelDelays[chKey] = ms
-        }
         var val = ms
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
@@ -520,10 +426,6 @@ extension DSPViewModel {
             DispatchQueue.main.async {
                 if abs(self.outputDelayMS[output] - val) > 0.01 {
                     self.outputDelayMS[output] = val
-                }
-                // Mirror to dashboard channel delay
-                if let chKey = Self.outputToChannelDelay[output] {
-                    self.channelDelays[chKey] = val
                 }
             }
         }

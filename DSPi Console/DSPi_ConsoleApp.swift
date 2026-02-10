@@ -938,7 +938,7 @@ struct DSPi_ConsoleApp: App {
 
     var body: some Scene {
         WindowGroup("DSPi Console") {
-            ContentView(vm: AppState.shared.viewModel, matrixMixerController: matrixMixerWindowController)
+            ContentView(vm: AppState.shared.viewModel)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -1006,6 +1006,11 @@ struct DSPi_ConsoleApp: App {
                 }
 
                 Divider()
+
+                Button("Matrix Mixer...") {
+                    matrixMixerWindowController.toggle()
+                }
+                .keyboardShortcut("M", modifiers: [.command, .shift])
 
                 Button("Loudness Compensation...") {
                     loudnessWindowController.show(vm: AppState.shared.viewModel)

@@ -128,8 +128,6 @@ class DSPViewModel: ObservableObject {
     @Published var channelData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
     @Published var channelDelays: [Int: Float] = [:]
-    @Published var channelGainDB: [Int: Float] = [0: 0.0, 1: 0.0, 2: 0.0]  // Output L, R, Sub
-    @Published var channelMute: [Int: Bool] = [0: false, 1: false, 2: false]
     @Published var loudnessEnabled: Bool = false
     @Published var loudnessRefSPL: Float = 83.0
     @Published var loudnessIntensity: Float = 100.0
@@ -154,11 +152,9 @@ class DSPViewModel: ObservableObject {
     // Live Data
     @Published var status = SystemStatus()
 
-    /// Returns true if the matrix output is disabled, muted, or both.
+    /// Returns true if the matrix output is disabled or muted.
     func isOutputInactive(_ outputIndex: Int) -> Bool {
-        let gainIdx: Int? = DSPViewModel.outputToChannelGain[outputIndex]
-        let muted = gainIdx.flatMap { channelMute[$0] } ?? false
-        return !outputEnabled[outputIndex] || outputMuted[outputIndex] || muted
+        !outputEnabled[outputIndex] || outputMuted[outputIndex]
     }
 
     let usb: USBDevice
@@ -169,14 +165,16 @@ class DSPViewModel: ObservableObject {
         self.usb = usb
 
         // Initialize Default Data
-        for ch in Channel.allCases {
-            var bands: [FilterParams] = []
-            for _ in 0..<ch.bandCount {
-                bands.append(FilterParams())
-            }
-            channelData[ch.rawValue] = bands
+        // Master channels 0, 1
+        for ch in [Channel.masterLeft, Channel.masterRight] {
+            channelData[ch.rawValue] = Array(repeating: FilterParams(), count: 10)
             channelVisibility[ch.rawValue] = true
-            channelDelays[ch.rawValue] = 0.0
+        }
+        // Output EQ channels 2-10 (output index + 2)
+        for outputIdx in 0..<9 {
+            let eqCh = outputIdx + 2
+            channelData[eqCh] = Array(repeating: FilterParams(), count: 10)
+            channelVisibility[eqCh] = true
         }
         
         // 1. Subscribe to USB connection changes AND Trigger Fetch
@@ -205,13 +203,25 @@ class DSPViewModel: ObservableObject {
     func updateSelection(to channel: Channel?) {
         withAnimation(.easeInOut(duration: 0.2)) {
             if let ch = channel {
-                for c in Channel.allCases {
-                    channelVisibility[c.rawValue] = (c == ch)
+                // Show only the selected master channel
+                for eqCh in 0...10 {
+                    channelVisibility[eqCh] = (eqCh == ch.rawValue)
                 }
             } else {
-                for c in Channel.allCases {
-                    channelVisibility[c.rawValue] = true
+                // Overview: show master L/R + all enabled output channels
+                channelVisibility[Channel.masterLeft.rawValue] = true
+                channelVisibility[Channel.masterRight.rawValue] = true
+                for outputIdx in 0..<9 {
+                    channelVisibility[outputIdx + 2] = outputEnabled[outputIdx]
                 }
+            }
+        }
+    }
+
+    func updateSelectionToOutput(_ outputIdx: Int) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            for eqCh in 0...10 {
+                channelVisibility[eqCh] = (eqCh == outputIdx + 2)
             }
         }
     }
@@ -364,41 +374,85 @@ struct ChannelRow: View {
     }
 }
 
+struct OutputRow: View {
+    let output: MatrixOutput
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if isSelected {
+                Rectangle().fill(Color.accentColor).frame(width: 3).padding(.vertical, 4)
+            } else {
+                Rectangle().fill(Color.clear).frame(width: 3).padding(.vertical, 4)
+            }
+
+            Text(output.name)
+                .font(.body)
+                .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
+                .padding(.leading, 8)
+                .frame(width: 80, alignment: .leading)
+
+            Spacer()
+
+            Text(output.descriptor)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundColor(output.color)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(output.color.opacity(0.15)))
+                .overlay(Capsule().stroke(output.color.opacity(0.4), lineWidth: 1))
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.trailing, 8)
+        }
+        .frame(height: 28)
+        .contentShape(Rectangle())
+        .background(isSelected ? Color.primary.opacity(0.05) : Color.clear)
+    }
+}
+
 struct GraphLegend: View {
     @ObservedObject var vm: DSPViewModel
-    
+
+    private func legendPill(eqCh: Int, name: String, color: Color) -> some View {
+        let isVisible = vm.channelVisibility[eqCh] ?? true
+        return Button(action: {
+            withAnimation(.easeInOut(duration: 0.1)) {
+                vm.channelVisibility[eqCh] = !isVisible
+            }
+        }) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(isVisible ? color : Color.gray.opacity(0.5))
+                    .frame(width: 6, height: 6)
+                Text(name)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(isVisible ? .primary : .secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(isVisible ? color.opacity(0.15) : Color.gray.opacity(0.1))
+            )
+            .overlay(
+                Capsule().stroke(
+                    isVisible ? color.opacity(0.5) : Color.clear,
+                    lineWidth: 1
+                )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(Channel.allCases, id: \.self) { ch in
-                let isVisible = vm.channelVisibility[ch.rawValue] ?? true
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.1)) {
-                        vm.channelVisibility[ch.rawValue] = !isVisible
-                    }
-                }) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(isVisible ? ch.color : Color.gray.opacity(0.5))
-                            .frame(width: 6, height: 6)
-                        
-                        Text(ch.shortName)
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(isVisible ? .primary : .secondary)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(isVisible ? ch.color.opacity(0.15) : Color.gray.opacity(0.1))
-                    )
-                    .overlay(
-                        Capsule().stroke(
-                            isVisible ? ch.color.opacity(0.5) : Color.clear,
-                            lineWidth: 1
-                        )
-                    )
-                }
-                .buttonStyle(.plain)
+            // Master L/R (always shown)
+            legendPill(eqCh: Channel.masterLeft.rawValue, name: "ML", color: Channel.masterLeft.color)
+            legendPill(eqCh: Channel.masterRight.rawValue, name: "MR", color: Channel.masterRight.color)
+
+            // Enabled outputs (dynamic)
+            ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                legendPill(eqCh: out.index + 2, name: out.name, color: out.color)
             }
         }
         .padding(.vertical, 6)
@@ -408,33 +462,33 @@ struct GraphLegend: View {
 // MARK: - DASHBOARD OVERVIEW (STEREO PAIRS)
 struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
-    
+
+    private var enabledOutputs: [MatrixOutput] {
+        MatrixOutput.all.filter { vm.outputEnabled[$0.index] }
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             StereoDashboardCard(
                 title: "STEREO INPUT (USB)",
                 left: .masterLeft,
                 right: .masterRight,
-                showDelay: false, // Delay Hidden for Inputs
+                showDelay: false,
                 vm: vm
             )
-            
-            HStack(alignment: .top, spacing: 18) {
-                StereoDashboardCard(
-                    title: "STEREO OUTPUT (SPDIF)",
-                    left: .outLeft,
-                    right: .outRight,
-                    showDelay: true, // Delay Visible for Outputs
-                    vm: vm
-                )
 
-                MonoDashboardCard(
-                    channel: .sub,
-                    vm: vm
-                )
-                .frame(width: 220)
+            // Dynamic output cards — pair adjacent enabled outputs into rows
+            let outputs = enabledOutputs
+            let chunked = stride(from: 0, to: outputs.count, by: 2).map {
+                Array(outputs[$0..<min($0 + 2, outputs.count)])
             }
-
+            ForEach(chunked, id: \.first!.index) { pair in
+                HStack(alignment: .top, spacing: 18) {
+                    ForEach(pair, id: \.index) { out in
+                        OutputDashboardCard(outputIndex: out.index, vm: vm)
+                    }
+                }
+            }
         }
         .padding(.horizontal)
         .padding(.top, 4)
@@ -565,6 +619,46 @@ struct MonoDashboardCard: View {
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(10)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(channel.color.opacity(0.3), lineWidth: 1))
+    }
+}
+
+// Single Card for Matrix Output
+struct OutputDashboardCard: View {
+    let outputIndex: Int
+    @ObservedObject var vm: DSPViewModel
+
+    private var output: MatrixOutput { MatrixOutput.all[outputIndex] }
+    private var eqChannel: Int { outputIndex + 2 }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Circle().fill(output.color).frame(width: 6, height: 6)
+                Text(output.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                Spacer()
+                Text("Delay: \(vm.outputDelayMS[outputIndex], specifier: "%.0f")ms")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(8)
+            .background(Color.white.opacity(0.01))
+            .frame(height: 32)
+
+            Divider().overlay(Color.gray.opacity(0.2))
+
+            VStack(spacing: 0) {
+                ForEach(0..<10, id: \.self) { band in
+                    if let params = vm.channelData[eqChannel]?[band] {
+                        DashboardRow(band: band + 1, params: params, color: output.color)
+                            .background(band % 2 == 0 ? Color.white.opacity(0.03) : Color.clear)
+                    }
+                }
+            }
+            .frame(height: CGFloat(10) * 24)
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(output.color.opacity(0.3), lineWidth: 1))
     }
 }
 
@@ -736,8 +830,8 @@ struct BodePlotView: View {
     }
 
     // Calculation Helper for Animation
-    func calculateMagnitudes(for channel: Channel) -> [Double] {
-        let filters = vm.channelData[channel.rawValue] ?? []
+    func calculateMagnitudes(for eqChannel: Int) -> [Double] {
+        let filters = vm.channelData[eqChannel] ?? []
         var results: [Double] = []
         results.reserveCapacity(201)
 
@@ -748,7 +842,7 @@ struct BodePlotView: View {
             let freq = pow(10, logMin + pct * (logMax - logMin))
 
             var mag: Float = 0
-            if (channel == .masterLeft || channel == .masterRight) && vm.bypass {
+            if (eqChannel == 0 || eqChannel == 1) && vm.bypass {
                 mag = 0
             } else {
                 mag = DSPMath.responseAt(freq: freq, filters: filters)
@@ -758,24 +852,34 @@ struct BodePlotView: View {
         return results
     }
 
+    // Color for a given EQ channel index
+    func colorForEQChannel(_ eqCh: Int) -> Color {
+        if eqCh <= 1 {
+            return Channel(rawValue: eqCh)!.color
+        } else {
+            return MatrixOutput.all[eqCh - 2].color
+        }
+    }
+
     // Group visible channels by identical magnitudes
-    func groupedChannels() -> [[[Double]: [Channel]]] {
-        var groups: [[Double]: [Channel]] = [:]
-        for ch in Channel.allCases {
-            if vm.channelVisibility[ch.rawValue] == true {
-                let mags = calculateMagnitudes(for: ch)
+    func groupedChannels() -> [[Double]: [(eqCh: Int, color: Color)]] {
+        var groups: [[Double]: [(eqCh: Int, color: Color)]] = [:]
+        for eqCh in 0...10 {
+            if vm.channelVisibility[eqCh] == true {
+                let mags = calculateMagnitudes(for: eqCh)
+                let entry = (eqCh: eqCh, color: colorForEQChannel(eqCh))
                 if groups[mags] != nil {
-                    groups[mags]!.append(ch)
+                    groups[mags]!.append(entry)
                 } else {
-                    groups[mags] = [ch]
+                    groups[mags] = [entry]
                 }
             }
         }
-        return [groups]
+        return groups
     }
 
     var body: some View {
-        let groups = groupedChannels()[0]
+        let groups = groupedChannels()
 
         ZStack {
             // Static Grid
@@ -799,47 +903,42 @@ struct BodePlotView: View {
 
             // Animated Lines - grouped by identical curves
             ForEach(Array(groups.keys), id: \.self) { mags in
-                let channels = groups[mags] ?? []
+                let entries = groups[mags] ?? []
                 let lineWidth = settings.graphLineWidth
-                if channels.count == 1 {
+                if entries.count == 1 {
                     // Single channel - solid color
                     ZStack {
                         if settings.showGraphGlow {
-                            // Outer glow
                             BodeLineShape(magnitudes: mags)
-                                .stroke(channels[0].color.opacity(0.3), lineWidth: lineWidth * 4)
+                                .stroke(entries[0].color.opacity(0.3), lineWidth: lineWidth * 4)
                                 .blur(radius: 6)
-                            // Inner glow
                             BodeLineShape(magnitudes: mags)
-                                .stroke(channels[0].color.opacity(0.6), lineWidth: lineWidth * 2)
+                                .stroke(entries[0].color.opacity(0.6), lineWidth: lineWidth * 2)
                                 .blur(radius: 3)
                         }
-                        // Main line
                         BodeLineShape(magnitudes: mags)
-                            .stroke(channels[0].color, lineWidth: lineWidth)
+                            .stroke(entries[0].color, lineWidth: lineWidth)
                     }
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 } else {
                     // Multiple overlapping channels - gradient
+                    let colors = entries.map { $0.color }
                     let gradient = LinearGradient(
-                        stops: gradientStops(for: channels),
+                        stops: gradientStops(for: colors),
                         startPoint: .leading,
                         endPoint: .trailing
                     )
                     ZStack {
                         if settings.showGraphGlow {
-                            // Outer glow
                             BodeLineShape(magnitudes: mags)
                                 .stroke(gradient, lineWidth: lineWidth * 5)
                                 .blur(radius: 8)
                                 .opacity(0.07)
-                            // Inner glow
                             BodeLineShape(magnitudes: mags)
                                 .stroke(gradient, lineWidth: lineWidth * 2.5)
                                 .blur(radius: 5)
                                 .opacity(0.07)
                         }
-                        // Main line
                         BodeLineShape(magnitudes: mags)
                             .stroke(gradient, lineWidth: lineWidth * 1.25)
                     }
@@ -854,39 +953,32 @@ struct BodePlotView: View {
     }
 
     // Create smooth gradient stops for overlapping channels
-    func gradientStops(for channels: [Channel]) -> [Gradient.Stop] {
-        guard !channels.isEmpty else { return [] }
-        guard channels.count > 1 else {
-            return [.init(color: channels[0].color, location: 0.0),
-                    .init(color: channels[0].color, location: 1.0)]
+    func gradientStops(for colors: [Color]) -> [Gradient.Stop] {
+        guard !colors.isEmpty else { return [] }
+        guard colors.count > 1 else {
+            return [.init(color: colors[0], location: 0.0),
+                    .init(color: colors[0], location: 1.0)]
         }
 
         var stops: [Gradient.Stop] = []
-        let count = channels.count
-
-        // Transition width is larger for fewer channels (smoother blend)
-        // 2 channels: 40% transition, 3 channels: 25%, 4+: 15%
+        let count = colors.count
         let transitionWidth: Double = count == 2 ? 0.4 : (count == 3 ? 0.25 : 0.15)
-
-        // Calculate segment size (solid color portion + transition)
         let segmentWidth = 1.0 / Double(count)
 
-        for (index, channel) in channels.enumerated() {
+        for (index, color) in colors.enumerated() {
             let segmentCenter = (Double(index) + 0.5) * segmentWidth
             let solidStart = segmentCenter - (segmentWidth - transitionWidth) / 2
             let solidEnd = segmentCenter + (segmentWidth - transitionWidth) / 2
-
-            // Clamp to valid range
             let clampedStart = max(0.0, solidStart)
             let clampedEnd = min(1.0, solidEnd)
 
             if index == 0 {
-                stops.append(.init(color: channel.color, location: 0.0))
+                stops.append(.init(color: color, location: 0.0))
             }
-            stops.append(.init(color: channel.color, location: clampedStart))
-            stops.append(.init(color: channel.color, location: clampedEnd))
+            stops.append(.init(color: color, location: clampedStart))
+            stops.append(.init(color: color, location: clampedEnd))
             if index == count - 1 {
-                stops.append(.init(color: channel.color, location: 1.0))
+                stops.append(.init(color: color, location: 1.0))
             }
         }
 
@@ -898,45 +990,18 @@ struct BodePlotView: View {
 enum SidebarSelection: Hashable {
     case overview
     case channel(Channel)
+    case output(Int)  // Matrix output index 0-8
 }
 
 // MARK: - Main Layout
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
-    @ObservedObject var matrixMixerController: MatrixMixerWindowController
     @State private var selection: SidebarSelection = .overview
-    
+
     var body: some View {
         HSplitView {
             // SIDEBAR
             List {
-                // Matrix Mixer (opens separate window)
-                HStack(spacing: 0) {
-                    if matrixMixerController.isVisible {
-                        Rectangle().fill(Color.accentColor).frame(width: 3).padding(.vertical, 4)
-                    } else {
-                        Rectangle().fill(Color.clear).frame(width: 3).padding(.vertical, 4)
-                    }
-
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.triangle.swap")
-                            .font(.system(size: 11))
-                            .foregroundColor(matrixMixerController.isVisible ? .secondary : .secondary.opacity(0.6))
-
-                        Text("Matrix Router")
-                            .font(.body)
-                            .foregroundColor(matrixMixerController.isVisible ? .primary : .primary.opacity(0.9))
-                    }
-                    .padding(.leading, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 28)
-                .contentShape(Rectangle())
-                .background(matrixMixerController.isVisible ? Color.primary.opacity(0.05) : Color.clear)
-                .onTapGesture {
-                    matrixMixerController.toggle()
-                }
-
                 Section(header: Text("INPUTS")) {
                     ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
                         ChannelRow(channel: ch, isSelected: selection == .channel(ch))
@@ -953,15 +1018,15 @@ struct ContentView: View {
                 }
                 
                 Section(header: Text("OUTPUTS")) {
-                    ForEach(Channel.allCases.filter { $0.isOutput }, id: \.self) { ch in
-                        ChannelRow(channel: ch, isSelected: selection == .channel(ch))
+                    ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                        OutputRow(output: out, isSelected: selection == .output(out.index))
                             .onTapGesture {
-                                if selection == .channel(ch) {
+                                if selection == .output(out.index) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
                                 } else {
-                                    selection = .channel(ch)
-                                    vm.updateSelection(to: ch)
+                                    selection = .output(out.index)
+                                    vm.updateSelectionToOutput(out.index)
                                 }
                             }
                     }
@@ -1037,21 +1102,21 @@ struct ContentView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
                                     MuteableLabel(text: "L", isMuted: vm.isOutputInactive(0)) {
-                                        vm.setChannelMute(ch: 0, muted: !(vm.channelMute[0] ?? false))
+                                        vm.setOutputMute(output: 0, muted: !vm.outputMuted[0])
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[2],
-                                        color: Channel.outLeft.color,
+                                        color: MatrixOutput.all[0].color,
                                         isMuted: vm.isOutputInactive(0)
                                     )
                                 }
                                 HStack {
                                     MuteableLabel(text: "R", isMuted: vm.isOutputInactive(1)) {
-                                        vm.setChannelMute(ch: 1, muted: !(vm.channelMute[1] ?? false))
+                                        vm.setOutputMute(output: 1, muted: !vm.outputMuted[1])
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[3],
-                                        color: Channel.outRight.color,
+                                        color: MatrixOutput.all[1].color,
                                         isMuted: vm.isOutputInactive(1)
                                     )
                                 }
@@ -1063,11 +1128,11 @@ struct ContentView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
                                     MuteableLabel(text: "S", isMuted: vm.isOutputInactive(8)) {
-                                        vm.setChannelMute(ch: 2, muted: !(vm.channelMute[2] ?? false))
+                                        vm.setOutputMute(output: 8, muted: !vm.outputMuted[8])
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[4],
-                                        color: Channel.sub.color,
+                                        color: MatrixOutput.all[8].color,
                                         isMuted: vm.isOutputInactive(8)
                                     )
                                 }
@@ -1125,25 +1190,6 @@ struct ContentView: View {
                     switch selection {
                     case .channel(let channel):
                         VStack(spacing: 16) {
-                            if channel.isOutput {
-                                let outputIdx = channel.rawValue - 2  // Map to 0, 1, 2
-                                ChannelSettingsView(
-                                    gainDB: Binding(
-                                        get: { vm.channelGainDB[outputIdx] ?? 0.0 },
-                                        set: { vm.setChannelGain(ch: outputIdx, db: $0) }
-                                    ),
-                                    delayMS: Binding(
-                                        get: { vm.channelDelays[channel.rawValue] ?? 0.0 },
-                                        set: { vm.setDelay(ch: channel.rawValue, ms: $0) }
-                                    ),
-                                    isMuted: Binding(
-                                        get: { vm.channelMute[outputIdx] ?? false },
-                                        set: { vm.setChannelMute(ch: outputIdx, muted: $0) }
-                                    )
-                                )
-                                .padding(.horizontal)
-                            }
-                            
                             FilterListView(
                                 bands: vm.channelData[channel.rawValue] ?? [],
                                 channelId: channel.rawValue,
@@ -1153,7 +1199,36 @@ struct ContentView: View {
                                 onClear: (channel == .masterLeft || channel == .masterRight) ? { vm.clearAllMaster() } : nil
                             )
                         }
-                        
+
+                    case .output(let idx):
+                        let eqChannel = idx + 2
+                        VStack(spacing: 16) {
+                            ChannelSettingsView(
+                                gainDB: Binding(
+                                    get: { vm.outputGainDB[idx] },
+                                    set: { vm.setOutputGain(output: idx, db: $0) }
+                                ),
+                                delayMS: Binding(
+                                    get: { vm.outputDelayMS[idx] },
+                                    set: { vm.setOutputDelay(output: idx, ms: $0) }
+                                ),
+                                isMuted: Binding(
+                                    get: { vm.outputMuted[idx] },
+                                    set: { vm.setOutputMute(output: idx, muted: $0) }
+                                )
+                            )
+                            .padding(.horizontal)
+
+                            FilterListView(
+                                bands: vm.channelData[eqChannel] ?? [],
+                                channelId: eqChannel,
+                                onUpdate: { band, params in
+                                    vm.setFilter(ch: eqChannel, band: band, p: params)
+                                },
+                                onClear: nil
+                            )
+                        }
+
                     case .overview:
                         ScrollView {
                             DashboardOverview(vm: vm)
@@ -1169,6 +1244,13 @@ struct ContentView: View {
         }
         .navigationTitle("DSPi Console")
         .frame(maxHeight:900)
+        .onChange(of: vm.outputEnabled) { _ in
+            // If the selected output was disabled, fall back to overview
+            if case .output(let idx) = selection, !vm.outputEnabled[idx] {
+                selection = .overview
+                vm.updateSelection(to: nil)
+            }
+        }
         .onAppear {
             DispatchQueue.main.async {
                 if let window = NSApp.keyWindow {
@@ -1487,11 +1569,11 @@ extension DSPViewModel {
 }
 
 #Preview("Dashboard") {
-    ContentView(vm: .preview, matrixMixerController: MatrixMixerWindowController())
+    ContentView(vm: .preview)
     .frame(height: 790)
 }
 
 #Preview("Channel Selected") {
-    ContentView(vm: .preview, matrixMixerController: MatrixMixerWindowController())
+    ContentView(vm: .preview)
     .frame(width: 1000, height: 780)
 }
