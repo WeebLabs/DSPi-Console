@@ -47,6 +47,10 @@ let REQ_GET_OUTPUT_MUTE: UInt8     = 0x77
 let REQ_SET_OUTPUT_DELAY: UInt8    = 0x78
 let REQ_GET_OUTPUT_DELAY: UInt8    = 0x79
 
+// Core 1 mode request codes
+let REQ_GET_CORE1_MODE: UInt8      = 0x7A
+let REQ_GET_CORE1_CONFLICT: UInt8  = 0x7B
+
 // Flash result codes
 let FLASH_OK: UInt8           = 0
 let FLASH_ERR_WRITE: UInt8    = 1
@@ -143,11 +147,19 @@ class DSPViewModel: ObservableObject {
     @Published var outputGainDB = Array(repeating: Float(0.0), count: 9)
     @Published var outputMuted = Array(repeating: false, count: 9)
     @Published var outputDelayMS = Array(repeating: Float(0.0), count: 9)
+    @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
 
     @Published var isDeviceConnected: Bool = false
 
     // Live Data
     @Published var status = SystemStatus()
+
+    /// Returns true if the matrix output is disabled, muted, or both.
+    func isOutputInactive(_ outputIndex: Int) -> Bool {
+        let gainIdx: Int? = DSPViewModel.outputToChannelGain[outputIndex]
+        let muted = gainIdx.flatMap { channelMute[$0] } ?? false
+        return !outputEnabled[outputIndex] || outputMuted[outputIndex] || muted
+    }
 
     let usb: USBDevice
     private var cancellables = Set<AnyCancellable>()
@@ -1024,23 +1036,23 @@ struct ContentView: View {
                                 Text("SPDIF OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
-                                    MuteableLabel(text: "L", isMuted: vm.channelMute[0] ?? false) {
+                                    MuteableLabel(text: "L", isMuted: vm.isOutputInactive(0)) {
                                         vm.setChannelMute(ch: 0, muted: !(vm.channelMute[0] ?? false))
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[2],
                                         color: Channel.outLeft.color,
-                                        isMuted: vm.channelMute[0] ?? false
+                                        isMuted: vm.isOutputInactive(0)
                                     )
                                 }
                                 HStack {
-                                    MuteableLabel(text: "R", isMuted: vm.channelMute[1] ?? false) {
+                                    MuteableLabel(text: "R", isMuted: vm.isOutputInactive(1)) {
                                         vm.setChannelMute(ch: 1, muted: !(vm.channelMute[1] ?? false))
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[3],
                                         color: Channel.outRight.color,
-                                        isMuted: vm.channelMute[1] ?? false
+                                        isMuted: vm.isOutputInactive(1)
                                     )
                                 }
                             }
@@ -1050,13 +1062,13 @@ struct ContentView: View {
                                 Text("PDM OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
-                                    MuteableLabel(text: "S", isMuted: vm.channelMute[2] ?? false) {
+                                    MuteableLabel(text: "S", isMuted: vm.isOutputInactive(8)) {
                                         vm.setChannelMute(ch: 2, muted: !(vm.channelMute[2] ?? false))
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[4],
                                         color: Channel.sub.color,
-                                        isMuted: vm.channelMute[2] ?? false
+                                        isMuted: vm.isOutputInactive(8)
                                     )
                                 }
                             }

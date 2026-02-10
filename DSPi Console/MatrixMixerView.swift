@@ -34,8 +34,15 @@ struct MatrixInput {
 
 // MARK: - Matrix Mixer View
 
+struct PendingConflict: Identifiable {
+    let id = UUID()
+    let output: Int
+    let isPDM: Bool  // true = user wants to enable PDM, false = user wants to enable an EQ worker output
+}
+
 struct MatrixMixerView: View {
     @ObservedObject var vm: DSPViewModel
+    @State private var pendingConflict: PendingConflict?
 
     private let columnWidth: CGFloat = 72
     private let labelWidth: CGFloat = 75
@@ -50,6 +57,62 @@ struct MatrixMixerView: View {
         }
         .padding()
         .fixedSize()
+        .alert(item: $pendingConflict) { conflict in
+            if conflict.isPDM {
+                Alert(
+                    title: Text("Warning"),
+                    message: Text("Channels 3-8 will be disabled. Are you sure?"),
+                    primaryButton: .default(Text("Enable PDM")) {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.switchToPDM()
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
+            } else {
+                Alert(
+                    title: Text("Warning"),
+                    message: Text("The PDM output will be disabled. Are you sure?"),
+                    primaryButton: .default(Text("Disable PDM")) {
+                        let output = conflict.output
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.switchFromPDM(enabling: output)
+                        }
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+        }
+    }
+
+    // MARK: - Conflict Helpers
+
+    /// Check if enabling this output would conflict with current state (client-side check).
+    private func wouldConflict(_ outputIndex: Int) -> Bool {
+        if outputIndex == 8 {
+            // PDM conflicts with any enabled output in 2-7
+            return (2...7).contains(where: { vm.outputEnabled[$0] })
+        } else if (2...7).contains(outputIndex) {
+            // EQ worker output conflicts with enabled PDM
+            return vm.outputEnabled[8]
+        }
+        return false
+    }
+
+    /// Handle enable button tap with conflict detection.
+    private func requestOutputEnable(output: Int) {
+        let currentlyEnabled = vm.outputEnabled[output]
+        if currentlyEnabled {
+            // Disabling always succeeds
+            vm.setOutputEnable(output: output, enabled: false)
+            return
+        }
+        // Enabling: check for conflict
+        if wouldConflict(output) {
+            pendingConflict = PendingConflict(output: output, isPDM: output == 8)
+        } else {
+            vm.setOutputEnable(output: output, enabled: true)
+        }
     }
 
     // MARK: - Routing Matrix
@@ -148,15 +211,21 @@ struct MatrixMixerView: View {
 
                         // Enable
                         Button(action: {
-                            vm.setOutputEnable(output: idx, enabled: !enabled)
+                            requestOutputEnable(output: idx)
                         }) {
                             Image(systemName: "power")
                                 .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(enabled ? .blue : .secondary.opacity(0.3))
+                                .foregroundColor(
+                                    enabled ? .blue :
+                                    (wouldConflict(idx) ? .orange.opacity(0.4) : .secondary.opacity(0.3))
+                                )
                         }
                         .buttonStyle(.plain)
                         .frame(height: 28)
-                        .help(enabled ? "Disable output (saves CPU)" : "Enable output")
+                        .help(
+                            enabled ? "Disable output (saves CPU)" :
+                            (wouldConflict(idx) ? "Conflict: shared Core 1 resource" : "Enable output")
+                        )
 
                         // Gain
                         CompactGainField(gain: Binding(
