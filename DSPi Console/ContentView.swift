@@ -73,14 +73,14 @@ enum Channel: Int, CaseIterable {
     
     var name: String {
         switch self {
-        case .masterLeft: return "Master L"
-        case .masterRight: return "Master R"
+        case .masterLeft: return "USB L"
+        case .masterRight: return "USB R"
         case .outLeft: return "Out L"
         case .outRight: return "Out R"
         case .sub: return "Sub"
         }
     }
-    
+
     var shortName: String {
         switch self {
         case .masterLeft: return "ML"
@@ -90,10 +90,11 @@ enum Channel: Int, CaseIterable {
         case .sub: return "SUB"
         }
     }
-    
+
     var descriptor: String {
         switch self {
-        case .masterLeft, .masterRight: return "USB"
+        case .masterLeft: return "IN1"
+        case .masterRight: return "IN2"
         case .outLeft, .outRight: return "SPDIF"
         case .sub: return "PDM (Pin 10)"
         }
@@ -361,6 +362,7 @@ struct ChannelRow: View {
             Text(channel.descriptor)
                 .font(.system(size: 8, weight: .bold))
                 .foregroundColor(channel.color)
+                .frame(minWidth: 28)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(channel.color.opacity(0.15)))
@@ -397,6 +399,7 @@ struct OutputRow: View {
             Text(output.descriptor)
                 .font(.system(size: 8, weight: .bold))
                 .foregroundColor(output.color)
+                .frame(minWidth: 28)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(output.color.opacity(0.15)))
@@ -427,6 +430,7 @@ struct GraphLegend: View {
                 Text(name)
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(isVisible ? .primary : .secondary)
+                    .frame(minWidth: 30)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -447,12 +451,12 @@ struct GraphLegend: View {
     var body: some View {
         HStack(spacing: 8) {
             // Master L/R (always shown)
-            legendPill(eqCh: Channel.masterLeft.rawValue, name: "ML", color: Channel.masterLeft.color)
-            legendPill(eqCh: Channel.masterRight.rawValue, name: "MR", color: Channel.masterRight.color)
+            legendPill(eqCh: Channel.masterLeft.rawValue, name: Channel.masterLeft.descriptor, color: Channel.masterLeft.color)
+            legendPill(eqCh: Channel.masterRight.rawValue, name: Channel.masterRight.descriptor, color: Channel.masterRight.color)
 
             // Enabled outputs (dynamic)
             ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                legendPill(eqCh: out.index + 2, name: out.name, color: out.color)
+                legendPill(eqCh: out.index + 2, name: out.descriptor, color: out.color)
             }
         }
         .padding(.vertical, 6)
@@ -462,10 +466,6 @@ struct GraphLegend: View {
 // MARK: - DASHBOARD OVERVIEW (STEREO PAIRS)
 struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
-
-    private var enabledOutputs: [MatrixOutput] {
-        MatrixOutput.all.filter { vm.outputEnabled[$0.index] }
-    }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -477,17 +477,25 @@ struct DashboardOverview: View {
                 vm: vm
             )
 
-            // Dynamic output cards — pair adjacent enabled outputs into rows
-            let outputs = enabledOutputs
-            let chunked = stride(from: 0, to: outputs.count, by: 2).map {
-                Array(outputs[$0..<min($0 + 2, outputs.count)])
-            }
-            ForEach(chunked, id: \.first!.index) { pair in
-                HStack(alignment: .top, spacing: 18) {
-                    ForEach(pair, id: \.index) { out in
-                        OutputDashboardCard(outputIndex: out.index, vm: vm)
-                    }
+            // SPDIF stereo pairs (0+1, 2+3, 4+5, 6+7)
+            ForEach(0..<4, id: \.self) { pairIdx in
+                let leftIdx = pairIdx * 2
+                let rightIdx = pairIdx * 2 + 1
+                let leftEnabled = vm.outputEnabled[leftIdx]
+                let rightEnabled = vm.outputEnabled[rightIdx]
+
+                if leftEnabled && rightEnabled {
+                    StereoOutputDashboardCard(leftIndex: leftIdx, rightIndex: rightIdx, vm: vm)
+                } else if leftEnabled {
+                    OutputDashboardCard(outputIndex: leftIdx, vm: vm)
+                } else if rightEnabled {
+                    OutputDashboardCard(outputIndex: rightIdx, vm: vm)
                 }
+            }
+
+            // PDM (always mono)
+            if vm.outputEnabled[8] {
+                OutputDashboardCard(outputIndex: 8, vm: vm)
             }
         }
         .padding(.horizontal)
@@ -619,6 +627,92 @@ struct MonoDashboardCard: View {
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(10)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(channel.color.opacity(0.3), lineWidth: 1))
+    }
+}
+
+// Stereo Card for L/R Matrix Output Pair
+struct StereoOutputDashboardCard: View {
+    let leftIndex: Int
+    let rightIndex: Int
+    @ObservedObject var vm: DSPViewModel
+
+    private var left: MatrixOutput { MatrixOutput.all[leftIndex] }
+    private var right: MatrixOutput { MatrixOutput.all[rightIndex] }
+    private var leftEqCh: Int { leftIndex + 2 }
+    private var rightEqCh: Int { rightIndex + 2 }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                HStack {
+                    Circle().fill(left.color).frame(width: 6, height: 6)
+                    Text(left.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Spacer()
+                    Text("Delay: \(vm.outputDelayMS[leftIndex], specifier: "%.0f")ms")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity)
+                .background(Color.white.opacity(0.01))
+
+                Divider()
+
+                HStack {
+                    Circle().fill(right.color).frame(width: 6, height: 6)
+                    Text(right.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Spacer()
+                    Text("Delay: \(vm.outputDelayMS[rightIndex], specifier: "%.0f")ms")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity)
+                .background(Color.white.opacity(0.01))
+            }
+            .frame(height: 32)
+
+            Divider().overlay(Color.gray.opacity(0.1))
+
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    ForEach(0..<10, id: \.self) { band in
+                        if let params = vm.channelData[leftEqCh]?[band] {
+                            DashboardRow(band: band + 1, params: params, color: left.color)
+                                .background(band % 2 == 0 ? Color.white.opacity(0.03) : Color.clear)
+                        }
+                    }
+                }
+
+                Divider()
+
+                VStack(spacing: 0) {
+                    ForEach(0..<10, id: \.self) { band in
+                        if let params = vm.channelData[rightEqCh]?[band] {
+                            DashboardRow(band: band + 1, params: params, color: right.color)
+                                .background(band % 2 == 0 ? Color.white.opacity(0.03) : Color.clear)
+                        }
+                    }
+                }
+            }
+            .frame(height: CGFloat(10) * 24)
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    LinearGradient(
+                        stops: [
+                            .init(color: left.color.opacity(0.3), location: 0.4),
+                            .init(color: right.color.opacity(0.3), location: 0.6)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    lineWidth: 1
+                )
+        )
     }
 }
 
@@ -1053,12 +1147,22 @@ struct ContentView: View {
                                 .onRightClick { vm.setPreamp(0) }
                         }
                         
-                        Toggle(isOn: Binding(get: { vm.bypass }, set: { vm.setBypass($0) })) {
-                            Text("Bypass Master EQ").font(.caption).fontWeight(.medium)
+                        Button(action: { vm.setBypass(!vm.bypass) }) {
+                            Text("Bypass Master EQ")
+                                .font(.caption).fontWeight(.medium)
+                                .foregroundColor(vm.bypass ? .white : .secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .fill(vm.bypass ? Color(red: 0.4, green: 0.12, blue: 0.12) : Color.white.opacity(0.08))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                )
                         }
-                        .toggleStyle(.button)
-                        .tint(.red)
-                        .frame(maxWidth: .infinity)
+                        .buttonStyle(.plain)
                     }
                     .padding()
                     // ADDED GESTURE HERE FOR SIDEBAR CONTROLS

@@ -9,15 +9,15 @@ struct MatrixOutput {
     let color: Color
 
     static let all: [MatrixOutput] = [
-        MatrixOutput(index: 0, name: "Out 1", descriptor: "SPDIF 1 L", color: Color(red: 0.27, green: 0.76, blue: 0.64)),
-        MatrixOutput(index: 1, name: "Out 2", descriptor: "SPDIF 1 R", color: Color(red: 0.35, green: 0.82, blue: 0.50)),
-        MatrixOutput(index: 2, name: "Out 3", descriptor: "SPDIF 2 L", color: Color(red: 0.94, green: 0.77, blue: 0.35)),
-        MatrixOutput(index: 3, name: "Out 4", descriptor: "SPDIF 2 R", color: Color(red: 0.95, green: 0.65, blue: 0.30)),
-        MatrixOutput(index: 4, name: "Out 5", descriptor: "SPDIF 3 L", color: Color(red: 0.35, green: 0.55, blue: 0.95)),
-        MatrixOutput(index: 5, name: "Out 6", descriptor: "SPDIF 3 R", color: Color(red: 0.55, green: 0.70, blue: 0.95)),
-        MatrixOutput(index: 6, name: "Out 7", descriptor: "SPDIF 4 L", color: Color(red: 0.85, green: 0.45, blue: 0.55)),
-        MatrixOutput(index: 7, name: "Out 8", descriptor: "SPDIF 4 R", color: Color(red: 0.95, green: 0.60, blue: 0.65)),
-        MatrixOutput(index: 8, name: "Out 9",   descriptor: "PDM",       color: Color(red: 0.73, green: 0.53, blue: 0.95)),
+        MatrixOutput(index: 0, name: "SPDIF 1 L", descriptor: "OUT1", color: Color(red: 0.27, green: 0.76, blue: 0.64)),
+        MatrixOutput(index: 1, name: "SPDIF 1 R", descriptor: "OUT2", color: Color(red: 0.35, green: 0.82, blue: 0.50)),
+        MatrixOutput(index: 2, name: "SPDIF 2 L", descriptor: "OUT3", color: Color(red: 0.94, green: 0.77, blue: 0.35)),
+        MatrixOutput(index: 3, name: "SPDIF 2 R", descriptor: "OUT4", color: Color(red: 0.95, green: 0.65, blue: 0.30)),
+        MatrixOutput(index: 4, name: "SPDIF 3 L", descriptor: "OUT5", color: Color(red: 0.35, green: 0.55, blue: 0.95)),
+        MatrixOutput(index: 5, name: "SPDIF 3 R", descriptor: "OUT6", color: Color(red: 0.55, green: 0.70, blue: 0.95)),
+        MatrixOutput(index: 6, name: "SPDIF 4 L", descriptor: "OUT7", color: Color(red: 0.85, green: 0.45, blue: 0.55)),
+        MatrixOutput(index: 7, name: "SPDIF 4 R", descriptor: "OUT8", color: Color(red: 0.95, green: 0.60, blue: 0.65)),
+        MatrixOutput(index: 8, name: "PDM",            descriptor: "OUT9", color: Color(red: 0.73, green: 0.53, blue: 0.95)),
     ]
 }
 
