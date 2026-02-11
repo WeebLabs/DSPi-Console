@@ -1359,7 +1359,7 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 if let window = NSApp.keyWindow {
                     window.isMovableByWindowBackground = true
-                    window.setContentSize(NSSize(width: 900, height: 770))
+                    window.setContentSize(NSSize(width: 950, height: 813))
                     window.styleMask.remove(.resizable)
                 }
             }
