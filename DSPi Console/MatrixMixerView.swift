@@ -48,12 +48,8 @@ struct MatrixMixerView: View {
     private let labelWidth: CGFloat = 75
 
     var body: some View {
-        VStack(spacing: 12) {
-            // Routing matrix
-            routingSection
-
-            // Per-output controls
-            outputSection
+        VStack(spacing: 0) {
+            unifiedSection
         }
         .padding()
         .fixedSize()
@@ -115,42 +111,41 @@ struct MatrixMixerView: View {
         }
     }
 
-    // MARK: - Routing Matrix
+    // MARK: - Unified Matrix Table
 
-    private var routingSection: some View {
+    private var unifiedSection: some View {
         VStack(spacing: 0) {
-            // Column headers (output names)
+            // ── Column headers ──
             HStack(spacing: 0) {
-                Color.clear.frame(width: labelWidth, height: 44)
+                Color.clear.frame(width: labelWidth, height: 48)
 
                 ForEach(MatrixOutput.all, id: \.index) { out in
-                    VStack(spacing: 2) {
+                    VStack(spacing: 3) {
                         Text(out.name)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.primary.opacity(0.9))
                         Text(out.descriptor)
-                            .font(.system(size: 8))
-                            .foregroundColor(out.color.opacity(0.7))
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(out.color.opacity(0.8))
                     }
-                    .frame(width: columnWidth, height: 44)
+                    .frame(width: columnWidth, height: 48)
                 }
             }
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
+            .background(Color.white.opacity(0.03))
 
-            Divider()
+            sectionDivider
+
+            // ── ROUTING ──
+            sectionLabel("ROUTING")
 
             // Input rows
             ForEach(MatrixInput.all, id: \.index) { input in
                 HStack(spacing: 0) {
-                    // Row header
                     Text(input.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundColor(input.color)
                         .frame(width: labelWidth, alignment: .center)
 
-                    Divider()
-
-                    // Crosspoint cells
                     ForEach(MatrixOutput.all, id: \.index) { out in
                         MatrixPoint(
                             isConnected: matrixRoutingBinding(row: input.index, col: out.index),
@@ -165,9 +160,87 @@ struct MatrixMixerView: View {
                 .frame(height: 78)
 
                 if input.index == 0 {
-                    Divider().padding(.leading, labelWidth)
+                    Divider().padding(.leading, labelWidth).opacity(0.4)
                 }
             }
+
+            sectionDivider
+
+            // ── OUTPUT CONTROLS ──
+            sectionLabel("OUTPUT")
+
+            // Enable row
+            controlRow("ENABLE") {
+                ForEach(MatrixOutput.all, id: \.index) { out in
+                    let idx = out.index
+                    Button(action: { requestOutputEnable(output: idx) }) {
+                        Image(systemName: "power")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(
+                                vm.outputEnabled[idx] ? .blue :
+                                (wouldConflict(idx) ? .orange.opacity(0.4) : .secondary.opacity(0.3))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: columnWidth, height: 30)
+                    .help(
+                        vm.outputEnabled[idx] ? "Disable output (saves CPU)" :
+                        (wouldConflict(idx) ? "Conflict: shared Core 1 resource" : "Enable output")
+                    )
+                }
+            }
+
+            subtleDivider
+
+            // Gain row
+            controlRow("GAIN") {
+                ForEach(MatrixOutput.all, id: \.index) { out in
+                    let idx = out.index
+                    CompactGainField(gain: Binding(
+                        get: { vm.outputGainDB[idx] },
+                        set: { vm.setOutputGain(output: idx, db: $0) }
+                    ))
+                    .frame(width: columnWidth, height: 30)
+                    .opacity(vm.outputEnabled[idx] ? 1.0 : 0.3)
+                }
+            }
+
+            subtleDivider
+
+            // Delay row
+            controlRow("DELAY") {
+                ForEach(MatrixOutput.all, id: \.index) { out in
+                    let idx = out.index
+                    CompactDelayField(delay: Binding(
+                        get: { vm.outputDelayMS[idx] },
+                        set: { vm.setOutputDelay(output: idx, ms: $0) }
+                    ))
+                    .frame(width: columnWidth, height: 30)
+                    .opacity(vm.outputEnabled[idx] ? 1.0 : 0.3)
+                }
+            }
+
+            subtleDivider
+
+            // Mute row
+            controlRow("MUTE") {
+                ForEach(MatrixOutput.all, id: \.index) { out in
+                    let idx = out.index
+                    Button(action: {
+                        vm.setOutputMute(output: idx, muted: !vm.outputMuted[idx])
+                    }) {
+                        Image(systemName: vm.outputMuted[idx] ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(vm.outputMuted[idx] ? .red : .secondary.opacity(0.4))
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: columnWidth, height: 30)
+                    .opacity(vm.outputEnabled[idx] ? 1.0 : 0.3)
+                    .help(vm.outputMuted[idx] ? "Unmute" : "Mute")
+                }
+            }
+
+            Spacer().frame(height: 4)
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
         .cornerRadius(10)
@@ -177,95 +250,40 @@ struct MatrixMixerView: View {
         )
     }
 
-    // MARK: - Output Controls
+    // MARK: - Table Helpers
 
-    private var outputSection: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                // Row labels
-                VStack(alignment: .trailing, spacing: 0) {
-                    Color.clear.frame(height: 36) // header spacer
-                    outputRowLabel("ENABLE")
-                    outputRowLabel("GAIN")
-                    outputRowLabel("DELAY")
-                    outputRowLabel("MUTE")
-                }
-                .frame(width: labelWidth)
+    private var sectionDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.08))
+            .frame(height: 1)
+    }
 
-                // Output columns
-                ForEach(MatrixOutput.all, id: \.index) { out in
-                    let idx = out.index
-                    let enabled = vm.outputEnabled[idx]
+    private var subtleDivider: some View {
+        Divider().padding(.leading, labelWidth).opacity(0.3)
+    }
 
-                    VStack(spacing: 0) {
-                        // Header: output name + descriptor
-                        VStack(spacing: 1) {
-                            Text(out.name)
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(enabled ? out.color : out.color.opacity(0.4))
-                            Text(out.descriptor)
-                                .font(.system(size: 7))
-                                .foregroundColor(.secondary.opacity(0.5))
-                        }
-                        .frame(height: 36)
-
-                        // Enable
-                        Button(action: {
-                            requestOutputEnable(output: idx)
-                        }) {
-                            Image(systemName: "power")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundColor(
-                                    enabled ? .blue :
-                                    (wouldConflict(idx) ? .orange.opacity(0.4) : .secondary.opacity(0.3))
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .frame(height: 28)
-                        .help(
-                            enabled ? "Disable output (saves CPU)" :
-                            (wouldConflict(idx) ? "Conflict: shared Core 1 resource" : "Enable output")
-                        )
-
-                        // Gain
-                        CompactGainField(gain: Binding(
-                            get: { vm.outputGainDB[idx] },
-                            set: { vm.setOutputGain(output: idx, db: $0) }
-                        ))
-                        .frame(height: 28)
-                        .opacity(enabled ? 1.0 : 0.3)
-
-                        // Delay
-                        CompactDelayField(delay: Binding(
-                            get: { vm.outputDelayMS[idx] },
-                            set: { vm.setOutputDelay(output: idx, ms: $0) }
-                        ))
-                        .frame(height: 28)
-                        .opacity(enabled ? 1.0 : 0.3)
-
-                        // Mute
-                        Button(action: {
-                            vm.setOutputMute(output: idx, muted: !vm.outputMuted[idx])
-                        }) {
-                            Image(systemName: vm.outputMuted[idx] ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(vm.outputMuted[idx] ? .red : .secondary.opacity(0.4))
-                        }
-                        .buttonStyle(.plain)
-                        .frame(height: 28)
-                        .opacity(enabled ? 1.0 : 0.3)
-                        .help(vm.outputMuted[idx] ? "Unmute" : "Mute")
-                    }
-                    .frame(width: columnWidth)
-                }
-            }
+    private func sectionLabel(_ text: String) -> some View {
+        HStack {
+            Text(text)
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundColor(.secondary.opacity(0.5))
+                .padding(.leading, 12)
+            Spacer()
         }
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-        )
+        .frame(height: 22)
+        .background(Color.white.opacity(0.015))
+    }
+
+    private func controlRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.secondary)
+                .frame(width: labelWidth, alignment: .trailing)
+                .padding(.trailing, 8)
+            content()
+        }
+        .frame(height: 30)
     }
 
     // MARK: - Bindings
@@ -309,15 +327,6 @@ struct MatrixMixerView: View {
         )
     }
 
-    // MARK: - Helpers
-
-    private func outputRowLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 9, weight: .bold))
-            .foregroundColor(.secondary)
-            .frame(height: 28)
-            .padding(.trailing, 8)
-    }
 }
 
 // MARK: - Compact Gain Field with Scroll Support
