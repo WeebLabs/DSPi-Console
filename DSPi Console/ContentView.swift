@@ -146,6 +146,9 @@ class DSPViewModel: ObservableObject {
     @Published var outputGainDB = Array(repeating: Float(0.0), count: 9)
     @Published var outputMuted = Array(repeating: false, count: 9)
     @Published var outputDelayMS = Array(repeating: Float(0.0), count: 9)
+    @Published var outputNames: [String] = MatrixOutput.all.map { $0.name } {
+        didSet { UserDefaults.standard.set(outputNames, forKey: "outputNames") }
+    }
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
 
     @Published var isDeviceConnected: Bool = false
@@ -178,6 +181,11 @@ class DSPViewModel: ObservableObject {
             channelVisibility[eqCh] = true
         }
         
+        // Load saved output names
+        if let saved = UserDefaults.standard.stringArray(forKey: "outputNames"), saved.count == 9 {
+            outputNames = saved
+        }
+
         // 1. Subscribe to USB connection changes AND Trigger Fetch
         usb.$isConnected
             .receive(on: RunLoop.main)
@@ -379,6 +387,7 @@ struct ChannelRow: View {
 struct OutputRow: View {
     let output: MatrixOutput
     let isSelected: Bool
+    @ObservedObject var vm: DSPViewModel
 
     var body: some View {
         HStack(spacing: 0) {
@@ -388,7 +397,7 @@ struct OutputRow: View {
                 Rectangle().fill(Color.clear).frame(width: 3).padding(.vertical, 4)
             }
 
-            Text(output.name)
+            Text(vm.outputNames[output.index])
                 .font(.body)
                 .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
                 .padding(.leading, 8)
@@ -646,7 +655,7 @@ struct StereoOutputDashboardCard: View {
             HStack(spacing: 0) {
                 HStack {
                     Circle().fill(left.color).frame(width: 6, height: 6)
-                    Text(left.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.outputNames[leftIndex]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     Text("Delay: \(vm.outputDelayMS[leftIndex], specifier: "%.0f")ms")
                         .font(.system(size: 9, design: .monospaced))
@@ -660,7 +669,7 @@ struct StereoOutputDashboardCard: View {
 
                 HStack {
                     Circle().fill(right.color).frame(width: 6, height: 6)
-                    Text(right.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.outputNames[rightIndex]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     Text("Delay: \(vm.outputDelayMS[rightIndex], specifier: "%.0f")ms")
                         .font(.system(size: 9, design: .monospaced))
@@ -728,7 +737,7 @@ struct OutputDashboardCard: View {
         VStack(spacing: 0) {
             HStack {
                 Circle().fill(output.color).frame(width: 6, height: 6)
-                Text(output.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                Text(vm.outputNames[outputIndex]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
                 Text("Delay: \(vm.outputDelayMS[outputIndex], specifier: "%.0f")ms")
                     .font(.system(size: 9, design: .monospaced))
@@ -1113,7 +1122,7 @@ struct ContentView: View {
                 
                 Section(header: Text("OUTPUTS")) {
                     ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                        OutputRow(output: out, isSelected: selection == .output(out.index))
+                        OutputRow(output: out, isSelected: selection == .output(out.index), vm: vm)
                             .onTapGesture {
                                 if selection == .output(out.index) {
                                     selection = .overview

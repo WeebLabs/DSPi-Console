@@ -89,9 +89,19 @@ struct GeneralSettingsTab: View {
 
                     Divider()
 
-                    Text("General settings will appear here as they are added.")
-                        .foregroundColor(.secondary)
-                        .font(.callout)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Output Channel Names")
+                                .font(.body)
+                            Text("Reset all output names to factory defaults")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Reset") {
+                            AppState.shared.viewModel.outputNames = MatrixOutput.all.map { $0.name }
+                        }
+                    }
                 }
                 .padding(.vertical, 8)
             }

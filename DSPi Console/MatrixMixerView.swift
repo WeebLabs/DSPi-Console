@@ -43,6 +43,7 @@ struct PendingConflict: Identifiable {
 struct MatrixMixerView: View {
     @ObservedObject var vm: DSPViewModel
     @State private var pendingConflict: PendingConflict?
+    @FocusState private var focusedNameIndex: Int?
 
     private let columnWidth: CGFloat = 72
     private let labelWidth: CGFloat = 75
@@ -121,9 +122,18 @@ struct MatrixMixerView: View {
 
                 ForEach(MatrixOutput.all, id: \.index) { out in
                     VStack(spacing: 3) {
-                        Text(out.name)
+                        TextField("", text: $vm.outputNames[out.index])
+                            .textFieldStyle(.plain)
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.primary.opacity(0.9))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .focused($focusedNameIndex, equals: out.index)
+                            .onSubmit {
+                                focusedNameIndex = nil
+                                DispatchQueue.main.async {
+                                    NSApp.keyWindow?.makeFirstResponder(nil)
+                                }
+                            }
                         Text(out.descriptor)
                             .font(.system(size: 8, weight: .bold))
                             .foregroundColor(out.color.opacity(0.8))
@@ -131,7 +141,6 @@ struct MatrixMixerView: View {
                     .frame(width: columnWidth, height: 48)
                 }
             }
-            .background(Color.white.opacity(0.03))
 
             sectionDivider
 
@@ -152,7 +161,8 @@ struct MatrixMixerView: View {
                             gain: matrixGainBinding(row: input.index, col: out.index),
                             isInverted: matrixInvertBinding(row: input.index, col: out.index),
                             inputColor: input.color,
-                            outputColor: out.color
+                            outputColor: out.color,
+                            outlineColor: (out.index == 8 && wouldConflict(8)) ? .orange : nil
                         )
                         .frame(width: columnWidth)
                     }
@@ -280,7 +290,6 @@ struct MatrixMixerView: View {
                 .font(.system(size: 9, weight: .bold))
                 .foregroundColor(.secondary)
                 .frame(width: labelWidth, alignment: .trailing)
-                .padding(.trailing, 8)
             content()
         }
         .frame(height: 30)
@@ -340,7 +349,7 @@ struct CompactGainField: View {
         TextField("", text: $text)
             .textFieldStyle(.plain)
             .font(.system(size: 11, design: .monospaced))
-            .foregroundColor(isFocused ? .accentColor : .primary.opacity(0.85))
+            .foregroundColor(isFocused ? .accentColor : .primary.opacity(0.65))
             .multilineTextAlignment(.center)
             .frame(width: 50)
             .focused($isFocused)
@@ -394,7 +403,7 @@ struct CompactDelayField: View {
         TextField("", text: $text)
             .textFieldStyle(.plain)
             .font(.system(size: 11, design: .monospaced))
-            .foregroundColor(isFocused ? .accentColor : .primary.opacity(0.85))
+            .foregroundColor(isFocused ? .accentColor : .primary.opacity(0.65))
             .multilineTextAlignment(.center)
             .frame(width: 50)
             .focused($isFocused)
@@ -482,8 +491,16 @@ struct MatrixPoint: View {
     @Binding var isInverted: Bool
     let inputColor: Color
     let outputColor: Color
+    var outlineColor: Color? = nil  // Optional override for disconnected circle outline
     @State private var isHovering = false
     @State private var isHoveringInvert = false
+
+    private var disconnectedColor: Color {
+        if let c = outlineColor {
+            return c.opacity(isHovering ? 0.5 : 0.35)
+        }
+        return Color.secondary.opacity(isHovering ? 0.3 : 0.12)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -511,12 +528,12 @@ struct MatrixPoint: View {
 
                     if isConnected {
                         Circle()
-                            .fill(Color.accentColor)
-                            .frame(width: 18, height: 18)
+                            .fill(inputColor)
+                            .frame(width: 16, height: 16)
                     } else {
                         Circle()
                             .stroke(
-                                Color.secondary.opacity(isHovering ? 0.3 : 0.12),
+                                disconnectedColor,
                                 lineWidth: isHovering ? 2 : 1.5
                             )
                             .frame(width: 18, height: 18)
