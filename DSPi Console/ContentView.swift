@@ -51,6 +51,17 @@ let REQ_GET_OUTPUT_DELAY: UInt8    = 0x79
 let REQ_GET_CORE1_MODE: UInt8      = 0x7A
 let REQ_GET_CORE1_CONFLICT: UInt8  = 0x7B
 
+// Pin configuration request codes
+let REQ_SET_OUTPUT_PIN: UInt8      = 0x7C
+let REQ_GET_OUTPUT_PIN: UInt8      = 0x7D
+
+// Pin configuration status codes
+let PIN_CONFIG_SUCCESS: UInt8        = 0x00
+let PIN_CONFIG_INVALID_PIN: UInt8    = 0x01
+let PIN_CONFIG_PIN_IN_USE: UInt8     = 0x02
+let PIN_CONFIG_INVALID_OUTPUT: UInt8 = 0x03
+let PIN_CONFIG_OUTPUT_ACTIVE: UInt8  = 0x04
+
 // Flash result codes
 let FLASH_OK: UInt8           = 0
 let FLASH_ERR_WRITE: UInt8    = 1
@@ -150,6 +161,7 @@ class DSPViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(outputNames, forKey: "outputNames") }
     }
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
+    @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
     @Published var isDeviceConnected: Bool = false
 

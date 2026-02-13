@@ -36,7 +36,7 @@ class AppSettings: ObservableObject {
 // MARK: - Settings View
 struct SettingsView: View {
     private enum Tabs: Hashable {
-        case general, appearance, graphing, advanced
+        case general, appearance, graphing, hardware, advanced
     }
 
     var body: some View {
@@ -59,13 +59,19 @@ struct SettingsView: View {
                 }
                 .tag(Tabs.graphing)
 
+            HardwareSettingsTab()
+                .tabItem {
+                    Label("Hardware", systemImage: "cpu")
+                }
+                .tag(Tabs.hardware)
+
             AdvancedSettingsTab()
                 .tabItem {
                     Label("Advanced", systemImage: "gearshape.2")
                 }
                 .tag(Tabs.advanced)
         }
-        .frame(width: 450, height: 280)
+        .frame(width: 450, height: 350)
     }
 }
 
@@ -189,6 +195,224 @@ struct AdvancedSettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+}
+
+// MARK: - Hardware Settings Tab
+
+struct HardwareSettingsTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+    @State private var statusMessage: String?
+    @State private var statusIsError = false
+
+    private struct PinOutput: Identifiable {
+        let id: Int       // output index 0-4
+        let name: String
+        let detail: String
+        let icon: String
+        let defaultPin: UInt8
+        let color: Color
+    }
+
+    private static let pinOutputs: [PinOutput] = [
+        PinOutput(id: 0, name: "S/PDIF 1", detail: "Stereo pair 1 (L/R)", icon: "wave.3.right",
+                  defaultPin: 6, color: Color(red: 0.27, green: 0.76, blue: 0.64)),
+        PinOutput(id: 1, name: "S/PDIF 2", detail: "Stereo pair 2 (L/R)", icon: "wave.3.right",
+                  defaultPin: 7, color: Color(red: 0.94, green: 0.77, blue: 0.35)),
+        PinOutput(id: 2, name: "S/PDIF 3", detail: "Stereo pair 3 (L/R)", icon: "wave.3.right",
+                  defaultPin: 8, color: Color(red: 0.35, green: 0.55, blue: 0.95)),
+        PinOutput(id: 3, name: "S/PDIF 4", detail: "Stereo pair 4 (L/R)", icon: "wave.3.right",
+                  defaultPin: 9, color: Color(red: 0.85, green: 0.45, blue: 0.55)),
+        PinOutput(id: 4, name: "PDM",      detail: "Subwoofer output",    icon: "waveform",
+                  defaultPin: 10, color: Color(red: 0.73, green: 0.53, blue: 0.95)),
+    ]
+
+    // RP2040 valid GPIO pins (excludes 12=UART, 23-25=system)
+    private static let validPins: [UInt8] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+        26, 27, 28
+    ]
+
+    private func pinInUseBy(_ pin: UInt8, excludingOutput: Int) -> String? {
+        for (i, assignedPin) in vm.outputPins.enumerated() {
+            if i != excludingOutput && assignedPin == pin {
+                return Self.pinOutputs[i].name
+            }
+        }
+        return nil
+    }
+
+    private func setPinForOutput(_ outputIndex: Int, pin: UInt8) {
+        guard vm.isDeviceConnected else {
+            statusMessage = "Device not connected"
+            statusIsError = true
+            return
+        }
+
+        var status = vm.setOutputPin(output: outputIndex, pin: pin)
+
+        // PDM requires disable/enable cycle if active
+        if status == PIN_CONFIG_OUTPUT_ACTIVE && outputIndex == 4 {
+            vm.setOutputEnable(output: 8, enabled: false)
+            status = vm.setOutputPin(output: outputIndex, pin: pin)
+            vm.setOutputEnable(output: 8, enabled: true)
+        }
+
+        let outputName = Self.pinOutputs[outputIndex].name
+        switch status {
+        case PIN_CONFIG_SUCCESS:
+            statusMessage = "\(outputName) reassigned to GPIO \(pin)"
+            statusIsError = false
+        case PIN_CONFIG_INVALID_PIN:
+            statusMessage = "GPIO \(pin) is not available on this platform"
+            statusIsError = true
+            vm.fetchOutputPin(output: outputIndex)
+        case PIN_CONFIG_PIN_IN_USE:
+            if let owner = pinInUseBy(pin, excludingOutput: outputIndex) {
+                statusMessage = "GPIO \(pin) is already assigned to \(owner)"
+            } else {
+                statusMessage = "GPIO \(pin) is already in use by another output"
+            }
+            statusIsError = true
+            vm.fetchOutputPin(output: outputIndex)
+        case PIN_CONFIG_INVALID_OUTPUT:
+            statusMessage = "Invalid output index"
+            statusIsError = true
+        case PIN_CONFIG_OUTPUT_ACTIVE:
+            statusMessage = "PDM output must be disabled before changing its pin"
+            statusIsError = true
+            vm.fetchOutputPin(output: outputIndex)
+        default:
+            statusMessage = "USB communication error"
+            statusIsError = true
+        }
+    }
+
+    private func resetToDefaults() {
+        guard vm.isDeviceConnected else {
+            statusMessage = "Device not connected"
+            statusIsError = true
+            return
+        }
+
+        for output in Self.pinOutputs {
+            var status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
+            // PDM may need disable/enable cycle
+            if status == PIN_CONFIG_OUTPUT_ACTIVE && output.id == 4 {
+                vm.setOutputEnable(output: 8, enabled: false)
+                status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
+                vm.setOutputEnable(output: 8, enabled: true)
+            }
+            if status != PIN_CONFIG_SUCCESS {
+                statusMessage = "Failed to reset \(output.name)"
+                statusIsError = true
+                return
+            }
+        }
+        statusMessage = "All pins reset to defaults"
+        statusIsError = false
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(Self.pinOutputs) { output in
+                    HStack(spacing: 10) {
+                        // Colored indicator + icon
+                        Image(systemName: output.icon)
+                            .font(.system(size: 12))
+                            .foregroundColor(output.color)
+                            .frame(width: 16)
+
+                        // Output name + detail
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(output.name)
+                                .font(.body)
+                            Text(output.detail)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(width: 130, alignment: .leading)
+
+                        Spacer()
+
+                        // Default indicator
+                        if vm.outputPins[output.id] == output.defaultPin {
+                            Text("DEFAULT")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.secondary.opacity(0.6))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.secondary.opacity(0.1)))
+                                .fixedSize()
+                        }
+
+                        // GPIO pin picker
+                        Picker("", selection: Binding(
+                            get: { vm.outputPins[output.id] },
+                            set: { setPinForOutput(output.id, pin: $0) }
+                        )) {
+                            ForEach(Self.validPins, id: \.self) { pin in
+                                if let owner = pinInUseBy(pin, excludingOutput: output.id) {
+                                    Text("GPIO \(pin) (\(owner))")
+                                        .foregroundColor(.secondary)
+                                        .tag(pin)
+                                } else {
+                                    Text("GPIO \(pin)")
+                                        .tag(pin)
+                                }
+                            }
+                        }
+                        .frame(width: 150)
+                    }
+                    .padding(.vertical, 1)
+                }
+            } header: {
+                Label("Pin Assignment", systemImage: "cpu")
+            }
+
+            Section {
+                // Status message
+                if let message = statusMessage {
+                    HStack(spacing: 6) {
+                        Image(systemName: statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundColor(statusIsError ? .orange : .green)
+                            .font(.caption)
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(statusIsError ? .orange : .secondary)
+                    }
+                }
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Persistence")
+                            .font(.body)
+                        Text("Pin changes apply immediately. Use Tools → Commit Parameters to save across power cycles.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Reset to Defaults") {
+                        resetToDefaults()
+                    }
+                    .disabled(!vm.isDeviceConnected)
+                }
+                .padding(.vertical, 2)
+            } header: {
+                Label("Information", systemImage: "info.circle")
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .onAppear {
+            if vm.isDeviceConnected {
+                for i in 0..<5 {
+                    vm.fetchOutputPin(output: i)
+                }
+            }
+        }
     }
 }
 

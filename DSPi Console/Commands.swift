@@ -46,8 +46,13 @@ extension DSPViewModel {
         }
 
         fetchCore1Mode()
+
+        // Fetch pin configuration
+        for i in 0..<5 {
+            fetchOutputPin(output: i)
+        }
     }
-    
+
     func fetchStatus() {
         // Single request for all peaks + CPU (wValue=9) - ensures synchronized meter readings
         guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 9, index: 0, length: 12) else { return }
@@ -469,6 +474,34 @@ extension DSPViewModel {
         fetchOutputEnable(output: 8)
         fetchOutputEnable(output: output)
         fetchCore1Mode()
+    }
+
+    // MARK: - Pin Configuration
+
+    func fetchOutputPin(output: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_PIN, value: UInt16(output), index: 2, length: 1) {
+            let pin = d[0]
+            DispatchQueue.main.async {
+                self.outputPins[output] = pin
+            }
+        }
+    }
+
+    /// Sets the GPIO pin for a physical output. Returns the firmware status code.
+    /// Single IN transfer: wValue = (new_pin << 8) | output_index
+    @discardableResult
+    func setOutputPin(output: Int, pin: UInt8) -> UInt8 {
+        let wValue = (UInt16(pin) << 8) | UInt16(output)
+        if let d = usb.getControlRequest(request: REQ_SET_OUTPUT_PIN, value: wValue, index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async {
+                    self.outputPins[output] = pin
+                }
+            }
+            return status
+        }
+        return 0xFF
     }
 
     // MARK: - Flash Storage Commands
