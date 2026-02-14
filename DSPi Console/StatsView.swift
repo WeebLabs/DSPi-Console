@@ -17,6 +17,12 @@ class StatsViewModel: ObservableObject {
     @Published var sampleRateHz: UInt32 = 0
     @Published var systemTempCentiC: Int32 = 0
 
+    // Device identification (fetched once on connect)
+    @Published var serialNumber: String = "—"
+    @Published var platformName: String = "—"
+    @Published var firmwareVersion: String = "—"
+    @Published var outputCount: Int = 0
+
     private var pollTimer: Timer?
     private weak var usb: USBDevice?
     private var cancellables = Set<AnyCancellable>()
@@ -29,6 +35,9 @@ class StatsViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
                 self?.isConnected = connected
+                if connected {
+                    self?.fetchDeviceInfo()
+                }
             }
             .store(in: &cancellables)
 
@@ -39,6 +48,9 @@ class StatsViewModel: ObservableObject {
 
         // Initial fetch
         fetchStats()
+        if usb.isConnected {
+            fetchDeviceInfo()
+        }
     }
 
     deinit {
@@ -108,6 +120,35 @@ class StatsViewModel: ObservableObject {
             DispatchQueue.main.async { self.systemTempCentiC = value }
         }
     }
+
+    func fetchDeviceInfo() {
+        guard let usb = usb else { return }
+
+        // REQ_GET_SERIAL (0x7E): 16-byte ASCII hex serial
+        if let data = usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16) {
+            let serial = String(data: data, encoding: .ascii)?
+                .trimmingCharacters(in: .controlCharacters.union(.whitespaces)) ?? "—"
+            DispatchQueue.main.async { self.serialNumber = serial.isEmpty ? "—" : serial }
+        }
+
+        // REQ_GET_PLATFORM (0x7F): 4-byte platform info
+        if let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) {
+            let platform = data[0]
+            let major = Int(data[1])
+            let minor = Int(data[2] >> 4)
+            let patch = Int(data[2] & 0x0F)
+            let outputs = Int(data[3])
+
+            let platformStr = platform == 1 ? "RP2350" : "RP2040"
+            let versionStr = "v\(major).\(minor).\(patch)"
+
+            DispatchQueue.main.async {
+                self.platformName = platformStr
+                self.firmwareVersion = versionStr
+                self.outputCount = outputs
+            }
+        }
+    }
 }
 
 // MARK: - Stats View
@@ -116,17 +157,15 @@ struct StatsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Header
-            HStack {
-                Text("System Statistics")
-                    .font(.headline)
-                Spacer()
-                Circle()
-                    .fill(vm.isConnected ? Color.green : Color.red)
-                    .frame(width: 8, height: 8)
-                Text(vm.isConnected ? "Connected" : "Disconnected")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            // Device Information Section
+            Text("Device Information")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                SystemInfoRow(title: "Platform", value: vm.platformName)
+                SystemInfoRow(title: "Firmware", value: vm.firmwareVersion)
+                SystemInfoRow(title: "Serial", value: vm.serialNumber)
             }
 
             Divider()
@@ -192,15 +231,24 @@ struct StatsView: View {
                 underruns: vm.spdifUnderruns
             )
 
-            Spacer()
+            Spacer().frame(height: 4)
 
             // Footer
-            Text("Updated every 2 seconds")
-                .font(.caption2)
-                .foregroundColor(.secondary)
+            HStack {
+                Circle()
+                    .fill(vm.isConnected ? Color.green : Color.red)
+                    .frame(width: 6, height: 6)
+                Text(vm.isConnected ? "Connected" : "Disconnected")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("Updated every 2 seconds")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
         .padding()
-        .frame(width: 320, height: 420)
+        .frame(width: 320)
     }
 }
 

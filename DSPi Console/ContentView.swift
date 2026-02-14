@@ -55,6 +55,10 @@ let REQ_GET_CORE1_CONFLICT: UInt8  = 0x7B
 let REQ_SET_OUTPUT_PIN: UInt8      = 0x7C
 let REQ_GET_OUTPUT_PIN: UInt8      = 0x7D
 
+// Device identification request codes
+let REQ_GET_SERIAL: UInt8          = 0x7E
+let REQ_GET_PLATFORM: UInt8        = 0x7F
+
 // Pin configuration status codes
 let PIN_CONFIG_SUCCESS: UInt8        = 0x00
 let PIN_CONFIG_INVALID_PIN: UInt8    = 0x01
