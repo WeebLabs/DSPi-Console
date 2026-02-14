@@ -43,10 +43,27 @@ struct PendingConflict: Identifiable {
 struct MatrixMixerView: View {
     @ObservedObject var vm: DSPViewModel
     @State private var pendingConflict: PendingConflict?
-    @FocusState private var focusedNameIndex: Int?
+    @State private var renamingOutput: Int? = nil
+    @State private var renameText = ""
+    @FocusState private var renameFocused: Bool
 
     private let columnWidth: CGFloat = 72
     private let labelWidth: CGFloat = 75
+
+    private func commitRename() {
+        guard let idx = renamingOutput else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty {
+            vm.outputNames[idx] = trimmed
+        }
+        renamingOutput = nil
+    }
+
+    private func startRename(_ index: Int) {
+        if renamingOutput != nil { commitRename() }
+        renameText = vm.outputNames[index]
+        renamingOutput = index
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,6 +71,21 @@ struct MatrixMixerView: View {
         }
         .padding()
         .fixedSize()
+        .onTapGesture {
+            if renamingOutput != nil { commitRename() }
+        }
+        .onChange(of: renameFocused) { focused in
+            if !focused && renamingOutput != nil {
+                commitRename()
+            }
+        }
+        .onChange(of: renamingOutput) { idx in
+            if idx != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    renameFocused = true
+                }
+            }
+        }
         .alert(item: $pendingConflict) { conflict in
             if conflict.isPDM {
                 Alert(
@@ -122,23 +154,27 @@ struct MatrixMixerView: View {
 
                 ForEach(MatrixOutput.all, id: \.index) { out in
                     VStack(spacing: 3) {
-                        TextField("", text: $vm.outputNames[out.index])
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .focused($focusedNameIndex, equals: out.index)
-                            .onSubmit {
-                                focusedNameIndex = nil
-                                DispatchQueue.main.async {
-                                    NSApp.keyWindow?.makeFirstResponder(nil)
-                                }
-                            }
+                        if renamingOutput == out.index {
+                            TextField("", text: $renameText)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .focused($renameFocused)
+                                .onSubmit { commitRename() }
+                        } else {
+                            Text(vm.outputNames[out.index])
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
                         Text(out.descriptor)
                             .font(.system(size: 8, weight: .bold))
                             .foregroundColor(out.color.opacity(0.8))
                     }
                     .frame(width: columnWidth, height: 48)
+                    .contentShape(Rectangle())
+                    .onRightClick { startRename(out.index) }
                 }
             }
 

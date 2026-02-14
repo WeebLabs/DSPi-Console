@@ -250,50 +250,36 @@ class DSPViewModel: ObservableObject {
 
 // MARK: - Custom Views
 
-/// Invisible overlay that detects right-clicks via local event monitor
+/// Invisible overlay that intercepts right-clicks while passing left-clicks through
 struct RightClickHandler: NSViewRepresentable {
     let action: () -> Void
 
-    func makeNSView(context: Context) -> RightClickMonitorView {
-        let view = RightClickMonitorView()
+    func makeNSView(context: Context) -> RightClickNSView {
+        let view = RightClickNSView()
         view.action = action
         return view
     }
 
-    func updateNSView(_ nsView: RightClickMonitorView, context: Context) {
+    func updateNSView(_ nsView: RightClickNSView, context: Context) {
         nsView.action = action
     }
 
-    class RightClickMonitorView: NSView {
+    class RightClickNSView: NSView {
         var action: (() -> Void)?
-        var monitor: Any?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window != nil && monitor == nil {
-                monitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
-                    guard let self = self, let window = self.window else { return event }
-                    let locationInWindow = event.locationInWindow
-                    let locationInView = self.convert(locationInWindow, from: nil)
-                    if self.bounds.contains(locationInView) {
-                        self.action?()
-                        return nil
-                    }
-                    return event
-                }
-            }
-        }
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            super.viewWillMove(toWindow: newWindow)
-            if newWindow == nil, let monitor = monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
-            }
-        }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
+            if let event = NSApp.currentEvent, event.type == .rightMouseDown {
+                return self
+            }
             return nil
+        }
+
+        override func rightMouseDown(with event: NSEvent) {
+            action?()
+        }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            return true
         }
     }
 }
@@ -400,6 +386,10 @@ struct OutputRow: View {
     let output: MatrixOutput
     let isSelected: Bool
     @ObservedObject var vm: DSPViewModel
+    let isRenaming: Bool
+    @Binding var renameText: String
+    let onCommitRename: () -> Void
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -409,11 +399,21 @@ struct OutputRow: View {
                 Rectangle().fill(Color.clear).frame(width: 3).padding(.vertical, 4)
             }
 
-            Text(vm.outputNames[output.index])
-                .font(.body)
-                .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
-                .padding(.leading, 8)
-                .frame(width: 80, alignment: .leading)
+            if isRenaming {
+                TextField("", text: $renameText)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .focused($isFocused)
+                    .onSubmit { onCommitRename() }
+                    .padding(.leading, 8)
+                    .frame(width: 80, alignment: .leading)
+            } else {
+                Text(vm.outputNames[output.index])
+                    .font(.body)
+                    .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
+                    .padding(.leading, 8)
+                    .frame(width: 80, alignment: .leading)
+            }
 
             Spacer()
 
@@ -431,6 +431,13 @@ struct OutputRow: View {
         .frame(height: 28)
         .contentShape(Rectangle())
         .background(isSelected ? Color.primary.opacity(0.05) : Color.clear)
+        .onChange(of: isRenaming) { renaming in
+            if renaming {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    isFocused = true
+                }
+            }
+        }
     }
 }
 
@@ -1112,6 +1119,23 @@ enum SidebarSelection: Hashable {
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
     @State private var selection: SidebarSelection = .overview
+    @State private var renamingOutput: Int? = nil
+    @State private var renameText = ""
+
+    private func commitRename() {
+        guard let idx = renamingOutput else { return }
+        let trimmed = renameText.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty {
+            vm.outputNames[idx] = trimmed
+        }
+        renamingOutput = nil
+    }
+
+    private func startRename(_ index: Int) {
+        if renamingOutput != nil { commitRename() }
+        renameText = vm.outputNames[index]
+        renamingOutput = index
+    }
 
     var body: some View {
         HSplitView {
@@ -1121,6 +1145,7 @@ struct ContentView: View {
                     ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
                         ChannelRow(channel: ch, isSelected: selection == .channel(ch))
                             .onTapGesture {
+                                if renamingOutput != nil { commitRename(); return }
                                 if selection == .channel(ch) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
@@ -1131,11 +1156,15 @@ struct ContentView: View {
                             }
                     }
                 }
-                
+
                 Section(header: Text("OUTPUTS")) {
                     ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                        OutputRow(output: out, isSelected: selection == .output(out.index), vm: vm)
+                        OutputRow(output: out, isSelected: selection == .output(out.index), vm: vm,
+                                  isRenaming: renamingOutput == out.index,
+                                  renameText: $renameText,
+                                  onCommitRename: { commitRename() })
                             .onTapGesture {
+                                if renamingOutput != nil { commitRename(); return }
                                 if selection == .output(out.index) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
@@ -1144,6 +1173,7 @@ struct ContentView: View {
                                     vm.updateSelectionToOutput(out.index)
                                 }
                             }
+                            .onRightClick { startRename(out.index) }
                     }
                 }
             }
@@ -1188,6 +1218,7 @@ struct ContentView: View {
                     .padding()
                     // ADDED GESTURE HERE FOR SIDEBAR CONTROLS
                     .onTapGesture {
+                        if renamingOutput != nil { commitRename() }
                         NSApp.keyWindow?.makeFirstResponder(nil)
                     }
                     
@@ -1271,6 +1302,7 @@ struct ContentView: View {
             .frame(minWidth: 220, maxWidth: 260)
             // ADDED GESTURE FOR THE REST OF THE SIDEBAR
             .onTapGesture {
+                if renamingOutput != nil { commitRename() }
                 NSApp.keyWindow?.makeFirstResponder(nil)
             }
 
@@ -1364,6 +1396,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(Color(NSColor.windowBackgroundColor.blended(withFraction: 0.2, of: .black) ?? .windowBackgroundColor))
             .onTapGesture {
+                if renamingOutput != nil { commitRename() }
                 NSApp.keyWindow?.makeFirstResponder(nil)
             }
         }
@@ -1386,6 +1419,7 @@ struct ContentView: View {
             }
         }
     }
+
 }
 
 // MARK: - New Control Views
