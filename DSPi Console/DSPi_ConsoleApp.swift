@@ -634,21 +634,52 @@ struct FileMenuActions {
         return filters
     }
 
-    private static func parseDSPiFile(_ contents: String) -> [Int: [FilterParams]]? {
-        var result: [Int: [FilterParams]] = [:]
+    struct ParsedChannelData {
+        var filters: [FilterParams]
+        var enableState: Bool? // nil = no state info (master or legacy format)
+    }
+
+    private static func parseDSPiFile(_ contents: String) -> [Int: ParsedChannelData]? {
+        var result: [Int: ParsedChannelData] = [:]
         var currentChannel: Int? = nil
 
+        // Regex for new output header content: Output N: Name (Enabled) or Output N: Name (Disabled)
+        let outputPattern = try? NSRegularExpression(pattern: "^Output\\s+(\\d+):.+\\((Enabled|Disabled)\\)$")
+
         for line in contents.components(separatedBy: .newlines) {
-            // Check for channel header [Channel Name]
+            // Check for channel header [...]
             if line.hasPrefix("[") && line.hasSuffix("]") {
-                let channelName = String(line.dropFirst().dropLast())
-                // Find matching channel
-                for ch in Channel.allCases {
-                    if ch.name == channelName {
-                        currentChannel = ch.rawValue
-                        result[ch.rawValue] = []
-                        break
-                    }
+                let headerContent = String(line.dropFirst().dropLast())
+
+                // New format: [USB L] / [USB R]
+                if headerContent == "USB L" {
+                    currentChannel = 0
+                    result[0] = ParsedChannelData(filters: [], enableState: nil)
+                } else if headerContent == "USB R" {
+                    currentChannel = 1
+                    result[1] = ParsedChannelData(filters: [], enableState: nil)
+                }
+                // New format: [Output N: Name (Enabled/Disabled)]
+                else if let match = outputPattern?.firstMatch(in: headerContent, options: [], range: NSRange(headerContent.startIndex..., in: headerContent)),
+                        let idxRange = Range(match.range(at: 1), in: headerContent),
+                        let stateRange = Range(match.range(at: 2), in: headerContent),
+                        let outputIdx = Int(headerContent[idxRange]),
+                        outputIdx >= 0 && outputIdx <= 8 {
+                    let eqCh = outputIdx + 2
+                    let enabled = headerContent[stateRange] == "Enabled"
+                    currentChannel = eqCh
+                    result[eqCh] = ParsedChannelData(filters: [], enableState: enabled)
+                }
+                // Backward compat: old channel names
+                else if headerContent == "Out L" {
+                    currentChannel = 2
+                    result[2] = ParsedChannelData(filters: [], enableState: nil)
+                } else if headerContent == "Out R" {
+                    currentChannel = 3
+                    result[3] = ParsedChannelData(filters: [], enableState: nil)
+                } else if headerContent == "Sub" {
+                    currentChannel = 4
+                    result[4] = ParsedChannelData(filters: [], enableState: nil)
                 }
                 continue
             }
@@ -660,7 +691,7 @@ struct FileMenuActions {
             // Check if filter is disabled (OFF or just no type)
             if line.uppercased().contains(" OFF") || (!line.uppercased().contains(" ON ")) {
                 // Add a flat filter placeholder
-                result[channel]?.append(FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
+                result[channel]?.filters.append(FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
                 continue
             }
 
@@ -705,7 +736,7 @@ struct FileMenuActions {
                 q = qVal
             }
 
-            result[channel]?.append(FilterParams(type: filterType, freq: freq, q: q, gain: gain))
+            result[channel]?.filters.append(FilterParams(type: filterType, freq: freq, q: q, gain: gain))
         }
 
         return result.isEmpty ? nil : result
@@ -722,10 +753,24 @@ struct FileMenuActions {
 
         let vm = AppState.shared.viewModel
 
-        for channel in Channel.allCases {
-            output += "[\(channel.name)]\n"
-            let filters = vm.channelData[channel.rawValue] ?? []
+        // Master channels (EQ 0, 1)
+        for eqCh in 0...1 {
+            let name = eqCh == 0 ? "USB L" : "USB R"
+            output += "[\(name)]\n"
+            let filters = vm.channelData[eqCh] ?? []
+            for (i, filter) in filters.enumerated() {
+                output += formatFilter(index: i + 1, filter: filter)
+            }
+            output += "\n"
+        }
 
+        // Output channels (output 0-8 → EQ 2-10)
+        for outputIdx in 0...8 {
+            let eqCh = outputIdx + 2
+            let name = vm.outputNames[outputIdx]
+            let state = vm.outputEnabled[outputIdx] ? "Enabled" : "Disabled"
+            output += "[Output \(outputIdx): \(name) (\(state))]\n"
+            let filters = vm.channelData[eqCh] ?? []
             for (i, filter) in filters.enumerated() {
                 output += formatFilter(index: i + 1, filter: filter)
             }
@@ -770,24 +815,33 @@ struct FileMenuActions {
         alert.informativeText = "Found \(filters.count) filter(s). Select which channel(s) to apply them to:"
         alert.alertStyle = .informational
 
-        // Create checkboxes for master channels
         let accessory = NSStackView()
         accessory.orientation = .vertical
         accessory.alignment = .leading
         accessory.spacing = 8
 
-        let masterChannels: [Channel] = [.masterLeft, .masterRight]
+        let vm = AppState.shared.viewModel
         var checkboxes: [NSButton] = []
 
-        for ch in masterChannels {
-            let checkbox = NSButton(checkboxWithTitle: ch.name, target: nil, action: nil)
-            checkbox.tag = ch.rawValue
-            checkbox.state = .on // Both checked by default
+        // Master channels (checked by default)
+        for (eqCh, name) in [(0, "USB L"), (1, "USB R")] {
+            let checkbox = NSButton(checkboxWithTitle: name, target: nil, action: nil)
+            checkbox.tag = eqCh
+            checkbox.state = .on
             checkboxes.append(checkbox)
             accessory.addArrangedSubview(checkbox)
         }
 
-        accessory.setFrameSize(NSSize(width: 200, height: CGFloat(masterChannels.count * 24)))
+        // Enabled output channels (unchecked by default)
+        for outputIdx in 0...8 where vm.outputEnabled[outputIdx] {
+            let checkbox = NSButton(checkboxWithTitle: vm.outputNames[outputIdx], target: nil, action: nil)
+            checkbox.tag = outputIdx + 2
+            checkbox.state = .off
+            checkboxes.append(checkbox)
+            accessory.addArrangedSubview(checkbox)
+        }
+
+        accessory.setFrameSize(NSSize(width: 200, height: CGFloat(checkboxes.count * 24)))
         alert.accessoryView = accessory
 
         alert.addButton(withTitle: "Import")
@@ -805,7 +859,7 @@ struct FileMenuActions {
         }
     }
 
-    private static func showMultiChannelPicker(channelFilters: [Int: [FilterParams]]) {
+    private static func showMultiChannelPicker(channelFilters: [Int: ParsedChannelData]) {
         let alert = NSAlert()
         alert.messageText = "Import Filters"
         alert.informativeText = "This file contains filter settings for multiple channels. Select which channels to import:"
@@ -816,16 +870,22 @@ struct FileMenuActions {
         accessory.alignment = .leading
         accessory.spacing = 8
 
+        let vm = AppState.shared.viewModel
         var checkboxes: [NSButton] = []
 
-        for channel in Channel.allCases {
-            if channelFilters[channel.rawValue] != nil {
-                let checkbox = NSButton(checkboxWithTitle: channel.name, target: nil, action: nil)
-                checkbox.tag = channel.rawValue
-                checkbox.state = .on // All checked by default
-                checkboxes.append(checkbox)
-                accessory.addArrangedSubview(checkbox)
-            }
+        // Show channels in order: master 0,1 then outputs 2-10
+        for eqCh in 0...10 {
+            guard channelFilters[eqCh] != nil else { continue }
+            let name: String
+            if eqCh == 0 { name = "USB L" }
+            else if eqCh == 1 { name = "USB R" }
+            else { name = vm.outputNames[eqCh - 2] }
+
+            let checkbox = NSButton(checkboxWithTitle: name, target: nil, action: nil)
+            checkbox.tag = eqCh
+            checkbox.state = .on
+            checkboxes.append(checkbox)
+            accessory.addArrangedSubview(checkbox)
         }
 
         accessory.setFrameSize(NSSize(width: 200, height: CGFloat(checkboxes.count * 24)))
@@ -836,9 +896,13 @@ struct FileMenuActions {
 
         if alert.runModal() == .alertFirstButtonReturn {
             for checkbox in checkboxes where checkbox.state == .on {
-                let channelIndex = checkbox.tag
-                if let filters = channelFilters[channelIndex] {
-                    applyFilters(filters, to: channelIndex)
+                let eqCh = checkbox.tag
+                if let data = channelFilters[eqCh] {
+                    applyFilters(data.filters, to: eqCh)
+                    // Restore enable/disable state for output channels
+                    if eqCh >= 2, let enabled = data.enableState {
+                        vm.setOutputEnable(output: eqCh - 2, enabled: enabled)
+                    }
                 }
             }
             showSuccess("Filters imported successfully")
@@ -847,9 +911,8 @@ struct FileMenuActions {
 
     private static func applyFilters(_ filters: [FilterParams], to channelIndex: Int) {
         let vm = AppState.shared.viewModel
-        guard let channel = Channel(rawValue: channelIndex) else { return }
+        let bandCount = 10
 
-        let bandCount = channel.bandCount
         for (i, filter) in filters.prefix(bandCount).enumerated() {
             vm.setFilter(ch: channelIndex, band: i, p: filter)
         }
