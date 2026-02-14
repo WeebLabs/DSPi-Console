@@ -366,6 +366,9 @@ extension DSPViewModel {
 
     func setOutputEnable(output: Int, enabled: Bool) {
         outputEnabled[output] = enabled
+        if isOverviewMode {
+            channelVisibility[output + 2] = enabled
+        }
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_ENABLE, value: UInt16(output), index: 2, data: data)

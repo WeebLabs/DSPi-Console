@@ -12,7 +12,7 @@ class CrossfeedWindowController: NSObject, ObservableObject {
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 560),
-                styleMask: [.titled, .closable],
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
@@ -20,6 +20,8 @@ class CrossfeedWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: view)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
+            window?.contentMinSize = NSSize(width: 380, height: 300)
+            window?.contentMaxSize = NSSize(width: 380, height: 520)
         }
 
         window?.center()
@@ -92,7 +94,7 @@ struct CrossfeedView: View {
                 }
             }
         }
-        .frame(width: 380, height: 520)
+        .frame(minWidth: 380, maxWidth: 380)
     }
 
     // MARK: - Header

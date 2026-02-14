@@ -168,6 +168,7 @@ class DSPViewModel: ObservableObject {
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
     @Published var isDeviceConnected: Bool = false
+    private(set) var isOverviewMode: Bool = true
 
     // Live Data
     @Published var status = SystemStatus()
@@ -194,7 +195,7 @@ class DSPViewModel: ObservableObject {
         for outputIdx in 0..<9 {
             let eqCh = outputIdx + 2
             channelData[eqCh] = Array(repeating: FilterParams(), count: 10)
-            channelVisibility[eqCh] = true
+            channelVisibility[eqCh] = outputEnabled[outputIdx]
         }
         
         // Load saved output names
@@ -210,6 +211,9 @@ class DSPViewModel: ObservableObject {
                 if connected {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         self?.fetchAll()
+                        DispatchQueue.main.async {
+                            self?.updateSelection(to: nil)
+                        }
                     }
                 }
             }
@@ -228,11 +232,13 @@ class DSPViewModel: ObservableObject {
     func updateSelection(to channel: Channel?) {
         withAnimation(.easeInOut(duration: 0.2)) {
             if let ch = channel {
+                isOverviewMode = false
                 // Show only the selected master channel
                 for eqCh in 0...10 {
                     channelVisibility[eqCh] = (eqCh == ch.rawValue)
                 }
             } else {
+                isOverviewMode = true
                 // Overview: show master L/R + all enabled output channels
                 channelVisibility[Channel.masterLeft.rawValue] = true
                 channelVisibility[Channel.masterRight.rawValue] = true
@@ -244,6 +250,7 @@ class DSPViewModel: ObservableObject {
     }
 
     func updateSelectionToOutput(_ outputIdx: Int) {
+        isOverviewMode = false
         withAnimation(.easeInOut(duration: 0.2)) {
             for eqCh in 0...10 {
                 channelVisibility[eqCh] = (eqCh == outputIdx + 2)
