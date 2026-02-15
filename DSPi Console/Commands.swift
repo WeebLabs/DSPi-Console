@@ -46,10 +46,20 @@ extension DSPViewModel {
         }
 
         fetchCore1Mode()
+        fetchPlatform()
 
         // Fetch pin configuration
         for i in 0..<5 {
             fetchOutputPin(output: i)
+        }
+    }
+
+    func fetchPlatform() {
+        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) else { return }
+        let platform = data[0]
+        let name = platform == 1 ? "RP2350" : "RP2040"
+        DispatchQueue.main.async {
+            self.platformName = name
         }
     }
 

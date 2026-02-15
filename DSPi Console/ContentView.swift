@@ -167,6 +167,7 @@ class DSPViewModel: ObservableObject {
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
+    @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
     private(set) var isOverviewMode: Bool = true
 

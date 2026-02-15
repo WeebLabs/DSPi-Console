@@ -19,6 +19,16 @@ struct MatrixOutput {
         MatrixOutput(index: 7, name: "SPDIF 4 R", descriptor: "OUT8", color: Color(red: 0.95, green: 0.60, blue: 0.65)),
         MatrixOutput(index: 8, name: "PDM",            descriptor: "OUT9", color: Color(red: 0.73, green: 0.53, blue: 0.95)),
     ]
+
+    /// RP2040 only supports SPDIF 1, SPDIF 2, and PDM (indices 0-3, 8)
+    static let rp2040Indices: Set<Int> = [0, 1, 2, 3, 8]
+
+    static func visible(for platform: String) -> [MatrixOutput] {
+        if platform == "RP2040" {
+            return all.filter { rp2040Indices.contains($0.index) }
+        }
+        return all
+    }
 }
 
 struct MatrixInput {
@@ -49,6 +59,10 @@ struct MatrixMixerView: View {
 
     private let columnWidth: CGFloat = 72
     private let labelWidth: CGFloat = 75
+
+    private var visibleOutputs: [MatrixOutput] {
+        MatrixOutput.visible(for: vm.platformName)
+    }
 
     private func commitRename() {
         guard let idx = renamingOutput else { return }
@@ -152,7 +166,7 @@ struct MatrixMixerView: View {
             HStack(spacing: 0) {
                 Color.clear.frame(width: labelWidth, height: 48)
 
-                ForEach(MatrixOutput.all, id: \.index) { out in
+                ForEach(visibleOutputs, id: \.index) { out in
                     VStack(spacing: 3) {
                         if renamingOutput == out.index {
                             TextField("", text: $renameText)
@@ -191,7 +205,7 @@ struct MatrixMixerView: View {
                         .foregroundColor(input.color)
                         .frame(width: labelWidth, alignment: .center)
 
-                    ForEach(MatrixOutput.all, id: \.index) { out in
+                    ForEach(visibleOutputs, id: \.index) { out in
                         MatrixPoint(
                             isConnected: matrixRoutingBinding(row: input.index, col: out.index),
                             gain: matrixGainBinding(row: input.index, col: out.index),
@@ -217,7 +231,7 @@ struct MatrixMixerView: View {
 
             // Enable row
             controlRow("ENABLE") {
-                ForEach(MatrixOutput.all, id: \.index) { out in
+                ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
                     Button(action: { requestOutputEnable(output: idx) }) {
                         Image(systemName: "power")
@@ -240,7 +254,7 @@ struct MatrixMixerView: View {
 
             // Gain row
             controlRow("GAIN") {
-                ForEach(MatrixOutput.all, id: \.index) { out in
+                ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
                     CompactGainField(gain: Binding(
                         get: { vm.outputGainDB[idx] },
@@ -255,7 +269,7 @@ struct MatrixMixerView: View {
 
             // Delay row
             controlRow("DELAY") {
-                ForEach(MatrixOutput.all, id: \.index) { out in
+                ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
                     CompactDelayField(delay: Binding(
                         get: { vm.outputDelayMS[idx] },
@@ -270,7 +284,7 @@ struct MatrixMixerView: View {
 
             // Mute row
             controlRow("MUTE") {
-                ForEach(MatrixOutput.all, id: \.index) { out in
+                ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
                     Button(action: {
                         vm.setOutputMute(output: idx, muted: !vm.outputMuted[idx])
