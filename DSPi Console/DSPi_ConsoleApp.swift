@@ -71,7 +71,7 @@ struct SettingsView: View {
                 }
                 .tag(Tabs.advanced)
         }
-        .frame(width: 450, height: 350)
+        .frame(width: 450)
     }
 }
 
@@ -227,6 +227,16 @@ struct HardwareSettingsTab: View {
                   defaultPin: 10, color: Color(red: 0.73, green: 0.53, blue: 0.95)),
     ]
 
+    /// RP2040 only has S/PDIF 1, S/PDIF 2, and PDM (ids 0, 1, 4)
+    private static let rp2040PinIds: Set<Int> = [0, 1, 4]
+
+    private var visiblePinOutputs: [PinOutput] {
+        if vm.platformName == "RP2040" {
+            return Self.pinOutputs.filter { Self.rp2040PinIds.contains($0.id) }
+        }
+        return Self.pinOutputs
+    }
+
     // RP2040 valid GPIO pins (excludes 12=UART, 23-25=system)
     private static let validPins: [UInt8] = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
@@ -235,9 +245,9 @@ struct HardwareSettingsTab: View {
     ]
 
     private func pinInUseBy(_ pin: UInt8, excludingOutput: Int) -> String? {
-        for (i, assignedPin) in vm.outputPins.enumerated() {
-            if i != excludingOutput && assignedPin == pin {
-                return Self.pinOutputs[i].name
+        for output in visiblePinOutputs {
+            if output.id != excludingOutput && vm.outputPins[output.id] == pin {
+                return output.name
             }
         }
         return nil
@@ -296,7 +306,7 @@ struct HardwareSettingsTab: View {
             return
         }
 
-        for output in Self.pinOutputs {
+        for output in visiblePinOutputs {
             var status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
             // PDM may need disable/enable cycle
             if status == PIN_CONFIG_OUTPUT_ACTIVE && output.id == 4 {
@@ -317,7 +327,7 @@ struct HardwareSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                ForEach(Self.pinOutputs) { output in
+                ForEach(visiblePinOutputs) { output in
                     HStack(spacing: 10) {
                         // Colored indicator + icon
                         Image(systemName: output.icon)
@@ -368,11 +378,6 @@ struct HardwareSettingsTab: View {
                     }
                     .padding(.vertical, 1)
                 }
-            } header: {
-                Label("Pin Assignment", systemImage: "cpu")
-            }
-
-            Section {
                 // Status message
                 if let message = statusMessage {
                     HStack(spacing: 6) {
@@ -384,28 +389,23 @@ struct HardwareSettingsTab: View {
                             .foregroundColor(statusIsError ? .orange : .secondary)
                     }
                 }
-
+            } header: {
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Persistence")
-                            .font(.body)
-                        Text("Pin changes apply immediately. Use Tools → Commit Parameters to save across power cycles.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    Label("Pin Assignment", systemImage: "cpu")
                     Spacer()
                     Button("Reset to Defaults") {
                         resetToDefaults()
                     }
+                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
                     .disabled(!vm.isDeviceConnected)
                 }
-                .padding(.vertical, 2)
-            } header: {
-                Label("Information", systemImage: "info.circle")
             }
         }
         .formStyle(.grouped)
         .padding()
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             if vm.isDeviceConnected {
                 for i in 0..<5 {
