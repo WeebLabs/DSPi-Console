@@ -8,6 +8,9 @@ struct MatrixOutput {
     let descriptor: String
     let color: Color
 
+    static let pdmColor = Color(red: 0.73, green: 0.53, blue: 0.95)
+
+    /// All outputs for RP2350 (9 outputs: 4 SPDIF pairs + PDM at index 8)
     static let all: [MatrixOutput] = [
         MatrixOutput(index: 0, name: "SPDIF 1 L", descriptor: "OUT1", color: Color(red: 0.27, green: 0.76, blue: 0.64)),
         MatrixOutput(index: 1, name: "SPDIF 1 R", descriptor: "OUT2", color: Color(red: 0.35, green: 0.82, blue: 0.50)),
@@ -17,17 +20,17 @@ struct MatrixOutput {
         MatrixOutput(index: 5, name: "SPDIF 3 R", descriptor: "OUT6", color: Color(red: 0.55, green: 0.70, blue: 0.95)),
         MatrixOutput(index: 6, name: "SPDIF 4 L", descriptor: "OUT7", color: Color(red: 0.85, green: 0.45, blue: 0.55)),
         MatrixOutput(index: 7, name: "SPDIF 4 R", descriptor: "OUT8", color: Color(red: 0.95, green: 0.60, blue: 0.65)),
-        MatrixOutput(index: 8, name: "PDM",            descriptor: "OUT9", color: Color(red: 0.73, green: 0.53, blue: 0.95)),
+        MatrixOutput(index: 8, name: "PDM",        descriptor: "OUT9", color: pdmColor),
     ]
 
-    /// RP2040 only supports SPDIF 1, SPDIF 2, and PDM (indices 0-3, 8)
-    static let rp2040Indices: Set<Int> = [0, 1, 2, 3, 8]
+    /// RP2040 outputs: 2 SPDIF pairs (indices 0-3) + PDM at index 4
+    static let rp2040: [MatrixOutput] = [
+        all[0], all[1], all[2], all[3],
+        MatrixOutput(index: 4, name: "PDM", descriptor: "OUT5", color: pdmColor),
+    ]
 
     static func visible(for platform: String) -> [MatrixOutput] {
-        if platform == "RP2040" {
-            return all.filter { rp2040Indices.contains($0.index) }
-        }
-        return all
+        platform == "RP2040" ? rp2040 : all
     }
 }
 
@@ -102,9 +105,12 @@ struct MatrixMixerView: View {
         }
         .alert(item: $pendingConflict) { conflict in
             if conflict.isPDM {
-                Alert(
+                let eqRange = vm.eqWorkerRange
+                let first = eqRange.lowerBound + 1  // 1-based for display
+                let last = eqRange.upperBound + 1
+                return Alert(
                     title: Text("Warning"),
-                    message: Text("Channels 3-8 will be disabled. Are you sure?"),
+                    message: Text("Outputs \(first)-\(last) will be disabled. Are you sure?"),
                     primaryButton: .default(Text("Enable PDM")) {
                         DispatchQueue.global(qos: .userInitiated).async {
                             vm.switchToPDM()
@@ -113,7 +119,7 @@ struct MatrixMixerView: View {
                     secondaryButton: .cancel()
                 )
             } else {
-                Alert(
+                return Alert(
                     title: Text("Warning"),
                     message: Text("The PDM output will be disabled. Are you sure?"),
                     primaryButton: .default(Text("Disable PDM")) {
@@ -132,12 +138,12 @@ struct MatrixMixerView: View {
 
     /// Check if enabling this output would conflict with current state (client-side check).
     private func wouldConflict(_ outputIndex: Int) -> Bool {
-        if outputIndex == 8 {
-            // PDM conflicts with any enabled output in 2-7
-            return (2...7).contains(where: { vm.outputEnabled[$0] })
-        } else if (2...7).contains(outputIndex) {
-            // EQ worker output conflicts with enabled PDM
-            return vm.outputEnabled[8]
+        let pdm = vm.pdmOutputIndex
+        let eqRange = vm.eqWorkerRange
+        if outputIndex == pdm {
+            return eqRange.contains(where: { vm.outputEnabled[$0] })
+        } else if eqRange.contains(outputIndex) {
+            return vm.outputEnabled[pdm]
         }
         return false
     }
@@ -152,7 +158,7 @@ struct MatrixMixerView: View {
         }
         // Enabling: check for conflict
         if wouldConflict(output) {
-            pendingConflict = PendingConflict(output: output, isPDM: output == 8)
+            pendingConflict = PendingConflict(output: output, isPDM: output == vm.pdmOutputIndex)
         } else {
             vm.setOutputEnable(output: output, enabled: true)
         }
@@ -212,7 +218,7 @@ struct MatrixMixerView: View {
                             isInverted: matrixInvertBinding(row: input.index, col: out.index),
                             inputColor: input.color,
                             outputColor: out.color,
-                            outlineColor: (out.index == 8 && wouldConflict(8)) ? .orange : nil
+                            outlineColor: (out.index == vm.pdmOutputIndex && wouldConflict(vm.pdmOutputIndex)) ? .orange : nil
                         )
                         .frame(width: columnWidth)
                     }

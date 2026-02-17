@@ -169,6 +169,11 @@ class DSPViewModel: ObservableObject {
 
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
+
+    // Platform-aware output layout
+    var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
+    var pdmOutputIndex: Int { platformName == "RP2040" ? 4 : 8 }
+    var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
     private(set) var isOverviewMode: Bool = true
 
     // Live Data
@@ -495,7 +500,7 @@ struct GraphLegend: View {
             legendPill(eqCh: Channel.masterRight.rawValue, name: Channel.masterRight.descriptor, color: Channel.masterRight.color)
 
             // Enabled outputs (dynamic)
-            ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+            ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
                 legendPill(eqCh: out.index + 2, name: out.descriptor, color: out.color)
             }
         }
@@ -517,8 +522,9 @@ struct DashboardOverview: View {
                 vm: vm
             )
 
-            // SPDIF stereo pairs (0+1, 2+3, 4+5, 6+7)
-            ForEach(0..<4, id: \.self) { pairIdx in
+            // SPDIF stereo pairs (RP2040: 2 pairs, RP2350: 4 pairs)
+            let spdifPairs = (vm.numOutputChannels - 1) / 2
+            ForEach(0..<spdifPairs, id: \.self) { pairIdx in
                 let leftIdx = pairIdx * 2
                 let rightIdx = pairIdx * 2 + 1
                 let leftEnabled = vm.outputEnabled[leftIdx]
@@ -534,8 +540,8 @@ struct DashboardOverview: View {
             }
 
             // PDM (always mono)
-            if vm.outputEnabled[8] {
-                OutputDashboardCard(outputIndex: 8, vm: vm)
+            if vm.outputEnabled[vm.pdmOutputIndex] {
+                OutputDashboardCard(outputIndex: vm.pdmOutputIndex, vm: vm)
             }
         }
         .padding(.horizontal)
@@ -761,7 +767,10 @@ struct OutputDashboardCard: View {
     let outputIndex: Int
     @ObservedObject var vm: DSPViewModel
 
-    private var output: MatrixOutput { MatrixOutput.all[outputIndex] }
+    private var output: MatrixOutput {
+        MatrixOutput.visible(for: vm.platformName).first(where: { $0.index == outputIndex })
+            ?? MatrixOutput.all[outputIndex]
+    }
     private var eqChannel: Int { outputIndex + 2 }
 
     var body: some View {
@@ -1170,7 +1179,7 @@ struct ContentView: View {
                 }
 
                 Section(header: Text("OUTPUTS")) {
-                    ForEach(MatrixOutput.all.filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                    ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
                         OutputRow(output: out, isSelected: selection == .output(out.index), vm: vm,
                                   isRenaming: renamingOutput == out.index,
                                   renameText: $renameText,
@@ -1295,13 +1304,13 @@ struct ContentView: View {
                                 Text("PDM OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 HStack {
-                                    MuteableLabel(text: "S", isMuted: vm.isOutputInactive(8)) {
-                                        vm.setOutputMute(output: 8, muted: !vm.outputMuted[8])
+                                    MuteableLabel(text: "S", isMuted: vm.isOutputInactive(vm.pdmOutputIndex)) {
+                                        vm.setOutputMute(output: vm.pdmOutputIndex, muted: !vm.outputMuted[vm.pdmOutputIndex])
                                     }
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[4],
-                                        color: MatrixOutput.all[8].color,
-                                        isMuted: vm.isOutputInactive(8)
+                                        color: MatrixOutput.pdmColor,
+                                        isMuted: vm.isOutputInactive(vm.pdmOutputIndex)
                                     )
                                 }
                             }

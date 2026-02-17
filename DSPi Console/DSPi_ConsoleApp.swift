@@ -105,7 +105,8 @@ struct GeneralSettingsTab: View {
                         }
                         Spacer()
                         Button("Reset") {
-                            AppState.shared.viewModel.outputNames = MatrixOutput.all.map { $0.name }
+                            let vm = AppState.shared.viewModel
+                            vm.outputNames = MatrixOutput.visible(for: vm.platformName).map { $0.name }
                         }
                     }
                 }
@@ -214,6 +215,7 @@ struct HardwareSettingsTab: View {
         let color: Color
     }
 
+    /// RP2350 pin outputs: firmware indices 0-4
     private static let pinOutputs: [PinOutput] = [
         PinOutput(id: 0, name: "S/PDIF 1", detail: "Stereo pair 1 (L/R)", icon: "wave.3.right",
                   defaultPin: 6, color: Color(red: 0.27, green: 0.76, blue: 0.64)),
@@ -227,14 +229,18 @@ struct HardwareSettingsTab: View {
                   defaultPin: 10, color: Color(red: 0.73, green: 0.53, blue: 0.95)),
     ]
 
-    /// RP2040 only has S/PDIF 1, S/PDIF 2, and PDM (ids 0, 1, 4)
-    private static let rp2040PinIds: Set<Int> = [0, 1, 4]
+    /// RP2040 pin outputs: firmware indices 0-2 (SPDIF 1, SPDIF 2, PDM)
+    private static let rp2040PinOutputs: [PinOutput] = [
+        PinOutput(id: 0, name: "S/PDIF 1", detail: "Stereo pair 1 (L/R)", icon: "wave.3.right",
+                  defaultPin: 6, color: Color(red: 0.27, green: 0.76, blue: 0.64)),
+        PinOutput(id: 1, name: "S/PDIF 2", detail: "Stereo pair 2 (L/R)", icon: "wave.3.right",
+                  defaultPin: 7, color: Color(red: 0.94, green: 0.77, blue: 0.35)),
+        PinOutput(id: 2, name: "PDM",      detail: "Subwoofer output",    icon: "waveform",
+                  defaultPin: 10, color: Color(red: 0.73, green: 0.53, blue: 0.95)),
+    ]
 
     private var visiblePinOutputs: [PinOutput] {
-        if vm.platformName == "RP2040" {
-            return Self.pinOutputs.filter { Self.rp2040PinIds.contains($0.id) }
-        }
-        return Self.pinOutputs
+        vm.platformName == "RP2040" ? Self.rp2040PinOutputs : Self.pinOutputs
     }
 
     // RP2040 valid GPIO pins (excludes 12=UART, 23-25=system)
@@ -263,13 +269,14 @@ struct HardwareSettingsTab: View {
         var status = vm.setOutputPin(output: outputIndex, pin: pin)
 
         // PDM requires disable/enable cycle if active
-        if status == PIN_CONFIG_OUTPUT_ACTIVE && outputIndex == 4 {
-            vm.setOutputEnable(output: 8, enabled: false)
+        let isPDM = visiblePinOutputs.first(where: { $0.id == outputIndex })?.name == "PDM"
+        if status == PIN_CONFIG_OUTPUT_ACTIVE && isPDM {
+            vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: false)
             status = vm.setOutputPin(output: outputIndex, pin: pin)
-            vm.setOutputEnable(output: 8, enabled: true)
+            vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: true)
         }
 
-        let outputName = Self.pinOutputs[outputIndex].name
+        let outputName = visiblePinOutputs.first(where: { $0.id == outputIndex })?.name ?? "Output \(outputIndex)"
         switch status {
         case PIN_CONFIG_SUCCESS:
             statusMessage = "\(outputName) reassigned to GPIO \(pin)"
@@ -309,10 +316,10 @@ struct HardwareSettingsTab: View {
         for output in visiblePinOutputs {
             var status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
             // PDM may need disable/enable cycle
-            if status == PIN_CONFIG_OUTPUT_ACTIVE && output.id == 4 {
-                vm.setOutputEnable(output: 8, enabled: false)
+            if status == PIN_CONFIG_OUTPUT_ACTIVE && output.name == "PDM" {
+                vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: false)
                 status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
-                vm.setOutputEnable(output: 8, enabled: true)
+                vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: true)
             }
             if status != PIN_CONFIG_SUCCESS {
                 statusMessage = "Failed to reset \(output.name)"
@@ -408,8 +415,8 @@ struct HardwareSettingsTab: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             if vm.isDeviceConnected {
-                for i in 0..<5 {
-                    vm.fetchOutputPin(output: i)
+                for output in visiblePinOutputs {
+                    vm.fetchOutputPin(output: output.id)
                 }
             }
         }
@@ -764,8 +771,8 @@ struct FileMenuActions {
             output += "\n"
         }
 
-        // Output channels (output 0-8 → EQ 2-10)
-        for outputIdx in 0...8 {
+        // Output channels (platform-aware)
+        for outputIdx in 0..<vm.numOutputChannels {
             let eqCh = outputIdx + 2
             let name = vm.outputNames[outputIdx]
             let state = vm.outputEnabled[outputIdx] ? "Enabled" : "Disabled"
@@ -833,7 +840,7 @@ struct FileMenuActions {
         }
 
         // Enabled output channels (unchecked by default)
-        for outputIdx in 0...8 where vm.outputEnabled[outputIdx] {
+        for outputIdx in 0..<vm.numOutputChannels where vm.outputEnabled[outputIdx] {
             let checkbox = NSButton(checkboxWithTitle: vm.outputNames[outputIdx], target: nil, action: nil)
             checkbox.tag = outputIdx + 2
             checkbox.state = .off
@@ -873,8 +880,9 @@ struct FileMenuActions {
         let vm = AppState.shared.viewModel
         var checkboxes: [NSButton] = []
 
-        // Show channels in order: master 0,1 then outputs 2-10
-        for eqCh in 0...10 {
+        // Show channels in order: master 0,1 then outputs
+        let maxEqCh = vm.numOutputChannels + 1  // output indices 0..<N map to EQ channels 2..<N+2
+        for eqCh in 0...maxEqCh {
             guard channelFilters[eqCh] != nil else { continue }
             let name: String
             if eqCh == 0 { name = "USB L" }

@@ -8,6 +8,12 @@ extension DSPViewModel {
 
     func fetchAll() {
         guard fetchPreamp() else { return }
+
+        // Determine platform first to set correct output/pin counts
+        let platform = fetchPlatform() ?? "RP2350"
+        let numOutputs = platform == "RP2040" ? 5 : 9
+        let numPins = platform == "RP2040" ? 3 : 5
+
         fetchBypass()
         fetchLoudness()
         fetchLoudnessRef()
@@ -25,8 +31,8 @@ extension DSPViewModel {
             }
         }
 
-        // Fetch output EQ (channels 2-10)
-        for outputIdx in 0..<9 {
+        // Fetch output EQ (channels 2+)
+        for outputIdx in 0..<numOutputs {
             for b in 0..<10 {
                 fetchFilter(ch: outputIdx + 2, band: b)
             }
@@ -34,11 +40,11 @@ extension DSPViewModel {
 
         // Fetch matrix mixer state
         for input in 0..<2 {
-            for output in 0..<9 {
+            for output in 0..<numOutputs {
                 fetchMatrixRoute(input: input, output: output)
             }
         }
-        for output in 0..<9 {
+        for output in 0..<numOutputs {
             fetchOutputEnable(output: output)
             fetchOutputGainDB(output: output)
             fetchOutputMute(output: output)
@@ -46,21 +52,26 @@ extension DSPViewModel {
         }
 
         fetchCore1Mode()
-        fetchPlatform()
 
         // Fetch pin configuration
-        for i in 0..<5 {
+        for i in 0..<numPins {
             fetchOutputPin(output: i)
         }
     }
 
-    func fetchPlatform() {
-        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) else { return }
+    @discardableResult
+    func fetchPlatform() -> String? {
+        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) else { return nil }
         let platform = data[0]
         let name = platform == 1 ? "RP2350" : "RP2040"
         DispatchQueue.main.async {
             self.platformName = name
+            // On RP2040, output index 4 is PDM (not SPDIF 3 L)
+            if name == "RP2040" && self.outputNames[4] == "SPDIF 3 L" {
+                self.outputNames[4] = "PDM"
+            }
         }
+        return name
     }
 
     func fetchStatus() {
@@ -465,26 +476,26 @@ extension DSPViewModel {
         return false
     }
 
-    /// Disable all EQ worker outputs (indices 2-7), then enable PDM (index 8), confirm via read-back.
+    /// Disable all EQ worker outputs, then enable PDM, confirm via read-back.
     func switchToPDM() {
-        for i in 2...7 {
+        for i in eqWorkerRange {
             setOutputEnable(output: i, enabled: false)
         }
-        setOutputEnable(output: 8, enabled: true)
+        setOutputEnable(output: pdmOutputIndex, enabled: true)
         // Read back to confirm
-        for i in 2...7 {
+        for i in eqWorkerRange {
             fetchOutputEnable(output: i)
         }
-        fetchOutputEnable(output: 8)
+        fetchOutputEnable(output: pdmOutputIndex)
         fetchCore1Mode()
     }
 
-    /// Disable PDM (index 8), then enable the requested output, confirm via read-back.
+    /// Disable PDM, then enable the requested output, confirm via read-back.
     func switchFromPDM(enabling output: Int) {
-        setOutputEnable(output: 8, enabled: false)
+        setOutputEnable(output: pdmOutputIndex, enabled: false)
         setOutputEnable(output: output, enabled: true)
         // Read back to confirm
-        fetchOutputEnable(output: 8)
+        fetchOutputEnable(output: pdmOutputIndex)
         fetchOutputEnable(output: output)
         fetchCore1Mode()
     }
