@@ -94,8 +94,11 @@ extension DSPViewModel {
     }
     
     func setFilter(ch: Int, band: Int, p: FilterParams) {
+        var p = p
+        p.gain = (p.gain * 10).rounded() / 10
+        if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
-        
+
         let data = NSMutableData()
         var ch8 = UInt8(ch); data.append(&ch8, length: 1)
         var b8 = UInt8(band); data.append(&b8, length: 1)
@@ -137,8 +140,9 @@ extension DSPViewModel {
     }
     
     func setDelay(ch: Int, ms: Float) {
-        self.channelDelays[ch] = ms
-        var val = ms
+        var val = ms.rounded()
+        if val == -0.0 { val = 0.0 }
+        self.channelDelays[ch] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
     }
@@ -155,8 +159,9 @@ extension DSPViewModel {
     }
 
     func setPreamp(_ db: Float) {
-        self.preampDB = db
-        var val = db
+        var val = (db * 10).rounded() / 10
+        if val == -0.0 { val = 0.0 }
+        self.preampDB = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
@@ -405,8 +410,9 @@ extension DSPViewModel {
     // MARK: - Per-Output Gain
 
     func setOutputGain(output: Int, db: Float) {
-        outputGainDB[output] = db
-        var val = db
+        var val = (db * 10).rounded() / 10
+        if val == -0.0 { val = 0.0 }
+        outputGainDB[output] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }
@@ -443,8 +449,9 @@ extension DSPViewModel {
     // MARK: - Per-Output Delay
 
     func setOutputDelay(output: Int, ms: Float) {
-        outputDelayMS[output] = ms
-        var val = ms
+        var val = ms.rounded()
+        if val == -0.0 { val = 0.0 }
+        outputDelayMS[output] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
     }
