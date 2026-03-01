@@ -29,6 +29,11 @@ struct FilterParams: Equatable, Identifiable {
     var q: Float = 0.707
     var gain: Float = 0.0
     var active: Bool = true // UI Toggle for graph visibility calculation only
+
+    static func == (lhs: FilterParams, rhs: FilterParams) -> Bool {
+        lhs.type == rhs.type && lhs.freq == rhs.freq &&
+        lhs.q == rhs.q && lhs.gain == rhs.gain && lhs.active == rhs.active
+    }
 }
 
 class DSPMath {

@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Accelerate
 
 // MARK: - Constants
 let REQ_SET_EQ_PARAM: UInt8 = 0x42
@@ -83,6 +84,10 @@ struct SystemStatus {
     var clipFlags: UInt16 = 0      // Sticky bitmask from firmware
     var clipLatched: UInt16 = 0    // App-side latch (OR'd from firmware flags)
     var clipTimestamp: Date? = nil  // When last clip was detected (for auto-clear)
+}
+
+class DSPMeterModel: ObservableObject {
+    @Published var status = SystemStatus()
 }
 
 enum Channel: Int, CaseIterable {
@@ -176,14 +181,15 @@ class DSPViewModel: ObservableObject {
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
 
-    // Platform-aware output layout
+    // Platform-aware output layout (platformName is set once at connection, safe to read from poll queue)
+    var numChannels: Int { platformName == "RP2040" ? 7 : 11 }
     var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
     var pdmOutputIndex: Int { platformName == "RP2040" ? 4 : 8 }
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
     private(set) var isOverviewMode: Bool = true
 
     // Live Data
-    @Published var status = SystemStatus()
+    let meters = DSPMeterModel()
 
     /// Returns true if the matrix output is disabled or muted.
     func isOutputInactive(_ outputIndex: Int) -> Bool {
@@ -192,7 +198,8 @@ class DSPViewModel: ObservableObject {
 
     let usb: USBDevice
     private var cancellables = Set<AnyCancellable>()
-    private var pollTimer: Timer?
+    private var pollTimer: DispatchSourceTimer?
+    private let pollQueue = DispatchQueue(label: "com.foxdac.poll", qos: .userInteractive)
 
     init(usb: USBDevice = AppState.shared.usb) {
         self.usb = usb
@@ -215,6 +222,8 @@ class DSPViewModel: ObservableObject {
             outputNames = saved
         }
 
+        recomputeAllMagnitudes()
+
         // 1. Subscribe to USB connection changes AND Trigger Fetch
         usb.$isConnected
             .receive(on: RunLoop.main)
@@ -222,20 +231,24 @@ class DSPViewModel: ObservableObject {
                 self?.isDeviceConnected = connected
                 if connected {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self?.updateSelection(to: nil)
+                    }
+                    self?.pollQueue.asyncAfter(deadline: .now() + 0.1) {
                         self?.fetchAll()
-                        DispatchQueue.main.async {
-                            self?.updateSelection(to: nil)
-                        }
                     }
                 }
             }
             .store(in: &cancellables)
         
-        // 2. Start Polling Timer (Every 60ms)
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.06, repeats: true) { [weak self] _ in
+        // 2. Start Polling Timer (Every 60ms) on background queue
+        let timer = DispatchSource.makeTimerSource(queue: pollQueue)
+        timer.schedule(deadline: .now(), repeating: 0.06)
+        timer.setEventHandler { [weak self] in
             guard let self = self, self.isDeviceConnected else { return }
             self.fetchStatus()
         }
+        timer.resume()
+        pollTimer = timer
         
         // Initial Connect attempt
         usb.connect()
@@ -268,6 +281,26 @@ class DSPViewModel: ObservableObject {
                 channelVisibility[eqCh] = (eqCh == outputIdx + 2)
             }
         }
+    }
+
+    // MARK: - Magnitude Cache
+    var cachedMagnitudes: [Int: [Double]] = [:]
+
+    func recomputeMagnitudes(for eqChannel: Int) {
+        let filters = channelData[eqChannel] ?? []
+        let isBypassed = bypass && (eqChannel <= 1)
+        var results = [Double]()
+        results.reserveCapacity(201)
+        let logMin = log10(Float(20.0)), logMax = log10(Float(20000.0))
+        for i in 0...200 {
+            let freq = pow(10, logMin + Float(i) / 200.0 * (logMax - logMin))
+            results.append(Double(isBypassed ? 0 : DSPMath.responseAt(freq: freq, filters: filters)))
+        }
+        cachedMagnitudes[eqChannel] = results
+    }
+
+    func recomputeAllMagnitudes() {
+        for eqCh in 0...10 { recomputeMagnitudes(for: eqCh) }
     }
 }
 
@@ -383,8 +416,7 @@ struct MuteableLabel: View {
 struct ChannelRow: View {
     let channel: Channel
     let isSelected: Bool
-    var level: Float = 0
-    var isClipping: Bool = false
+    @ObservedObject var meters: DSPMeterModel
 
     var body: some View {
         HStack(spacing: 0) {
@@ -401,9 +433,9 @@ struct ChannelRow: View {
                 .frame(width: 80, alignment: .leading)
 
             HorizontalMeterBar(
-                level: level,
+                level: meters.status.peaks[channel.rawValue],
                 color: channel.color,
-                isClipping: isClipping
+                isClipping: (meters.status.clipLatched & (1 << UInt16(channel.rawValue))) != 0
             )
             .padding(.horizontal, 4)
 
@@ -427,7 +459,9 @@ struct ChannelRow: View {
 struct OutputRow: View {
     let output: MatrixOutput
     let isSelected: Bool
-    @ObservedObject var vm: DSPViewModel
+    let name: String
+    let isMuted: Bool
+    @ObservedObject var meters: DSPMeterModel
     let isRenaming: Bool
     @Binding var renameText: String
     let onCommitRename: () -> Void
@@ -452,7 +486,7 @@ struct OutputRow: View {
                     .padding(.leading, 8)
                     .frame(width: 80, alignment: .leading)
             } else {
-                Text(vm.outputNames[output.index])
+                Text(name)
                     .font(.body)
                     .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
                     .padding(.leading, 8)
@@ -460,10 +494,10 @@ struct OutputRow: View {
             }
 
             HorizontalMeterBar(
-                level: vm.status.peaks[chIdx],
+                level: meters.status.peaks[chIdx],
                 color: output.color,
-                isMuted: vm.isOutputInactive(output.index),
-                isClipping: (vm.status.clipLatched & (1 << UInt16(chIdx))) != 0
+                isMuted: isMuted,
+                isClipping: (meters.status.clipLatched & (1 << UInt16(chIdx))) != 0
             )
             .padding(.horizontal, 4)
 
@@ -487,6 +521,17 @@ struct OutputRow: View {
                     isFocused = true
                 }
             }
+        }
+    }
+}
+
+struct CpuSection: View {
+    @ObservedObject var meters: DSPMeterModel
+    var body: some View {
+        HStack {
+            CpuMeter(core: 0, load: meters.status.cpu0)
+            Spacer()
+            CpuMeter(core: 1, load: meters.status.cpu1)
         }
     }
 }
@@ -909,39 +954,50 @@ struct DashboardRow: View {
 // MARK: - Graph Animation Support
 struct AnimatableVector: VectorArithmetic {
     var values: [Double]
-    
+
     static var zero = AnimatableVector(values: [])
-    
+
     var magnitudeSquared: Double {
-        values.reduce(0.0) { $0 + $1 * $1 }
+        guard !values.isEmpty else { return 0 }
+        var result: Double = 0
+        vDSP_dotprD(values, 1, values, 1, &result, vDSP_Length(values.count))
+        return result
     }
-    
+
     static func - (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
-        let count = max(lhs.values.count, rhs.values.count)
-        var result = [Double](repeating: 0.0, count: count)
-        for i in 0..<count {
-            let l = i < lhs.values.count ? lhs.values[i] : 0.0
-            let r = i < rhs.values.count ? rhs.values[i] : 0.0
-            result[i] = l - r
+        let lc = lhs.values.count, rc = rhs.values.count
+        let count = max(lc, rc)
+        guard count > 0 else { return .zero }
+        var result = [Double](repeating: 0, count: count)
+        if lc == rc {
+            vDSP_vsubD(rhs.values, 1, lhs.values, 1, &result, 1, vDSP_Length(count))
+        } else {
+            for i in 0..<count {
+                result[i] = (i < lc ? lhs.values[i] : 0) - (i < rc ? rhs.values[i] : 0)
+            }
         }
         return AnimatableVector(values: result)
     }
-    
+
     static func + (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
-        let count = max(lhs.values.count, rhs.values.count)
-        var result = [Double](repeating: 0.0, count: count)
-        for i in 0..<count {
-            let l = i < lhs.values.count ? lhs.values[i] : 0.0
-            let r = i < rhs.values.count ? rhs.values[i] : 0.0
-            result[i] = l + r
+        let lc = lhs.values.count, rc = rhs.values.count
+        let count = max(lc, rc)
+        guard count > 0 else { return .zero }
+        var result = [Double](repeating: 0, count: count)
+        if lc == rc {
+            vDSP_vaddD(lhs.values, 1, rhs.values, 1, &result, 1, vDSP_Length(count))
+        } else {
+            for i in 0..<count {
+                result[i] = (i < lc ? lhs.values[i] : 0) + (i < rc ? rhs.values[i] : 0)
+            }
         }
         return AnimatableVector(values: result)
     }
-    
+
     mutating func scale(by rhs: Double) {
-        for i in 0..<values.count {
-            values[i] *= rhs
-        }
+        guard !values.isEmpty else { return }
+        var scalar = rhs
+        vDSP_vsmulD(values, 1, &scalar, &values, 1, vDSP_Length(values.count))
     }
 }
 
@@ -1005,29 +1061,6 @@ struct BodePlotView: View {
         return height - (CGFloat(normalized) * height)
     }
 
-    // Calculation Helper for Animation
-    func calculateMagnitudes(for eqChannel: Int) -> [Double] {
-        let filters = vm.channelData[eqChannel] ?? []
-        var results: [Double] = []
-        results.reserveCapacity(201)
-
-        for i in 0...200 {
-            let pct = Float(i) / 200.0
-            let logMin = log10(minFreq)
-            let logMax = log10(maxFreq)
-            let freq = pow(10, logMin + pct * (logMax - logMin))
-
-            var mag: Float = 0
-            if (eqChannel == 0 || eqChannel == 1) && vm.bypass {
-                mag = 0
-            } else {
-                mag = DSPMath.responseAt(freq: freq, filters: filters)
-            }
-            results.append(Double(mag))
-        }
-        return results
-    }
-
     // Color for a given EQ channel index
     func colorForEQChannel(_ eqCh: Int) -> Color {
         if eqCh <= 1 {
@@ -1042,7 +1075,7 @@ struct BodePlotView: View {
         var groups: [[Double]: [(eqCh: Int, color: Color)]] = [:]
         for eqCh in 0...10 {
             if vm.channelVisibility[eqCh] == true {
-                let mags = calculateMagnitudes(for: eqCh)
+                let mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
                 let entry = (eqCh: eqCh, color: colorForEQChannel(eqCh))
                 if groups[mags] != nil {
                     groups[mags]!.append(entry)
@@ -1175,6 +1208,8 @@ struct ContentView: View {
     @State private var selection: SidebarSelection = .overview
     @State private var renamingOutput: Int? = nil
     @State private var renameText = ""
+    @State private var localPreamp: Float = 0
+    @State private var isDraggingPreamp = false
 
     private func commitRename() {
         guard let idx = renamingOutput else { return }
@@ -1198,8 +1233,7 @@ struct ContentView: View {
                 Section(header: Text("INPUTS")) {
                     ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
                         ChannelRow(channel: ch, isSelected: selection == .channel(ch),
-                                  level: vm.status.peaks[ch.rawValue],
-                                  isClipping: (vm.status.clipLatched & (1 << UInt16(ch.rawValue))) != 0)
+                                  meters: vm.meters)
                             .onTapGesture {
                                 if renamingOutput != nil { commitRename(); return }
                                 if selection == .channel(ch) {
@@ -1215,7 +1249,10 @@ struct ContentView: View {
 
                 Section(header: Text("OUTPUTS")) {
                     ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                        OutputRow(output: out, isSelected: selection == .output(out.index), vm: vm,
+                        OutputRow(output: out, isSelected: selection == .output(out.index),
+                                  name: vm.outputNames[out.index],
+                                  isMuted: vm.isOutputInactive(out.index),
+                                  meters: vm.meters,
                                   isRenaming: renamingOutput == out.index,
                                   renameText: $renameText,
                                   onCommitRename: { commitRename() })
@@ -1246,12 +1283,22 @@ struct ContentView: View {
                             HStack {
                                 Text("Preamp").font(.caption2).foregroundColor(.secondary)
                                 Spacer()
-                                // Using ValueField for direct Preamp Entry if desired, or keep as display
-                                ValueField(label: "dB", value: vm.preampDB, width: 60) { vm.setPreamp($0) }
+                                ValueField(label: "dB", value: localPreamp, width: 60) {
+                                    localPreamp = $0
+                                    vm.setPreamp($0)
+                                }
                             }
-                            Slider(value: Binding(get: { vm.preampDB }, set: { vm.setPreamp($0) }), in: -60...10)
-                                .controlSize(.small)
-                                .onRightClick { vm.setPreamp(0) }
+                            Slider(value: $localPreamp, in: -60...10) { editing in
+                                isDraggingPreamp = editing
+                                if !editing { vm.setPreamp(localPreamp) }
+                            }
+                            .controlSize(.small)
+                            .onChange(of: localPreamp) { val in
+                                if isDraggingPreamp { vm.sendPreampToDevice(val) }
+                            }
+                            .onAppear { localPreamp = vm.preampDB }
+                            .onChange(of: vm.preampDB) { val in if !isDraggingPreamp { localPreamp = val } }
+                            .onRightClick { localPreamp = 0; vm.setPreamp(0) }
                         }
                         
                         Button(action: { vm.setBypass(!vm.bypass) }) {
@@ -1281,11 +1328,7 @@ struct ContentView: View {
                     Divider()
                     
                     // System Status — CPU load only (meters are inline in sidebar rows)
-                    HStack {
-                        CpuMeter(core: 0, load: vm.status.cpu0)
-                        Spacer()
-                        CpuMeter(core: 1, load: vm.status.cpu1)
-                    }
+                    CpuSection(meters: vm.meters)
                     .padding()
                 }
                 .background(.ultraThinMaterial)
@@ -1363,7 +1406,9 @@ struct ContentView: View {
                                 isMuted: Binding(
                                     get: { vm.outputMuted[idx] },
                                     set: { vm.setOutputMute(output: idx, muted: $0) }
-                                )
+                                ),
+                                onGainDrag: { vm.sendOutputGainToDevice(output: idx, db: $0) },
+                                onDelayDrag: { vm.sendOutputDelayToDevice(output: idx, ms: $0) }
                             )
                             .padding(.horizontal)
 
@@ -1419,6 +1464,13 @@ struct ChannelSettingsView: View {
     @Binding var gainDB: Float
     @Binding var delayMS: Float
     @Binding var isMuted: Bool
+    var onGainDrag: ((Float) -> Void)? = nil
+    var onDelayDrag: ((Float) -> Void)? = nil
+
+    @State private var localGain: Float = 0
+    @State private var localDelay: Float = 0
+    @State private var isDraggingGain = false
+    @State private var isDraggingDelay = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1427,37 +1479,57 @@ struct ChannelSettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("Gain", systemImage: "speaker.wave.2.fill")
                         .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
-                    // Numeric Entry for Gain
-                    ValueField(label: "dB", value: gainDB, width: 60) { gainDB = $0 }
+                    ValueField(label: "dB", value: localGain, width: 60) {
+                        localGain = $0
+                        gainDB = $0
+                    }
                 }
                 .frame(width: 80, alignment: .leading)
 
-                Slider(value: Binding(get: { gainDB }, set: { gainDB = $0 }), in: -60...10)
-                    .onRightClick { gainDB = 0 }
+                Slider(value: $localGain, in: -60...10) { editing in
+                    isDraggingGain = editing
+                    if !editing { gainDB = localGain }
+                }
+                .onChange(of: localGain) { val in
+                    if isDraggingGain { onGainDrag?(val) }
+                }
+                .onAppear { localGain = gainDB }
+                .onChange(of: gainDB) { val in if !isDraggingGain { localGain = val } }
+                .onRightClick { localGain = 0; gainDB = 0 }
             }
             .padding(12)
             .frame(maxWidth: .infinity)
-            
+
             Divider()
-            
+
             // DELAY
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("Delay", systemImage: "clock.arrow.circlepath")
                         .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
-                    // Numeric Entry for Delay
-                    ValueField(label: "ms", value: delayMS, width: 60) { delayMS = $0 }
+                    ValueField(label: "ms", value: localDelay, width: 60) {
+                        localDelay = $0
+                        delayMS = $0
+                    }
                 }
                 .frame(width: 80, alignment: .leading)
 
-                Slider(value: $delayMS, in: 0...170)
-                    .onRightClick { delayMS = 0 }
+                Slider(value: $localDelay, in: 0...170) { editing in
+                    isDraggingDelay = editing
+                    if !editing { delayMS = localDelay }
+                }
+                .onChange(of: localDelay) { val in
+                    if isDraggingDelay { onDelayDrag?(val) }
+                }
+                .onAppear { localDelay = delayMS }
+                .onChange(of: delayMS) { val in if !isDraggingDelay { localDelay = val } }
+                .onRightClick { localDelay = 0; delayMS = 0 }
             }
             .padding(12)
             .frame(maxWidth: .infinity)
-            
+
             Divider()
-            
+
             // MUTE
             Toggle(isOn: $isMuted) {
                 Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
@@ -1696,7 +1768,7 @@ extension DSPViewModel {
         let vm = DSPViewModel(usb: USBDevice())
         vm.isDeviceConnected = true
         vm.preampDB = -3.0
-        vm.status = SystemStatus(peaks: [0.6, 0.55, 0.4, 0.35, 0.25], cpu0: 42, cpu1: 38)
+        vm.meters.status = SystemStatus(peaks: [0.6, 0.55, 0.4, 0.35, 0.25], cpu0: 42, cpu1: 38)
 
         // Add some sample filter data for Master L
         vm.channelData[Channel.masterLeft.rawValue] = [

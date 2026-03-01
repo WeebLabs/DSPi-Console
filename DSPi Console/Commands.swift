@@ -57,6 +57,8 @@ extension DSPViewModel {
         for i in 0..<numPins {
             fetchOutputPin(output: i)
         }
+
+        DispatchQueue.main.async { self.recomputeAllMagnitudes() }
     }
 
     @discardableResult
@@ -75,7 +77,7 @@ extension DSPViewModel {
     }
 
     func fetchStatus() {
-        let numChannels = platformName == "RP2040" ? 7 : 11
+        let numChannels = self.numChannels
         let responseSize = numChannels * 2 + 4  // peaks (2 bytes each) + cpu0 + cpu1 + clip_flags (2 bytes)
 
         guard let data = usb.getControlRequest(
@@ -95,35 +97,60 @@ extension DSPViewModel {
         }
 
         DispatchQueue.main.async {
+            var s = self.meters.status
             var fullPeaks = Array(repeating: Float(0), count: 11)
             for i in 0..<numChannels { fullPeaks[i] = peaks[i] }
-            self.status.peaks = fullPeaks
-            self.status.cpu0 = cpu0
-            self.status.cpu1 = cpu1
-            self.status.clipFlags = clipFlags
+            s.peaks = fullPeaks
+            s.cpu0 = cpu0
+            s.cpu1 = cpu1
+            s.clipFlags = clipFlags
 
             // Only update timestamp when genuinely new clip bits appear
-            let newClips = clipFlags & ~self.status.clipLatched
-            self.status.clipLatched |= clipFlags
+            let newClips = clipFlags & ~s.clipLatched
+            s.clipLatched |= clipFlags
             if newClips != 0 {
-                self.status.clipTimestamp = Date()
+                s.clipTimestamp = Date()
             }
 
             // Auto-clear after 10 seconds of no new clips
-            if let ts = self.status.clipTimestamp,
+            if let ts = s.clipTimestamp,
                Date().timeIntervalSince(ts) > 10.0,
-               self.status.clipLatched != 0 {
-                self.clearClips()
-                self.status.clipLatched = 0
-                self.status.clipTimestamp = nil
+               s.clipLatched != 0 {
+                s.clipLatched = 0
+                s.clipTimestamp = nil
+                DispatchQueue.global(qos: .utility).async { self.clearClips() }
             }
+            self.meters.status = s
         }
     }
 
     func clearClips() {
         _ = usb.getControlRequest(request: REQ_CLEAR_CLIPS, value: 0, index: 0, length: 2)
     }
-    
+
+    // MARK: - USB-only sends (no @Published update, for slider drag)
+
+    func sendPreampToDevice(_ db: Float) {
+        var val = (db * 10).rounded() / 10
+        if val == -0.0 { val = 0.0 }
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+    }
+
+    func sendOutputGainToDevice(output: Int, db: Float) {
+        var val = (db * 10).rounded() / 10
+        if val == -0.0 { val = 0.0 }
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
+    }
+
+    func sendOutputDelayToDevice(output: Int, ms: Float) {
+        var val = ms.rounded()
+        if val == -0.0 { val = 0.0 }
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
+    }
+
     func setFilter(ch: Int, band: Int, p: FilterParams) {
         var p = p
         p.gain = (p.gain * 10).rounded() / 10
@@ -140,6 +167,7 @@ extension DSPViewModel {
         var g32 = p.gain; data.append(&g32, length: 4)
         
         usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
+        recomputeMagnitudes(for: ch)
     }
     
     func fetchFilter(ch: Int, band: Int) {
@@ -218,13 +246,19 @@ extension DSPViewModel {
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         usb.sendControlRequest(request: REQ_SET_BYPASS, value: 0, index: 0, data: data)
+        recomputeMagnitudes(for: 0)
+        recomputeMagnitudes(for: 1)
     }
     
     @discardableResult
     func fetchBypass() -> Bool {
         if let d = usb.getControlRequest(request: REQ_GET_BYPASS, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
-            DispatchQueue.main.async { self.bypass = val }
+            DispatchQueue.main.async {
+                self.bypass = val
+                self.recomputeMagnitudes(for: 0)
+                self.recomputeMagnitudes(for: 1)
+            }
             return true
         } else {
             DispatchQueue.main.async { self.usb.isConnected = false }
@@ -241,6 +275,8 @@ extension DSPViewModel {
                 setFilter(ch: ch, band: b, p: defaultFilter)
             }
         }
+        recomputeMagnitudes(for: 0)
+        recomputeMagnitudes(for: 1)
     }
 
     // MARK: - Loudness Compensation
