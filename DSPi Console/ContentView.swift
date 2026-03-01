@@ -59,6 +59,9 @@ let REQ_GET_OUTPUT_PIN: UInt8      = 0x7D
 let REQ_GET_SERIAL: UInt8          = 0x7E
 let REQ_GET_PLATFORM: UInt8        = 0x7F
 
+// Clip detection request codes
+let REQ_CLEAR_CLIPS: UInt8            = 0x83
+
 // Pin configuration status codes
 let PIN_CONFIG_SUCCESS: UInt8        = 0x00
 let PIN_CONFIG_INVALID_PIN: UInt8    = 0x01
@@ -74,9 +77,12 @@ let FLASH_ERR_CRC: UInt8      = 3
 
 // Data Structure from Firmware
 struct SystemStatus {
-    var peaks: [Float] = [0,0,0,0,0] // 0.0 to 1.0
+    var peaks: [Float] = Array(repeating: 0, count: 11)  // Max 11 channels (RP2350)
     var cpu0: Int = 0
     var cpu1: Int = 0
+    var clipFlags: UInt16 = 0      // Sticky bitmask from firmware
+    var clipLatched: UInt16 = 0    // App-side latch (OR'd from firmware flags)
+    var clipTimestamp: Date? = nil  // When last clip was detected (for auto-clear)
 }
 
 enum Channel: Int, CaseIterable {
@@ -308,21 +314,35 @@ extension View {
 }
 
 struct HorizontalMeterBar: View {
-    var level: Float // 0.0 to 1.0
+    var level: Float        // 0.0 to 1.0
     var color: Color
     var isMuted: Bool = false
+    var isClipping: Bool = false
 
     var body: some View {
         GeometryReader { geo in
+            let w = geo.size.width
+            let clipZoneWidth: CGFloat = 3
+            let meterWidth = w - clipZoneWidth
+
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2).fill(Color.black.opacity(0.3))
-                RoundedRectangle(cornerRadius: 2).fill(color)
-                    // Animation ensures smooth tweening between data points
-                    .frame(width: CGFloat(max(0, min(1, level))) * geo.size.width)
-                    .animation(.easeOut(duration: 0.1), value: level)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.black.opacity(0.3))
+
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(color)
+                    .frame(width: CGFloat(max(0, min(1, level))) * meterWidth)
+                    .animation(.linear(duration: 0.06), value: level)
+
+                if isClipping {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.red)
+                        .frame(width: clipZoneWidth)
+                        .offset(x: meterWidth)
+                }
             }
         }
-        .frame(height: 8)
+        .frame(height: 6)
         .opacity(isMuted ? 0.4 : 1.0)
     }
 }
@@ -347,6 +367,7 @@ struct CpuMeter: View {
 struct MuteableLabel: View {
     let text: String
     let isMuted: Bool
+    var width: CGFloat = 8
     let onToggle: () -> Void
 
     var body: some View {
@@ -357,7 +378,7 @@ struct MuteableLabel: View {
                 .opacity(isMuted ? 0.3 : 1.0)
         }
         .buttonStyle(.plain)
-        .frame(width: 8, alignment: .leading)
+        .frame(width: width, alignment: .leading)
         .help(isMuted ? "Click to unmute" : "Click to mute")
     }
 }
@@ -1256,62 +1277,78 @@ struct ContentView: View {
                         }
                         
                         // Vertical Stack of Horizontal Meters
-                        VStack(alignment: .leading, spacing: 12) {
-                            // Group 1: USB IN
-                            VStack(spacing: 4) {
-                                Text("USB IN").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            // Group 1: Input — always shown
+                            VStack(spacing: 2) {
+                                Text("USB IN")
+                                    .font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                HStack {
-                                    Text("L").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+                                HStack(spacing: 2) {
+                                    Text("L").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary)
                                         .frame(width: 8, alignment: .leading)
-                                        HorizontalMeterBar(level: vm.status.peaks[0], color: Channel.masterLeft.color)
-                                }
-                                HStack {
-                                    Text("R").font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
-                                        .frame(width: 8, alignment: .leading)
-                                        HorizontalMeterBar(level: vm.status.peaks[1], color: Channel.masterRight.color)
-                                }
-                            }
-                            
-                            // Group 2: SPDIF OUT
-                            VStack(spacing: 4) {
-                                Text("SPDIF OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                HStack {
-                                    MuteableLabel(text: "L", isMuted: vm.isOutputInactive(0)) {
-                                        vm.setOutputMute(output: 0, muted: !vm.outputMuted[0])
-                                    }
                                     HorizontalMeterBar(
-                                        level: vm.status.peaks[2],
-                                        color: MatrixOutput.all[0].color,
-                                        isMuted: vm.isOutputInactive(0)
+                                        level: vm.status.peaks[0],
+                                        color: Channel.masterLeft.color,
+                                        isClipping: (vm.status.clipLatched & (1 << 0)) != 0
                                     )
                                 }
-                                HStack {
-                                    MuteableLabel(text: "R", isMuted: vm.isOutputInactive(1)) {
-                                        vm.setOutputMute(output: 1, muted: !vm.outputMuted[1])
-                                    }
+                                HStack(spacing: 2) {
+                                    Text("R").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary)
+                                        .frame(width: 8, alignment: .leading)
                                     HorizontalMeterBar(
-                                        level: vm.status.peaks[3],
-                                        color: MatrixOutput.all[1].color,
-                                        isMuted: vm.isOutputInactive(1)
+                                        level: vm.status.peaks[1],
+                                        color: Channel.masterRight.color,
+                                        isClipping: (vm.status.clipLatched & (1 << 1)) != 0
                                     )
                                 }
                             }
 
-                            // Group 3: SUB
-                            VStack(spacing: 4) {
-                                Text("PDM OUT").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                HStack {
-                                    MuteableLabel(text: "S", isMuted: vm.isOutputInactive(vm.pdmOutputIndex)) {
-                                        vm.setOutputMute(output: vm.pdmOutputIndex, muted: !vm.outputMuted[vm.pdmOutputIndex])
+                            // Group 2: S/PDIF outputs — individual channels, only if enabled
+                            let spdifCount = vm.platformName == "RP2040" ? 4 : 8
+                            let enabledSpdif = (0..<spdifCount).filter { vm.outputEnabled[$0] }
+                            if !enabledSpdif.isEmpty {
+                                VStack(spacing: 2) {
+                                    Text("SPDIF OUT")
+                                        .font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    ForEach(enabledSpdif, id: \.self) { outIdx in
+                                        let chIdx = outIdx + 2
+                                        let pair = (outIdx / 2) + 1
+                                        let side = outIdx % 2 == 0 ? "L" : "R"
+                                        let label = "\(pair)\(side)"
+                                        HStack(spacing: 2) {
+                                            MuteableLabel(text: label, isMuted: vm.isOutputInactive(outIdx), width: 14) {
+                                                vm.setOutputMute(output: outIdx, muted: !vm.outputMuted[outIdx])
+                                            }
+                                            HorizontalMeterBar(
+                                                level: vm.status.peaks[chIdx],
+                                                color: MatrixOutput.all[outIdx].color,
+                                                isMuted: vm.isOutputInactive(outIdx),
+                                                isClipping: (vm.status.clipLatched & (1 << UInt16(chIdx))) != 0
+                                            )
+                                        }
                                     }
-                                    HorizontalMeterBar(
-                                        level: vm.status.peaks[4],
-                                        color: MatrixOutput.pdmColor,
-                                        isMuted: vm.isOutputInactive(vm.pdmOutputIndex)
-                                    )
+                                }
+                            }
+
+                            // Group 3: PDM — only if enabled
+                            if vm.outputEnabled[vm.pdmOutputIndex] {
+                                let pdmChIdx = vm.pdmOutputIndex + 2
+                                VStack(spacing: 2) {
+                                    Text("PDM OUT")
+                                        .font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    HStack(spacing: 2) {
+                                        MuteableLabel(text: "S", isMuted: vm.isOutputInactive(vm.pdmOutputIndex)) {
+                                            vm.setOutputMute(output: vm.pdmOutputIndex, muted: !vm.outputMuted[vm.pdmOutputIndex])
+                                        }
+                                        HorizontalMeterBar(
+                                            level: vm.status.peaks[pdmChIdx],
+                                            color: MatrixOutput.pdmColor,
+                                            isMuted: vm.isOutputInactive(vm.pdmOutputIndex),
+                                            isClipping: (vm.status.clipLatched & (1 << UInt16(pdmChIdx))) != 0
+                                        )
+                                    }
                                 }
                             }
                         }

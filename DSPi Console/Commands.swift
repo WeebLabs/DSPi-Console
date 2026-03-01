@@ -75,22 +75,53 @@ extension DSPViewModel {
     }
 
     func fetchStatus() {
-        // Single request for all peaks + CPU (wValue=9) - ensures synchronized meter readings
-        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 9, index: 0, length: 12) else { return }
+        let numChannels = platformName == "RP2040" ? 7 : 11
+        let responseSize = numChannels * 2 + 4  // peaks (2 bytes each) + cpu0 + cpu1 + clip_flags (2 bytes)
 
-        let peak0 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 0, as: UInt16.self) }) / 65535.0
-        let peak1 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }) / 65535.0
-        let peak2 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self) }) / 65535.0
-        let peak3 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self) }) / 65535.0
-        let peak4 = Float(data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt16.self) }) / 65535.0
-        let cpu0 = Int(data[10])
-        let cpu1 = Int(data[11])
+        guard let data = usb.getControlRequest(
+            request: REQ_GET_STATUS, value: 9, index: 0,
+            length: UInt16(responseSize)
+        ), data.count >= responseSize else { return }
+
+        var peaks = [Float](repeating: 0, count: numChannels)
+        for i in 0..<numChannels {
+            let raw = data.withUnsafeBytes { $0.load(fromByteOffset: i * 2, as: UInt16.self) }
+            peaks[i] = Float(raw) / 32767.0
+        }
+        let cpu0 = Int(data[numChannels * 2])
+        let cpu1 = Int(data[numChannels * 2 + 1])
+        let clipFlags = data.withUnsafeBytes {
+            $0.load(fromByteOffset: numChannels * 2 + 2, as: UInt16.self)
+        }
 
         DispatchQueue.main.async {
-            self.status.peaks = [peak0, peak1, peak2, peak3, peak4]
+            var fullPeaks = Array(repeating: Float(0), count: 11)
+            for i in 0..<numChannels { fullPeaks[i] = peaks[i] }
+            self.status.peaks = fullPeaks
             self.status.cpu0 = cpu0
             self.status.cpu1 = cpu1
+            self.status.clipFlags = clipFlags
+
+            // Only update timestamp when genuinely new clip bits appear
+            let newClips = clipFlags & ~self.status.clipLatched
+            self.status.clipLatched |= clipFlags
+            if newClips != 0 {
+                self.status.clipTimestamp = Date()
+            }
+
+            // Auto-clear after 10 seconds of no new clips
+            if let ts = self.status.clipTimestamp,
+               Date().timeIntervalSince(ts) > 10.0,
+               self.status.clipLatched != 0 {
+                self.clearClips()
+                self.status.clipLatched = 0
+                self.status.clipTimestamp = nil
+            }
         }
+    }
+
+    func clearClips() {
+        _ = usb.getControlRequest(request: REQ_CLEAR_CLIPS, value: 0, index: 0, length: 2)
     }
     
     func setFilter(ch: Int, band: Int, p: FilterParams) {
