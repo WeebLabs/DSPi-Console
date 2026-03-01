@@ -1278,23 +1278,18 @@ struct ContentView: View {
                         
                         // Vertical Stack of Horizontal Meters
                         VStack(alignment: .leading, spacing: 8) {
-                            // Group 1: Input — always shown
+                            // Group 1: Input — always shown, L/R on one row
                             VStack(spacing: 2) {
                                 Text("USB IN")
                                     .font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                HStack(spacing: 2) {
-                                    Text("L").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary)
-                                        .frame(width: 8, alignment: .leading)
+                                HStack(spacing: 6) {
+                                    Spacer().frame(width: 8)
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[0],
                                         color: Channel.masterLeft.color,
                                         isClipping: (vm.status.clipLatched & (1 << 0)) != 0
                                     )
-                                }
-                                HStack(spacing: 2) {
-                                    Text("R").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary)
-                                        .frame(width: 8, alignment: .leading)
                                     HorizontalMeterBar(
                                         level: vm.status.peaks[1],
                                         color: Channel.masterRight.color,
@@ -1303,29 +1298,44 @@ struct ContentView: View {
                                 }
                             }
 
-                            // Group 2: S/PDIF outputs — individual channels, only if enabled
-                            let spdifCount = vm.platformName == "RP2040" ? 4 : 8
-                            let enabledSpdif = (0..<spdifCount).filter { vm.outputEnabled[$0] }
-                            if !enabledSpdif.isEmpty {
+                            // Group 2: S/PDIF outputs — L/R pair per row, click bar to mute
+                            let spdifPairs = vm.platformName == "RP2040" ? 2 : 4
+                            let enabledPairs = (0..<spdifPairs).filter { p in
+                                vm.outputEnabled[p * 2] || vm.outputEnabled[p * 2 + 1]
+                            }
+                            if !enabledPairs.isEmpty {
                                 VStack(spacing: 2) {
                                     Text("SPDIF OUT")
                                         .font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                    ForEach(enabledSpdif, id: \.self) { outIdx in
-                                        let chIdx = outIdx + 2
-                                        let pair = (outIdx / 2) + 1
-                                        let side = outIdx % 2 == 0 ? "L" : "R"
-                                        let label = "\(pair)\(side)"
-                                        HStack(spacing: 2) {
-                                            MuteableLabel(text: label, isMuted: vm.isOutputInactive(outIdx), width: 14) {
-                                                vm.setOutputMute(output: outIdx, muted: !vm.outputMuted[outIdx])
-                                            }
+                                    ForEach(enabledPairs, id: \.self) { pair in
+                                        let lIdx = pair * 2
+                                        let rIdx = pair * 2 + 1
+                                        let lCh = lIdx + 2
+                                        let rCh = rIdx + 2
+                                        HStack(spacing: 6) {
+                                            Text("\(pair + 1)")
+                                                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                                .frame(width: 8)
                                             HorizontalMeterBar(
-                                                level: vm.status.peaks[chIdx],
-                                                color: MatrixOutput.all[outIdx].color,
-                                                isMuted: vm.isOutputInactive(outIdx),
-                                                isClipping: (vm.status.clipLatched & (1 << UInt16(chIdx))) != 0
+                                                level: vm.outputEnabled[lIdx] ? vm.status.peaks[lCh] : 0,
+                                                color: MatrixOutput.all[lIdx].color,
+                                                isMuted: vm.isOutputInactive(lIdx),
+                                                isClipping: vm.outputEnabled[lIdx] && (vm.status.clipLatched & (1 << UInt16(lCh))) != 0
                                             )
+                                            .contentShape(Rectangle())
+                                            .onTapGesture { vm.setOutputMute(output: lIdx, muted: !vm.outputMuted[lIdx]) }
+                                            .help(vm.outputMuted[lIdx] ? "Click to unmute" : "Click to mute")
+                                            HorizontalMeterBar(
+                                                level: vm.outputEnabled[rIdx] ? vm.status.peaks[rCh] : 0,
+                                                color: MatrixOutput.all[rIdx].color,
+                                                isMuted: vm.isOutputInactive(rIdx),
+                                                isClipping: vm.outputEnabled[rIdx] && (vm.status.clipLatched & (1 << UInt16(rCh))) != 0
+                                            )
+                                            .contentShape(Rectangle())
+                                            .onTapGesture { vm.setOutputMute(output: rIdx, muted: !vm.outputMuted[rIdx]) }
+                                            .help(vm.outputMuted[rIdx] ? "Click to unmute" : "Click to mute")
                                         }
                                     }
                                 }
@@ -1338,17 +1348,15 @@ struct ContentView: View {
                                     Text("PDM OUT")
                                         .font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                    HStack(spacing: 2) {
-                                        MuteableLabel(text: "S", isMuted: vm.isOutputInactive(vm.pdmOutputIndex)) {
-                                            vm.setOutputMute(output: vm.pdmOutputIndex, muted: !vm.outputMuted[vm.pdmOutputIndex])
-                                        }
-                                        HorizontalMeterBar(
-                                            level: vm.status.peaks[pdmChIdx],
-                                            color: MatrixOutput.pdmColor,
-                                            isMuted: vm.isOutputInactive(vm.pdmOutputIndex),
-                                            isClipping: (vm.status.clipLatched & (1 << UInt16(pdmChIdx))) != 0
-                                        )
-                                    }
+                                    HorizontalMeterBar(
+                                        level: vm.status.peaks[pdmChIdx],
+                                        color: MatrixOutput.pdmColor,
+                                        isMuted: vm.isOutputInactive(vm.pdmOutputIndex),
+                                        isClipping: (vm.status.clipLatched & (1 << UInt16(pdmChIdx))) != 0
+                                    )
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { vm.setOutputMute(output: vm.pdmOutputIndex, muted: !vm.outputMuted[vm.pdmOutputIndex]) }
+                                    .help(vm.outputMuted[vm.pdmOutputIndex] ? "Click to unmute" : "Click to mute")
                                 }
                             }
                         }
