@@ -1,0 +1,300 @@
+import SwiftUI
+import Accelerate
+
+// MARK: - Graph Animation Support
+
+struct AnimatableVector: VectorArithmetic {
+    var values: [Double]
+
+    static var zero = AnimatableVector(values: [])
+
+    var magnitudeSquared: Double {
+        guard !values.isEmpty else { return 0 }
+        var result: Double = 0
+        vDSP_dotprD(values, 1, values, 1, &result, vDSP_Length(values.count))
+        return result
+    }
+
+    static func - (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
+        let lc = lhs.values.count, rc = rhs.values.count
+        let count = max(lc, rc)
+        guard count > 0 else { return .zero }
+        var result = [Double](repeating: 0, count: count)
+        if lc == rc {
+            vDSP_vsubD(rhs.values, 1, lhs.values, 1, &result, 1, vDSP_Length(count))
+        } else {
+            for i in 0..<count {
+                result[i] = (i < lc ? lhs.values[i] : 0) - (i < rc ? rhs.values[i] : 0)
+            }
+        }
+        return AnimatableVector(values: result)
+    }
+
+    static func + (lhs: AnimatableVector, rhs: AnimatableVector) -> AnimatableVector {
+        let lc = lhs.values.count, rc = rhs.values.count
+        let count = max(lc, rc)
+        guard count > 0 else { return .zero }
+        var result = [Double](repeating: 0, count: count)
+        if lc == rc {
+            vDSP_vaddD(lhs.values, 1, rhs.values, 1, &result, 1, vDSP_Length(count))
+        } else {
+            for i in 0..<count {
+                result[i] = (i < lc ? lhs.values[i] : 0) + (i < rc ? rhs.values[i] : 0)
+            }
+        }
+        return AnimatableVector(values: result)
+    }
+
+    mutating func scale(by rhs: Double) {
+        guard !values.isEmpty else { return }
+        var scalar = rhs
+        vDSP_vsmulD(values, 1, &scalar, &values, 1, vDSP_Length(values.count))
+    }
+}
+
+struct BodeLineShape: Shape {
+    var magnitudes: [Double] // 201 points
+
+    var animatableData: AnimatableVector {
+        get { AnimatableVector(values: magnitudes) }
+        set { magnitudes = newValue.values }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard !magnitudes.isEmpty else { return path }
+
+        let width = rect.width
+        let height = rect.height
+        let dbRange: Float = 20.0
+
+        func yPos(_ db: Float) -> CGFloat {
+            let normalized = (db + dbRange) / (2.0 * dbRange)
+            return height - (CGFloat(normalized) * height)
+        }
+
+        let count = magnitudes.count
+        for i in 0..<count {
+            let pct = CGFloat(i) / CGFloat(count - 1)
+            let x = pct * width
+            let y = yPos(Float(magnitudes[i]))
+
+            if i == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+
+        return path
+    }
+}
+
+// MARK: - Graph View
+
+struct BodePlotView: View {
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
+
+    let minFreq: Float = 20.0
+    let maxFreq: Float = 20000.0
+    let dbRange: Float = 20.0
+
+    // Grid Helper
+    func xPos(_ freq: Float, width: CGFloat) -> CGFloat {
+        let logMin = log10(minFreq)
+        let logMax = log10(maxFreq)
+        let logVal = log10(freq)
+        return CGFloat((logVal - logMin) / (logMax - logMin)) * width
+    }
+
+    func yPos(_ db: Float, height: CGFloat) -> CGFloat {
+        let normalized = (db + dbRange) / (2.0 * dbRange)
+        return height - (CGFloat(normalized) * height)
+    }
+
+    // Color for a given EQ channel index
+    func colorForEQChannel(_ eqCh: Int) -> Color {
+        if eqCh <= 1 {
+            return Channel(rawValue: eqCh)!.color
+        } else {
+            return MatrixOutput.all[eqCh - 2].color
+        }
+    }
+
+    // Group visible channels by identical magnitudes
+    func groupedChannels() -> [[Double]: [(eqCh: Int, color: Color)]] {
+        var groups: [[Double]: [(eqCh: Int, color: Color)]] = [:]
+        for eqCh in 0...10 {
+            if vm.channelVisibility[eqCh] == true {
+                let mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
+                let entry = (eqCh: eqCh, color: colorForEQChannel(eqCh))
+                if groups[mags] != nil {
+                    groups[mags]!.append(entry)
+                } else {
+                    groups[mags] = [entry]
+                }
+            }
+        }
+        return groups
+    }
+
+    var body: some View {
+        let groups = groupedChannels()
+
+        ZStack {
+            // Static Grid
+            Canvas { context, size in
+                let gridPath = Path { path in
+                    for f in [100.0, 1000.0, 10000.0] {
+                        let x = xPos(Float(f), width: size.width)
+                        path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
+                    }
+                    for db in [-10.0, 0.0, 10.0] {
+                        let y = yPos(Float(db), height: size.height)
+                        path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y))
+                    }
+                }
+                context.stroke(gridPath, with: .color(.white.opacity(0.1)))
+
+                let zeroY = yPos(0, height: size.height)
+                var zeroPath = Path(); zeroPath.move(to: CGPoint(x: 0, y: zeroY)); zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
+                context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
+            }
+
+            // Animated Lines - grouped by identical curves
+            ForEach(Array(groups.keys), id: \.self) { mags in
+                let entries = groups[mags] ?? []
+                let lineWidth = settings.graphLineWidth
+                if entries.count == 1 {
+                    // Single channel - solid color
+                    ZStack {
+                        if settings.showGraphGlow {
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(entries[0].color.opacity(0.3), lineWidth: lineWidth * 4)
+                                .blur(radius: 6)
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(entries[0].color.opacity(0.6), lineWidth: lineWidth * 2)
+                                .blur(radius: 3)
+                        }
+                        BodeLineShape(magnitudes: mags)
+                            .stroke(entries[0].color, lineWidth: lineWidth)
+                    }
+                    .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
+                } else {
+                    // Multiple overlapping channels - gradient
+                    let colors = entries.map { $0.color }
+                    let gradient = LinearGradient(
+                        stops: gradientStops(for: colors),
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    ZStack {
+                        if settings.showGraphGlow {
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(gradient, lineWidth: lineWidth * 5)
+                                .blur(radius: 8)
+                                .opacity(0.07)
+                            BodeLineShape(magnitudes: mags)
+                                .stroke(gradient, lineWidth: lineWidth * 2.5)
+                                .blur(radius: 5)
+                                .opacity(0.07)
+                        }
+                        BodeLineShape(magnitudes: mags)
+                            .stroke(gradient, lineWidth: lineWidth * 1.25)
+                    }
+                    .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
+                }
+            }
+        }
+        .background(Color(NSColor.windowBackgroundColor).opacity(0.5))
+        .cornerRadius(8)
+        .clipped()
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+    }
+
+    // Create smooth gradient stops for overlapping channels
+    func gradientStops(for colors: [Color]) -> [Gradient.Stop] {
+        guard !colors.isEmpty else { return [] }
+        guard colors.count > 1 else {
+            return [.init(color: colors[0], location: 0.0),
+                    .init(color: colors[0], location: 1.0)]
+        }
+
+        var stops: [Gradient.Stop] = []
+        let count = colors.count
+        let transitionWidth: Double = count == 2 ? 0.4 : (count == 3 ? 0.25 : 0.15)
+        let segmentWidth = 1.0 / Double(count)
+
+        for (index, color) in colors.enumerated() {
+            let segmentCenter = (Double(index) + 0.5) * segmentWidth
+            let solidStart = segmentCenter - (segmentWidth - transitionWidth) / 2
+            let solidEnd = segmentCenter + (segmentWidth - transitionWidth) / 2
+            let clampedStart = max(0.0, solidStart)
+            let clampedEnd = min(1.0, solidEnd)
+
+            if index == 0 {
+                stops.append(.init(color: color, location: 0.0))
+            }
+            stops.append(.init(color: color, location: clampedStart))
+            stops.append(.init(color: color, location: clampedEnd))
+            if index == count - 1 {
+                stops.append(.init(color: color, location: 1.0))
+            }
+        }
+
+        return stops.sorted { $0.location < $1.location }
+    }
+}
+
+// MARK: - Graph Legend
+
+struct GraphLegend: View {
+    @ObservedObject var vm: DSPViewModel
+
+    private func legendPill(eqCh: Int, name: String, color: Color) -> some View {
+        let isVisible = vm.channelVisibility[eqCh] ?? true
+        return Button(action: {
+            withAnimation(.easeInOut(duration: 0.1)) {
+                vm.channelVisibility[eqCh] = !isVisible
+            }
+        }) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(isVisible ? color : Color.gray.opacity(0.5))
+                    .frame(width: 6, height: 6)
+                Text(name)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(isVisible ? .primary : .secondary)
+                    .frame(minWidth: 30)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(isVisible ? color.opacity(0.15) : Color.gray.opacity(0.1))
+            )
+            .overlay(
+                Capsule().stroke(
+                    isVisible ? color.opacity(0.5) : Color.clear,
+                    lineWidth: 1
+                )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Master L/R (always shown)
+            legendPill(eqCh: Channel.masterLeft.rawValue, name: Channel.masterLeft.descriptor, color: Channel.masterLeft.color)
+            legendPill(eqCh: Channel.masterRight.rawValue, name: Channel.masterRight.descriptor, color: Channel.masterRight.color)
+
+            // Enabled outputs (dynamic)
+            ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                legendPill(eqCh: out.index + 2, name: out.descriptor, color: out.color)
+            }
+        }
+        .padding(.vertical, 6)
+    }
+}
