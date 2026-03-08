@@ -481,7 +481,7 @@ struct CompactDelayField: View {
             .background(
                 ScrollWheelHandler { delta in
                     if !isFocused {
-                        delay = max(0, min(170, delay + delta * 5))
+                        delay = max(0, min(85, delay + delta * 5))
                     }
                 }
             )
@@ -502,7 +502,7 @@ struct CompactDelayField: View {
             .replacingOccurrences(of: "ms", with: "")
             .trimmingCharacters(in: .whitespaces)
         if let value = Float(cleaned) {
-            delay = max(0, min(170, value))
+            delay = max(0, min(85, value))
         }
         updateDisplay()
     }

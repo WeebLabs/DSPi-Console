@@ -32,6 +32,14 @@ class DSPViewModel: ObservableObject {
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
+    // Preset state
+    @Published var presetOccupied: UInt16 = 0
+    @Published var presetNames: [String] = Array(repeating: "", count: 10)
+    @Published var activePresetSlot: Int = 0      // 0-9, always valid
+    @Published var presetStartupMode: Int = 0     // 0 = specified default, 1 = last active
+    @Published var presetDefaultSlot: Int = 0
+    @Published var presetIncludePins: Bool = false
+
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
 
@@ -49,6 +57,8 @@ class DSPViewModel: ObservableObject {
     func isOutputInactive(_ outputIndex: Int) -> Bool {
         !outputEnabled[outputIndex] || outputMuted[outputIndex]
     }
+
+    func isPresetOccupied(_ slot: Int) -> Bool { presetOccupied & (1 << slot) != 0 }
 
     let usb: USBDevice
     private var cancellables = Set<AnyCancellable>()

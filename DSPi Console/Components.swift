@@ -292,7 +292,7 @@ struct ChannelSettingsView: View {
                 }
                 .frame(width: 80, alignment: .leading)
 
-                Slider(value: $localDelay, in: 0...170) { editing in
+                Slider(value: $localDelay, in: 0...85) { editing in
                     isDraggingDelay = editing
                     if !editing { delayMS = localDelay }
                 }

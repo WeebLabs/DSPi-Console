@@ -70,6 +70,31 @@ let PIN_CONFIG_PIN_IN_USE: UInt8     = 0x02
 let PIN_CONFIG_INVALID_OUTPUT: UInt8 = 0x03
 let PIN_CONFIG_OUTPUT_ACTIVE: UInt8  = 0x04
 
+// Preset request codes (0x90-0x9A)
+let REQ_PRESET_SAVE: UInt8              = 0x90
+let REQ_PRESET_LOAD: UInt8              = 0x91
+let REQ_PRESET_DELETE: UInt8            = 0x92
+let REQ_PRESET_GET_NAME: UInt8          = 0x93
+let REQ_PRESET_SET_NAME: UInt8          = 0x94
+let REQ_PRESET_GET_DIR: UInt8           = 0x95
+let REQ_PRESET_SET_STARTUP: UInt8       = 0x96
+let REQ_PRESET_GET_STARTUP: UInt8       = 0x97
+let REQ_PRESET_SET_INCLUDE_PINS: UInt8  = 0x98
+let REQ_PRESET_GET_INCLUDE_PINS: UInt8  = 0x99
+let REQ_PRESET_GET_ACTIVE: UInt8        = 0x9A
+
+// Bulk parameter transfer request codes
+let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
+let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
+let BULK_PARAMS_SIZE: UInt16            = 2480
+
+// Preset status codes
+let PRESET_OK: UInt8                    = 0x00
+let PRESET_ERR_INVALID_SLOT: UInt8      = 0x01
+let PRESET_ERR_SLOT_EMPTY: UInt8        = 0x02  // reserved
+let PRESET_ERR_CRC: UInt8               = 0x03
+let PRESET_ERR_FLASH_WRITE: UInt8       = 0x04
+
 // Flash result codes
 let FLASH_OK: UInt8           = 0
 let FLASH_ERR_WRITE: UInt8    = 1

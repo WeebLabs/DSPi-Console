@@ -7,58 +7,16 @@ extension DSPViewModel {
     // --- USB Commands ---
 
     func fetchAll() {
-        guard fetchPreamp() else { return }
-
-        // Determine platform first to set correct output/pin counts
-        let platform = fetchPlatform() ?? "RP2350"
-        let numOutputs = platform == "RP2040" ? 5 : 9
-        let numPins = platform == "RP2040" ? 3 : 5
-
-        fetchBypass()
-        fetchLoudness()
-        fetchLoudnessRef()
-        fetchLoudnessIntensity()
-        fetchCrossfeed()
-        fetchCrossfeedPreset()
-        fetchCrossfeedFreq()
-        fetchCrossfeedFeed()
-        fetchCrossfeedITD()
-
-        // Fetch master EQ (channels 0, 1)
-        for ch in [Channel.masterLeft, Channel.masterRight] {
-            for b in 0..<10 {
-                fetchFilter(ch: ch.rawValue, band: b)
-            }
-        }
-
-        // Fetch output EQ (channels 2+)
-        for outputIdx in 0..<numOutputs {
-            for b in 0..<10 {
-                fetchFilter(ch: outputIdx + 2, band: b)
-            }
-        }
-
-        // Fetch matrix mixer state
-        for input in 0..<2 {
-            for output in 0..<numOutputs {
-                fetchMatrixRoute(input: input, output: output)
-            }
-        }
-        for output in 0..<numOutputs {
-            fetchOutputEnable(output: output)
-            fetchOutputGainDB(output: output)
-            fetchOutputMute(output: output)
-            fetchOutputDelay(output: output)
-        }
+        guard fetchAllParams() else { return }
 
         fetchCore1Mode()
 
-        // Fetch pin configuration
-        for i in 0..<numPins {
-            fetchOutputPin(output: i)
+        // Fetch preset state
+        fetchPresetDirectory()
+        for slot in 0..<10 {
+            fetchPresetName(slot: slot)
         }
-
-        DispatchQueue.main.async { self.recomputeAllMagnitudes() }
+        fetchPresetActive()
     }
 
     @discardableResult
@@ -600,6 +558,259 @@ extension DSPViewModel {
             return status
         }
         return 0xFF
+    }
+
+    // MARK: - Bulk Parameter Transfer
+
+    /// Fetches all DSP parameters in a single 2480-byte USB transfer.
+    /// Parses the WireBulkParams structure and updates all published properties.
+    /// Returns true if successful, false if the device is not connected.
+    @discardableResult
+    func fetchAllParams() -> Bool {
+        guard let data = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+              data.count >= Int(BULK_PARAMS_SIZE) else {
+            DispatchQueue.main.async { self.usb.isConnected = false }
+            return false
+        }
+
+        // --- Header (offset 0, 16 bytes) ---
+        let platformId = data[1]
+        let numCh = Int(data[2])
+        let numOutCh = Int(data[3])
+        let platform = platformId == 1 ? "RP2350" : "RP2040"
+
+        // --- Global (offset 16, 16 bytes) ---
+        let preamp: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 16, as: Float.self) }
+        let bypassVal = data[20] != 0
+        let loudnessEn = data[21] != 0
+        let loudnessRef: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 24, as: Float.self) }
+        let loudnessInt: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 28, as: Float.self) }
+
+        // --- Crossfeed (offset 32, 16 bytes) ---
+        let cfEnabled = data[32] != 0
+        let cfPreset = Int(data[33])
+        let cfITD = data[34] != 0
+        let cfFreq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 36, as: Float.self) }
+        let cfFeed: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 40, as: Float.self) }
+
+        // --- Delays (offset 64, 44 bytes) ---
+        var delays = [Int: Float]()
+        for i in 0..<numCh {
+            delays[i] = data.withUnsafeBytes { $0.load(fromByteOffset: 64 + i * 4, as: Float.self) }
+        }
+
+        // --- Matrix crosspoints (offset 108, 144 bytes = 2 inputs × 9 outputs × 8 bytes) ---
+        var routing = Array(repeating: Array(repeating: false, count: 9), count: 2)
+        var mxGain = Array(repeating: Array(repeating: Float(0.0), count: 9), count: 2)
+        var mxInvert = Array(repeating: Array(repeating: false, count: 9), count: 2)
+        for input in 0..<2 {
+            for output in 0..<numOutCh {
+                let base = 108 + (input * 9 + output) * 8
+                routing[input][output] = data[base] != 0
+                mxInvert[input][output] = data[base + 1] != 0
+                mxGain[input][output] = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
+            }
+        }
+
+        // --- Matrix outputs (offset 252, 108 bytes = 9 outputs × 12 bytes) ---
+        var outEnabled = Array(repeating: false, count: 9)
+        var outMuted = Array(repeating: false, count: 9)
+        var outGain = Array(repeating: Float(0.0), count: 9)
+        var outDelay = Array(repeating: Float(0.0), count: 9)
+        for output in 0..<numOutCh {
+            let base = 252 + output * 12
+            outEnabled[output] = data[base] != 0
+            outMuted[output] = data[base + 1] != 0
+            outGain[output] = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
+            outDelay[output] = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
+        }
+
+        // --- Pin config (offset 360, 8 bytes) ---
+        let numPins = min(Int(data[360]), 5)
+        var pins: [UInt8] = [6, 7, 8, 9, 10]  // defaults
+        for i in 0..<numPins {
+            pins[i] = data[361 + i]
+        }
+
+        // --- EQ bands (offset 368, 2112 bytes = 11 channels × 12 bands × 16 bytes) ---
+        let bandsInFirmware = 12
+        let bandsInApp = 10
+        var channelFilters = [Int: [FilterParams]]()
+        for ch in 0..<numCh {
+            var bands = [FilterParams]()
+            bands.reserveCapacity(bandsInApp)
+            for band in 0..<bandsInApp {
+                let base = 368 + (ch * bandsInFirmware + band) * 16
+                let type: UInt32 = data.withUnsafeBytes { $0.load(fromByteOffset: base, as: UInt32.self) }
+                let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
+                let q: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
+                let gain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 12, as: Float.self) }
+                bands.append(FilterParams(
+                    type: FilterType(rawValue: Int(type)) ?? .flat,
+                    freq: freq,
+                    q: q,
+                    gain: gain
+                ))
+            }
+            channelFilters[ch] = bands
+        }
+
+        // --- Apply all parsed values on main thread ---
+        DispatchQueue.main.async {
+            self.platformName = platform
+            if platform == "RP2040" && self.outputNames[4] == "SPDIF 3 L" {
+                self.outputNames[4] = "PDM"
+            }
+
+            self.preampDB = preamp
+            self.bypass = bypassVal
+            self.loudnessEnabled = loudnessEn
+            self.loudnessRefSPL = loudnessRef
+            self.loudnessIntensity = loudnessInt
+
+            self.crossfeedEnabled = cfEnabled
+            self.crossfeedPreset = cfPreset
+            self.crossfeedITD = cfITD
+            self.crossfeedFreq = cfFreq
+            self.crossfeedFeed = cfFeed
+
+            self.channelDelays = delays
+
+            self.matrixRouting = routing
+            self.matrixGain = mxGain
+            self.matrixInvert = mxInvert
+
+            self.outputEnabled = outEnabled
+            self.outputMuted = outMuted
+            self.outputGainDB = outGain
+            self.outputDelayMS = outDelay
+
+            self.outputPins = pins
+
+            self.channelData = channelFilters
+
+            self.recomputeAllMagnitudes()
+        }
+
+        return true
+    }
+
+    // MARK: - Preset Commands
+
+    @discardableResult
+    func fetchPresetDirectory() -> UInt16 {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 6),
+              data.count >= 6 else { return 0 }
+        let occupied = data.withUnsafeBytes { $0.load(as: UInt16.self) }
+        let startupMode = Int(data[2])
+        let defaultSlot = Int(data[3])
+        let lastActive = data[4]
+        let includePins = data[5] != 0
+        DispatchQueue.main.async {
+            self.presetOccupied = occupied
+            self.presetStartupMode = startupMode
+            self.presetDefaultSlot = defaultSlot
+            self.activePresetSlot = Int(lastActive)
+            self.presetIncludePins = includePins
+        }
+        return occupied
+    }
+
+    func fetchPresetName(slot: Int) {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_NAME, value: UInt16(slot), index: 2, length: 32) else { return }
+        let name: String
+        if let nulIndex = data.firstIndex(of: 0) {
+            name = String(data: data[0..<nulIndex], encoding: .ascii) ?? ""
+        } else {
+            name = String(data: data, encoding: .ascii) ?? ""
+        }
+        DispatchQueue.main.async {
+            self.presetNames[slot] = name
+        }
+    }
+
+    func fetchPresetActive() {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_ACTIVE, value: 0, index: 2, length: 1) else { return }
+        DispatchQueue.main.async {
+            self.activePresetSlot = Int(data[0])
+        }
+    }
+
+    @discardableResult
+    func savePreset(slot: Int) -> UInt8 {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_SAVE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
+        let status = data[0]
+        if status == PRESET_OK {
+            DispatchQueue.main.async {
+                self.activePresetSlot = slot
+                self.presetOccupied |= UInt16(1 << slot)
+            }
+        }
+        return status
+    }
+
+    @discardableResult
+    func loadPreset(slot: Int) -> UInt8 {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
+        let status = data[0]
+        if status == PRESET_OK {
+            DispatchQueue.main.async {
+                self.activePresetSlot = slot
+            }
+            // Wait for mute period then re-sync DSP parameters
+            Thread.sleep(forTimeInterval: 0.01)
+            fetchAllParams()
+        }
+        return status
+    }
+
+    @discardableResult
+    func deletePreset(slot: Int) -> UInt8 {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_DELETE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
+        let status = data[0]
+        if status == PRESET_OK {
+            DispatchQueue.main.async {
+                self.presetOccupied &= ~UInt16(1 << slot)
+            }
+        }
+        return status
+    }
+
+    func setPresetName(slot: Int, name: String) {
+        var nameData = Data(name.prefix(31).utf8)
+        nameData.append(0) // NUL terminator
+        usb.sendControlRequest(request: REQ_PRESET_SET_NAME, value: UInt16(slot), index: 2, data: nameData)
+        DispatchQueue.main.async {
+            self.presetNames[slot] = String(name.prefix(31))
+        }
+    }
+
+    func setPresetStartup(mode: Int, defaultSlot: Int) {
+        let data = Data([UInt8(mode), UInt8(defaultSlot)])
+        usb.sendControlRequest(request: REQ_PRESET_SET_STARTUP, value: 0, index: 2, data: data)
+    }
+
+    func fetchPresetStartup() {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_STARTUP, value: 0, index: 2, length: 3),
+              data.count >= 3 else { return }
+        DispatchQueue.main.async {
+            self.presetStartupMode = Int(data[0])
+            self.presetDefaultSlot = Int(data[1])
+            self.activePresetSlot = Int(data[2])
+        }
+    }
+
+    func setPresetIncludePins(_ include: Bool) {
+        let data = Data([include ? 1 : 0])
+        usb.sendControlRequest(request: REQ_PRESET_SET_INCLUDE_PINS, value: 0, index: 2, data: data)
+    }
+
+    func fetchPresetIncludePins() {
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_INCLUDE_PINS, value: 0, index: 2, length: 1) else { return }
+        let val = data[0] != 0
+        DispatchQueue.main.async {
+            self.presetIncludePins = val
+        }
     }
 
     // MARK: - Flash Storage Commands

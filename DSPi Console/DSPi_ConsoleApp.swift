@@ -76,6 +76,14 @@ struct SettingsView: View {
 }
 
 struct GeneralSettingsTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+
+    private func slotLabel(_ slot: Int) -> String {
+        let display = slot + 1
+        let name = vm.presetNames[slot].isEmpty ? "Empty" : vm.presetNames[slot]
+        return "\(display): \(name)"
+    }
+
     var body: some View {
         Form {
             Section {
@@ -105,12 +113,48 @@ struct GeneralSettingsTab: View {
                         }
                         Spacer()
                         Button("Reset") {
-                            let vm = AppState.shared.viewModel
                             vm.outputNames = MatrixOutput.visible(for: vm.platformName).map { $0.name }
                         }
                     }
                 }
                 .padding(.vertical, 8)
+            }
+
+            Section {
+                Picker("Mode", selection: Binding(
+                    get: { vm.presetStartupMode },
+                    set: { mode in
+                        vm.presetStartupMode = mode
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.setPresetStartup(mode: mode, defaultSlot: vm.presetDefaultSlot)
+                        }
+                    }
+                )) {
+                    Text("Specified Default").tag(0)
+                    Text("Last Used").tag(1)
+                }
+
+                if vm.presetStartupMode == 0 {
+                    Picker("Default Preset", selection: Binding(
+                        get: { vm.presetDefaultSlot },
+                        set: { slot in
+                            vm.presetDefaultSlot = slot
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                vm.setPresetStartup(mode: vm.presetStartupMode, defaultSlot: slot)
+                            }
+                        }
+                    )) {
+                        ForEach(0..<10, id: \.self) { slot in
+                            Text(slotLabel(slot)).tag(slot)
+                        }
+                    }
+                }
+
+                Text("Choose which preset loads when the device powers on.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } header: {
+                Label("Startup Preset", systemImage: "power")
             }
         }
         .formStyle(.grouped)
@@ -408,6 +452,27 @@ struct HardwareSettingsTab: View {
                     .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
                     .disabled(!vm.isDeviceConnected)
                 }
+            }
+
+            Section {
+                Toggle(isOn: Binding(
+                    get: { vm.presetIncludePins },
+                    set: { val in
+                        vm.presetIncludePins = val
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.setPresetIncludePins(val)
+                        }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Include Pin Configuration")
+                        Text("Restore GPIO pin assignments when loading a preset")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+            } header: {
+                Label("Presets", systemImage: "square.stack.3d.up")
             }
         }
         .formStyle(.grouped)

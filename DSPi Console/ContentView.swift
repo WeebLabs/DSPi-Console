@@ -17,6 +17,9 @@ struct ContentView: View {
     @State private var renameText = ""
     @State private var localPreamp: Float = 0
     @State private var isDraggingPreamp = false
+    @State private var showPresetRename = false
+    @State private var presetRenameSlot = 0
+    @State private var presetRenameText = ""
 
     private func commitRename() {
         guard let idx = renamingOutput else { return }
@@ -31,6 +34,84 @@ struct ContentView: View {
         if renamingOutput != nil { commitRename() }
         renameText = vm.outputNames[index]
         renamingOutput = index
+    }
+
+    private func presetLabel(_ slot: Int) -> String {
+        let display = slot + 1
+        let name = vm.presetNames[slot].isEmpty ? "Empty" : vm.presetNames[slot]
+        return "\(display): \(name)"
+    }
+
+    private func saveActivePreset(vm: DSPViewModel) {
+        let slot = vm.activePresetSlot
+        DispatchQueue.global(qos: .userInitiated).async {
+            if vm.presetNames[slot].isEmpty {
+                vm.setPresetName(slot: slot, name: "Preset \(slot + 1)")
+            }
+            let status = vm.savePreset(slot: slot)
+            if status != PRESET_OK {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Save Failed"
+                    alert.informativeText = "Failed to save preset (error \(status))."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
+    private func showPresetClearConfirmation(vm: DSPViewModel, slot: Int) {
+        let alert = NSAlert()
+        alert.messageText = "Clear Preset?"
+        alert.informativeText = "Clear \"\(presetLabel(slot))\" and restore factory defaults? This cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.deletePreset(slot: slot)
+            if status == PRESET_OK {
+                vm.setPresetName(slot: slot, name: "")
+                // If we cleared the active slot, reload it to apply factory defaults
+                if vm.activePresetSlot == slot {
+                    _ = vm.loadPreset(slot: slot)
+                }
+            }
+            DispatchQueue.main.async {
+                if status != PRESET_OK {
+                    let errAlert = NSAlert()
+                    errAlert.messageText = "Clear Failed"
+                    errAlert.informativeText = "Failed to clear preset (error \(status))."
+                    errAlert.alertStyle = .warning
+                    errAlert.addButton(withTitle: "OK")
+                    errAlert.runModal()
+                }
+            }
+        }
+    }
+
+    private func showPresetClearAllConfirmation(vm: DSPViewModel) {
+        let alert = NSAlert()
+        alert.messageText = "Clear All Presets?"
+        alert.informativeText = "This will erase all preset data and names, restoring every slot to factory defaults. This cannot be undone."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Clear All")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            for slot in 0..<10 where vm.isPresetOccupied(slot) {
+                vm.deletePreset(slot: slot)
+                vm.setPresetName(slot: slot, name: "")
+            }
+            // Reload active slot to apply factory defaults
+            _ = vm.loadPreset(slot: vm.activePresetSlot)
+        }
     }
 
     var body: some View {
@@ -85,6 +166,63 @@ struct ContentView: View {
                     // Global Controls
                     VStack(alignment: .leading, spacing: 12) {
                         Text("GLOBAL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+
+                        // Preset Picker
+                        VStack(spacing: 6) {
+                            HStack {
+                                Text("Preset").font(.caption2).foregroundColor(.secondary)
+                                Spacer()
+                                Picker("", selection: Binding(
+                                    get: { vm.activePresetSlot },
+                                    set: { slot in
+                                        guard slot != vm.activePresetSlot else { return }
+                                        DispatchQueue.global(qos: .userInitiated).async {
+                                            let status = vm.loadPreset(slot: slot)
+                                            if status != PRESET_OK {
+                                                DispatchQueue.main.async {
+                                                    let alert = NSAlert()
+                                                    alert.messageText = "Load Failed"
+                                                    alert.informativeText = status == PRESET_ERR_CRC
+                                                        ? "Preset data is corrupted."
+                                                        : "Failed to load preset (error \(status))."
+                                                    alert.alertStyle = .warning
+                                                    alert.addButton(withTitle: "OK")
+                                                    alert.runModal()
+                                                }
+                                            }
+                                        }
+                                    }
+                                )) {
+                                    ForEach(0..<10, id: \.self) { slot in
+                                        Text(presetLabel(slot)).tag(slot)
+                                    }
+                                }
+                                .pickerStyle(.automatic)
+                                .labelsHidden()
+                                .disabled(!vm.isDeviceConnected)
+                            }
+                        }
+                        .contextMenu {
+                            Button("Save") {
+                                saveActivePreset(vm: vm)
+                            }
+                            Button("Rename \"\(presetLabel(vm.activePresetSlot))\"...") {
+                                presetRenameSlot = vm.activePresetSlot
+                                presetRenameText = vm.presetNames[vm.activePresetSlot]
+                                showPresetRename = true
+                            }
+                            if vm.isPresetOccupied(vm.activePresetSlot) {
+                                Button("Clear \"\(presetLabel(vm.activePresetSlot))\"...", role: .destructive) {
+                                    showPresetClearConfirmation(vm: vm, slot: vm.activePresetSlot)
+                                }
+                            }
+                            if vm.presetOccupied != 0 {
+                                Divider()
+                                Button("Clear All Slots...", role: .destructive) {
+                                    showPresetClearAllConfirmation(vm: vm)
+                                }
+                            }
+                        }
 
                         VStack(spacing: 4) {
                             HStack {
@@ -251,6 +389,28 @@ struct ContentView: View {
                 selection = .overview
                 vm.updateSelection(to: nil)
             }
+        }
+        .sheet(isPresented: $showPresetRename) {
+            VStack(spacing: 16) {
+                Text("Rename Preset").font(.headline)
+                TextField("Name", text: $presetRenameText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 200)
+                HStack {
+                    Button("Cancel") { showPresetRename = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Rename") {
+                        let name = presetRenameText.trimmingCharacters(in: .whitespaces)
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.setPresetName(slot: presetRenameSlot, name: name)
+                        }
+                        showPresetRename = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding()
+            .frame(width: 280)
         }
         .onAppear {
             DispatchQueue.main.async {
