@@ -42,6 +42,10 @@ struct ContentView: View {
         return "\(display): \(name)"
     }
 
+    private func presetDropdownLabel(_ slot: Int) -> String {
+        vm.presetNames[slot].isEmpty ? "Empty" : vm.presetNames[slot]
+    }
+
     private func saveActivePreset(vm: DSPViewModel) {
         let slot = vm.activePresetSlot
         DispatchQueue.global(qos: .userInitiated).async {
@@ -168,11 +172,13 @@ struct ContentView: View {
                         Text("GLOBAL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
 
                         // Preset Picker
-                        VStack(spacing: 6) {
-                            HStack {
-                                Text("Preset").font(.caption2).foregroundColor(.secondary)
-                                Spacer()
-                                Picker("", selection: Binding(
+                        HStack {
+                            Text("Preset").font(.caption2).foregroundColor(.secondary)
+                            Spacer()
+                            BorderlessPopUpButton(
+                                items: Array(0..<10),
+                                titleForItem: { presetDropdownLabel($0) },
+                                selection: Binding(
                                     get: { vm.activePresetSlot },
                                     set: { slot in
                                         guard slot != vm.activePresetSlot else { return }
@@ -192,33 +198,35 @@ struct ContentView: View {
                                             }
                                         }
                                     }
-                                )) {
-                                    ForEach(0..<10, id: \.self) { slot in
-                                        Text(presetLabel(slot)).tag(slot)
-                                    }
-                                }
-                                .pickerStyle(.automatic)
-                                .labelsHidden()
-                                .disabled(!vm.isDeviceConnected)
+                                )
+                            )
+                            .overlay(alignment: .trailing) {
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.trailing, 4)
+                                    .allowsHitTesting(false)
                             }
+                            .fixedSize()
+                            .opacity(vm.isDeviceConnected ? 1.0 : 0.4)
+                            .allowsHitTesting(vm.isDeviceConnected)
                         }
                         .contextMenu {
-                            Button("Save") {
-                                saveActivePreset(vm: vm)
-                            }
-                            Button("Rename \"\(presetLabel(vm.activePresetSlot))\"...") {
+                            Button("Save") { saveActivePreset(vm: vm) }
+                            Button("Rename…") {
                                 presetRenameSlot = vm.activePresetSlot
                                 presetRenameText = vm.presetNames[vm.activePresetSlot]
                                 showPresetRename = true
                             }
                             if vm.isPresetOccupied(vm.activePresetSlot) {
-                                Button("Clear \"\(presetLabel(vm.activePresetSlot))\"...", role: .destructive) {
+                                Divider()
+                                Button("Clear \"\(presetLabel(vm.activePresetSlot))\"…", role: .destructive) {
                                     showPresetClearConfirmation(vm: vm, slot: vm.activePresetSlot)
                                 }
                             }
                             if vm.presetOccupied != 0 {
                                 Divider()
-                                Button("Clear All Slots...", role: .destructive) {
+                                Button("Clear All Slots…", role: .destructive) {
                                     showPresetClearAllConfirmation(vm: vm)
                                 }
                             }

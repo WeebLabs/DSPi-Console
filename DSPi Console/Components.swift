@@ -375,15 +375,35 @@ struct FilterListView: View {
 
 // MARK: - NSViewRepresentable Components
 
+private class PaddedPopUpButtonCell: NSPopUpButtonCell {
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        super.drawTitle(title, withFrame: frame.offsetBy(dx: 0, dy: 1), in: controlView)
+    }
+}
+
+private class PaddedPopUpButton: NSPopUpButton {
+    var trailingPadding: CGFloat = 14
+    override class var cellClass: AnyClass? {
+        get { PaddedPopUpButtonCell.self }
+        set {}
+    }
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        size.width += trailingPadding
+        return size
+    }
+}
+
 struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
     let items: [T]
     let titleForItem: (T) -> String
     @Binding var selection: T
 
     func makeNSView(context: Context) -> NSPopUpButton {
-        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        let button = PaddedPopUpButton(frame: .zero, pullsDown: false)
         button.isBordered = true
         button.showsBorderOnlyWhileMouseInside = true
+        (button.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
         button.target = context.coordinator
         button.action = #selector(Coordinator.selectionChanged(_:))
         return button
@@ -393,12 +413,14 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
         // Update coordinator's reference to current parent (fixes stale binding issue)
         context.coordinator.parent = self
 
-        button.removeAllItems()
-        for item in items {
-            button.addItem(withTitle: titleForItem(item))
+        button.menu?.removeAllItems()
+        for (index, item) in items.enumerated() {
+            let menuItem = NSMenuItem(title: titleForItem(item), action: nil, keyEquivalent: "")
+            menuItem.tag = index
+            button.menu?.addItem(menuItem)
         }
         if let index = items.firstIndex(of: selection) {
-            button.selectItem(at: index)
+            button.selectItem(withTag: index)
         }
     }
 
