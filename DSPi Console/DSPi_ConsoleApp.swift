@@ -27,6 +27,16 @@ class AppSettings: ObservableObject {
     @AppStorage("graphLineWidth") var graphLineWidth: Double = 2.0
     @AppStorage("graphAnimationSpeed") var graphAnimationSpeed: Double = 0.2
 
+    // Scale & Labels
+    @AppStorage("showFrequencyLabels") var showFrequencyLabels: Bool = true
+    @AppStorage("showDBLabels") var showDBLabels: Bool = true
+    @AppStorage("showFrequencyGrid") var showFrequencyGrid: Bool = true
+    @AppStorage("showDBGrid") var showDBGrid: Bool = true
+    @AppStorage("graphDBRange") var graphDBRange: Double = 50.0
+    @AppStorage("graphDBCenter") var graphDBCenter: Double = 0.0
+    @AppStorage("graphMinFreq") var graphMinFreq: Double = 15.0
+    @AppStorage("graphMaxFreq") var graphMaxFreq: Double = 20000.0
+
     // Advanced
     @AppStorage("showDebugInfo") var showDebugInfo: Bool = false
 
@@ -210,6 +220,66 @@ struct GraphingSettingsTab: View {
                 .padding(.vertical, 4)
             } header: {
                 Label("Response Curve", systemImage: "waveform.path")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Show Frequency Grid", isOn: $settings.showFrequencyGrid)
+                        .toggleStyle(.switch)
+                    Toggle("Show Frequency Labels", isOn: $settings.showFrequencyLabels)
+                        .toggleStyle(.switch)
+                    Toggle("Show dB Grid", isOn: $settings.showDBGrid)
+                        .toggleStyle(.switch)
+                    Toggle("Show dB Labels", isOn: $settings.showDBLabels)
+                        .toggleStyle(.switch)
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Vertical Range: \(Int(settings.graphDBRange)) dB")
+                            .font(.body)
+                        Slider(value: $settings.graphDBRange, in: 10...100, step: 2)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        let top = settings.graphDBCenter + settings.graphDBRange / 2
+                        let bottom = settings.graphDBCenter - settings.graphDBRange / 2
+                        Text("Center: \(Int(settings.graphDBCenter)) dB → \(String(format: "%+.0f", top)) to \(String(format: "%+.0f", bottom))")
+                            .font(.body)
+                        Slider(value: $settings.graphDBCenter, in: -40...20, step: 1)
+                    }
+
+                    Divider()
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Min Frequency")
+                                .font(.body)
+                            Picker("", selection: $settings.graphMinFreq) {
+                                Text("10 Hz").tag(10.0)
+                                Text("15 Hz").tag(15.0)
+                                Text("20 Hz").tag(20.0)
+                                Text("50 Hz").tag(50.0)
+                                Text("100 Hz").tag(100.0)
+                            }
+                            .labelsHidden()
+                        }
+                        Spacer()
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Max Frequency")
+                                .font(.body)
+                            Picker("", selection: $settings.graphMaxFreq) {
+                                Text("5 kHz").tag(5000.0)
+                                Text("10 kHz").tag(10000.0)
+                                Text("20 kHz").tag(20000.0)
+                            }
+                            .labelsHidden()
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Label("Scale & Grid", systemImage: "ruler")
             }
         }
         .formStyle(.grouped)

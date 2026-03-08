@@ -155,7 +155,7 @@ class DSPViewModel: ObservableObject {
         let isBypassed = bypass && (eqChannel <= 1)
         var results = [Double]()
         results.reserveCapacity(201)
-        let logMin = log10(Float(20.0)), logMax = log10(Float(20000.0))
+        let logMin = log10(Float(10.0)), logMax = log10(Float(20000.0))
         for i in 0...200 {
             let freq = pow(10, logMin + Float(i) / 200.0 * (logMax - logMin))
             results.append(Double(isBypassed ? 0 : DSPMath.responseAt(freq: freq, filters: filters)))

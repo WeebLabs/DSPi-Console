@@ -53,7 +53,11 @@ struct AnimatableVector: VectorArithmetic {
 }
 
 struct BodeLineShape: Shape {
-    var magnitudes: [Double] // 201 points
+    var magnitudes: [Double] // 201 points (log-spaced 10Hz-20kHz)
+    var dbTop: Float = 25.0
+    var dbBottom: Float = -25.0
+    var minFreq: Float = 20.0
+    var maxFreq: Float = 20000.0
 
     var animatableData: AnimatableVector {
         get { AnimatableVector(values: magnitudes) }
@@ -66,18 +70,25 @@ struct BodeLineShape: Shape {
 
         let width = rect.width
         let height = rect.height
-        let dbRange: Float = 20.0
+        let dbSpan = dbTop - dbBottom
 
-        func yPos(_ db: Float) -> CGFloat {
-            let normalized = (db + dbRange) / (2.0 * dbRange)
-            return height - (CGFloat(normalized) * height)
-        }
+        // Data frequency range (always 10Hz-20kHz, 201 log-spaced points)
+        let dataLogMin = log10(Float(10.0))
+        let dataLogMax = log10(Float(20000.0))
+        let viewLogMin = log10(minFreq)
+        let viewLogMax = log10(maxFreq)
+        let viewLogSpan = viewLogMax - viewLogMin
 
         let count = magnitudes.count
         for i in 0..<count {
-            let pct = CGFloat(i) / CGFloat(count - 1)
-            let x = pct * width
-            let y = yPos(Float(magnitudes[i]))
+            // Frequency of this data point
+            let dataLog = dataLogMin + Float(i) / Float(count - 1) * (dataLogMax - dataLogMin)
+            // Map to view x position
+            let x = CGFloat((dataLog - viewLogMin) / viewLogSpan) * width
+            // Map dB to y position
+            let db = Float(magnitudes[i])
+            let normalized = (db - dbBottom) / dbSpan
+            let y = height - CGFloat(normalized) * height
 
             if i == 0 {
                 path.move(to: CGPoint(x: x, y: y))
@@ -96,9 +107,10 @@ struct BodePlotView: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject private var settings = AppSettings.shared
 
-    let minFreq: Float = 20.0
-    let maxFreq: Float = 20000.0
-    let dbRange: Float = 20.0
+    var minFreq: Float { Float(settings.graphMinFreq) }
+    var maxFreq: Float { Float(settings.graphMaxFreq) }
+    var dbTop: Float { Float(settings.graphDBCenter + settings.graphDBRange / 2.0) }
+    var dbBottom: Float { Float(settings.graphDBCenter - settings.graphDBRange / 2.0) }
 
     // Grid Helper
     func xPos(_ freq: Float, width: CGFloat) -> CGFloat {
@@ -109,7 +121,7 @@ struct BodePlotView: View {
     }
 
     func yPos(_ db: Float, height: CGFloat) -> CGFloat {
-        let normalized = (db + dbRange) / (2.0 * dbRange)
+        let normalized = (db - dbBottom) / (dbTop - dbBottom)
         return height - (CGFloat(normalized) * height)
     }
 
@@ -143,23 +155,93 @@ struct BodePlotView: View {
         let groups = groupedChannels()
 
         ZStack {
-            // Static Grid
+            // Static Grid & Labels
             Canvas { context, size in
-                let gridPath = Path { path in
-                    for f in [100.0, 1000.0, 10000.0] {
-                        let x = xPos(Float(f), width: size.width)
-                        path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height))
+                let minF = minFreq
+                let maxF = maxFreq
+                let dTop = dbTop
+                let dBot = dbBottom
+                let dbSpan = dTop - dBot
+
+                // Frequency gridlines
+                if settings.showFrequencyGrid {
+                    let majorFreqs: [Float] = [100, 1000, 10000]
+                    let minorFreqs: [Float] = [20, 30, 40, 50, 60, 70, 80, 90,
+                                               200, 300, 400, 500, 600, 700, 800, 900,
+                                               2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000,
+                                               20000]
+                    let majorPath = Path { path in
+                        for f in majorFreqs where f >= minF && f <= maxF {
+                            let x = xPos(f, width: size.width)
+                            path.move(to: CGPoint(x: x, y: 0))
+                            path.addLine(to: CGPoint(x: x, y: size.height))
+                        }
                     }
-                    for db in [-10.0, 0.0, 10.0] {
-                        let y = yPos(Float(db), height: size.height)
-                        path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y))
+                    context.stroke(majorPath, with: .color(.white.opacity(0.15)))
+
+                    let minorPath = Path { path in
+                        for f in minorFreqs where f >= minF && f <= maxF && !majorFreqs.contains(f) {
+                            let x = xPos(f, width: size.width)
+                            path.move(to: CGPoint(x: x, y: 0))
+                            path.addLine(to: CGPoint(x: x, y: size.height))
+                        }
+                    }
+                    context.stroke(minorPath, with: .color(.white.opacity(0.06)))
+                }
+
+                // dB gridlines
+                if settings.showDBGrid {
+                    let step: Float = dbSpan <= 12 ? 1 : (dbSpan <= 30 ? 3 : (dbSpan <= 60 ? 5 : 10))
+                    let startDB = (dBot / step).rounded(.up) * step
+                    let dbPath = Path { path in
+                        var db = startDB
+                        while db <= dTop {
+                            if abs(db) > 0.01 { // skip 0dB, drawn separately
+                                let y = yPos(db, height: size.height)
+                                path.move(to: CGPoint(x: 0, y: y))
+                                path.addLine(to: CGPoint(x: size.width, y: y))
+                            }
+                            db += step
+                        }
+                    }
+                    context.stroke(dbPath, with: .color(.white.opacity(0.1)))
+
+                    // 0dB reference line
+                    if dBot <= 0 && dTop >= 0 {
+                        let zeroY = yPos(0, height: size.height)
+                        var zeroPath = Path()
+                        zeroPath.move(to: CGPoint(x: 0, y: zeroY))
+                        zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
+                        context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
                     }
                 }
-                context.stroke(gridPath, with: .color(.white.opacity(0.1)))
 
-                let zeroY = yPos(0, height: size.height)
-                var zeroPath = Path(); zeroPath.move(to: CGPoint(x: 0, y: zeroY)); zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
-                context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
+                // Frequency labels
+                if settings.showFrequencyLabels {
+                    let labelFreqs: [(Float, String)] = [
+                        (20, "20"), (50, "50"), (100, "100"), (200, "200"), (500, "500"),
+                        (1000, "1k"), (2000, "2k"), (5000, "5k"), (10000, "10k"), (20000, "20k")
+                    ]
+                    for (f, label) in labelFreqs where f >= minF && f <= maxF {
+                        let x = xPos(f, width: size.width)
+                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
+                        context.draw(context.resolve(text), at: CGPoint(x: x, y: size.height - 2), anchor: .bottom)
+                    }
+                }
+
+                // dB labels
+                if settings.showDBLabels {
+                    let step: Float = dbSpan <= 12 ? 1 : (dbSpan <= 30 ? 3 : (dbSpan <= 60 ? 5 : 10))
+                    let startDB = (dBot / step).rounded(.up) * step
+                    var db = startDB
+                    while db <= dTop {
+                        let y = yPos(db, height: size.height)
+                        let label = db >= 0 ? String(format: "+%g", db) : String(format: "%g", db)
+                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
+                        context.draw(context.resolve(text), at: CGPoint(x: 4, y: y), anchor: .leading)
+                        db += step
+                    }
+                }
             }
 
             // Animated Lines - grouped by identical curves
@@ -170,14 +252,14 @@ struct BodePlotView: View {
                     // Single channel - solid color
                     ZStack {
                         if settings.showGraphGlow {
-                            BodeLineShape(magnitudes: mags)
+                            BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(entries[0].color.opacity(0.3), lineWidth: lineWidth * 4)
                                 .blur(radius: 6)
-                            BodeLineShape(magnitudes: mags)
+                            BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(entries[0].color.opacity(0.6), lineWidth: lineWidth * 2)
                                 .blur(radius: 3)
                         }
-                        BodeLineShape(magnitudes: mags)
+                        BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                             .stroke(entries[0].color, lineWidth: lineWidth)
                     }
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
@@ -191,16 +273,16 @@ struct BodePlotView: View {
                     )
                     ZStack {
                         if settings.showGraphGlow {
-                            BodeLineShape(magnitudes: mags)
+                            BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(gradient, lineWidth: lineWidth * 5)
                                 .blur(radius: 8)
                                 .opacity(0.07)
-                            BodeLineShape(magnitudes: mags)
+                            BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(gradient, lineWidth: lineWidth * 2.5)
                                 .blur(radius: 5)
                                 .opacity(0.07)
                         }
-                        BodeLineShape(magnitudes: mags)
+                        BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                             .stroke(gradient, lineWidth: lineWidth * 1.25)
                     }
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
