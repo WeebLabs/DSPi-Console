@@ -383,7 +383,7 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(Color(NSColor.windowBackgroundColor.blended(withFraction: 0.2, of: .black) ?? .windowBackgroundColor))
+            .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
             .onTapGesture {
                 if renamingOutput != nil { commitRename() }
                 NSApp.keyWindow?.makeFirstResponder(nil)

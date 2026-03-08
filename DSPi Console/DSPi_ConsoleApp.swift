@@ -1386,6 +1386,10 @@ struct DSPi_ConsoleApp: App {
     var body: some Scene {
         WindowGroup("DSPi Console") {
             ContentView(vm: AppState.shared.viewModel)
+                .preferredColorScheme(.dark)
+                .onAppear {
+                    NSApp.appearance = NSAppearance(named: .darkAqua)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
