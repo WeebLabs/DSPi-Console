@@ -689,6 +689,13 @@ extension DSPViewModel {
 
             self.channelData = channelFilters
 
+            // Refresh channel visibility now that outputEnabled is populated
+            if self.isOverviewMode {
+                for outputIdx in 0..<9 {
+                    self.channelVisibility[outputIdx + 2] = outEnabled[outputIdx]
+                }
+            }
+
             self.recomputeAllMagnitudes()
         }
 
