@@ -216,32 +216,6 @@ struct BodePlotView: View {
                     }
                 }
 
-                // Frequency labels
-                if settings.showFrequencyLabels {
-                    let labelFreqs: [(Float, String)] = [
-                        (20, "20"), (50, "50"), (100, "100"), (200, "200"), (500, "500"),
-                        (1000, "1k"), (2000, "2k"), (5000, "5k"), (10000, "10k"), (20000, "20k")
-                    ]
-                    for (f, label) in labelFreqs where f >= minF && f <= maxF {
-                        let x = xPos(f, width: size.width)
-                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
-                        context.draw(context.resolve(text), at: CGPoint(x: x, y: size.height - 2), anchor: .bottom)
-                    }
-                }
-
-                // dB labels
-                if settings.showDBLabels {
-                    let step: Float = dbSpan <= 12 ? 1 : (dbSpan <= 30 ? 3 : (dbSpan <= 60 ? 5 : 10))
-                    let startDB = (dBot / step).rounded(.up) * step
-                    var db = startDB
-                    while db <= dTop {
-                        let y = yPos(db, height: size.height)
-                        let label = db >= 0 ? String(format: "+%g", db) : String(format: "%g", db)
-                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
-                        context.draw(context.resolve(text), at: CGPoint(x: 4, y: y), anchor: .leading)
-                        db += step
-                    }
-                }
             }
 
             // Animated Lines - grouped by identical curves
@@ -293,6 +267,41 @@ struct BodePlotView: View {
         .cornerRadius(8)
         .clipped()
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+        .overlay(
+            Canvas { context, size in
+                let minF = minFreq
+                let maxF = maxFreq
+                let dTop = dbTop
+                let dBot = dbBottom
+                let dbSpan = dTop - dBot
+
+                if settings.showFrequencyLabels {
+                    let labelFreqs: [(Float, String)] = [
+                        (20, "20"), (50, "50"), (100, "100"), (200, "200"), (500, "500"),
+                        (1000, "1k"), (2000, "2k"), (5000, "5k"), (10000, "10k"), (20000, "20k")
+                    ]
+                    for (f, label) in labelFreqs where f >= minF && f <= maxF {
+                        let x = xPos(f, width: size.width)
+                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
+                        context.draw(context.resolve(text), at: CGPoint(x: x, y: size.height - 2), anchor: .bottom)
+                    }
+                }
+
+                if settings.showDBLabels {
+                    let step: Float = dbSpan <= 12 ? 1 : (dbSpan <= 30 ? 3 : (dbSpan <= 60 ? 5 : 10))
+                    let startDB = (dBot / step).rounded(.up) * step
+                    var db = startDB
+                    while db <= dTop {
+                        let y = yPos(db, height: size.height)
+                        let label = db >= 0 ? String(format: "+%g", db) : String(format: "%g", db)
+                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
+                        context.draw(context.resolve(text), at: CGPoint(x: 4, y: y), anchor: .leading)
+                        db += step
+                    }
+                }
+            }
+            .allowsHitTesting(false)
+        )
     }
 
     // Create smooth gradient stops for overlapping channels

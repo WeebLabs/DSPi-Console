@@ -81,7 +81,8 @@ struct SettingsView: View {
                 }
                 .tag(Tabs.advanced)
         }
-        .frame(width: 450)
+        .frame(width: 450, height: nil)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -238,7 +239,10 @@ struct GraphingSettingsTab: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Vertical Range: \(Int(settings.graphDBRange)) dB")
                             .font(.body)
-                        Slider(value: $settings.graphDBRange, in: 10...100, step: 2)
+                        Slider(value: Binding(
+                            get: { settings.graphDBRange },
+                            set: { settings.graphDBRange = $0.rounded() }
+                        ), in: 10...100)
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
@@ -246,7 +250,10 @@ struct GraphingSettingsTab: View {
                         let bottom = settings.graphDBCenter - settings.graphDBRange / 2
                         Text("Center: \(Int(settings.graphDBCenter)) dB → \(String(format: "%+.0f", top)) to \(String(format: "%+.0f", bottom))")
                             .font(.body)
-                        Slider(value: $settings.graphDBCenter, in: -40...20, step: 1)
+                        Slider(value: Binding(
+                            get: { settings.graphDBCenter },
+                            set: { settings.graphDBCenter = $0.rounded() }
+                        ), in: -40...20)
                     }
 
                     Divider()
