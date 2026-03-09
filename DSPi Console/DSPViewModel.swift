@@ -148,7 +148,7 @@ class DSPViewModel: ObservableObject {
     }
 
     // MARK: - Magnitude Cache
-    var cachedMagnitudes: [Int: [Double]] = [:]
+    @Published var cachedMagnitudes: [Int: [Double]] = [:]
 
     func recomputeMagnitudes(for eqChannel: Int) {
         let filters = channelData[eqChannel] ?? []

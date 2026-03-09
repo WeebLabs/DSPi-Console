@@ -1384,11 +1384,12 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
 
     var body: some Scene {
-        WindowGroup("DSPi Console") {
+        Window("DSPi Console", id: "main") {
             ContentView(vm: AppState.shared.viewModel)
                 .preferredColorScheme(.dark)
                 .onAppear {
                     NSApp.appearance = NSAppearance(named: .darkAqua)
+                    NSWindow.allowsAutomaticWindowTabbing = false
                 }
         }
         .windowStyle(.hiddenTitleBar)

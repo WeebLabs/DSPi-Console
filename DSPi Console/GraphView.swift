@@ -139,7 +139,12 @@ struct BodePlotView: View {
         var groups: [[Double]: [(eqCh: Int, color: Color)]] = [:]
         for eqCh in 0...10 {
             if vm.channelVisibility[eqCh] == true {
-                let mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
+                var mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
+                // Apply output gain as constant offset
+                if eqCh >= 2 {
+                    let gain = Double(vm.outputGainDB[eqCh - 2])
+                    if gain != 0 { mags = mags.map { $0 + gain } }
+                }
                 let entry = (eqCh: eqCh, color: colorForEQChannel(eqCh))
                 if groups[mags] != nil {
                     groups[mags]!.append(entry)

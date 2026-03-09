@@ -98,6 +98,7 @@ extension DSPViewModel {
     func sendOutputGainToDevice(output: Int, db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
+        outputGainDB[output] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }
