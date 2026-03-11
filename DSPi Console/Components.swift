@@ -524,12 +524,8 @@ struct FilterRowView: View {
                     }
 
                     // Q
-                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
-                        ValueField(label: "Q", value: params.q, width: 50) {
-                            var p = params; p.q = $0; onChange(p)
-                        }
-                    } else {
-                        Spacer().frame(width: 50 + 24)
+                    ValueField(label: "Q", value: params.q, width: 50) {
+                        var p = params; p.q = $0; onChange(p)
                     }
                 }
             } else {
