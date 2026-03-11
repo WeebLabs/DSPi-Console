@@ -462,6 +462,11 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
             if index >= 0 && index < parent.items.count {
                 parent.selection = parent.items[index]
             }
+            // Resync popup to binding value in case the setter rejected the change
+            // (e.g. unsaved changes alert → Cancel)
+            if let correctIndex = parent.items.firstIndex(of: parent.selection) {
+                sender.selectItem(withTag: correctIndex)
+            }
         }
     }
 }

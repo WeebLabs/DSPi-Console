@@ -1380,6 +1380,7 @@ class AutoEQRebuildWindowController: NSObject {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindowObserver: Any?
+    private weak var originalWindowDelegate: NSWindowDelegate?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Find the main window once it appears and set ourselves as its delegate
@@ -1390,6 +1391,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self,
                   let window = note.object as? NSWindow,
                   window.title == "DSPi Console" else { return }
+            self.originalWindowDelegate = window.delegate
             window.delegate = self
             if let obs = self.mainWindowObserver {
                 NotificationCenter.default.removeObserver(obs)
@@ -1443,6 +1445,19 @@ extension AppDelegate: NSWindowDelegate {
         // If the user cancels, terminateCancel keeps the window open.
         NSApp.terminate(nil)
         return false
+    }
+
+    // Forward all other delegate methods to SwiftUI's original window delegate
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return originalWindowDelegate?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let delegate = originalWindowDelegate, delegate.responds(to: aSelector) {
+            return delegate
+        }
+        return super.forwardingTarget(for: aSelector)
     }
 }
 
