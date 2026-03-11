@@ -188,18 +188,74 @@ struct ContentView: View {
                                     get: { vm.activePresetSlot },
                                     set: { slot in
                                         guard slot != vm.activePresetSlot else { return }
-                                        DispatchQueue.global(qos: .userInitiated).async {
-                                            let status = vm.loadPreset(slot: slot)
-                                            if status != PRESET_OK {
-                                                DispatchQueue.main.async {
-                                                    let alert = NSAlert()
-                                                    alert.messageText = "Load Failed"
-                                                    alert.informativeText = status == PRESET_ERR_CRC
-                                                        ? "Preset data is corrupted."
-                                                        : "Failed to load preset (error \(status))."
-                                                    alert.alertStyle = .warning
-                                                    alert.addButton(withTitle: "OK")
-                                                    alert.runModal()
+                                        if vm.isDeviceConnected && vm.hasUnsavedChanges {
+                                            let diff = vm.computeDiff()
+                                            let action = PresetAlerts.showUnsavedChangesAlert(diff: diff)
+                                            switch action {
+                                            case .save:
+                                                DispatchQueue.global(qos: .userInitiated).async {
+                                                    if vm.presetNames[vm.activePresetSlot].isEmpty {
+                                                        vm.setPresetName(slot: vm.activePresetSlot, name: "Preset \(vm.activePresetSlot + 1)")
+                                                    }
+                                                    let saveStatus = vm.savePreset(slot: vm.activePresetSlot)
+                                                    guard saveStatus == PRESET_OK else {
+                                                        DispatchQueue.main.async {
+                                                            let alert = NSAlert()
+                                                            alert.messageText = "Save Failed"
+                                                            alert.informativeText = "Failed to save preset (error \(saveStatus)). Preset switch aborted."
+                                                            alert.alertStyle = .warning
+                                                            alert.addButton(withTitle: "OK")
+                                                            alert.runModal()
+                                                        }
+                                                        return
+                                                    }
+                                                    let loadStatus = vm.loadPreset(slot: slot)
+                                                    if loadStatus != PRESET_OK {
+                                                        DispatchQueue.main.async {
+                                                            let alert = NSAlert()
+                                                            alert.messageText = "Load Failed"
+                                                            alert.informativeText = loadStatus == PRESET_ERR_CRC
+                                                                ? "Preset data is corrupted."
+                                                                : "Failed to load preset (error \(loadStatus))."
+                                                            alert.alertStyle = .warning
+                                                            alert.addButton(withTitle: "OK")
+                                                            alert.runModal()
+                                                        }
+                                                    }
+                                                }
+                                            case .discard:
+                                                DispatchQueue.global(qos: .userInitiated).async {
+                                                    let status = vm.loadPreset(slot: slot)
+                                                    if status != PRESET_OK {
+                                                        DispatchQueue.main.async {
+                                                            let alert = NSAlert()
+                                                            alert.messageText = "Load Failed"
+                                                            alert.informativeText = status == PRESET_ERR_CRC
+                                                                ? "Preset data is corrupted."
+                                                                : "Failed to load preset (error \(status))."
+                                                            alert.alertStyle = .warning
+                                                            alert.addButton(withTitle: "OK")
+                                                            alert.runModal()
+                                                        }
+                                                    }
+                                                }
+                                            case .cancel:
+                                                return
+                                            }
+                                        } else {
+                                            DispatchQueue.global(qos: .userInitiated).async {
+                                                let status = vm.loadPreset(slot: slot)
+                                                if status != PRESET_OK {
+                                                    DispatchQueue.main.async {
+                                                        let alert = NSAlert()
+                                                        alert.messageText = "Load Failed"
+                                                        alert.informativeText = status == PRESET_ERR_CRC
+                                                            ? "Preset data is corrupted."
+                                                            : "Failed to load preset (error \(status))."
+                                                        alert.alertStyle = .warning
+                                                        alert.addButton(withTitle: "OK")
+                                                        alert.runModal()
+                                                    }
                                                 }
                                             }
                                         }

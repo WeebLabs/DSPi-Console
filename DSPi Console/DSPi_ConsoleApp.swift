@@ -1376,9 +1376,80 @@ class AutoEQRebuildWindowController: NSObject {
     }
 }
 
+// MARK: - Quit Interception
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    private var mainWindowObserver: Any?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Find the main window once it appears and set ourselves as its delegate
+        // so we can intercept the close button with windowShouldClose.
+        mainWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self = self,
+                  let window = note.object as? NSWindow,
+                  window.title == "DSPi Console" else { return }
+            window.delegate = self
+            if let obs = self.mainWindowObserver {
+                NotificationCenter.default.removeObserver(obs)
+                self.mainWindowObserver = nil
+            }
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let vm = AppState.shared.viewModel
+        guard vm.isDeviceConnected, vm.hasUnsavedChanges else { return .terminateNow }
+
+        let diff = vm.computeDiff()
+        let action = PresetAlerts.showUnsavedChangesAlert(diff: diff)
+        switch action {
+        case .save:
+            DispatchQueue.global(qos: .userInitiated).async {
+                if vm.presetNames[vm.activePresetSlot].isEmpty {
+                    vm.setPresetName(slot: vm.activePresetSlot, name: "Preset \(vm.activePresetSlot + 1)")
+                }
+                let status = vm.savePreset(slot: vm.activePresetSlot)
+                DispatchQueue.main.async {
+                    if status == PRESET_OK {
+                        NSApp.reply(toApplicationShouldTerminate: true)
+                    } else {
+                        let alert = NSAlert()
+                        alert.messageText = "Save Failed"
+                        alert.informativeText = "Failed to save preset (error \(status)). Quit anyway?"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "Quit")
+                        alert.addButton(withTitle: "Cancel")
+                        let quit = alert.runModal() == .alertFirstButtonReturn
+                        NSApp.reply(toApplicationShouldTerminate: quit)
+                    }
+                }
+            }
+            return .terminateLater
+        case .discard:
+            return .terminateNow
+        case .cancel:
+            return .terminateCancel
+        }
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // Route window close through app termination so the unsaved changes
+        // prompt can prevent the close. NSApp.terminate triggers
+        // applicationShouldTerminate, which handles Save/Discard/Cancel.
+        // If the user cancels, terminateCancel keeps the window open.
+        NSApp.terminate(nil)
+        return false
+    }
+}
+
 // MARK: - App
 @main
 struct DSPi_ConsoleApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var statsWindowController = StatsWindowController()
     @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()

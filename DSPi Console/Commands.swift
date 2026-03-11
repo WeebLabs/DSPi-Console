@@ -705,6 +705,7 @@ extension DSPViewModel {
             }
 
             self.recomputeAllMagnitudes()
+            self.updateSavedSnapshot()
         }
 
         return true
@@ -759,6 +760,7 @@ extension DSPViewModel {
             DispatchQueue.main.async {
                 self.activePresetSlot = slot
                 self.presetOccupied |= UInt16(1 << slot)
+                self.updateSavedSnapshot()
             }
         }
         return status

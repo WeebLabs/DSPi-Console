@@ -41,6 +41,9 @@ class DSPViewModel: ObservableObject {
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
 
+    /// Snapshot of state at last save/load point for unsaved changes detection
+    var savedSnapshot: PresetSnapshot?
+
     // Platform-aware output layout (platformName is set once at connection, safe to read from poll queue)
     var numChannels: Int { platformName == "RP2040" ? 7 : 11 }
     var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
@@ -89,6 +92,9 @@ class DSPViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
                 self?.isDeviceConnected = connected
+                if !connected {
+                    self?.savedSnapshot = nil
+                }
                 if connected {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         self?.updateSelection(to: nil)
@@ -161,6 +167,48 @@ class DSPViewModel: ObservableObject {
 
     func recomputeAllMagnitudes() {
         for eqCh in 0...10 { recomputeMagnitudes(for: eqCh) }
+    }
+
+    // MARK: - Unsaved Changes Detection
+
+    func captureSnapshot() -> PresetSnapshot {
+        PresetSnapshot(
+            preampDB: preampDB,
+            bypass: bypass,
+            loudnessEnabled: loudnessEnabled,
+            loudnessRefSPL: loudnessRefSPL,
+            loudnessIntensity: loudnessIntensity,
+            crossfeedEnabled: crossfeedEnabled,
+            crossfeedPreset: crossfeedPreset,
+            crossfeedFreq: crossfeedFreq,
+            crossfeedFeed: crossfeedFeed,
+            crossfeedITD: crossfeedITD,
+            channelDelays: channelDelays,
+            matrixRouting: matrixRouting,
+            matrixGain: matrixGain,
+            matrixInvert: matrixInvert,
+            outputEnabled: outputEnabled,
+            outputMuted: outputMuted,
+            outputGainDB: outputGainDB,
+            outputDelayMS: outputDelayMS,
+            channelFilters: channelData.mapValues { $0.map { SnapshotFilterParams(from: $0) } },
+            channelNames: channelNames,
+            outputPins: presetIncludePins ? outputPins : nil
+        )
+    }
+
+    func updateSavedSnapshot() {
+        savedSnapshot = captureSnapshot()
+    }
+
+    var hasUnsavedChanges: Bool {
+        guard let saved = savedSnapshot else { return false }
+        return captureSnapshot() != saved
+    }
+
+    func computeDiff() -> PresetDiff {
+        guard let saved = savedSnapshot else { return PresetDiff(changes: []) }
+        return PresetSnapshot.diff(from: saved, to: captureSnapshot(), channelNames: channelNames)
     }
 
     static func defaultChannelNames(for platform: String) -> [String] {

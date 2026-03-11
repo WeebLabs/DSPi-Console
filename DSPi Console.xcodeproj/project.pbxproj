@@ -40,6 +40,11 @@
 			path = Images;
 			sourceTree = "<group>";
 		};
+		667C679A2F61130D00264C32 /* Documentation */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Documentation;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -56,6 +61,7 @@
 		665141BC2F0DF37B00093CAF = {
 			isa = PBXGroup;
 			children = (
+				667C679A2F61130D00264C32 /* Documentation */,
 				66626F292F1487CD009BAE8A /* README.md */,
 				665141C72F0DF37B00093CAF /* DSPi Console */,
 				665141C62F0DF37B00093CAF /* Products */,
@@ -90,6 +96,7 @@
 			fileSystemSynchronizedGroups = (
 				665141C72F0DF37B00093CAF /* DSPi Console */,
 				66626F352F148868009BAE8A /* Images */,
+				667C679A2F61130D00264C32 /* Documentation */,
 			);
 			name = "DSPi Console";
 			packageProductDependencies = (
