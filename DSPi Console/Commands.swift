@@ -26,10 +26,6 @@ extension DSPViewModel {
         let name = platform == 1 ? "RP2350" : "RP2040"
         DispatchQueue.main.async {
             self.platformName = name
-            // On RP2040, output index 4 is PDM (not SPDIF 3 L)
-            if name == "RP2040" && self.outputNames[4] == "SPDIF 3 L" {
-                self.outputNames[4] = "PDM"
-            }
         }
         return name
     }
@@ -656,12 +652,22 @@ extension DSPViewModel {
             channelFilters[ch] = bands
         }
 
+        // --- Channel names (offset 2480, 352 bytes = 11 channels × 32 bytes) ---
+        var names = [String](repeating: "", count: 11)
+        for ch in 0..<numCh {
+            let base = 2480 + ch * 32
+            let end = min(base + 32, data.count)
+            let slice = data[base..<end]
+            if let nulIdx = slice.firstIndex(of: 0) {
+                names[ch] = String(data: data[base..<nulIdx], encoding: .ascii) ?? ""
+            } else {
+                names[ch] = String(data: slice, encoding: .ascii) ?? ""
+            }
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
-            if platform == "RP2040" && self.outputNames[4] == "SPDIF 3 L" {
-                self.outputNames[4] = "PDM"
-            }
 
             self.preampDB = preamp
             self.bypass = bypassVal
@@ -689,6 +695,7 @@ extension DSPViewModel {
             self.outputPins = pins
 
             self.channelData = channelFilters
+            self.channelNames = names
 
             // Refresh channel visibility now that outputEnabled is populated
             if self.isOverviewMode {
@@ -818,6 +825,31 @@ extension DSPViewModel {
         let val = data[0] != 0
         DispatchQueue.main.async {
             self.presetIncludePins = val
+        }
+    }
+
+    // MARK: - Channel Names
+
+    func setChannelName(channel: Int, name: String) {
+        var nameData = Data(count: 32)  // Always send full 32-byte buffer, zero-padded
+        let utf8 = Data(name.prefix(31).utf8)
+        nameData.replaceSubrange(0..<utf8.count, with: utf8)
+        usb.sendControlRequest(request: REQ_SET_CHANNEL_NAME, value: UInt16(channel), index: 2, data: nameData)
+        DispatchQueue.main.async {
+            self.channelNames[channel] = String(name.prefix(31))
+        }
+    }
+
+    func fetchChannelName(channel: Int) {
+        guard let data = usb.getControlRequest(request: REQ_GET_CHANNEL_NAME, value: UInt16(channel), index: 2, length: 32) else { return }
+        let name: String
+        if let nulIndex = data.firstIndex(of: 0) {
+            name = String(data: data[0..<nulIndex], encoding: .ascii) ?? ""
+        } else {
+            name = String(data: data, encoding: .ascii) ?? ""
+        }
+        DispatchQueue.main.async {
+            self.channelNames[channel] = name
         }
     }
 

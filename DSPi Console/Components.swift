@@ -127,7 +127,12 @@ struct MuteableLabel: View {
 struct ChannelRow: View {
     let channel: Channel
     let isSelected: Bool
+    let name: String
     @ObservedObject var meters: DSPMeterModel
+    let isRenaming: Bool
+    @Binding var renameText: String
+    let onCommitRename: () -> Void
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -137,11 +142,21 @@ struct ChannelRow: View {
                 Rectangle().fill(Color.clear).frame(width: 3).padding(.vertical, 4)
             }
 
-            Text(channel.name)
-                .font(.body)
-                .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
-                .padding(.leading, 8)
-                .frame(width: 80, alignment: .leading)
+            if isRenaming {
+                TextField("", text: $renameText)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .focused($isFocused)
+                    .onSubmit { onCommitRename() }
+                    .padding(.leading, 8)
+                    .frame(width: 80, alignment: .leading)
+            } else {
+                Text(name)
+                    .font(.body)
+                    .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
+                    .padding(.leading, 8)
+                    .frame(width: 80, alignment: .leading)
+            }
 
             HorizontalMeterBar(
                 level: meters.status.peaks[channel.rawValue],
@@ -164,6 +179,13 @@ struct ChannelRow: View {
         .frame(height: 28)
         .contentShape(Rectangle())
         .background(isSelected ? Color.primary.opacity(0.05) : Color.clear)
+        .onChange(of: isRenaming) { renaming in
+            if renaming {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    isFocused = true
+                }
+            }
+        }
     }
 }
 

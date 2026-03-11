@@ -56,7 +56,7 @@ struct StereoDashboardCard: View {
             HStack(spacing: 0) {
                 HStack {
                     Circle().fill(left.color).frame(width: 6, height: 6)
-                    Text(left.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.channelNames[left.rawValue]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     if showDelay {
                         Text("Delay: \(vm.channelDelays[left.rawValue] ?? 0.0, specifier: "%.0f")ms")
@@ -73,7 +73,7 @@ struct StereoDashboardCard: View {
 
                 HStack {
                     Circle().fill(right.color).frame(width: 6, height: 6)
-                    Text(right.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.channelNames[right.rawValue]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     if showDelay {
                         Text("Delay: \(vm.channelDelays[right.rawValue] ?? 0.0, specifier: "%.0f")ms")
@@ -142,7 +142,7 @@ struct MonoDashboardCard: View {
         VStack(spacing: 0) {
             HStack {
                 Circle().fill(channel.color).frame(width: 6, height: 6)
-                Text(channel.name).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                Text(vm.channelNames[channel.rawValue]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
                 Text("Delay: \(vm.channelDelays[channel.rawValue] ?? 0.0, specifier: "%.0f")ms")
                     .font(.system(size: 9, design: .monospaced))
@@ -188,7 +188,7 @@ struct StereoOutputDashboardCard: View {
             HStack(spacing: 0) {
                 HStack {
                     Circle().fill(left.color).frame(width: 6, height: 6)
-                    Text(vm.outputNames[leftIndex]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.channelNames[leftIndex + 2]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     Text("Delay: \(vm.outputDelayMS[leftIndex], specifier: "%.0f")ms")
                         .font(.system(size: 9, design: .monospaced))
@@ -202,7 +202,7 @@ struct StereoOutputDashboardCard: View {
 
                 HStack {
                     Circle().fill(right.color).frame(width: 6, height: 6)
-                    Text(vm.outputNames[rightIndex]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.channelNames[rightIndex + 2]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     Text("Delay: \(vm.outputDelayMS[rightIndex], specifier: "%.0f")ms")
                         .font(.system(size: 9, design: .monospaced))
@@ -274,7 +274,7 @@ struct OutputDashboardCard: View {
         VStack(spacing: 0) {
             HStack {
                 Circle().fill(output.color).frame(width: 6, height: 6)
-                Text(vm.outputNames[outputIndex]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                Text(vm.channelNames[outputIndex + 2]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
                 Text("Delay: \(vm.outputDelayMS[outputIndex], specifier: "%.0f")ms")
                     .font(.system(size: 9, design: .monospaced))

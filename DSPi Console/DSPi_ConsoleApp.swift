@@ -116,15 +116,20 @@ struct GeneralSettingsTab: View {
 
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Output Channel Names")
+                            Text("Channel Names")
                                 .font(.body)
-                            Text("Reset all output names to factory defaults")
+                            Text("Reset all channel names to factory defaults")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
                         Button("Reset") {
-                            vm.outputNames = MatrixOutput.visible(for: vm.platformName).map { $0.name }
+                            let defaults = DSPViewModel.defaultChannelNames(for: vm.platformName)
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                for ch in 0..<vm.numChannels {
+                                    vm.setChannelName(channel: ch, name: defaults[ch])
+                                }
+                            }
                         }
                     }
                 }
@@ -904,7 +909,7 @@ struct FileMenuActions {
 
         // Master channels (EQ 0, 1)
         for eqCh in 0...1 {
-            let name = eqCh == 0 ? "USB L" : "USB R"
+            let name = vm.channelNames[eqCh]
             output += "[\(name)]\n"
             let filters = vm.channelData[eqCh] ?? []
             for (i, filter) in filters.enumerated() {
@@ -916,7 +921,7 @@ struct FileMenuActions {
         // Output channels (platform-aware)
         for outputIdx in 0..<vm.numOutputChannels {
             let eqCh = outputIdx + 2
-            let name = vm.outputNames[outputIdx]
+            let name = vm.channelNames[outputIdx + 2]
             let state = vm.outputEnabled[outputIdx] ? "Enabled" : "Disabled"
             output += "[Output \(outputIdx): \(name) (\(state))]\n"
             let filters = vm.channelData[eqCh] ?? []
@@ -973,8 +978,8 @@ struct FileMenuActions {
         var checkboxes: [NSButton] = []
 
         // Master channels (checked by default)
-        for (eqCh, name) in [(0, "USB L"), (1, "USB R")] {
-            let checkbox = NSButton(checkboxWithTitle: name, target: nil, action: nil)
+        for eqCh in [0, 1] {
+            let checkbox = NSButton(checkboxWithTitle: vm.channelNames[eqCh], target: nil, action: nil)
             checkbox.tag = eqCh
             checkbox.state = .on
             checkboxes.append(checkbox)
@@ -983,7 +988,7 @@ struct FileMenuActions {
 
         // Enabled output channels (unchecked by default)
         for outputIdx in 0..<vm.numOutputChannels where vm.outputEnabled[outputIdx] {
-            let checkbox = NSButton(checkboxWithTitle: vm.outputNames[outputIdx], target: nil, action: nil)
+            let checkbox = NSButton(checkboxWithTitle: vm.channelNames[outputIdx + 2], target: nil, action: nil)
             checkbox.tag = outputIdx + 2
             checkbox.state = .off
             checkboxes.append(checkbox)
@@ -1026,10 +1031,7 @@ struct FileMenuActions {
         let maxEqCh = vm.numOutputChannels + 1  // output indices 0..<N map to EQ channels 2..<N+2
         for eqCh in 0...maxEqCh {
             guard channelFilters[eqCh] != nil else { continue }
-            let name: String
-            if eqCh == 0 { name = "USB L" }
-            else if eqCh == 1 { name = "USB R" }
-            else { name = vm.outputNames[eqCh - 2] }
+            let name = vm.channelNames[eqCh]
 
             let checkbox = NSButton(checkboxWithTitle: name, target: nil, action: nil)
             checkbox.tag = eqCh

@@ -13,7 +13,7 @@ enum SidebarSelection: Hashable {
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
     @State private var selection: SidebarSelection = .overview
-    @State private var renamingOutput: Int? = nil
+    @State private var renamingChannel: Int? = nil  // channelNames index
     @State private var renameText = ""
     @State private var localPreamp: Float = 0
     @State private var isDraggingPreamp = false
@@ -22,18 +22,20 @@ struct ContentView: View {
     @State private var presetRenameText = ""
 
     private func commitRename() {
-        guard let idx = renamingOutput else { return }
+        guard let idx = renamingChannel else { return }
         let trimmed = renameText.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty {
-            vm.outputNames[idx] = trimmed
+            DispatchQueue.global(qos: .userInitiated).async {
+                vm.setChannelName(channel: idx, name: trimmed)
+            }
         }
-        renamingOutput = nil
+        renamingChannel = nil
     }
 
-    private func startRename(_ index: Int) {
-        if renamingOutput != nil { commitRename() }
-        renameText = vm.outputNames[index]
-        renamingOutput = index
+    private func startRename(_ channelIdx: Int) {
+        if renamingChannel != nil { commitRename() }
+        renameText = vm.channelNames[channelIdx]
+        renamingChannel = channelIdx
     }
 
     private func presetLabel(_ slot: Int) -> String {
@@ -125,9 +127,12 @@ struct ContentView: View {
                 Section(header: Text("INPUTS")) {
                     ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
                         ChannelRow(channel: ch, isSelected: selection == .channel(ch),
-                                  meters: vm.meters)
+                                  name: vm.channelNames[ch.rawValue], meters: vm.meters,
+                                  isRenaming: renamingChannel == ch.rawValue,
+                                  renameText: $renameText,
+                                  onCommitRename: { commitRename() })
                             .onTapGesture {
-                                if renamingOutput != nil { commitRename(); return }
+                                if renamingChannel != nil { commitRename(); return }
                                 if selection == .channel(ch) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
@@ -136,20 +141,21 @@ struct ContentView: View {
                                     vm.updateSelection(to: ch)
                                 }
                             }
+                            .onRightClick { startRename(ch.rawValue) }
                     }
                 }
 
                 Section(header: Text("OUTPUTS")) {
                     ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
                         OutputRow(output: out, isSelected: selection == .output(out.index),
-                                  name: vm.outputNames[out.index],
+                                  name: vm.channelNames[out.index + 2],
                                   isMuted: vm.isOutputInactive(out.index),
                                   meters: vm.meters,
-                                  isRenaming: renamingOutput == out.index,
+                                  isRenaming: renamingChannel == out.index + 2,
                                   renameText: $renameText,
                                   onCommitRename: { commitRename() })
                             .onTapGesture {
-                                if renamingOutput != nil { commitRename(); return }
+                                if renamingChannel != nil { commitRename(); return }
                                 if selection == .output(out.index) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
@@ -158,7 +164,7 @@ struct ContentView: View {
                                     vm.updateSelectionToOutput(out.index)
                                 }
                             }
-                            .onRightClick { startRename(out.index) }
+                            .onRightClick { startRename(out.index + 2) }
                     }
                 }
             }
@@ -274,7 +280,7 @@ struct ContentView: View {
                     .padding()
                     // ADDED GESTURE HERE FOR SIDEBAR CONTROLS
                     .onTapGesture {
-                        if renamingOutput != nil { commitRename() }
+                        if renamingChannel != nil { commitRename() }
                         NSApp.keyWindow?.makeFirstResponder(nil)
                     }
 
@@ -289,7 +295,7 @@ struct ContentView: View {
             .frame(minWidth: 220, maxWidth: 260)
             // ADDED GESTURE FOR THE REST OF THE SIDEBAR
             .onTapGesture {
-                if renamingOutput != nil { commitRename() }
+                if renamingChannel != nil { commitRename() }
                 NSApp.keyWindow?.makeFirstResponder(nil)
             }
 
@@ -385,7 +391,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
             .onTapGesture {
-                if renamingOutput != nil { commitRename() }
+                if renamingChannel != nil { commitRename() }
                 NSApp.keyWindow?.makeFirstResponder(nil)
             }
         }

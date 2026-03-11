@@ -71,14 +71,16 @@ struct MatrixMixerView: View {
         guard let idx = renamingOutput else { return }
         let trimmed = renameText.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty {
-            vm.outputNames[idx] = trimmed
+            DispatchQueue.global(qos: .userInitiated).async {
+                vm.setChannelName(channel: idx + 2, name: trimmed)
+            }
         }
         renamingOutput = nil
     }
 
     private func startRename(_ index: Int) {
         if renamingOutput != nil { commitRename() }
-        renameText = vm.outputNames[index]
+        renameText = vm.channelNames[index + 2]
         renamingOutput = index
     }
 
@@ -183,7 +185,7 @@ struct MatrixMixerView: View {
                                 .focused($renameFocused)
                                 .onSubmit { commitRename() }
                         } else {
-                            Text(vm.outputNames[out.index])
+                            Text(vm.channelNames[out.index + 2])
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)

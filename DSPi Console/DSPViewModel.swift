@@ -26,9 +26,7 @@ class DSPViewModel: ObservableObject {
     @Published var outputGainDB = Array(repeating: Float(0.0), count: 9)
     @Published var outputMuted = Array(repeating: false, count: 9)
     @Published var outputDelayMS = Array(repeating: Float(0.0), count: 9)
-    @Published var outputNames: [String] = MatrixOutput.all.map { $0.name } {
-        didSet { UserDefaults.standard.set(outputNames, forKey: "outputNames") }
-    }
+    @Published var channelNames: [String] = DSPViewModel.defaultChannelNames(for: "")
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
@@ -81,10 +79,8 @@ class DSPViewModel: ObservableObject {
             channelVisibility[eqCh] = outputEnabled[outputIdx]
         }
 
-        // Load saved output names
-        if let saved = UserDefaults.standard.stringArray(forKey: "outputNames"), saved.count == 9 {
-            outputNames = saved
-        }
+        // Clean up legacy UserDefaults key
+        UserDefaults.standard.removeObject(forKey: "outputNames")
 
         recomputeAllMagnitudes()
 
@@ -165,5 +161,16 @@ class DSPViewModel: ObservableObject {
 
     func recomputeAllMagnitudes() {
         for eqCh in 0...10 { recomputeMagnitudes(for: eqCh) }
+    }
+
+    static func defaultChannelNames(for platform: String) -> [String] {
+        if platform == "RP2040" {
+            return ["USB L", "USB R", "SPDIF 1 L", "SPDIF 1 R",
+                    "SPDIF 2 L", "SPDIF 2 R", "PDM", "", "", "", ""]
+        } else {
+            return ["USB L", "USB R", "SPDIF 1 L", "SPDIF 1 R",
+                    "SPDIF 2 L", "SPDIF 2 R", "SPDIF 3 L", "SPDIF 3 R",
+                    "SPDIF 4 L", "SPDIF 4 R", "PDM"]
+        }
     }
 }
