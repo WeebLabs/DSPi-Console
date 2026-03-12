@@ -405,6 +405,7 @@ private class PaddedPopUpButtonCell: NSPopUpButtonCell {
 
 private class PaddedPopUpButton: NSPopUpButton {
     var trailingPadding: CGFloat = 14
+    var onRightClick: (() -> Void)?
     override class var cellClass: AnyClass? {
         get { PaddedPopUpButtonCell.self }
         set {}
@@ -414,6 +415,9 @@ private class PaddedPopUpButton: NSPopUpButton {
         size.width += trailingPadding
         return size
     }
+    override func rightMouseDown(with event: NSEvent) {
+        onRightClick?()
+    }
 }
 
 struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
@@ -421,11 +425,18 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
     let titleForItem: (T) -> String
     @Binding var selection: T
 
+    var font: NSFont?
+    var enabled: Bool = true
+    var showsHoverBorder: Bool = true
+    var onRightClick: (() -> Void)? = nil
+
     func makeNSView(context: Context) -> NSPopUpButton {
         let button = PaddedPopUpButton(frame: .zero, pullsDown: false)
-        button.isBordered = true
-        button.showsBorderOnlyWhileMouseInside = true
+        button.isBordered = showsHoverBorder
+        button.showsBorderOnlyWhileMouseInside = showsHoverBorder
+        button.onRightClick = onRightClick
         (button.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        if let font = font { button.font = font }
         button.target = context.coordinator
         button.action = #selector(Coordinator.selectionChanged(_:))
         return button
@@ -435,6 +446,10 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
         // Update coordinator's reference to current parent (fixes stale binding issue)
         context.coordinator.parent = self
 
+        if let font = font { button.font = font }
+        button.isBordered = showsHoverBorder && enabled
+        button.showsBorderOnlyWhileMouseInside = showsHoverBorder && enabled
+        (button as? PaddedPopUpButton)?.onRightClick = onRightClick
         button.menu?.removeAllItems()
         for (index, item) in items.enumerated() {
             let menuItem = NSMenuItem(title: titleForItem(item), action: nil, keyEquivalent: "")

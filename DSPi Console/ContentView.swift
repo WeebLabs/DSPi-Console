@@ -365,23 +365,46 @@ struct ContentView: View {
 
                         Spacer()
 
-                        if vm.isDeviceConnected {
-                            HStack(spacing: 6) {
-                                Circle().fill(.green).frame(width: 6, height: 6)
-                                Text("Connected").font(.caption).foregroundColor(.secondary)
-                            }
-                        } else {
-                            HStack(spacing: 6) {
-                                Circle().fill(.red).frame(width: 6, height: 6)
-                                Text(vm.usb.errorMessage ?? "Disconnected").font(.caption).foregroundColor(.red)
-                            }
-                        }
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(vm.isDeviceConnected ? .green : .red)
+                                .frame(width: 6, height: 6)
 
-                        Button(action: { vm.usb.connect(); vm.fetchAll() }) {
-                            Image(systemName: "arrow.clockwise")
+                            if vm.availableDevices.isEmpty {
+                                Text("No Devices").font(.caption).foregroundColor(.red)
+                            } else {
+                                BorderlessPopUpButton(
+                                    items: vm.availableDevices,
+                                    titleForItem: { $0.displayName },
+                                    selection: Binding(
+                                        get: {
+                                            if let selected = vm.selectedDevice,
+                                               vm.availableDevices.contains(selected) {
+                                                return selected
+                                            }
+                                            return vm.availableDevices[0]
+                                        },
+                                        set: { vm.switchToDevice($0) }
+                                    ),
+                                    font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                                    enabled: vm.availableDevices.count > 1,
+                                    showsHoverBorder: false,
+                                    onRightClick: { vm.usb.reconnect() }
+                                )
+                                .overlay(alignment: .trailing) {
+                                    if vm.availableDevices.count > 1 {
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.secondary)
+                                            .offset(y: 1)
+                                            .padding(.trailing, 4)
+                                            .allowsHitTesting(false)
+                                    }
+                                }
+                                .fixedSize()
+                                .allowsHitTesting(vm.availableDevices.count > 1)
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 8)
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)

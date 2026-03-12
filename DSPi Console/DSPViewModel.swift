@@ -40,6 +40,8 @@ class DSPViewModel: ObservableObject {
 
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
+    @Published var availableDevices: [DSPiDevice] = []
+    @Published var selectedDevice: DSPiDevice? = nil
 
     /// Snapshot of state at last save/load point for unsaved changes detection
     var savedSnapshot: PresetSnapshot?
@@ -106,6 +108,15 @@ class DSPViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Forward device list and selection from USBDevice
+        usb.$availableDevices
+            .receive(on: RunLoop.main)
+            .assign(to: &$availableDevices)
+
+        usb.$selectedDevice
+            .receive(on: RunLoop.main)
+            .assign(to: &$selectedDevice)
+
         // 2. Start Polling Timer (Every 60ms) on background queue
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
         timer.schedule(deadline: .now(), repeating: 0.06)
@@ -117,7 +128,7 @@ class DSPViewModel: ObservableObject {
         pollTimer = timer
 
         // Initial Connect attempt
-        usb.connect()
+        usb.reconnect()
     }
 
     func updateSelection(to channel: Channel?) {
@@ -209,6 +220,45 @@ class DSPViewModel: ObservableObject {
     func computeDiff() -> PresetDiff {
         guard let saved = savedSnapshot else { return PresetDiff(changes: []) }
         return PresetSnapshot.diff(from: saved, to: captureSnapshot(), channelNames: channelNames)
+    }
+
+    func switchToDevice(_ device: DSPiDevice) {
+        guard device != selectedDevice else { return }
+
+        if isDeviceConnected && hasUnsavedChanges {
+            let diff = computeDiff()
+            let action = PresetAlerts.showUnsavedChangesAlert(diff: diff)
+            switch action {
+            case .save:
+                DispatchQueue.global(qos: .userInitiated).async {
+                    if self.presetNames[self.activePresetSlot].isEmpty {
+                        self.setPresetName(slot: self.activePresetSlot, name: "Preset \(self.activePresetSlot + 1)")
+                    }
+                    let saveStatus = self.savePreset(slot: self.activePresetSlot)
+                    guard saveStatus == PRESET_OK else {
+                        DispatchQueue.main.async {
+                            let alert = NSAlert()
+                            alert.messageText = "Save Failed"
+                            alert.informativeText = "Failed to save preset (error \(saveStatus)). Device switch aborted."
+                            alert.alertStyle = .warning
+                            alert.addButton(withTitle: "OK")
+                            alert.runModal()
+                        }
+                        return
+                    }
+                    self.savedSnapshot = nil
+                    self.usb.selectDevice(device)
+                }
+            case .discard:
+                savedSnapshot = nil
+                usb.selectDevice(device)
+            case .cancel:
+                return
+            }
+        } else {
+            savedSnapshot = nil
+            usb.selectDevice(device)
+        }
     }
 
     static func defaultChannelNames(for platform: String) -> [String] {
