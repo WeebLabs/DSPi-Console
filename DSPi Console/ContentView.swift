@@ -382,7 +382,7 @@ struct ContentView: View {
                                                vm.availableDevices.contains(selected) {
                                                 return selected
                                             }
-                                            return vm.availableDevices[0]
+                                            return vm.availableDevices.first ?? DSPiDevice(serial: "", locationID: 0)
                                         },
                                         set: { vm.switchToDevice($0) }
                                     ),

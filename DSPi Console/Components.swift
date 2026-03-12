@@ -416,7 +416,11 @@ private class PaddedPopUpButton: NSPopUpButton {
         return size
     }
     override func rightMouseDown(with event: NSEvent) {
-        onRightClick?()
+        if let onRightClick = onRightClick {
+            onRightClick()
+        } else {
+            super.rightMouseDown(with: event)
+        }
     }
 }
 
