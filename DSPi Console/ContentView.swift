@@ -131,8 +131,9 @@ struct ContentView: View {
                                   isRenaming: renamingChannel == ch.rawValue,
                                   renameText: $renameText,
                                   onCommitRename: { commitRename() })
+                            .onOptionClick { startRename(ch.rawValue) }
                             .onTapGesture {
-                                if renamingChannel != nil { commitRename(); return }
+                                if renamingChannel != nil { commitRename() }
                                 if selection == .channel(ch) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
@@ -141,7 +142,17 @@ struct ContentView: View {
                                     vm.updateSelection(to: ch)
                                 }
                             }
-                            .onRightClick { startRename(ch.rawValue) }
+                            .contextMenu {
+                                Button("Rename") { startRename(ch.rawValue) }
+                                Divider()
+                                Button("Copy Parameters") {
+                                    vm.copyChannelParams(eqChannel: ch.rawValue, name: vm.channelNames[ch.rawValue])
+                                }
+                                Button("Paste Parameters") {
+                                    vm.pasteChannelParams(eqChannel: ch.rawValue)
+                                }
+                                .disabled(vm.channelClipboard == nil)
+                            }
                     }
                 }
 
@@ -154,8 +165,9 @@ struct ContentView: View {
                                   isRenaming: renamingChannel == out.index + 2,
                                   renameText: $renameText,
                                   onCommitRename: { commitRename() })
+                            .onOptionClick { startRename(out.index + 2) }
                             .onTapGesture {
-                                if renamingChannel != nil { commitRename(); return }
+                                if renamingChannel != nil { commitRename() }
                                 if selection == .output(out.index) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
@@ -164,7 +176,17 @@ struct ContentView: View {
                                     vm.updateSelectionToOutput(out.index)
                                 }
                             }
-                            .onRightClick { startRename(out.index + 2) }
+                            .contextMenu {
+                                Button("Rename") { startRename(out.index + 2) }
+                                Divider()
+                                Button("Copy Parameters") {
+                                    vm.copyChannelParams(eqChannel: out.index + 2, name: vm.channelNames[out.index + 2])
+                                }
+                                Button("Paste Parameters") {
+                                    vm.pasteChannelParams(eqChannel: out.index + 2)
+                                }
+                                .disabled(vm.channelClipboard == nil)
+                            }
                     }
                 }
             }

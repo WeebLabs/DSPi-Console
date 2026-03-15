@@ -196,7 +196,17 @@ struct MatrixMixerView: View {
                     }
                     .frame(width: columnWidth, height: 48)
                     .contentShape(Rectangle())
-                    .onRightClick { startRename(out.index) }
+                    .contextMenu {
+                        Button("Rename") { startRename(out.index) }
+                        Divider()
+                        Button("Copy Parameters") {
+                            vm.copyChannelParams(eqChannel: out.index + 2, name: vm.channelNames[out.index + 2])
+                        }
+                        Button("Paste Parameters") {
+                            vm.pasteChannelParams(eqChannel: out.index + 2)
+                        }
+                        .disabled(vm.channelClipboard == nil)
+                    }
                 }
             }
 

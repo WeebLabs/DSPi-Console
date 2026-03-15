@@ -40,6 +40,46 @@ extension View {
     func onRightClick(perform action: @escaping () -> Void) -> some View {
         self.overlay(RightClickHandler(action: action))
     }
+    func onOptionClick(perform action: @escaping () -> Void) -> some View {
+        self.overlay(OptionClickHandler(action: action))
+    }
+}
+
+// MARK: - Option Click Handler
+
+/// Invisible overlay that intercepts option-clicks while passing other clicks through
+struct OptionClickHandler: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> OptionClickNSView {
+        let view = OptionClickNSView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ nsView: OptionClickNSView, context: Context) {
+        nsView.action = action
+    }
+
+    class OptionClickNSView: NSView {
+        var action: (() -> Void)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            if let event = NSApp.currentEvent, event.type == .leftMouseDown,
+               event.modifierFlags.contains(.option) {
+                return self
+            }
+            return nil
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            action?()
+        }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            return true
+        }
+    }
 }
 
 // MARK: - Meter Components
@@ -186,6 +226,9 @@ struct ChannelRow: View {
                 }
             }
         }
+        .onChange(of: isFocused) { focused in
+            if !focused && isRenaming { onCommitRename() }
+        }
     }
 }
 
@@ -254,6 +297,9 @@ struct OutputRow: View {
                     isFocused = true
                 }
             }
+        }
+        .onChange(of: isFocused) { focused in
+            if !focused && isRenaming { onCommitRename() }
         }
     }
 }

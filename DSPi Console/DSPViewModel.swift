@@ -261,6 +261,54 @@ class DSPViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Channel Clipboard
+
+    struct ChannelClipboard {
+        let filters: [FilterParams]
+        let outputGainDB: Float?
+        let outputDelayMS: Float?
+        let outputMuted: Bool?
+        let sourceName: String
+    }
+
+    var channelClipboard: ChannelClipboard? = nil
+
+    func copyChannelParams(eqChannel: Int, name: String) {
+        let filters = channelData[eqChannel] ?? []
+        if eqChannel >= 2 {
+            let outIdx = eqChannel - 2
+            channelClipboard = ChannelClipboard(
+                filters: filters,
+                outputGainDB: outputGainDB[outIdx],
+                outputDelayMS: outputDelayMS[outIdx],
+                outputMuted: outputMuted[outIdx],
+                sourceName: name
+            )
+        } else {
+            channelClipboard = ChannelClipboard(
+                filters: filters,
+                outputGainDB: nil, outputDelayMS: nil, outputMuted: nil,
+                sourceName: name
+            )
+        }
+    }
+
+    func pasteChannelParams(eqChannel: Int) {
+        guard let cb = channelClipboard else { return }
+        for (i, filter) in cb.filters.prefix(10).enumerated() {
+            setFilter(ch: eqChannel, band: i, p: filter)
+        }
+        for i in cb.filters.count..<10 {
+            setFilter(ch: eqChannel, band: i, p: FilterParams())
+        }
+        if eqChannel >= 2 {
+            let outIdx = eqChannel - 2
+            if let gain = cb.outputGainDB { setOutputGain(output: outIdx, db: gain) }
+            if let delay = cb.outputDelayMS { setOutputDelay(output: outIdx, ms: delay) }
+            if let muted = cb.outputMuted { setOutputMute(output: outIdx, muted: muted) }
+        }
+    }
+
     static func defaultChannelNames(for platform: String) -> [String] {
         if platform == "RP2040" {
             return ["USB L", "USB R", "SPDIF 1 L", "SPDIF 1 R",
