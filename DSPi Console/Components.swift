@@ -655,3 +655,26 @@ struct ValueField: View {
         .onChange(of: value) { newValue in text = String(format: "%.1f", newValue) }
     }
 }
+
+// MARK: - Sidebar Icon Button
+
+struct SidebarIconButton: View {
+    let icon: String
+    let isActive: Bool
+    let tooltip: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(isActive ? .white : isHovered ? .white.opacity(0.7) : .secondary.opacity(0.6))
+                .animation(.easeInOut(duration: 0.2), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+        .frame(maxWidth: .infinity)
+        .onHover { isHovered = $0 }
+    }
+}

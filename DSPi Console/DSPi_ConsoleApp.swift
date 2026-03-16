@@ -1474,6 +1474,10 @@ struct DSPi_ConsoleApp: App {
     var body: some Scene {
         Window("DSPi Console", id: "main") {
             ContentView(vm: AppState.shared.viewModel)
+                .environmentObject(matrixMixerWindowController)
+                .environmentObject(loudnessWindowController)
+                .environmentObject(crossfeedWindowController)
+                .environmentObject(statsWindowController)
                 .preferredColorScheme(.dark)
                 .onAppear {
                     NSApp.appearance = NSAppearance(named: .darkAqua)

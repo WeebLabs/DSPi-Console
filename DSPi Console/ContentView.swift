@@ -12,6 +12,10 @@ enum SidebarSelection: Hashable {
 
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
+    @EnvironmentObject var matrixMixerController: MatrixMixerWindowController
+    @EnvironmentObject var loudnessController: LoudnessWindowController
+    @EnvironmentObject var crossfeedController: CrossfeedWindowController
+    @EnvironmentObject var statsController: StatsWindowController
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
     @State private var renameText = ""
@@ -20,6 +24,8 @@ struct ContentView: View {
     @State private var showPresetRename = false
     @State private var presetRenameSlot = 0
     @State private var presetRenameText = ""
+    @State private var settingsWindowOpen = false
+    @Environment(\.openSettings) private var openSettingsAction
 
     private func commitRename() {
         guard let idx = renamingChannel else { return }
@@ -191,14 +197,71 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
+            .mask(
+                VStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 16)
+                }
+                .ignoresSafeArea(.all, edges: [.top, .bottom])
+            )
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
+                    // Quick Access Icons
+                    HStack(spacing: 0) {
+                        SidebarIconButton(
+                            icon: "slider.horizontal.3",
+                            isActive: matrixMixerController.isVisible,
+                            tooltip: "Matrix Mixer",
+                            action: { matrixMixerController.toggle() }
+                        )
+
+                        SidebarIconButton(
+                            icon: "headphones",
+                            isActive: vm.crossfeedEnabled,
+                            tooltip: "Headphone Crossfeed",
+                            action: { vm.setCrossfeed(!vm.crossfeedEnabled) }
+                        )
+                        .onRightClick { crossfeedController.show(vm: vm) }
+
+                        SidebarIconButton(
+                            icon: "speaker.zzz",
+                            isActive: vm.loudnessEnabled,
+                            tooltip: "Loudness Compensation",
+                            action: { vm.setLoudness(!vm.loudnessEnabled) }
+                        )
+                        .onRightClick { loudnessController.show(vm: vm) }
+
+                        SidebarIconButton(
+                            icon: "info.circle",
+                            isActive: statsController.isVisible,
+                            tooltip: "Stats for Nerbs",
+                            action: { statsController.toggle(usb: vm.usb) }
+                        )
+
+                        SidebarIconButton(
+                            icon: "gearshape",
+                            isActive: settingsWindowOpen,
+                            tooltip: "Settings",
+                            action: {
+                                if settingsWindowOpen, let w = NSApp.windows.first(where: {
+                                    $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window"
+                                }) {
+                                    w.close()
+                                } else {
+                                    openSettingsAction()
+                                    settingsWindowOpen = true
+                                }
+                            }
+                        )
+                    }
+                    .padding(.vertical, 8)
+
+                    VStack(spacing: 0) {
                     Divider()
 
                     // Global Controls
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("GLOBAL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-
                         // Preset Picker
                         HStack {
                             Text("Preset").font(.caption2).foregroundColor(.secondary)
@@ -367,8 +430,9 @@ struct ContentView: View {
                     // System Status — CPU load only (meters are inline in sidebar rows)
                     CpuSection(meters: vm.meters)
                     .padding()
+                    }
+                    .background(.ultraThinMaterial)
                 }
-                .background(.ultraThinMaterial)
             }
             .frame(minWidth: 220, maxWidth: 260)
             // ADDED GESTURE FOR THE REST OF THE SIDEBAR
@@ -536,6 +600,12 @@ struct ContentView: View {
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            if let window = note.object as? NSWindow,
+               window.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" {
+                settingsWindowOpen = false
+            }
+        }
     }
 
 }
@@ -572,10 +642,18 @@ extension DSPViewModel {
 
 #Preview("Dashboard") {
     ContentView(vm: .preview)
-    .frame(height: 790)
+        .environmentObject(MatrixMixerWindowController())
+        .environmentObject(LoudnessWindowController())
+        .environmentObject(CrossfeedWindowController())
+        .environmentObject(StatsWindowController())
+        .frame(height: 790)
 }
 
 #Preview("Channel Selected") {
     ContentView(vm: .preview)
-    .frame(width: 1000, height: 780)
+        .environmentObject(MatrixMixerWindowController())
+        .environmentObject(LoudnessWindowController())
+        .environmentObject(CrossfeedWindowController())
+        .environmentObject(StatsWindowController())
+        .frame(width: 1000, height: 780)
 }
