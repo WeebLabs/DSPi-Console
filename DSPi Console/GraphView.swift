@@ -307,6 +307,9 @@ struct BodePlotView: View {
             }
             .allowsHitTesting(false)
         )
+        .overlay(
+            GraphVerticalZoomHandler(settings: settings)
+        )
     }
 
     // Create smooth gradient stops for overlapping channels
@@ -340,6 +343,103 @@ struct BodePlotView: View {
         }
 
         return stops.sorted { $0.location < $1.location }
+    }
+}
+
+// MARK: - Graph Resize Handle
+
+struct GraphResizeHandle: View {
+    var body: some View {
+        GraphResizeHandleRepresentable()
+            .frame(height: 20)
+            .padding(.horizontal)
+    }
+}
+
+struct GraphResizeHandleRepresentable: NSViewRepresentable {
+    func makeNSView(context: Context) -> GraphResizeNSView {
+        GraphResizeNSView()
+    }
+
+    func updateNSView(_ nsView: GraphResizeNSView, context: Context) {}
+}
+
+class GraphResizeNSView: NSView {
+    private var dragStartHeight: Double = 0
+    private var dragStartY: CGFloat = 0
+    private var isDragging = false
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStartY = NSEvent.mouseLocation.y
+        dragStartHeight = AppSettings.shared.graphHeight
+        isDragging = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        let currentY = NSEvent.mouseLocation.y
+        let delta = Double(currentY - dragStartY)
+        let newHeight = dragStartHeight - delta
+        AppSettings.shared.graphHeight = min(max(newHeight, 200), 350)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+    }
+}
+
+// MARK: - Vertical Zoom Handler
+
+struct GraphVerticalZoomHandler: NSViewRepresentable {
+    let settings: AppSettings
+    private let zoneWidth: CGFloat = 40
+
+    func makeNSView(context: Context) -> VerticalZoomNSView {
+        let view = VerticalZoomNSView()
+        view.settings = settings
+        view.zoneWidth = zoneWidth
+        return view
+    }
+
+    func updateNSView(_ nsView: VerticalZoomNSView, context: Context) {
+        nsView.settings = settings
+    }
+}
+
+class VerticalZoomNSView: NSView {
+    var settings: AppSettings?
+    var zoneWidth: CGFloat = 40
+
+    override func scrollWheel(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        guard location.x <= zoneWidth, let settings = settings else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        let delta = Double(event.scrollingDeltaY)
+        let sensitivity = event.hasPreciseScrollingDeltas ? 0.3 : 3.0
+        let newRange = settings.graphDBRange - delta * sensitivity
+        settings.graphDBRange = min(max(newRange, 10), 100)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if local.x <= zoneWidth {
+            return self
+        }
+        return nil
     }
 }
 
@@ -391,6 +491,7 @@ struct GraphLegend: View {
                 legendPill(eqCh: out.index + 2, name: out.descriptor, color: out.color)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
     }
 }

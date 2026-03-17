@@ -575,13 +575,13 @@ struct FilterRowView: View {
             if isActive {
                 HStack(spacing: 12) {
                     // Freq
-                    ValueField(label: "Hz", value: params.freq, width: 80) {
+                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
                         var p = params; p.freq = $0; onChange(p)
                     }
 
                     // Gain
                     if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
-                        ValueField(label: "dB", value: params.gain, width: 60) {
+                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
                             var p = params; p.gain = $0; onChange(p)
                         }
                     } else {
@@ -589,7 +589,7 @@ struct FilterRowView: View {
                     }
 
                     // Q
-                    ValueField(label: "Q", value: params.q, width: 50) {
+                    ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3) {
                         var p = params; p.q = $0; onChange(p)
                     }
                 }
@@ -620,9 +620,23 @@ struct ValueField: View {
     let label: String
     let value: Float
     let width: CGFloat
+    var scrollStep: Float = 0.1
+    var minValue: Float? = nil
+    var maxDecimals: Int = 1
     let onCommit: (Float) -> Void
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
+
+    private func format(_ v: Float) -> String {
+        let full = String(format: "%.\(maxDecimals)f", v)
+        // Trim trailing zeros but keep at least one decimal
+        let parts = full.split(separator: ".", maxSplits: 1)
+        guard parts.count == 2 else { return full }
+        let decimals = String(parts[1])
+        let trimmed = decimals.replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+        if trimmed.isEmpty { return "\(parts[0]).0" }
+        return "\(parts[0]).\(trimmed)"
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -641,8 +655,8 @@ struct ValueField: View {
                     .padding(4)
                     .frame(width: width) // Enforce fixed width
                     .focused($isFocused)
-                    .onSubmit { if let v = Float(text) { onCommit(v) } else { text = String(format: "%.1f", value) } }
-                    .onChange(of: isFocused) { focused in if !focused { if let v = Float(text) { onCommit(v) } else { text = String(format: "%.1f", value) } } }
+                    .onSubmit { if let v = Float(text) { onCommit(v) } else { text = format(value) } }
+                    .onChange(of: isFocused) { focused in if !focused { if let v = Float(text) { onCommit(v) } else { text = format(value) } } }
             }
             .fixedSize(horizontal: true, vertical: false)
 
@@ -651,8 +665,54 @@ struct ValueField: View {
                 .foregroundColor(.secondary)
                 .frame(width: 20, alignment: .leading)
         }
-        .onAppear { text = String(format: "%.1f", value) }
-        .onChange(of: value) { newValue in text = String(format: "%.1f", newValue) }
+        .overlay(
+            ValueFieldScrollHandler(value: value, step: scrollStep, minValue: minValue, onCommit: onCommit)
+        )
+        .onAppear { text = format(value) }
+        .onChange(of: value) { newValue in text = format(newValue) }
+    }
+}
+
+// MARK: - Value Field Scroll Handler
+
+struct ValueFieldScrollHandler: NSViewRepresentable {
+    let value: Float
+    let step: Float
+    let minValue: Float?
+    let onCommit: (Float) -> Void
+
+    func makeNSView(context: Context) -> ValueFieldScrollNSView {
+        let view = ValueFieldScrollNSView()
+        view.value = value
+        view.step = step
+        view.minValue = minValue
+        view.onCommit = onCommit
+        return view
+    }
+
+    func updateNSView(_ nsView: ValueFieldScrollNSView, context: Context) {
+        nsView.value = value
+        nsView.step = step
+        nsView.minValue = minValue
+        nsView.onCommit = onCommit
+    }
+}
+
+class ValueFieldScrollNSView: NSView {
+    var value: Float = 0
+    var step: Float = 0.1
+    var minValue: Float?
+    var onCommit: ((Float) -> Void)?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func scrollWheel(with event: NSEvent) {
+        let delta = Double(event.scrollingDeltaY)
+        guard abs(delta) > 0.01 else { return }
+
+        let direction: Float = delta > 0 ? 1 : -1
+        let newValue = value + direction * step
+        onCommit?(minValue.map { max(newValue, $0) } ?? newValue)
     }
 }
 

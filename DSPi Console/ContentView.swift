@@ -12,6 +12,7 @@ enum SidebarSelection: Hashable {
 
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject var matrixMixerController: MatrixMixerWindowController
     @EnvironmentObject var loudnessController: LoudnessWindowController
     @EnvironmentObject var crossfeedController: CrossfeedWindowController
@@ -496,8 +497,11 @@ struct ContentView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 16)
 
-                    BodePlotView(vm: vm).frame(height: 250).padding(.horizontal)
-                    GraphLegend(vm: vm).padding(.horizontal).padding(.top, 8)
+                    BodePlotView(vm: vm)
+                        .frame(height: CGFloat(settings.graphHeight))
+                        .padding(.horizontal)
+                    GraphResizeHandle()
+                    GraphLegend(vm: vm).padding(.horizontal).padding(.top, -16)
                 }
 
                 // Right Panel Content (Dynamic)

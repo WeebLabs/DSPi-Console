@@ -34,6 +34,7 @@ class AppSettings: ObservableObject {
     @AppStorage("showDBGrid") var showDBGrid: Bool = true
     @AppStorage("graphDBRange") var graphDBRange: Double = 50.0
     @AppStorage("graphDBCenter") var graphDBCenter: Double = 0.0
+    @AppStorage("graphHeight") var graphHeight: Double = 250.0
     @AppStorage("graphMinFreq") var graphMinFreq: Double = 15.0
     @AppStorage("graphMaxFreq") var graphMaxFreq: Double = 20000.0
 

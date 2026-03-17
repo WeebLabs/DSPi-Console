@@ -1,5 +1,15 @@
 import SwiftUI
 
+private func formatTrimmed(_ value: Double, decimals: Int, signed: Bool = false) -> String {
+    let fmt = signed ? "%+.\(decimals)f" : "%.\(decimals)f"
+    let full = String(format: fmt, value)
+    let parts = full.split(separator: ".", maxSplits: 1)
+    guard parts.count == 2 else { return full }
+    let trimmed = String(parts[1]).replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+    if trimmed.isEmpty { return "\(parts[0]).0" }
+    return "\(parts[0]).\(trimmed)"
+}
+
 // MARK: - Dashboard Overview (Stereo Pairs)
 
 struct DashboardOverview: View {
@@ -347,14 +357,14 @@ struct DashboardRow: View {
                     Spacer().frame(width: 4)
 
                     if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
-                        Text("\(params.gain, specifier: "%+.1f")")
+                        Text(formatTrimmed(Double(params.gain), decimals: 2, signed: true))
                             .foregroundColor(.primary.opacity(0.8))
                         Text("dB").foregroundColor(.secondary.opacity(0.7)).font(.system(size: 8))
                     }
 
                     if params.type == .peaking {
                         Spacer().frame(width: 4)
-                        Text("\(params.q, specifier: "%.1f")")
+                        Text(formatTrimmed(Double(params.q), decimals: 3))
                             .foregroundColor(.primary.opacity(0.8))
                         Text("Q").foregroundColor(.secondary.opacity(0.7)).font(.system(size: 8))
                     }
