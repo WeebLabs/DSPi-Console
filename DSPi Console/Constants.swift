@@ -92,6 +92,10 @@ let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 let BULK_PARAMS_SIZE: UInt16            = 2832
 
+// Buffer statistics request codes
+let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
+let REQ_RESET_BUFFER_STATS: UInt8       = 0xB1
+
 // Preset status codes
 let PRESET_OK: UInt8                    = 0x00
 let PRESET_ERR_INVALID_SLOT: UInt8      = 0x01

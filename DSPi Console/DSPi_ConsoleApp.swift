@@ -639,7 +639,7 @@ class StatsWindowController: NSObject, ObservableObject {
             let statsView = StatsView(vm: statsVM!)
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 320, height: 420),
+                contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
