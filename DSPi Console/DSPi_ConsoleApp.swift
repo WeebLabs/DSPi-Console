@@ -38,6 +38,9 @@ class AppSettings: ObservableObject {
     @AppStorage("graphMinFreq") var graphMinFreq: Double = 15.0
     @AppStorage("graphMaxFreq") var graphMaxFreq: Double = 20000.0
 
+    // Pop-out Graph
+    @AppStorage("popoutGraphFollowsSelection") var popoutGraphFollowsSelection: Bool = true
+
     // Advanced
     @AppStorage("showDebugInfo") var showDebugInfo: Bool = false
 
@@ -293,6 +296,13 @@ struct GraphingSettingsTab: View {
                 .padding(.vertical, 4)
             } header: {
                 Label("Scale & Grid", systemImage: "ruler")
+            }
+
+            Section {
+                Toggle("Pop-out graph follows channel selection", isOn: $settings.popoutGraphFollowsSelection)
+                    .toggleStyle(.switch)
+            } header: {
+                Label("Pop-out Window", systemImage: "rectangle.portrait.and.arrow.right")
             }
         }
         .formStyle(.grouped)
@@ -665,6 +675,89 @@ class StatsWindowController: NSObject, ObservableObject {
 extension StatsWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         isVisible = false
+    }
+}
+
+// MARK: - Graph Pop-Out Window Controller
+
+class GraphWindowController: NSObject, ObservableObject {
+    private var window: NSWindow?
+    @Published var isVisible: Bool = false
+
+    func show(vm: DSPViewModel) {
+        if window == nil {
+            let graphContent = GraphPopOutView(vm: vm)
+                .environmentObject(self)
+
+            window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 800, height: 400),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window?.title = "Filter Response"
+            window?.contentView = NSHostingView(rootView: graphContent)
+            window?.isReleasedWhenClosed = false
+            window?.minSize = NSSize(width: 500, height: 250)
+            window?.delegate = self
+        }
+
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            isVisible = true
+        }
+    }
+
+    func hide() {
+        window?.orderOut(nil)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            isVisible = false
+        }
+    }
+}
+
+extension GraphWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            isVisible = false
+        }
+    }
+}
+
+struct GraphPopOutView: View {
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
+    @State private var popoutVisibility: [Int: Bool] = [:]
+
+    private func initVisibility() {
+        guard popoutVisibility.isEmpty else { return }
+        // Start with all master + enabled outputs visible
+        var vis: [Int: Bool] = [0: true, 1: true]
+        for i in 0..<9 {
+            vis[i + 2] = vm.outputEnabled[i]
+        }
+        popoutVisibility = vis
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if settings.popoutGraphFollowsSelection {
+                BodePlotView(vm: vm, isPopOut: true)
+                    .padding()
+                GraphLegend(vm: vm)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+            } else {
+                BodePlotView(vm: vm, isPopOut: true, visibilityOverride: $popoutVisibility)
+                    .padding()
+                GraphLegend(vm: vm, visibilityOverride: $popoutVisibility)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+            }
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+        .onAppear { initVisibility() }
     }
 }
 
@@ -1471,6 +1564,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
+    @StateObject private var graphWindowController = GraphWindowController()
 
     var body: some Scene {
         Window("DSPi Console", id: "main") {
@@ -1479,6 +1573,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(loudnessWindowController)
                 .environmentObject(crossfeedWindowController)
                 .environmentObject(statsWindowController)
+                .environmentObject(graphWindowController)
                 .preferredColorScheme(.dark)
                 .onAppear {
                     NSApp.appearance = NSAppearance(named: .darkAqua)

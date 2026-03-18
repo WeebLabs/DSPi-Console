@@ -17,6 +17,7 @@ struct ContentView: View {
     @EnvironmentObject var loudnessController: LoudnessWindowController
     @EnvironmentObject var crossfeedController: CrossfeedWindowController
     @EnvironmentObject var statsController: StatsWindowController
+    @EnvironmentObject var graphWindowController: GraphWindowController
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
     @State private var renameText = ""
@@ -211,7 +212,7 @@ struct ContentView: View {
                     // Quick Access Icons
                     HStack(spacing: 0) {
                         SidebarIconButton(
-                            icon: "slider.horizontal.3",
+                            icon: "slider.vertical.3",
                             isActive: matrixMixerController.isVisible,
                             tooltip: "Matrix Mixer",
                             action: { matrixMixerController.toggle() }
@@ -444,11 +445,23 @@ struct ContentView: View {
 
             // MAIN CONTENT
             VStack(alignment: .leading, spacing: 20) {
-                // Graph
+                // Graph + connection status
                 VStack(alignment: .leading, spacing: 0) {
-                    // Combined header: Filters title + connection status
+                    // Header: connection status (always visible)
                     HStack {
-                        Text("Filter Response").font(.headline)
+                        if graphWindowController.isVisible {
+                            Button(action: { graphWindowController.hide() }) {
+                                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Close pop-out window")
+                            .transition(.opacity)
+                        } else {
+                            Text("Filter Response").font(.headline)
+                                .transition(.opacity)
+                        }
 
                         Spacer()
 
@@ -495,13 +508,17 @@ struct ContentView: View {
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)
-                    .padding(.bottom, 16)
+                    .padding(.bottom, graphWindowController.isVisible ? 0 : 16)
 
-                    BodePlotView(vm: vm)
-                        .frame(height: CGFloat(settings.graphHeight))
-                        .padding(.horizontal)
-                    GraphResizeHandle()
-                    GraphLegend(vm: vm).padding(.horizontal).padding(.top, -16)
+                    if !graphWindowController.isVisible {
+                        BodePlotView(vm: vm)
+                            .frame(height: CGFloat(settings.graphHeight))
+                            .padding(.horizontal)
+                            .transition(.scale(scale: 0.95, anchor: .top).combined(with: .opacity))
+                        GraphResizeHandle()
+                        GraphLegend(vm: vm).padding(.horizontal).padding(.top, -16)
+                            .transition(.opacity)
+                    }
                 }
 
                 // Right Panel Content (Dynamic)
@@ -650,6 +667,7 @@ extension DSPViewModel {
         .environmentObject(LoudnessWindowController())
         .environmentObject(CrossfeedWindowController())
         .environmentObject(StatsWindowController())
+        .environmentObject(GraphWindowController())
         .frame(height: 790)
 }
 
@@ -659,5 +677,6 @@ extension DSPViewModel {
         .environmentObject(LoudnessWindowController())
         .environmentObject(CrossfeedWindowController())
         .environmentObject(StatsWindowController())
+        .environmentObject(GraphWindowController())
         .frame(width: 1000, height: 780)
 }

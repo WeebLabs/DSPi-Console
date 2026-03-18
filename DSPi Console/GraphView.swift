@@ -105,7 +105,17 @@ struct BodeLineShape: Shape {
 
 struct BodePlotView: View {
     @ObservedObject var vm: DSPViewModel
+    var isPopOut: Bool = false
+    @Binding var visibilityOverride: [Int: Bool]
     @ObservedObject private var settings = AppSettings.shared
+    @EnvironmentObject var graphWindowController: GraphWindowController
+    @State private var isHovered = false
+
+    init(vm: DSPViewModel, isPopOut: Bool = false, visibilityOverride: Binding<[Int: Bool]> = .constant([:])) {
+        self.vm = vm
+        self.isPopOut = isPopOut
+        self._visibilityOverride = visibilityOverride
+    }
 
     var minFreq: Float { Float(settings.graphMinFreq) }
     var maxFreq: Float { Float(settings.graphMaxFreq) }
@@ -134,18 +144,38 @@ struct BodePlotView: View {
         }
     }
 
+    struct ChannelEntry {
+        let eqCh: Int
+        let color: Color
+        let isActive: Bool
+    }
+
+    // Whether this instance uses independent visibility
+    private var useOverride: Bool {
+        isPopOut && !settings.popoutGraphFollowsSelection && !visibilityOverride.isEmpty
+    }
+
     // Group visible channels by identical magnitudes
-    func groupedChannels() -> [[Double]: [(eqCh: Int, color: Color)]] {
-        var groups: [[Double]: [(eqCh: Int, color: Color)]] = [:]
+    func groupedChannels() -> [[Double]: [ChannelEntry]] {
+        var groups: [[Double]: [ChannelEntry]] = [:]
+        let activeEq = vm.activeEqChannel
+        let followsSelection = !isPopOut || settings.popoutGraphFollowsSelection
         for eqCh in 0...10 {
-            if vm.channelVisibility[eqCh] == true {
+            let visible: Bool
+            if useOverride {
+                visible = visibilityOverride[eqCh] ?? false
+            } else {
+                visible = vm.channelVisibility[eqCh] == true
+            }
+            if visible {
                 var mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
                 // Apply output gain as constant offset
                 if eqCh >= 2 {
                     let gain = Double(vm.outputGainDB[eqCh - 2])
                     if gain != 0 { mags = mags.map { $0 + gain } }
                 }
-                let entry = (eqCh: eqCh, color: colorForEQChannel(eqCh))
+                let isActive = !followsSelection || activeEq == nil || eqCh == activeEq
+                let entry = ChannelEntry(eqCh: eqCh, color: colorForEQChannel(eqCh), isActive: isActive)
                 if groups[mags] != nil {
                     groups[mags]!.append(entry)
                 } else {
@@ -227,10 +257,13 @@ struct BodePlotView: View {
             ForEach(Array(groups.keys), id: \.self) { mags in
                 let entries = groups[mags] ?? []
                 let lineWidth = settings.graphLineWidth
+                let allActive = entries.allSatisfy { $0.isActive }
+                let dashPattern: [CGFloat] = allActive ? [] : [6, 4]
+                let style = StrokeStyle(lineWidth: lineWidth, dash: dashPattern)
                 if entries.count == 1 {
-                    // Single channel - solid color
+                    // Single channel
                     ZStack {
-                        if settings.showGraphGlow {
+                        if settings.showGraphGlow && allActive {
                             BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(entries[0].color.opacity(0.3), lineWidth: lineWidth * 4)
                                 .blur(radius: 6)
@@ -239,7 +272,7 @@ struct BodePlotView: View {
                                 .blur(radius: 3)
                         }
                         BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
-                            .stroke(entries[0].color, lineWidth: lineWidth)
+                            .stroke(entries[0].color, style: style)
                     }
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 } else {
@@ -251,7 +284,7 @@ struct BodePlotView: View {
                         endPoint: .trailing
                     )
                     ZStack {
-                        if settings.showGraphGlow {
+                        if settings.showGraphGlow && allActive {
                             BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(gradient, lineWidth: lineWidth * 5)
                                 .blur(radius: 8)
@@ -262,7 +295,7 @@ struct BodePlotView: View {
                                 .opacity(0.07)
                         }
                         BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
-                            .stroke(gradient, lineWidth: lineWidth * 1.25)
+                            .stroke(gradient, style: StrokeStyle(lineWidth: lineWidth * 1.25, dash: dashPattern))
                     }
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 }
@@ -310,6 +343,25 @@ struct BodePlotView: View {
         .overlay(
             GraphVerticalZoomHandler(settings: settings)
         )
+        .overlay(alignment: .topTrailing) {
+            if isHovered && !graphWindowController.isVisible {
+                Button(action: {
+                    graphWindowController.show(vm: vm)
+                }) {
+                    Image(systemName: "arrow.down.backward.and.arrow.up.forward")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .padding(6)
+                .transition(.opacity)
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
     }
 
     // Create smooth gradient stops for overlapping channels
@@ -447,12 +499,24 @@ class VerticalZoomNSView: NSView {
 
 struct GraphLegend: View {
     @ObservedObject var vm: DSPViewModel
+    @Binding var visibilityOverride: [Int: Bool]
+
+    init(vm: DSPViewModel, visibilityOverride: Binding<[Int: Bool]> = .constant([:])) {
+        self.vm = vm
+        self._visibilityOverride = visibilityOverride
+    }
+
+    private var useOverride: Bool { !visibilityOverride.isEmpty }
 
     private func legendPill(eqCh: Int, name: String, color: Color) -> some View {
-        let isVisible = vm.channelVisibility[eqCh] ?? true
+        let isVisible = useOverride ? (visibilityOverride[eqCh] ?? false) : (vm.channelVisibility[eqCh] ?? true)
         return Button(action: {
             withAnimation(.easeInOut(duration: 0.1)) {
-                vm.channelVisibility[eqCh] = !isVisible
+                if useOverride {
+                    visibilityOverride[eqCh] = !isVisible
+                } else {
+                    vm.channelVisibility[eqCh] = !isVisible
+                }
             }
         }) {
             HStack(spacing: 6) {

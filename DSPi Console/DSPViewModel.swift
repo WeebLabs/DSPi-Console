@@ -52,6 +52,7 @@ class DSPViewModel: ObservableObject {
     var pdmOutputIndex: Int { platformName == "RP2040" ? 4 : 8 }
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
     private(set) var isOverviewMode: Bool = true
+    @Published var activeEqChannel: Int? = nil
 
     // Live Data
     let meters = DSPMeterModel()
@@ -135,12 +136,14 @@ class DSPViewModel: ObservableObject {
         withAnimation(.easeInOut(duration: 0.2)) {
             if let ch = channel {
                 isOverviewMode = false
+                activeEqChannel = ch.rawValue
                 // Show only the selected master channel
                 for eqCh in 0...10 {
                     channelVisibility[eqCh] = (eqCh == ch.rawValue)
                 }
             } else {
                 isOverviewMode = true
+                activeEqChannel = nil
                 // Overview: show master L/R + all enabled output channels
                 channelVisibility[Channel.masterLeft.rawValue] = true
                 channelVisibility[Channel.masterRight.rawValue] = true
@@ -153,6 +156,7 @@ class DSPViewModel: ObservableObject {
 
     func updateSelectionToOutput(_ outputIdx: Int) {
         isOverviewMode = false
+        activeEqChannel = outputIdx + 2
         withAnimation(.easeInOut(duration: 0.2)) {
             for eqCh in 0...10 {
                 channelVisibility[eqCh] = (eqCh == outputIdx + 2)
