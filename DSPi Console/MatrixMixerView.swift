@@ -224,6 +224,7 @@ struct MatrixMixerView: View {
                         .frame(width: labelWidth, alignment: .center)
 
                     ForEach(visibleOutputs, id: \.index) { out in
+                        let enabled = vm.outputEnabled[out.index]
                         MatrixPoint(
                             isConnected: matrixRoutingBinding(row: input.index, col: out.index),
                             gain: matrixGainBinding(row: input.index, col: out.index),
@@ -233,6 +234,8 @@ struct MatrixMixerView: View {
                             outlineColor: (out.index == vm.pdmOutputIndex && wouldConflict(vm.pdmOutputIndex)) ? .orange : nil
                         )
                         .frame(width: columnWidth)
+                        .saturation(enabled ? 1.0 : 0.0)
+                        .opacity(enabled ? 1.0 : 0.3)
                     }
                 }
                 .frame(height: 78)
@@ -419,12 +422,12 @@ struct CompactGainField: View {
             .font(.system(size: 11, design: .monospaced))
             .foregroundColor(isFocused ? .accentColor : .primary.opacity(0.65))
             .multilineTextAlignment(.center)
-            .frame(width: 50)
+            .frame(width: 62)
             .focused($isFocused)
             .onSubmit { commitValue(); isFocused = false }
             .onChange(of: isFocused) { focused in
                 if focused {
-                    text = gain == 0 ? "0" : String(format: "%+.0f", gain)
+                    text = formatGain(gain)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
                     }
@@ -445,8 +448,18 @@ struct CompactGainField: View {
             )
     }
 
+    private func formatGain(_ value: Float) -> String {
+        if value == 0 { return "0" }
+        var s = String(format: "%+.2f", value)
+        if s.contains(".") {
+            while s.hasSuffix("0") { s.removeLast() }
+            if s.hasSuffix(".") { s.removeLast() }
+        }
+        return s
+    }
+
     private func updateDisplay() {
-        text = gain == 0 ? "0 dB" : String(format: "%+.0f dB", gain)
+        text = formatGain(gain) + " dB"
     }
 
     private func commitValue() {

@@ -244,13 +244,19 @@ class USBDevice: ObservableObject {
 
     fileprivate func onMatched(iterator: io_iterator_t) {
         var newDevices: [DSPiDevice] = []
+        // Retain service handles for devices we may auto-connect to,
+        // so we can open them directly without a second IOKit scan.
+        var serviceForSerial: [String: io_service_t] = [:]
 
         while case let service = IOIteratorNext(iterator), service != 0 {
-            defer { IOObjectRelease(service) }
-
-            guard let serial = readSerialNumber(from: service) else { continue }
+            guard let serial = readSerialNumber(from: service) else {
+                IOObjectRelease(service)
+                continue
+            }
             let locationID = readLocationID(from: service) ?? 0
             newDevices.append(DSPiDevice(serial: serial, locationID: locationID))
+            // Keep the service alive (caller will release after auto-connect decision)
+            serviceForSerial[serial] = service
         }
 
         guard !newDevices.isEmpty else { return }
@@ -263,15 +269,39 @@ class USBDevice: ObservableObject {
                 }
             }
 
-            // Auto-connect logic
+            // Auto-connect logic — open directly from the retained service handle
+            var deviceToConnect: DSPiDevice?
             if self.selectedDevice == nil && !self.availableDevices.isEmpty {
-                // No device selected — auto-select first available
-                self.selectDevice(self.availableDevices[0])
+                deviceToConnect = self.availableDevices[0]
             } else if let selected = self.selectedDevice,
                       newDevices.contains(where: { $0.serial == selected.serial }),
                       self.deviceInterface == nil {
-                // Re-plugged selected device — auto-reconnect
-                self.selectDevice(selected)
+                deviceToConnect = selected
+            }
+
+            if let device = deviceToConnect, let service = serviceForSerial[device.serial] {
+                self.serialQueue.async {
+                    self.closeDevice()
+                    if self.openDevice(service: service) {
+                        DispatchQueue.main.async {
+                            self.selectedDevice = device
+                            self.isConnected = true
+                            self.errorMessage = nil
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            self.isConnected = false
+                            if self.errorMessage == nil {
+                                self.errorMessage = "Could not open device"
+                            }
+                        }
+                    }
+                    // Release all retained services
+                    for (_, svc) in serviceForSerial { IOObjectRelease(svc) }
+                }
+            } else {
+                // No auto-connect — release all retained services
+                for (_, svc) in serviceForSerial { IOObjectRelease(svc) }
             }
         }
     }

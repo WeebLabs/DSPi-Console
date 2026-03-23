@@ -257,13 +257,13 @@ struct BodePlotView: View {
             ForEach(Array(groups.keys), id: \.self) { mags in
                 let entries = groups[mags] ?? []
                 let lineWidth = settings.graphLineWidth
-                let allActive = entries.allSatisfy { $0.isActive }
-                let dashPattern: [CGFloat] = allActive ? [] : [6, 4]
+                let anyActive = entries.contains { $0.isActive }
+                let dashPattern: [CGFloat] = anyActive ? [] : [6, 4]
                 let style = StrokeStyle(lineWidth: lineWidth, dash: dashPattern)
                 if entries.count == 1 {
                     // Single channel
                     ZStack {
-                        if settings.showGraphGlow && allActive {
+                        if settings.showGraphGlow && anyActive {
                             BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(entries[0].color.opacity(0.3), lineWidth: lineWidth * 4)
                                 .blur(radius: 6)
@@ -284,7 +284,7 @@ struct BodePlotView: View {
                         endPoint: .trailing
                     )
                     ZStack {
-                        if settings.showGraphGlow && allActive {
+                        if settings.showGraphGlow && anyActive {
                             BodeLineShape(magnitudes: mags, dbTop: dbTop, dbBottom: dbBottom, minFreq: minFreq, maxFreq: maxFreq)
                                 .stroke(gradient, lineWidth: lineWidth * 5)
                                 .blur(radius: 8)
