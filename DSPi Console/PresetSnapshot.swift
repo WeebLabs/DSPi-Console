@@ -42,6 +42,11 @@ struct PresetSnapshot: Equatable {
     let channelFilters: [Int: [SnapshotFilterParams]]
     let channelNames: [String]
     let outputPins: [UInt8]?  // nil when presetIncludePins is false
+    let outputSlotTypes: [UInt8]?  // nil when presetIncludePins is false
+    let i2sBckPin: UInt8?
+    let mckEnabled: Bool?
+    let mckPin: UInt8?
+    let mckMultiplier: Int?
 }
 
 // MARK: - Diff
@@ -180,6 +185,29 @@ extension PresetSnapshot {
             if pinChanges > 0 {
                 changes.append(.init(category: "Pins", description: "\(pinChanges) pin assignment\(pinChanges == 1 ? "" : "s") changed"))
             }
+        }
+
+        // I2S config (only if both snapshots track it)
+        if let oldTypes = old.outputSlotTypes, let newTypes = new.outputSlotTypes {
+            var typeChanges = 0
+            for i in 0..<min(oldTypes.count, newTypes.count) {
+                if oldTypes[i] != newTypes[i] { typeChanges += 1 }
+            }
+            if typeChanges > 0 {
+                changes.append(.init(category: "I2S", description: "\(typeChanges) output type\(typeChanges == 1 ? "" : "s") changed"))
+            }
+        }
+        if let oldPin = old.i2sBckPin, let newPin = new.i2sBckPin, oldPin != newPin {
+            changes.append(.init(category: "I2S", description: "BCK pin: GPIO \(oldPin) → GPIO \(newPin)"))
+        }
+        if let oldVal = old.mckEnabled, let newVal = new.mckEnabled, oldVal != newVal {
+            changes.append(.init(category: "I2S", description: "MCK: \(newVal ? "enabled" : "disabled")"))
+        }
+        if let oldPin = old.mckPin, let newPin = new.mckPin, oldPin != newPin {
+            changes.append(.init(category: "I2S", description: "MCK pin: GPIO \(oldPin) → GPIO \(newPin)"))
+        }
+        if let oldVal = old.mckMultiplier, let newVal = new.mckMultiplier, oldVal != newVal {
+            changes.append(.init(category: "I2S", description: "MCK multiplier: \(oldVal)x → \(newVal)x"))
         }
 
         return PresetDiff(changes: changes)

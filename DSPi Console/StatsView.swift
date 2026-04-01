@@ -57,6 +57,18 @@ class StatsViewModel: ObservableObject {
     // Buffer fill level statistics
     @Published var bufferStats: BufferStatsPacket = BufferStatsPacket()
 
+    // SPDIF DMA starvation counters
+    @Published var starvationTotal: UInt32 = 0
+    @Published var starvationPerInstance: [UInt32] = [0, 0, 0, 0]
+    @Published var starvationDelta: UInt32 = 0
+    @Published var starvationLastEventTime: Date? = nil
+    @Published var starvationPreviousEventTime: Date? = nil
+
+    // Reconnection counter
+    @Published var reconnectCount: Int = 0
+
+    private var previousStarvationTotal: UInt32? = nil
+    private var hasConnectedOnce = false
     private var pollTimer: Timer?
     private weak var usb: USBDevice?
     private var cancellables = Set<AnyCancellable>()
@@ -68,9 +80,14 @@ class StatsViewModel: ObservableObject {
         usb.$isConnected
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
-                self?.isConnected = connected
+                guard let self = self else { return }
+                self.isConnected = connected
                 if connected {
-                    self?.fetchDeviceInfo()
+                    if self.hasConnectedOnce {
+                        self.reconnectCount += 1
+                    }
+                    self.hasConnectedOnce = true
+                    self.fetchDeviceInfo()
                 }
             }
             .store(in: &cancellables)
@@ -155,6 +172,7 @@ class StatsViewModel: ObservableObject {
         }
 
         fetchBufferStats()
+        fetchStarvationStats()
     }
 
     func fetchBufferStats() {
@@ -189,6 +207,49 @@ class StatsViewModel: ObservableObject {
         )
 
         DispatchQueue.main.async { self.bufferStats = packet }
+    }
+
+    func fetchStarvationStats() {
+        guard let usb = usb, isConnected else { return }
+
+        // wValue=17: total SPDIF DMA starvations (wIndex=2 per spec)
+        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 17, index: 2, length: 4) else { return }
+        let total = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+
+        var delta: UInt32 = 0
+        if let prev = previousStarvationTotal {
+            delta = total &- prev  // wrap-safe subtraction
+        }
+        previousStarvationTotal = total
+
+        // If new starvation events, read per-instance counters
+        var perInstance: [UInt32] = [0, 0, 0, 0]
+        var eventTime: Date? = starvationLastEventTime
+        var prevEventTime: Date? = starvationPreviousEventTime
+        if delta > 0 {
+            prevEventTime = starvationLastEventTime
+            for i in 0..<4 {
+                if let d = usb.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
+                    perInstance[i] = d.withUnsafeBytes { $0.load(as: UInt32.self) }
+                }
+            }
+            eventTime = Date()
+        } else if total > 0 {
+            // No new events but have historical — still read per-instance for display
+            for i in 0..<4 {
+                if let d = usb.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
+                    perInstance[i] = d.withUnsafeBytes { $0.load(as: UInt32.self) }
+                }
+            }
+        }
+
+        DispatchQueue.main.async {
+            self.starvationTotal = total
+            self.starvationPerInstance = perInstance
+            self.starvationDelta = delta
+            if let t = eventTime { self.starvationLastEventTime = t }
+            if let p = prevEventTime { self.starvationPreviousEventTime = p }
+        }
     }
 
     func resetBufferWatermarks() {
@@ -227,6 +288,72 @@ class StatsViewModel: ObservableObject {
 }
 
 // MARK: - Stats View
+// MARK: - Starvation Timer Helpers
+
+private func formatElapsed(_ interval: TimeInterval) -> String {
+    let totalSeconds = Int(interval)
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds % 3600) / 60
+    let seconds = totalSeconds % 60
+    if hours > 0 {
+        return String(format: "%dh %02dm %02ds", hours, minutes, seconds)
+    } else {
+        return String(format: "%dm %02ds", minutes, seconds)
+    }
+}
+
+struct StarvationTimerRow: View {
+    let label: String
+    let since: Date?
+    @State private var now = Date()
+    let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Spacer()
+            if let since = since {
+                Text(formatElapsed(now.timeIntervalSince(since)))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            } else {
+                Text("—")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 1)
+        .onReceive(timer) { self.now = $0 }
+    }
+}
+
+struct StarvationIntervalRow: View {
+    let label: String
+    let from: Date?
+    let to: Date?
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Spacer()
+            if let from = from, let to = to {
+                Text(formatElapsed(to.timeIntervalSince(from)))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            } else {
+                Text("—")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 1)
+    }
+}
+
 struct StatsView: View {
     @ObservedObject var vm: StatsViewModel
 
@@ -242,6 +369,7 @@ struct StatsView: View {
                     SystemInfoRow(title: "Platform", value: vm.platformName)
                     SystemInfoRow(title: "Firmware", value: vm.firmwareVersion)
                     SystemInfoRow(title: "Serial", value: vm.serialNumber)
+                    SystemInfoRow(title: "Reconnects", value: "\(vm.reconnectCount)")
                 }
 
                 Divider()
@@ -295,8 +423,8 @@ struct StatsView: View {
 
                 Divider()
 
-                // SPDIF Section
-                Text("SPDIF (Main Output)")
+                // Output Section
+                Text("Audio Output")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
 
@@ -306,6 +434,60 @@ struct StatsView: View {
                     overruns: vm.spdifOverruns,
                     underruns: vm.spdifUnderruns
                 )
+
+                Divider()
+
+                // SPDIF DMA Starvation Section
+                Text("SPDIF DMA Starvation")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    // Total with delta warning
+                    HStack {
+                        Text("Total")
+                            .font(.system(size: 11, weight: .medium))
+                        Spacer()
+                        if vm.starvationDelta > 0 {
+                            Text("+\(vm.starvationDelta)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundColor(.red)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.red.opacity(0.15))
+                                .cornerRadius(3)
+                        }
+                        Text("\(vm.starvationTotal)")
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundColor(vm.starvationTotal > 0 ? .red : .primary)
+                    }
+                    .padding(.vertical, 2)
+
+                    // Per-instance counters (based on numSpdif)
+                    let instanceCount = max(Int(vm.bufferStats.numSpdif), 2)
+                    ForEach(0..<instanceCount, id: \.self) { i in
+                        let chL = i * 2 + 1
+                        let chR = chL + 1
+                        HStack {
+                            Text("Out \(chL)/\(chR)")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(vm.starvationPerInstance[i])")
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundColor(vm.starvationPerInstance[i] > 0 ? .red : .primary)
+                        }
+                        .padding(.vertical, 1)
+                    }
+
+                    // Elapsed time since last event
+                    StarvationTimerRow(label: "Time since last event",
+                                       since: vm.starvationLastEventTime)
+
+                    StarvationIntervalRow(label: "Time between last two",
+                                          from: vm.starvationPreviousEventTime,
+                                          to: vm.starvationLastEventTime)
+                }
 
                 Divider()
 
@@ -334,12 +516,12 @@ struct StatsView: View {
                     }
                 }
 
-                // Per-SPDIF instance rows
+                // Per-output slot rows
                 if vm.bufferStats.numSpdif > 0 {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(0..<Int(vm.bufferStats.numSpdif), id: \.self) { i in
                             BufferFillRow(
-                                title: "SPDIF \(i + 1)",
+                                title: "\(AppState.shared.viewModel.outputSlotTypes[i] == 1 ? "I2S" : "SPDIF") \(i + 1)",
                                 fillPct: vm.bufferStats.spdif[i].consumerFillPct,
                                 minPct: vm.bufferStats.spdif[i].consumerMinFillPct,
                                 maxPct: vm.bufferStats.spdif[i].consumerMaxFillPct,
@@ -398,6 +580,7 @@ struct StatsView: View {
         }
         .frame(width: 320)
     }
+
 }
 
 // MARK: - Buffer Fill Thresholds

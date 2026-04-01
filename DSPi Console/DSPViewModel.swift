@@ -30,6 +30,13 @@ class DSPViewModel: ObservableObject {
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
+    // I2S configuration state
+    @Published var outputSlotTypes: [UInt8] = [0, 0, 0, 0]  // Per-slot: 0=S/PDIF, 1=I2S
+    @Published var i2sBckPin: UInt8 = 14      // BCK GPIO (LRCLK = BCK + 1)
+    @Published var mckEnabled: Bool = false
+    @Published var mckPin: UInt8 = 13
+    @Published var mckMultiplier: Int = 128   // 128 or 256
+
     // Preset state
     @Published var presetOccupied: UInt16 = 0
     @Published var presetNames: [String] = Array(repeating: "", count: 10)
@@ -51,6 +58,8 @@ class DSPViewModel: ObservableObject {
     var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
     var pdmOutputIndex: Int { platformName == "RP2040" ? 4 : 8 }
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
+    var numOutputSlots: Int { platformName == "RP2040" ? 2 : 4 }
+    var anySlotIsI2S: Bool { outputSlotTypes.prefix(numOutputSlots).contains(1) }
     private(set) var isOverviewMode: Bool = true
     @Published var activeEqChannel: Int? = nil
 
@@ -208,7 +217,12 @@ class DSPViewModel: ObservableObject {
             outputDelayMS: outputDelayMS,
             channelFilters: channelData.mapValues { $0.map { SnapshotFilterParams(from: $0) } },
             channelNames: channelNames,
-            outputPins: presetIncludePins ? outputPins : nil
+            outputPins: presetIncludePins ? outputPins : nil,
+            outputSlotTypes: presetIncludePins ? outputSlotTypes : nil,
+            i2sBckPin: presetIncludePins ? i2sBckPin : nil,
+            mckEnabled: presetIncludePins ? mckEnabled : nil,
+            mckPin: presetIncludePins ? mckPin : nil,
+            mckMultiplier: presetIncludePins ? mckMultiplier : nil
         )
     }
 
@@ -314,13 +328,20 @@ class DSPViewModel: ObservableObject {
     }
 
     static func defaultChannelNames(for platform: String) -> [String] {
+        return defaultChannelNames(for: platform, slotTypes: [0, 0, 0, 0])
+    }
+
+    static func defaultChannelNames(for platform: String, slotTypes: [UInt8]) -> [String] {
+        func slotName(_ slot: Int) -> String {
+            slot < slotTypes.count && slotTypes[slot] == 1 ? "I2S" : "SPDIF"
+        }
         if platform == "RP2040" {
-            return ["USB L", "USB R", "SPDIF 1 L", "SPDIF 1 R",
-                    "SPDIF 2 L", "SPDIF 2 R", "PDM", "", "", "", ""]
+            return ["USB L", "USB R", "\(slotName(0)) 1 L", "\(slotName(0)) 1 R",
+                    "\(slotName(1)) 2 L", "\(slotName(1)) 2 R", "PDM", "", "", "", ""]
         } else {
-            return ["USB L", "USB R", "SPDIF 1 L", "SPDIF 1 R",
-                    "SPDIF 2 L", "SPDIF 2 R", "SPDIF 3 L", "SPDIF 3 R",
-                    "SPDIF 4 L", "SPDIF 4 R", "PDM"]
+            return ["USB L", "USB R", "\(slotName(0)) 1 L", "\(slotName(0)) 1 R",
+                    "\(slotName(1)) 2 L", "\(slotName(1)) 2 R", "\(slotName(2)) 3 L", "\(slotName(2)) 3 R",
+                    "\(slotName(3)) 4 L", "\(slotName(3)) 4 R", "PDM"]
         }
     }
 }

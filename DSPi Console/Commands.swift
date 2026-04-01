@@ -557,6 +557,108 @@ extension DSPViewModel {
         return 0xFF
     }
 
+    // MARK: - I2S Configuration
+
+    /// Switch an output slot between S/PDIF (0) and I2S (1). Returns firmware status code.
+    @discardableResult
+    func setOutputSlotType(slot: Int, type: UInt8) -> UInt8 {
+        let wValue = (UInt16(type) << 8) | UInt16(slot)
+        if let d = usb.getControlRequest(request: REQ_SET_OUTPUT_TYPE, value: wValue, index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.outputSlotTypes[slot] = type }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    func fetchOutputSlotType(slot: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_TYPE, value: UInt16(slot), index: 2, length: 1) {
+            let type = d[0]
+            DispatchQueue.main.async { self.outputSlotTypes[slot] = type }
+        }
+    }
+
+    /// Set BCK GPIO pin. Requires all slots to be S/PDIF. LRCLK = BCK + 1.
+    @discardableResult
+    func setI2SBckPin(_ pin: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_I2S_BCK_PIN, value: UInt16(pin), index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.i2sBckPin = pin }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    func fetchI2SBckPin() {
+        if let d = usb.getControlRequest(request: REQ_GET_I2S_BCK_PIN, value: 0, index: 2, length: 1) {
+            DispatchQueue.main.async { self.i2sBckPin = d[0] }
+        }
+    }
+
+    /// Enable or disable the master clock output.
+    @discardableResult
+    func setMckEnable(_ enabled: Bool) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_MCK_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.mckEnabled = enabled }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    func fetchMckEnable() {
+        if let d = usb.getControlRequest(request: REQ_GET_MCK_ENABLE, value: 0, index: 2, length: 1) {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.mckEnabled = val }
+        }
+    }
+
+    /// Set MCK GPIO pin. MCK must be disabled first.
+    @discardableResult
+    func setMckPin(_ pin: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_MCK_PIN, value: UInt16(pin), index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.mckPin = pin }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    func fetchMckPin() {
+        if let d = usb.getControlRequest(request: REQ_GET_MCK_PIN, value: 0, index: 2, length: 1) {
+            DispatchQueue.main.async { self.mckPin = d[0] }
+        }
+    }
+
+    /// Set MCK frequency multiplier (128 or 256).
+    @discardableResult
+    func setMckMultiplier(_ multiplier: Int) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_MCK_MULTIPLIER, value: UInt16(multiplier & 0xFF), index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.mckMultiplier = multiplier }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    func fetchMckMultiplier() {
+        if let d = usb.getControlRequest(request: REQ_GET_MCK_MULTIPLIER, value: 0, index: 2, length: 1) {
+            let raw = d[0]
+            let value = raw == 0 ? 256 : Int(raw)  // 256 wraps to 0x00 in uint8
+            DispatchQueue.main.async { self.mckMultiplier = value }
+        }
+    }
+
     // MARK: - Bulk Parameter Transfer
 
     /// Fetches all DSP parameters in a single 2480-byte USB transfer.
@@ -565,7 +667,7 @@ extension DSPViewModel {
     @discardableResult
     func fetchAllParams() -> Bool {
         guard let data = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
-              data.count >= Int(BULK_PARAMS_SIZE) else {
+              data.count >= 2832 else {  // Accept V2 (2832) or V3 (2848) responses
             DispatchQueue.main.async { self.usb.isConnected = false }
             return false
         }
@@ -665,6 +767,22 @@ extension DSPViewModel {
             }
         }
 
+        // --- I2S Config (offset 2832, 16 bytes) --- V3 firmware only
+        var slotTypes: [UInt8] = [0, 0, 0, 0]
+        var bckPin: UInt8 = 14
+        var mckPinVal: UInt8 = 13
+        var mckEn = false
+        var mckMult = 128
+
+        if data.count >= 2848 {
+            for i in 0..<4 { slotTypes[i] = data[2832 + i] }
+            bckPin = data[2836]
+            mckPinVal = data[2837]
+            mckEn = data[2838] != 0
+            let rawMult = data[2839]
+            mckMult = rawMult == 0 ? 256 : Int(rawMult)
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -693,6 +811,12 @@ extension DSPViewModel {
             self.outputDelayMS = outDelay
 
             self.outputPins = pins
+
+            self.outputSlotTypes = slotTypes
+            self.i2sBckPin = bckPin
+            self.mckPin = mckPinVal
+            self.mckEnabled = mckEn
+            self.mckMultiplier = mckMult
 
             self.channelData = channelFilters
             self.channelNames = names

@@ -275,7 +275,7 @@ struct OutputDashboardCard: View {
     @ObservedObject var vm: DSPViewModel
 
     private var output: MatrixOutput {
-        MatrixOutput.visible(for: vm.platformName).first(where: { $0.index == outputIndex })
+        MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).first(where: { $0.index == outputIndex })
             ?? MatrixOutput.all[outputIndex]
     }
     private var eqChannel: Int { outputIndex + 2 }

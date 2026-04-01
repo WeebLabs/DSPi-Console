@@ -352,32 +352,27 @@ struct HardwareSettingsTab: View {
         let color: Color
     }
 
-    /// RP2350 pin outputs: firmware indices 0-4
-    private static let pinOutputs: [PinOutput] = [
-        PinOutput(id: 0, name: "S/PDIF 1", detail: "Stereo pair 1 (L/R)", icon: "wave.3.right",
-                  defaultPin: 6, color: Color(red: 0.27, green: 0.76, blue: 0.64)),
-        PinOutput(id: 1, name: "S/PDIF 2", detail: "Stereo pair 2 (L/R)", icon: "wave.3.right",
-                  defaultPin: 7, color: Color(red: 0.94, green: 0.77, blue: 0.35)),
-        PinOutput(id: 2, name: "S/PDIF 3", detail: "Stereo pair 3 (L/R)", icon: "wave.3.right",
-                  defaultPin: 8, color: Color(red: 0.35, green: 0.55, blue: 0.95)),
-        PinOutput(id: 3, name: "S/PDIF 4", detail: "Stereo pair 4 (L/R)", icon: "wave.3.right",
-                  defaultPin: 9, color: Color(red: 0.85, green: 0.45, blue: 0.55)),
-        PinOutput(id: 4, name: "PDM",      detail: "Subwoofer output",    icon: "waveform",
-                  defaultPin: 10, color: Color(red: 0.73, green: 0.53, blue: 0.95)),
-    ]
-
-    /// RP2040 pin outputs: firmware indices 0-2 (SPDIF 1, SPDIF 2, PDM)
-    private static let rp2040PinOutputs: [PinOutput] = [
-        PinOutput(id: 0, name: "S/PDIF 1", detail: "Stereo pair 1 (L/R)", icon: "wave.3.right",
-                  defaultPin: 6, color: Color(red: 0.27, green: 0.76, blue: 0.64)),
-        PinOutput(id: 1, name: "S/PDIF 2", detail: "Stereo pair 2 (L/R)", icon: "wave.3.right",
-                  defaultPin: 7, color: Color(red: 0.94, green: 0.77, blue: 0.35)),
-        PinOutput(id: 2, name: "PDM",      detail: "Subwoofer output",    icon: "waveform",
-                  defaultPin: 10, color: Color(red: 0.73, green: 0.53, blue: 0.95)),
-    ]
+    private static let defaultDataPins: [UInt8] = [6, 7, 8, 9]
 
     private var visiblePinOutputs: [PinOutput] {
-        vm.platformName == "RP2040" ? Self.rp2040PinOutputs : Self.pinOutputs
+        let numSlots = vm.numOutputSlots
+        let matrixOutputs = MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes)
+        var outputs = (0..<numSlots).map { slot -> PinOutput in
+            let isI2S = vm.outputSlotTypes[slot] == 1
+            let color = matrixOutputs[slot * 2 + 1].color // R channel color
+            return PinOutput(
+                id: slot,
+                name: "Output \(slot + 1)",
+                detail: isI2S ? "I2S" : "S/PDIF",
+                icon: isI2S ? "headphones" : "wave.3.right",
+                defaultPin: Self.defaultDataPins[slot],
+                color: color
+            )
+        }
+        let pdmId = vm.platformName == "RP2040" ? 2 : 4
+        outputs.append(PinOutput(id: pdmId, name: "Subwoofer", detail: "PDM", icon: "waveform",
+                                 defaultPin: 10, color: MatrixOutput.pdmColor))
+        return outputs
     }
 
     // RP2040 valid GPIO pins (excludes 12=UART, 23-25=system)
@@ -393,6 +388,9 @@ struct HardwareSettingsTab: View {
                 return output.name
             }
         }
+        if pin == vm.i2sBckPin { return "I2S BCK" }
+        if pin == vm.i2sBckPin &+ 1 { return "I2S LRCLK" }
+        if pin == vm.mckPin { return "I2S MCK" }
         return nil
     }
 
@@ -470,39 +468,54 @@ struct HardwareSettingsTab: View {
 
     var body: some View {
         Form {
+            // MARK: Outputs
             Section {
                 ForEach(visiblePinOutputs) { output in
-                    HStack(spacing: 10) {
-                        // Colored indicator + icon
-                        Image(systemName: output.icon)
-                            .font(.system(size: 12))
-                            .foregroundColor(output.color)
-                            .frame(width: 16)
-
-                        // Output name + detail
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(output.name)
-                                .font(.body)
-                            Text(output.detail)
-                                .font(.caption2)
+                    HStack(spacing: 0) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(output.color)
+                                .frame(width: 6, height: 6)
+                            Text(output.id < vm.numOutputSlots ? "OUT \(output.id * 2 + 1)/\(output.id * 2 + 2)" : "Sub")
+                                .font(.system(size: 10, weight: .medium))
                                 .foregroundColor(.secondary)
                         }
-                        .frame(width: 130, alignment: .leading)
+                        .frame(width: 60, alignment: .leading)
+
+                        if output.id < vm.numOutputSlots {
+                            Picker("", selection: Binding(
+                                get: { vm.outputSlotTypes[output.id] },
+                                set: { newType in
+                                    DispatchQueue.global(qos: .userInitiated).async {
+                                        let status = vm.setOutputSlotType(slot: output.id, type: newType)
+                                        DispatchQueue.main.async {
+                                            if status != PIN_CONFIG_SUCCESS {
+                                                statusMessage = "Failed to change \(output.name) type"
+                                                statusIsError = true
+                                            } else {
+                                                statusMessage = "\(output.name) set to \(newType == 1 ? "I2S" : "S/PDIF")"
+                                                statusIsError = false
+                                            }
+                                        }
+                                    }
+                                }
+                            )) {
+                                Text("S/PDIF").tag(UInt8(0))
+                                Text("I2S").tag(UInt8(1))
+                            }
+                            .labelsHidden()
+                            .frame(width: 80, alignment: .trailing)
+                        } else {
+                            Picker("", selection: .constant(0)) {
+                                Text("PDM").tag(0)
+                            }
+                            .labelsHidden()
+                            .frame(width: 80, alignment: .trailing)
+                            .allowsHitTesting(false)
+                        }
 
                         Spacer()
 
-                        // Default indicator
-                        if vm.outputPins[output.id] == output.defaultPin {
-                            Text("DEFAULT")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundColor(.secondary.opacity(0.6))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.secondary.opacity(0.1)))
-                                .fixedSize()
-                        }
-
-                        // GPIO pin picker
                         Picker("", selection: Binding(
                             get: { vm.outputPins[output.id] },
                             set: { setPinForOutput(output.id, pin: $0) }
@@ -518,11 +531,12 @@ struct HardwareSettingsTab: View {
                                 }
                             }
                         }
-                        .frame(width: 150)
+                        .labelsHidden()
+                        .fixedSize()
                     }
-                    .padding(.vertical, 1)
+                    .padding(.vertical, 2)
                 }
-                // Status message
+
                 if let message = statusMessage {
                     HStack(spacing: 6) {
                         Image(systemName: statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
@@ -535,9 +549,9 @@ struct HardwareSettingsTab: View {
                 }
             } header: {
                 HStack {
-                    Label("Pin Assignment", systemImage: "cpu")
+                    Label("Output Assignment", systemImage: "cpu")
                     Spacer()
-                    Button("Reset to Defaults") {
+                    Button("Reset Pins") {
                         resetToDefaults()
                     }
                     .font(.caption)
@@ -545,6 +559,156 @@ struct HardwareSettingsTab: View {
                     .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
                     .disabled(!vm.isDeviceConnected)
                 }
+            }
+
+            // MARK: I2S Clock
+            Section {
+                HStack {
+                    Image(systemName: "waveform.path")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .frame(width: 16)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("BCK Pin")
+                            .font(.body)
+                        Text("LRCK: GPIO \(vm.i2sBckPin &+ 1) (BCK + 1)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { vm.i2sBckPin },
+                        set: { newPin in
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setI2SBckPin(newPin)
+                                DispatchQueue.main.async {
+                                    switch status {
+                                    case PIN_CONFIG_SUCCESS:
+                                        statusMessage = "BCK pin set to GPIO \(newPin), LRCLK = GPIO \(newPin &+ 1)"
+                                        statusIsError = false
+                                    case PIN_CONFIG_OUTPUT_ACTIVE:
+                                        statusMessage = "All outputs must be S/PDIF before changing BCK pin"
+                                        statusIsError = true
+                                    case PIN_CONFIG_PIN_IN_USE:
+                                        statusMessage = "GPIO \(newPin) or \(newPin &+ 1) is already in use"
+                                        statusIsError = true
+                                    default:
+                                        statusMessage = "Failed to set BCK pin"
+                                        statusIsError = true
+                                    }
+                                }
+                            }
+                        }
+                    )) {
+                        ForEach(Self.validPins, id: \.self) { pin in
+                            Text("GPIO \(pin)").tag(pin)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(vm.anySlotIsI2S)
+                }
+
+                //Divider()
+
+                Toggle(isOn: Binding(
+                    get: { vm.mckEnabled },
+                    set: { newVal in
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let status = vm.setMckEnable(newVal)
+                            DispatchQueue.main.async {
+                                if status == PIN_CONFIG_SUCCESS {
+                                    statusMessage = "Master clock \(newVal ? "enabled" : "disabled")"
+                                    statusIsError = false
+                                } else {
+                                    statusMessage = "Failed to \(newVal ? "enable" : "disable") master clock"
+                                    statusIsError = true
+                                }
+                            }
+                        }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Master Clock (MCK)")
+                        Text("Clock reference for external DACs")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                HStack {
+                    Image(systemName: "clock")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .frame(width: 16)
+                    Text("MCK Pin")
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { vm.mckPin },
+                        set: { newPin in
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setMckPin(newPin)
+                                DispatchQueue.main.async {
+                                    switch status {
+                                    case PIN_CONFIG_SUCCESS:
+                                        statusMessage = "MCK pin set to GPIO \(newPin)"
+                                        statusIsError = false
+                                    case PIN_CONFIG_OUTPUT_ACTIVE:
+                                        statusMessage = "Disable MCK before changing its pin"
+                                        statusIsError = true
+                                    case PIN_CONFIG_PIN_IN_USE:
+                                        statusMessage = "GPIO \(newPin) is already in use"
+                                        statusIsError = true
+                                    default:
+                                        statusMessage = "Failed to set MCK pin"
+                                        statusIsError = true
+                                    }
+                                }
+                            }
+                        }
+                    )) {
+                        ForEach(Self.validPins, id: \.self) { pin in
+                            Text("GPIO \(pin)").tag(pin)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(vm.mckEnabled)
+                }
+
+                HStack {
+                    Image(systemName: "multiply")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .frame(width: 16)
+                    Text("MCK Multiplier")
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { vm.mckMultiplier },
+                        set: { newVal in
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setMckMultiplier(newVal)
+                                DispatchQueue.main.async {
+                                    if status == PIN_CONFIG_SUCCESS {
+                                        statusMessage = "MCK multiplier set to \(newVal)x"
+                                        statusIsError = false
+                                    } else {
+                                        statusMessage = "Failed to set MCK multiplier"
+                                        statusIsError = true
+                                    }
+                                }
+                            }
+                        }
+                    )) {
+                        Text("128x").tag(128)
+                        Text("256x").tag(256)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            } header: {
+                Label("I2S Configuration", systemImage: "waveform.path")
             }
 
             Section {
@@ -570,12 +734,18 @@ struct HardwareSettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
-        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             if vm.isDeviceConnected {
                 for output in visiblePinOutputs {
                     vm.fetchOutputPin(output: output.id)
                 }
+                for slot in 0..<vm.numOutputSlots {
+                    vm.fetchOutputSlotType(slot: slot)
+                }
+                vm.fetchI2SBckPin()
+                vm.fetchMckEnable()
+                vm.fetchMckPin()
+                vm.fetchMckMultiplier()
             }
         }
     }
@@ -1268,6 +1438,29 @@ struct ToolsMenuActions {
         }
     }
 
+    static func enterFirmwareUpdateMode() {
+        let skipConfirmation = NSEvent.modifierFlags.contains(.option)
+
+        if !skipConfirmation {
+            let alert = NSAlert()
+            alert.messageText = "Firmware Update"
+            alert.informativeText = "This will reboot the device into bootloader mode.\n\nAudio output will stop immediately. The device will appear as a USB drive to which you can drag a .uf2 firmware file."
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "Reboot into Bootloader")
+            alert.addButton(withTitle: "Cancel")
+
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        let usb = AppState.shared.usb
+        guard usb.isConnected else {
+            showError("Not connected to device")
+            return
+        }
+        // Device disconnects after this command — ignore nil response
+        _ = usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+    }
+
     private static func showSuccess(_ message: String) {
         let alert = NSAlert()
         alert.messageText = "Success"
@@ -1643,6 +1836,12 @@ struct DSPi_ConsoleApp: App {
 
                 Button("Factory Reset...") {
                     ToolsMenuActions.factoryReset()
+                }
+
+                Divider()
+
+                Button("Firmware Update...") {
+                    ToolsMenuActions.enterFirmwareUpdateMode()
                 }
 
                 Divider()

@@ -32,6 +32,33 @@ struct MatrixOutput {
     static func visible(for platform: String) -> [MatrixOutput] {
         platform == "RP2040" ? rp2040 : all
     }
+
+    static func visible(for platform: String, slotTypes: [UInt8]) -> [MatrixOutput] {
+        func slotName(_ slot: Int) -> String {
+            slot < slotTypes.count && slotTypes[slot] == 1 ? "I2S" : "SPDIF"
+        }
+        if platform == "RP2040" {
+            return [
+                MatrixOutput(index: 0, name: "\(slotName(0)) 1 L", descriptor: "OUT1", color: all[0].color),
+                MatrixOutput(index: 1, name: "\(slotName(0)) 1 R", descriptor: "OUT2", color: all[1].color),
+                MatrixOutput(index: 2, name: "\(slotName(1)) 2 L", descriptor: "OUT3", color: all[2].color),
+                MatrixOutput(index: 3, name: "\(slotName(1)) 2 R", descriptor: "OUT4", color: all[3].color),
+                MatrixOutput(index: 4, name: "PDM", descriptor: "OUT5", color: pdmColor),
+            ]
+        } else {
+            return [
+                MatrixOutput(index: 0, name: "\(slotName(0)) 1 L", descriptor: "OUT1", color: all[0].color),
+                MatrixOutput(index: 1, name: "\(slotName(0)) 1 R", descriptor: "OUT2", color: all[1].color),
+                MatrixOutput(index: 2, name: "\(slotName(1)) 2 L", descriptor: "OUT3", color: all[2].color),
+                MatrixOutput(index: 3, name: "\(slotName(1)) 2 R", descriptor: "OUT4", color: all[3].color),
+                MatrixOutput(index: 4, name: "\(slotName(2)) 3 L", descriptor: "OUT5", color: all[4].color),
+                MatrixOutput(index: 5, name: "\(slotName(2)) 3 R", descriptor: "OUT6", color: all[5].color),
+                MatrixOutput(index: 6, name: "\(slotName(3)) 4 L", descriptor: "OUT7", color: all[6].color),
+                MatrixOutput(index: 7, name: "\(slotName(3)) 4 R", descriptor: "OUT8", color: all[7].color),
+                MatrixOutput(index: 8, name: "PDM", descriptor: "OUT9", color: pdmColor),
+            ]
+        }
+    }
 }
 
 struct MatrixInput {
@@ -64,7 +91,7 @@ struct MatrixMixerView: View {
     private let labelWidth: CGFloat = 75
 
     private var visibleOutputs: [MatrixOutput] {
-        MatrixOutput.visible(for: vm.platformName)
+        MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes)
     }
 
     private func commitRename() {

@@ -551,7 +551,7 @@ struct GraphLegend: View {
             legendPill(eqCh: Channel.masterRight.rawValue, name: Channel.masterRight.descriptor, color: Channel.masterRight.color)
 
             // Enabled outputs (dynamic)
-            ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+            ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
                 legendPill(eqCh: out.index + 2, name: out.descriptor, color: out.color)
             }
         }

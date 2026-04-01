@@ -165,7 +165,7 @@ struct ContentView: View {
                 }
 
                 Section(header: Text("OUTPUTS")) {
-                    ForEach(MatrixOutput.visible(for: vm.platformName).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                    ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
                         OutputRow(output: out, isSelected: selection == .output(out.index),
                                   name: vm.channelNames[out.index + 2],
                                   isMuted: vm.isOutputInactive(out.index),

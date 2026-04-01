@@ -60,6 +60,18 @@ let REQ_GET_OUTPUT_PIN: UInt8      = 0x7D
 let REQ_GET_SERIAL: UInt8          = 0x7E
 let REQ_GET_PLATFORM: UInt8        = 0x7F
 
+// I2S output configuration request codes
+let REQ_SET_OUTPUT_TYPE: UInt8     = 0xC0
+let REQ_GET_OUTPUT_TYPE: UInt8     = 0xC1
+let REQ_SET_I2S_BCK_PIN: UInt8    = 0xC2
+let REQ_GET_I2S_BCK_PIN: UInt8    = 0xC3
+let REQ_SET_MCK_ENABLE: UInt8     = 0xC4
+let REQ_GET_MCK_ENABLE: UInt8     = 0xC5
+let REQ_SET_MCK_PIN: UInt8        = 0xC6
+let REQ_GET_MCK_PIN: UInt8        = 0xC7
+let REQ_SET_MCK_MULTIPLIER: UInt8 = 0xC8
+let REQ_GET_MCK_MULTIPLIER: UInt8 = 0xC9
+
 // Clip detection request codes
 let REQ_CLEAR_CLIPS: UInt8            = 0x83
 
@@ -90,11 +102,14 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-let BULK_PARAMS_SIZE: UInt16            = 2832
+let BULK_PARAMS_SIZE: UInt16            = 2848
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
 let REQ_RESET_BUFFER_STATS: UInt8       = 0xB1
+
+// Firmware update request codes
+let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0
 
 // Preset status codes
 let PRESET_OK: UInt8                    = 0x00
