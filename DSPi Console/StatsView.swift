@@ -521,7 +521,7 @@ struct StatsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(0..<Int(vm.bufferStats.numSpdif), id: \.self) { i in
                             BufferFillRow(
-                                title: "\(AppState.shared.viewModel.outputSlotTypes[i] == 1 ? "I2S" : "SPDIF") \(i + 1)",
+                                title: "Out \(i * 2 + 1)/\(i * 2 + 2) (\(AppState.shared.viewModel.outputSlotTypes[i] == 1 ? "I2S" : "SPDIF"))",
                                 fillPct: vm.bufferStats.spdif[i].consumerFillPct,
                                 minPct: vm.bufferStats.spdif[i].consumerMinFillPct,
                                 maxPct: vm.bufferStats.spdif[i].consumerMaxFillPct,
@@ -622,7 +622,7 @@ struct BufferFillRow: View {
         HStack {
             Text(title)
                 .font(.system(size: 11, weight: .medium))
-                .frame(width: 70, alignment: .leading)
+                .frame(width: 100, alignment: .leading)
 
             Text("\(fillPct)%")
                 .font(.system(size: 14, weight: .bold, design: .monospaced))
