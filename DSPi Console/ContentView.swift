@@ -18,6 +18,7 @@ struct ContentView: View {
     @EnvironmentObject var crossfeedController: CrossfeedWindowController
     @EnvironmentObject var statsController: StatsWindowController
     @EnvironmentObject var graphWindowController: GraphWindowController
+    @EnvironmentObject var levellerController: VolumeLevellerWindowController
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
     @State private var renameText = ""
@@ -233,6 +234,14 @@ struct ContentView: View {
                             action: { vm.setLoudness(!vm.loudnessEnabled) }
                         )
                         .onRightClick { loudnessController.show(vm: vm) }
+
+                        SidebarIconButton(
+                            icon: "waveform.path.ecg",
+                            isActive: vm.levellerEnabled,
+                            tooltip: "Volume Leveller",
+                            action: { vm.setLeveller(!vm.levellerEnabled) }
+                        )
+                        .onRightClick { levellerController.show(vm: vm) }
 
                         SidebarIconButton(
                             icon: "info.circle",
@@ -552,6 +561,7 @@ struct ContentView: View {
                                     get: { vm.outputMuted[idx] },
                                     set: { vm.setOutputMute(output: idx, muted: $0) }
                                 ),
+                                maxDelay: vm.platformName == "RP2040" ? 42 : 85,
                                 onGainDrag: { vm.sendOutputGainToDevice(output: idx, db: $0) },
                                 onDelayDrag: { vm.sendOutputDelayToDevice(output: idx, ms: $0) }
                             )

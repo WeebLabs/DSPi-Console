@@ -102,11 +102,25 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-let BULK_PARAMS_SIZE: UInt16            = 2848
+let BULK_PARAMS_SIZE: UInt16            = 2864
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
 let REQ_RESET_BUFFER_STATS: UInt8       = 0xB1
+
+// Volume Leveller request codes
+let REQ_SET_LEVELLER: UInt8             = 0xB4
+let REQ_GET_LEVELLER: UInt8             = 0xB5
+let REQ_SET_LEVELLER_AMOUNT: UInt8      = 0xB6
+let REQ_GET_LEVELLER_AMOUNT: UInt8      = 0xB7
+let REQ_SET_LEVELLER_SPEED: UInt8       = 0xB8
+let REQ_GET_LEVELLER_SPEED: UInt8       = 0xB9
+let REQ_SET_LEVELLER_MAXGAIN: UInt8     = 0xBA
+let REQ_GET_LEVELLER_MAXGAIN: UInt8     = 0xBB
+let REQ_SET_LEVELLER_LOOKAHEAD: UInt8   = 0xBC
+let REQ_GET_LEVELLER_LOOKAHEAD: UInt8   = 0xBD
+let REQ_SET_LEVELLER_GATE: UInt8        = 0xBE
+let REQ_GET_LEVELLER_GATE: UInt8        = 0xBF
 
 // Firmware update request codes
 let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0

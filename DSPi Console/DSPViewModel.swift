@@ -30,12 +30,21 @@ class DSPViewModel: ObservableObject {
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
+    // Volume Leveller state
+    @Published var levellerEnabled: Bool = false
+    @Published var levellerAmount: Float = 100.0
+    @Published var levellerSpeed: Int = 0        // 0=Slow, 1=Medium, 2=Fast
+    @Published var levellerMaxGainDB: Float = 24.0
+    @Published var levellerLookahead: Bool = false
+    @Published var levellerGateDB: Float = -70.0
+
     // I2S configuration state
     @Published var outputSlotTypes: [UInt8] = [0, 0, 0, 0]  // Per-slot: 0=S/PDIF, 1=I2S
     @Published var i2sBckPin: UInt8 = 14      // BCK GPIO (LRCLK = BCK + 1)
     @Published var mckEnabled: Bool = false
     @Published var mckPin: UInt8 = 13
     @Published var mckMultiplier: Int = 128   // 128 or 256
+    @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
     // Preset state
     @Published var presetOccupied: UInt16 = 0
@@ -207,6 +216,12 @@ class DSPViewModel: ObservableObject {
             crossfeedFreq: crossfeedFreq,
             crossfeedFeed: crossfeedFeed,
             crossfeedITD: crossfeedITD,
+            levellerEnabled: levellerEnabled,
+            levellerAmount: levellerAmount,
+            levellerSpeed: levellerSpeed,
+            levellerMaxGainDB: levellerMaxGainDB,
+            levellerLookahead: levellerLookahead,
+            levellerGateDB: levellerGateDB,
             channelDelays: channelDelays,
             matrixRouting: matrixRouting,
             matrixGain: matrixGain,

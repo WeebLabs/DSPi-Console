@@ -354,6 +354,17 @@ struct HardwareSettingsTab: View {
 
     private static let defaultDataPins: [UInt8] = [6, 7, 8, 9]
 
+    private var mck256UnsupportedAtCurrentRate: Bool {
+        vm.sampleRateHz >= 96000
+    }
+
+    private var sampleRateLabel: String {
+        if vm.sampleRateHz == 0 {
+            return "unknown sample rate"
+        }
+        return String(format: "%.1f kHz", Double(vm.sampleRateHz) / 1000.0)
+    }
+
     private var visiblePinOutputs: [PinOutput] {
         let numSlots = vm.numOutputSlots
         let matrixOutputs = MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes)
@@ -706,6 +717,16 @@ struct HardwareSettingsTab: View {
                     }
                     .labelsHidden()
                     .fixedSize()
+                    .disabled(mck256UnsupportedAtCurrentRate)
+                }
+
+                if mck256UnsupportedAtCurrentRate {
+                    HStack {
+                        Spacer()
+                        Text("Locked to 128x at \(sampleRateLabel)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
             } header: {
                 Label("I2S Configuration", systemImage: "waveform.path")
@@ -746,6 +767,7 @@ struct HardwareSettingsTab: View {
                 vm.fetchMckEnable()
                 vm.fetchMckPin()
                 vm.fetchMckMultiplier()
+                vm.fetchSampleRate()
             }
         }
     }
@@ -1363,25 +1385,27 @@ struct FileMenuActions {
 // MARK: - Tools Menu Actions
 struct ToolsMenuActions {
     static func commitParameters() {
+        let vm = AppState.shared.viewModel
+        guard vm.isDeviceConnected else {
+            showError("Not connected to device")
+            return
+        }
+
+        let slot = vm.activePresetSlot
         let alert = NSAlert()
-        alert.messageText = "Commit Parameters"
-        alert.informativeText = "Save current parameters to device?\n\nThis may cause a brief audio interruption."
+        alert.messageText = "Save Preset"
+        alert.informativeText = "Save current parameters to preset slot \(slot + 1)?"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
 
         if alert.runModal() == .alertFirstButtonReturn {
-            let vm = AppState.shared.viewModel
-            guard vm.isDeviceConnected else {
-                showError("Not connected to device")
-                return
-            }
-            let result = vm.saveParams()
+            let result = vm.savePreset(slot: slot)
             switch result {
-            case FLASH_OK:
-                showSuccess("Parameters saved successfully")
+            case PRESET_OK:
+                showSuccess("Preset saved successfully")
             default:
-                showError("Failed to save parameters")
+                showError("Failed to save preset (error \(result))")
             }
         }
     }
@@ -1755,6 +1779,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var statsWindowController = StatsWindowController()
     @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
+    @StateObject private var levellerWindowController = VolumeLevellerWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
     @StateObject private var graphWindowController = GraphWindowController()
@@ -1765,6 +1790,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(matrixMixerWindowController)
                 .environmentObject(loudnessWindowController)
                 .environmentObject(crossfeedWindowController)
+                .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
                 .environmentObject(graphWindowController)
                 .preferredColorScheme(.dark)
@@ -1860,6 +1886,11 @@ struct DSPi_ConsoleApp: App {
                     crossfeedWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("X", modifiers: [.command, .shift])
+
+                Button("Volume Leveller...") {
+                    levellerWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("V", modifiers: [.command, .shift])
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)

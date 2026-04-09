@@ -322,7 +322,7 @@ struct MatrixMixerView: View {
                     CompactDelayField(delay: Binding(
                         get: { vm.outputDelayMS[idx] },
                         set: { vm.setOutputDelay(output: idx, ms: $0) }
-                    ))
+                    ), maxDelay: vm.platformName == "RP2040" ? 42 : 85)
                     .frame(width: columnWidth, height: 30)
                     .opacity(vm.outputEnabled[idx] ? 1.0 : 0.3)
                 }
@@ -504,6 +504,7 @@ struct CompactGainField: View {
 
 struct CompactDelayField: View {
     @Binding var delay: Float
+    var maxDelay: Float = 85
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
 
@@ -533,7 +534,7 @@ struct CompactDelayField: View {
             .background(
                 ScrollWheelHandler { delta in
                     if !isFocused {
-                        delay = max(0, min(85, delay + delta * 5))
+                        delay = max(0, min(maxDelay, delay + delta * 5))
                     }
                 }
             )
@@ -554,7 +555,7 @@ struct CompactDelayField: View {
             .replacingOccurrences(of: "ms", with: "")
             .trimmingCharacters(in: .whitespaces)
         if let value = Float(cleaned) {
-            delay = max(0, min(85, value))
+            delay = max(0, min(maxDelay, value))
         }
         updateDisplay()
     }

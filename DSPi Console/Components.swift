@@ -310,6 +310,7 @@ struct ChannelSettingsView: View {
     @Binding var gainDB: Float
     @Binding var delayMS: Float
     @Binding var isMuted: Bool
+    var maxDelay: Float = 85
     var onGainDrag: ((Float) -> Void)? = nil
     var onDelayDrag: ((Float) -> Void)? = nil
 
@@ -360,7 +361,7 @@ struct ChannelSettingsView: View {
                 }
                 .frame(width: 80, alignment: .leading)
 
-                Slider(value: $localDelay, in: 0...85) { editing in
+                Slider(value: $localDelay, in: 0...maxDelay) { editing in
                     isDraggingDelay = editing
                     if !editing { delayMS = localDelay }
                 }

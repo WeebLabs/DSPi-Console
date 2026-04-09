@@ -10,6 +10,7 @@ extension DSPViewModel {
         guard fetchAllParams() else { return }
 
         fetchCore1Mode()
+        fetchSampleRate()
 
         // Fetch preset state
         fetchPresetDirectory()
@@ -75,6 +76,28 @@ extension DSPViewModel {
                 DispatchQueue.global(qos: .utility).async { self.clearClips() }
             }
             self.meters.status = s
+        }
+
+        // Poll sample rate at a lower cadence than meter traffic to keep
+        // hardware UI constraints current (e.g., MCK multiplier gating).
+        struct SampleRatePollState { static var decimator = 0 }
+        SampleRatePollState.decimator = (SampleRatePollState.decimator + 1) & 0x0F
+        if SampleRatePollState.decimator == 0 {
+            fetchSampleRate()
+        }
+    }
+
+    func fetchSampleRate() {
+        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4),
+              data.count >= 4 else { return }
+        let rate = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        DispatchQueue.main.async {
+            self.sampleRateHz = rate
+            // Keep UI consistent with firmware/runtime policy:
+            // 256x MCK is not available at 96 kHz.
+            if rate >= 96000, self.mckMultiplier == 256 {
+                self.mckMultiplier = 128
+            }
         }
     }
 
@@ -377,6 +400,50 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Volume Leveller
+
+    func setLeveller(_ enabled: Bool) {
+        self.levellerEnabled = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_LEVELLER, value: 0, index: 0, data: data)
+    }
+
+    func setLevellerAmount(_ amount: Float) {
+        self.levellerAmount = amount
+        var val = amount
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_LEVELLER_AMOUNT, value: 0, index: 0, data: data)
+    }
+
+    func setLevellerSpeed(_ speed: Int) {
+        self.levellerSpeed = speed
+        var val = UInt8(speed)
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_LEVELLER_SPEED, value: 0, index: 0, data: data)
+    }
+
+    func setLevellerMaxGain(_ db: Float) {
+        self.levellerMaxGainDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_LEVELLER_MAXGAIN, value: 0, index: 0, data: data)
+    }
+
+    func setLevellerLookahead(_ enabled: Bool) {
+        self.levellerLookahead = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_LEVELLER_LOOKAHEAD, value: 0, index: 0, data: data)
+    }
+
+    func setLevellerGate(_ db: Float) {
+        self.levellerGateDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_LEVELLER_GATE, value: 0, index: 0, data: data)
+    }
+
     // MARK: - Matrix Mixer
 
     func setMatrixRoute(input: Int, output: Int, enabled: Bool, gain: Float, invert: Bool) {
@@ -639,9 +706,11 @@ extension DSPViewModel {
     }
 
     /// Set MCK frequency multiplier (128 or 256).
+    /// Wire encoding (V5+): wValue 0 = 128x, 1 = 256x.
     @discardableResult
     func setMckMultiplier(_ multiplier: Int) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_MCK_MULTIPLIER, value: UInt16(multiplier & 0xFF), index: 2, length: 1) {
+        let wireValue: UInt16 = (multiplier == 256) ? 1 : 0
+        if let d = usb.getControlRequest(request: REQ_SET_MCK_MULTIPLIER, value: wireValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.mckMultiplier = multiplier }
@@ -654,7 +723,7 @@ extension DSPViewModel {
     func fetchMckMultiplier() {
         if let d = usb.getControlRequest(request: REQ_GET_MCK_MULTIPLIER, value: 0, index: 2, length: 1) {
             let raw = d[0]
-            let value = raw == 0 ? 256 : Int(raw)  // 256 wraps to 0x00 in uint8
+            let value = raw == 1 ? 256 : 128  // V5 encoding: 0 = 128x, 1 = 256x
             DispatchQueue.main.async { self.mckMultiplier = value }
         }
     }
@@ -780,7 +849,24 @@ extension DSPViewModel {
             mckPinVal = data[2837]
             mckEn = data[2838] != 0
             let rawMult = data[2839]
-            mckMult = rawMult == 0 ? 256 : Int(rawMult)
+            mckMult = rawMult == 1 ? 256 : 128  // V5 encoding: 0 = 128x, 1 = 256x
+        }
+
+        // --- Volume Leveller (offset 2848, 16 bytes) --- V4 firmware only
+        var lvlEnabled = false
+        var lvlSpeed = 0
+        var lvlLookahead = false
+        var lvlAmount: Float = 100.0
+        var lvlMaxGain: Float = 24.0
+        var lvlGateDB: Float = -70.0
+
+        if data.count >= 2864 {
+            lvlEnabled = data[2848] != 0
+            lvlSpeed = Int(data[2849])
+            lvlLookahead = data[2850] != 0
+            lvlAmount = data.withUnsafeBytes { $0.load(fromByteOffset: 2852, as: Float.self) }
+            lvlMaxGain = data.withUnsafeBytes { $0.load(fromByteOffset: 2856, as: Float.self) }
+            lvlGateDB = data.withUnsafeBytes { $0.load(fromByteOffset: 2860, as: Float.self) }
         }
 
         // --- Apply all parsed values on main thread ---
@@ -817,6 +903,13 @@ extension DSPViewModel {
             self.mckPin = mckPinVal
             self.mckEnabled = mckEn
             self.mckMultiplier = mckMult
+
+            self.levellerEnabled = lvlEnabled
+            self.levellerAmount = lvlAmount
+            self.levellerSpeed = lvlSpeed
+            self.levellerMaxGainDB = lvlMaxGain
+            self.levellerLookahead = lvlLookahead
+            self.levellerGateDB = lvlGateDB
 
             self.channelData = channelFilters
             self.channelNames = names

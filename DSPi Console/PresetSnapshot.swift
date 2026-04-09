@@ -31,6 +31,12 @@ struct PresetSnapshot: Equatable {
     let crossfeedFreq: Float
     let crossfeedFeed: Float
     let crossfeedITD: Bool
+    let levellerEnabled: Bool
+    let levellerAmount: Float
+    let levellerSpeed: Int
+    let levellerMaxGainDB: Float
+    let levellerLookahead: Bool
+    let levellerGateDB: Float
     let channelDelays: [Int: Float]
     let matrixRouting: [[Bool]]
     let matrixGain: [[Float]]
@@ -110,6 +116,29 @@ extension PresetSnapshot {
         }
         if old.crossfeedITD != new.crossfeedITD {
             changes.append(.init(category: "Crossfeed", description: "Crossfeed ITD: \(new.crossfeedITD ? "enabled" : "disabled")"))
+        }
+
+        // Volume Leveller
+        if old.levellerEnabled != new.levellerEnabled {
+            changes.append(.init(category: "Leveller", description: "Volume Leveller: \(new.levellerEnabled ? "enabled" : "disabled")"))
+        }
+        if old.levellerAmount != new.levellerAmount {
+            changes.append(.init(category: "Leveller", description: "Leveller amount: \(formatVal(old.levellerAmount))% → \(formatVal(new.levellerAmount))%"))
+        }
+        if old.levellerSpeed != new.levellerSpeed {
+            let names = ["Slow", "Medium", "Fast"]
+            let oldName = old.levellerSpeed < names.count ? names[old.levellerSpeed] : "\(old.levellerSpeed)"
+            let newName = new.levellerSpeed < names.count ? names[new.levellerSpeed] : "\(new.levellerSpeed)"
+            changes.append(.init(category: "Leveller", description: "Leveller speed: \(oldName) → \(newName)"))
+        }
+        if old.levellerMaxGainDB != new.levellerMaxGainDB {
+            changes.append(.init(category: "Leveller", description: "Leveller max gain: \(formatVal(old.levellerMaxGainDB)) dB → \(formatVal(new.levellerMaxGainDB)) dB"))
+        }
+        if old.levellerLookahead != new.levellerLookahead {
+            changes.append(.init(category: "Leveller", description: "Leveller lookahead: \(new.levellerLookahead ? "enabled" : "disabled")"))
+        }
+        if old.levellerGateDB != new.levellerGateDB {
+            changes.append(.init(category: "Leveller", description: "Leveller gate: \(formatVal(old.levellerGateDB)) dB → \(formatVal(new.levellerGateDB)) dB"))
         }
 
         // Channel Delays
