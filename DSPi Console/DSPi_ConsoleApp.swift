@@ -749,6 +749,23 @@ struct HardwareSettingsTab: View {
                     }
                 }
                 .toggleStyle(.switch)
+
+                Toggle(isOn: Binding(
+                    get: { vm.presetIncludeMasterVolume },
+                    set: { val in
+                        vm.presetIncludeMasterVolume = val
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.setIncludeMasterVolume(val)
+                        }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Include Master Volume")
+                        Text("Restore master volume level when loading a preset")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
             } header: {
                 Label("Presets", systemImage: "square.stack.3d.up")
             }

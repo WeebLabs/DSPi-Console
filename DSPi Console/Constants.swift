@@ -102,7 +102,7 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-let BULK_PARAMS_SIZE: UInt16            = 2864
+let BULK_PARAMS_SIZE: UInt16            = 2896
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
@@ -121,6 +121,16 @@ let REQ_SET_LEVELLER_LOOKAHEAD: UInt8   = 0xBC
 let REQ_GET_LEVELLER_LOOKAHEAD: UInt8   = 0xBD
 let REQ_SET_LEVELLER_GATE: UInt8        = 0xBE
 let REQ_GET_LEVELLER_GATE: UInt8        = 0xBF
+
+// Per-channel preamp request codes
+let REQ_SET_PREAMP_CH: UInt8           = 0xD0
+let REQ_GET_PREAMP_CH: UInt8           = 0xD1
+
+// Master volume request codes
+let REQ_SET_MASTER_VOLUME: UInt8       = 0xD2
+let REQ_GET_MASTER_VOLUME: UInt8       = 0xD3
+let REQ_SET_INCLUDE_MASTER_VOL: UInt8  = 0xD4
+let REQ_GET_INCLUDE_MASTER_VOL: UInt8  = 0xD5
 
 // Firmware update request codes
 let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0

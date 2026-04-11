@@ -4,7 +4,9 @@ import Combine
 // MARK: - View Model
 
 class DSPViewModel: ObservableObject {
-    @Published var preampDB: Float = 0.0
+    @Published var preampDB: [Float] = [0.0, 0.0]
+    @Published var preampLinked: Bool = true
+    @Published var masterVolumeDB: Float = 0.0
     @Published var bypass: Bool = false
     @Published var channelData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
@@ -53,6 +55,7 @@ class DSPViewModel: ObservableObject {
     @Published var presetStartupMode: Int = 0     // 0 = specified default, 1 = last active
     @Published var presetDefaultSlot: Int = 0
     @Published var presetIncludePins: Bool = false
+    @Published var presetIncludeMasterVolume: Bool = false
 
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
@@ -207,6 +210,7 @@ class DSPViewModel: ObservableObject {
     func captureSnapshot() -> PresetSnapshot {
         PresetSnapshot(
             preampDB: preampDB,
+            masterVolumeDB: presetIncludeMasterVolume ? masterVolumeDB : nil,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
             loudnessRefSPL: loudnessRefSPL,

@@ -114,6 +114,38 @@ extension DSPViewModel {
         usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
 
+    func sendPreampChannelToDevice(channel: Int, db: Float) {
+        var val = (db * 10).rounded() / 10
+        if val == -0.0 { val = 0.0 }
+        if preampLinked {
+            let data = Data(bytes: &val, count: 4)
+            usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+        } else {
+            let data = Data(bytes: &val, count: 4)
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        }
+    }
+
+    func sendMasterVolumeToDevice(_ db: Float) {
+        var val = Self.roundMasterVolume(db)
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
+    }
+
+    private static func roundMasterVolume(_ db: Float) -> Float {
+        if db <= -128 { return -128 }
+        if db >= 0 { return 0 }
+        let rounded: Float
+        if db > -10 {
+            rounded = (db * 10).rounded() / 10
+        } else if db > -40 {
+            rounded = (db * 2).rounded() / 2
+        } else {
+            rounded = db.rounded()
+        }
+        return rounded == -0.0 ? 0.0 : rounded
+    }
+
     func sendOutputGainToDevice(output: Int, db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
@@ -195,21 +227,23 @@ extension DSPViewModel {
         }
     }
 
+    /// Legacy global preamp SET — sets both channels to the same value via 0x44.
     func setPreamp(_ db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
-        self.preampDB = val
+        self.preampDB = [val, val]
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
-    
+
+    /// Legacy global preamp GET — returns channel 0 only.
     @discardableResult
     func fetchPreamp() -> Bool {
         if let d = usb.getControlRequest(request: REQ_GET_PREAMP, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.preampDB - val) > 0.1 {
-                    self.preampDB = val
+                if abs(self.preampDB[0] - val) > 0.1 {
+                    self.preampDB[0] = val
                 }
             }
             return true
@@ -218,7 +252,69 @@ extension DSPViewModel {
             return false
         }
     }
-    
+
+    // MARK: - Per-Channel Preamp
+
+    func setPreampChannel(channel: Int, db: Float) {
+        var val = (db * 10).rounded() / 10
+        if val == -0.0 { val = 0.0 }
+        self.preampDB[channel] = val
+        if preampLinked {
+            self.preampDB[1 - channel] = val
+            let data = Data(bytes: &val, count: 4)
+            usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+        } else {
+            let data = Data(bytes: &val, count: 4)
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        }
+    }
+
+    func fetchPreampChannel(channel: Int) {
+        if let d = usb.getControlRequest(request: REQ_GET_PREAMP_CH, value: UInt16(channel), index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.preampDB[channel] - val) > 0.1 {
+                    self.preampDB[channel] = val
+                }
+            }
+        }
+    }
+
+    // MARK: - Master Volume
+
+    func setMasterVolume(_ db: Float) {
+        var val = Self.roundMasterVolume(db)
+        self.masterVolumeDB = val
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
+    }
+
+    func fetchMasterVolume() {
+        if let d = usb.getControlRequest(request: REQ_GET_MASTER_VOLUME, value: 0, index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.masterVolumeDB - val) > 0.01 {
+                    self.masterVolumeDB = val
+                }
+            }
+        }
+    }
+
+    // MARK: - Include Master Volume (preset directory flag)
+
+    func setIncludeMasterVolume(_ include: Bool) {
+        let data = Data([include ? 1 : 0])
+        usb.sendControlRequest(request: REQ_SET_INCLUDE_MASTER_VOL, value: 0, index: 2, data: data)
+    }
+
+    func fetchIncludeMasterVolume() {
+        guard let data = usb.getControlRequest(request: REQ_GET_INCLUDE_MASTER_VOL, value: 0, index: 2, length: 1) else { return }
+        let val = data[0] != 0
+        DispatchQueue.main.async {
+            self.presetIncludeMasterVolume = val
+        }
+    }
+
     func setBypass(_ enabled: Bool) {
         self.bypass = enabled
         var val: UInt8 = enabled ? 1 : 0
@@ -734,14 +830,17 @@ extension DSPViewModel {
     /// Parses the WireBulkParams structure and updates all published properties.
     /// Returns true if successful, false if the device is not connected.
     @discardableResult
-    func fetchAllParams() -> Bool {
+    func fetchAllParams(markDisconnectedOnFailure: Bool = true) -> Bool {
         guard let data = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
-              data.count >= 2832 else {  // Accept V2 (2832) or V3 (2848) responses
-            DispatchQueue.main.async { self.usb.isConnected = false }
+              data.count >= 2832 else {  // Accept V2 (2832) or later
+            if markDisconnectedOnFailure {
+                DispatchQueue.main.async { self.usb.isConnected = false }
+            }
             return false
         }
 
         // --- Header (offset 0, 16 bytes) ---
+        let formatVersion = data[0]
         let platformId = data[1]
         let numCh = Int(data[2])
         let numOutCh = Int(data[3])
@@ -869,11 +968,28 @@ extension DSPViewModel {
             lvlGateDB = data.withUnsafeBytes { $0.load(fromByteOffset: 2860, as: Float.self) }
         }
 
+        // --- Per-Channel Preamp (offset 2864, 16 bytes) --- V6 firmware only
+        var preampCh0: Float = preamp  // fallback to global preamp
+        var preampCh1: Float = preamp
+
+        if formatVersion >= 6 && data.count >= 2872 {
+            preampCh0 = data.withUnsafeBytes { $0.load(fromByteOffset: 2864, as: Float.self) }
+            preampCh1 = data.withUnsafeBytes { $0.load(fromByteOffset: 2868, as: Float.self) }
+        }
+
+        // --- Master Volume (offset 2880, 16 bytes) --- V6 firmware only
+        var masterVol: Float = 0.0
+
+        if formatVersion >= 6 && data.count >= 2884 {
+            masterVol = data.withUnsafeBytes { $0.load(fromByteOffset: 2880, as: Float.self) }
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
 
-            self.preampDB = preamp
+            self.preampDB = [preampCh0, preampCh1]
+            self.masterVolumeDB = masterVol
             self.bypass = bypassVal
             self.loudnessEnabled = loudnessEn
             self.loudnessRefSPL = loudnessRef
@@ -932,19 +1048,21 @@ extension DSPViewModel {
 
     @discardableResult
     func fetchPresetDirectory() -> UInt16 {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 6),
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 7),
               data.count >= 6 else { return 0 }
         let occupied = data.withUnsafeBytes { $0.load(as: UInt16.self) }
         let startupMode = Int(data[2])
         let defaultSlot = Int(data[3])
         let lastActive = data[4]
         let includePins = data[5] != 0
+        let includeMasterVol = data.count >= 7 ? (data[6] != 0) : false
         DispatchQueue.main.async {
             self.presetOccupied = occupied
             self.presetStartupMode = startupMode
             self.presetDefaultSlot = defaultSlot
             self.activePresetSlot = Int(lastActive)
             self.presetIncludePins = includePins
+            self.presetIncludeMasterVolume = includeMasterVol
         }
         return occupied
     }
@@ -985,17 +1103,44 @@ extension DSPViewModel {
 
     @discardableResult
     func loadPreset(slot: Int) -> UInt8 {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
+        print("[PRESET] loadPreset(\(slot)) starting")
+        guard let data = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1) else {
+            print("[PRESET] loadPreset(\(slot)) USB request failed (nil)")
+            return 0xFF
+        }
         let status = data[0]
+        print("[PRESET] loadPreset(\(slot)) device status=\(status)")
         if status == PRESET_OK {
-            DispatchQueue.main.async {
-                self.activePresetSlot = slot
-            }
-            // Wait for mute period then re-sync DSP parameters
-            Thread.sleep(forTimeInterval: 0.01)
+            Thread.sleep(forTimeInterval: 0.1)
             fetchAllParams()
         }
         return status
+    }
+
+    private func waitForPresetActivation(slot: Int, timeout: TimeInterval = 1.5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let data = usb.getControlRequest(request: REQ_PRESET_GET_ACTIVE, value: 0, index: 2, length: 1),
+               data.count >= 1,
+               Int(data[0]) == slot {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return false
+    }
+
+    private func refreshAfterPresetLoad(timeout: TimeInterval = 1.5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if fetchAllParams(markDisconnectedOnFailure: false) {
+                _ = fetchPresetDirectory()
+                fetchPresetActive()
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.03)
+        }
+        return false
     }
 
     @discardableResult

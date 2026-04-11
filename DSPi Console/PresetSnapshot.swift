@@ -21,7 +21,8 @@ struct SnapshotFilterParams: Equatable {
 /// Uses compiler-synthesized Equatable — exact Float equality is safe because
 /// values are quantized at the USB protocol level (single-precision, rounded to 0.1 dB).
 struct PresetSnapshot: Equatable {
-    let preampDB: Float
+    let preampDB: [Float]
+    let masterVolumeDB: Float?  // nil when presetIncludeMasterVolume is false
     let bypass: Bool
     let loudnessEnabled: Bool
     let loudnessRefSPL: Float
@@ -82,9 +83,18 @@ extension PresetSnapshot {
     static func diff(from old: PresetSnapshot, to new: PresetSnapshot, channelNames: [String]) -> PresetDiff {
         var changes = [PresetDiff.Change]()
 
-        // Global
-        if old.preampDB != new.preampDB {
-            changes.append(.init(category: "Global", description: "Preamp: \(formatDB(old.preampDB)) → \(formatDB(new.preampDB))"))
+        // Global — per-channel preamp
+        let preampLabels = ["L", "R"]
+        for ch in 0..<min(old.preampDB.count, new.preampDB.count) {
+            if old.preampDB[ch] != new.preampDB[ch] {
+                changes.append(.init(category: "Global", description: "Preamp \(preampLabels[ch]): \(formatDB(old.preampDB[ch])) → \(formatDB(new.preampDB[ch]))"))
+            }
+        }
+        // Master volume (only when included in presets)
+        if let oldVol = old.masterVolumeDB, let newVol = new.masterVolumeDB, oldVol != newVol {
+            let oldStr = oldVol <= -128 ? "-∞ dB" : formatDB(oldVol)
+            let newStr = newVol <= -128 ? "-∞ dB" : formatDB(newVol)
+            changes.append(.init(category: "Global", description: "Master Volume: \(oldStr) → \(newStr)"))
         }
         if old.bypass != new.bypass {
             changes.append(.init(category: "Global", description: "Master EQ bypass: \(old.bypass ? "on" : "off") → \(new.bypass ? "on" : "off")"))

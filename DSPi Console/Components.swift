@@ -395,6 +395,79 @@ struct ChannelSettingsView: View {
     }
 }
 
+// MARK: - Per-Channel Preamp Control
+
+struct PreampControlView: View {
+    let channel: Int  // 0 = L, 1 = R
+    @ObservedObject var vm: DSPViewModel
+
+    @State private var localPreamp: Float = 0
+    @State private var isDragging = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Label("Preamp", systemImage: "dial.low.fill")
+                            .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
+
+                        Button(action: {
+                            vm.preampLinked.toggle()
+                            if vm.preampLinked {
+                                // Sync other channel to this channel's value
+                                vm.setPreampChannel(channel: 1 - channel, db: vm.preampDB[channel])
+                            }
+                        }) {
+                            Image(systemName: vm.preampLinked ? "link" : "link.badge.plus")
+                                .font(.caption2)
+                                .foregroundColor(vm.preampLinked ? .accentColor : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(vm.preampLinked ? "Unlink L/R preamp" : "Link L/R preamp")
+                    }
+                    ValueField(label: "dB", value: localPreamp, width: 60) {
+                        localPreamp = $0
+                        vm.setPreampChannel(channel: channel, db: $0)
+                    }
+                }
+                .frame(width: 100, alignment: .leading)
+
+                Slider(value: $localPreamp, in: -60...10) { editing in
+                    isDragging = editing
+                    if !editing {
+                        vm.setPreampChannel(channel: channel, db: localPreamp)
+                    }
+                }
+                .onChange(of: localPreamp) { val in
+                    if isDragging {
+                        vm.sendPreampChannelToDevice(channel: channel, db: val)
+                        if vm.preampLinked {
+                            // Update other channel's @Published value so its view updates
+                            let rounded = (val * 10).rounded() / 10
+                            vm.preampDB[1 - channel] = rounded == -0.0 ? 0.0 : rounded
+                        }
+                    }
+                }
+                .onAppear { localPreamp = vm.preampDB[channel] }
+                .onChange(of: vm.preampDB) { newArr in
+                    if !isDragging { localPreamp = newArr[channel] }
+                }
+                .onRightClick {
+                    localPreamp = 0
+                    vm.setPreampChannel(channel: channel, db: 0)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(height: 60)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+    }
+}
+
 // MARK: - Filter List
 
 struct FilterListView: View {
@@ -501,13 +574,21 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
         button.isBordered = showsHoverBorder && enabled
         button.showsBorderOnlyWhileMouseInside = showsHoverBorder && enabled
         (button as? PaddedPopUpButton)?.onRightClick = onRightClick
-        button.menu?.removeAllItems()
-        for (index, item) in items.enumerated() {
-            let menuItem = NSMenuItem(title: titleForItem(item), action: nil, keyEquivalent: "")
-            menuItem.tag = index
-            button.menu?.addItem(menuItem)
+
+        // Only rebuild menu if items changed (avoids swallowing clicks during polling updates)
+        let currentTitles = (0..<(button.menu?.numberOfItems ?? 0)).map { button.menu?.item(at: $0)?.title ?? "" }
+        let newTitles = items.map { titleForItem($0) }
+        if currentTitles != newTitles {
+            button.menu?.removeAllItems()
+            for (index, item) in items.enumerated() {
+                let menuItem = NSMenuItem(title: titleForItem(item), action: nil, keyEquivalent: "")
+                menuItem.tag = index
+                button.menu?.addItem(menuItem)
+            }
         }
-        if let index = items.firstIndex(of: selection) {
+
+        // Only update selection if it actually changed
+        if let index = items.firstIndex(of: selection), button.indexOfSelectedItem != index {
             button.selectItem(withTag: index)
         }
     }
@@ -527,11 +608,6 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
             let index = sender.indexOfSelectedItem
             if index >= 0 && index < parent.items.count {
                 parent.selection = parent.items[index]
-            }
-            // Resync popup to binding value in case the setter rejected the change
-            // (e.g. unsaved changes alert → Cancel)
-            if let correctIndex = parent.items.firstIndex(of: parent.selection) {
-                sender.selectItem(withTag: correctIndex)
             }
         }
     }
@@ -624,6 +700,7 @@ struct ValueField: View {
     var scrollStep: Float = 0.1
     var minValue: Float? = nil
     var maxDecimals: Int = 1
+    var displayOverride: String? = nil
     let onCommit: (Float) -> Void
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
@@ -669,8 +746,13 @@ struct ValueField: View {
         .overlay(
             ValueFieldScrollHandler(value: value, step: scrollStep, minValue: minValue, onCommit: onCommit)
         )
-        .onAppear { text = format(value) }
-        .onChange(of: value) { newValue in text = format(newValue) }
+        .onAppear { text = (!isFocused && displayOverride != nil) ? displayOverride! : format(value) }
+        .onChange(of: value) { newValue in
+            if !isFocused, let override = displayOverride { text = override } else { text = format(newValue) }
+        }
+        .onChange(of: displayOverride) { override in
+            if !isFocused, let override { text = override } else { text = format(value) }
+        }
     }
 }
 

@@ -471,7 +471,7 @@ class USBDevice: ObservableObject {
             let result = dev.pointee!.pointee.DeviceRequest(dev, &requestPtr)
 
             if result == kIOReturnSuccess {
-                return Data(bytes: buffer, count: Int(length))
+                return Data(bytes: buffer, count: Int(requestPtr.wLenDone))
             }
             return nil
         }

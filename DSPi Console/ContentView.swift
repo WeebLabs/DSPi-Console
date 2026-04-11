@@ -22,13 +22,63 @@ struct ContentView: View {
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
     @State private var renameText = ""
-    @State private var localPreamp: Float = 0
-    @State private var isDraggingPreamp = false
+    @State private var localMasterVolume: Float = 0
+    @State private var isDraggingMasterVolume = false
     @State private var showPresetRename = false
     @State private var presetRenameSlot = 0
     @State private var presetRenameText = ""
+    @State private var presetSwitchInFlight = false
     @State private var settingsWindowOpen = false
     @Environment(\.openSettings) private var openSettingsAction
+
+    // Piecewise-linear master volume slider mapping:
+    //   0 to -10 dB:   0.1 dB steps → 100 units (40% of throw)
+    //   -10 to -40 dB: 0.5 dB steps →  60 units (24% of throw)
+    //   -40 to -128 dB: 1.0 dB steps → 88 units (36% of throw)
+    // Slider pos 1.0 = 0 dB, pos 0.0 = -128 dB (mute)
+    private static let mvTotalUnits: Float = 248 // 100 + 60 + 88
+    private static let mvBreak1: Float = 1.0 - 100 / mvTotalUnits  // pos where db = -10
+    private static let mvBreak2: Float = mvBreak1 - 60 / mvTotalUnits // pos where db = -40
+
+    private static func masterVolSliderToDB(_ pos: Float) -> Float {
+        if pos <= 0 { return -128 }
+        if pos >= 1 { return 0 }
+        if pos > mvBreak1 {
+            // Region 1: 0 to -10 dB, 0.1 dB per unit
+            return -(1.0 - pos) * mvTotalUnits * 0.1
+        } else if pos > mvBreak2 {
+            // Region 2: -10 to -40 dB, 0.5 dB per unit
+            return -10 - (mvBreak1 - pos) * mvTotalUnits * 0.5
+        } else {
+            // Region 3: -40 to -128 dB, 1.0 dB per unit
+            return -40 - (mvBreak2 - pos) * mvTotalUnits * 1.0
+        }
+    }
+
+    private static func masterVolDBToSlider(_ db: Float) -> Float {
+        if db <= -128 { return 0 }
+        if db >= 0 { return 1 }
+        if db > -10 {
+            return 1.0 - (-db / 0.1) / mvTotalUnits
+        } else if db > -40 {
+            return mvBreak1 - ((-db - 10) / 0.5) / mvTotalUnits
+        } else {
+            return mvBreak2 - ((-db - 40) / 1.0) / mvTotalUnits
+        }
+    }
+
+    private static func masterVolDisplayValue(_ db: Float) -> Float {
+        if db <= -128 { return -128 }
+        let rounded: Float
+        if db > -10 {
+            rounded = (db * 10).rounded() / 10
+        } else if db > -40 {
+            rounded = (db * 2).rounded() / 2
+        } else {
+            rounded = db.rounded()
+        }
+        return rounded == -0.0 ? 0.0 : rounded
+    }
 
     private func commitRename() {
         guard let idx = renamingChannel else { return }
@@ -91,6 +141,7 @@ struct ContentView: View {
             let status = vm.deletePreset(slot: slot)
             if status == PRESET_OK {
                 vm.setPresetName(slot: slot, name: "")
+                vm.fetchPresetDirectory()
                 // If we cleared the active slot, reload it to apply factory defaults
                 if vm.activePresetSlot == slot {
                     _ = vm.loadPreset(slot: slot)
@@ -123,6 +174,10 @@ struct ContentView: View {
             for slot in 0..<10 where vm.isPresetOccupied(slot) {
                 vm.deletePreset(slot: slot)
                 vm.setPresetName(slot: slot, name: "")
+            }
+            vm.fetchPresetDirectory()
+            for slot in 0..<10 {
+                vm.fetchPresetName(slot: slot)
             }
             // Reload active slot to apply factory defaults
             _ = vm.loadPreset(slot: vm.activePresetSlot)
@@ -283,75 +338,91 @@ struct ContentView: View {
                                 selection: Binding(
                                     get: { vm.activePresetSlot },
                                     set: { slot in
-                                        guard slot != vm.activePresetSlot else { return }
+                                        let previousSlot = vm.activePresetSlot
+                                        print("[PRESET] set closure: slot=\(slot) previous=\(previousSlot) inFlight=\(presetSwitchInFlight) connected=\(vm.isDeviceConnected) unsaved=\(vm.hasUnsavedChanges)")
+                                        guard slot != previousSlot else {
+                                            print("[PRESET] SKIP: same slot")
+                                            return
+                                        }
+                                        guard !presetSwitchInFlight else {
+                                            print("[PRESET] SKIP: switch in flight")
+                                            return
+                                        }
+
+                                        let showLoadFailed: (UInt8) -> Void = { status in
+                                            vm.fetchPresetActive()
+                                            let alert = NSAlert()
+                                            alert.messageText = "Load Failed"
+                                            alert.informativeText = status == PRESET_ERR_CRC
+                                                ? "Preset data is corrupted."
+                                                : "Failed to load preset (error \(status))."
+                                            alert.alertStyle = .warning
+                                            alert.addButton(withTitle: "OK")
+                                            alert.runModal()
+                                        }
+
+                                        presetSwitchInFlight = true
+                                        print("[PRESET] inFlight = true")
                                         if vm.isDeviceConnected && vm.hasUnsavedChanges {
                                             let diff = vm.computeDiff()
                                             let action = PresetAlerts.showUnsavedChangesAlert(diff: diff)
                                             switch action {
                                             case .save:
                                                 DispatchQueue.global(qos: .userInitiated).async {
-                                                    if vm.presetNames[vm.activePresetSlot].isEmpty {
-                                                        vm.setPresetName(slot: vm.activePresetSlot, name: "Preset \(vm.activePresetSlot + 1)")
+                                                    if vm.presetNames[previousSlot].isEmpty {
+                                                        vm.setPresetName(slot: previousSlot, name: "Preset \(previousSlot + 1)")
                                                     }
-                                                    let saveStatus = vm.savePreset(slot: vm.activePresetSlot)
+                                                    let saveStatus = vm.savePreset(slot: previousSlot)
                                                     guard saveStatus == PRESET_OK else {
                                                         DispatchQueue.main.async {
+                                                            vm.activePresetSlot = previousSlot
                                                             let alert = NSAlert()
                                                             alert.messageText = "Save Failed"
                                                             alert.informativeText = "Failed to save preset (error \(saveStatus)). Preset switch aborted."
                                                             alert.alertStyle = .warning
                                                             alert.addButton(withTitle: "OK")
                                                             alert.runModal()
+                                                            presetSwitchInFlight = false
                                                         }
                                                         return
                                                     }
                                                     let loadStatus = vm.loadPreset(slot: slot)
-                                                    if loadStatus != PRESET_OK {
-                                                        DispatchQueue.main.async {
-                                                            let alert = NSAlert()
-                                                            alert.messageText = "Load Failed"
-                                                            alert.informativeText = loadStatus == PRESET_ERR_CRC
-                                                                ? "Preset data is corrupted."
-                                                                : "Failed to load preset (error \(loadStatus))."
-                                                            alert.alertStyle = .warning
-                                                            alert.addButton(withTitle: "OK")
-                                                            alert.runModal()
+                                                    DispatchQueue.main.async {
+                                                        if loadStatus != PRESET_OK {
+                                                            showLoadFailed(loadStatus)
                                                         }
+                                                        presetSwitchInFlight = false
                                                     }
                                                 }
                                             case .discard:
                                                 DispatchQueue.global(qos: .userInitiated).async {
                                                     let status = vm.loadPreset(slot: slot)
-                                                    if status != PRESET_OK {
-                                                        DispatchQueue.main.async {
-                                                            let alert = NSAlert()
-                                                            alert.messageText = "Load Failed"
-                                                            alert.informativeText = status == PRESET_ERR_CRC
-                                                                ? "Preset data is corrupted."
-                                                                : "Failed to load preset (error \(status))."
-                                                            alert.alertStyle = .warning
-                                                            alert.addButton(withTitle: "OK")
-                                                            alert.runModal()
+                                                    DispatchQueue.main.async {
+                                                        if status != PRESET_OK {
+                                                            showLoadFailed(status)
                                                         }
+                                                        presetSwitchInFlight = false
                                                     }
                                                 }
                                             case .cancel:
+                                                presetSwitchInFlight = false
                                                 return
                                             }
                                         } else {
+                                            print("[PRESET] no unsaved changes, loading slot \(slot)")
+                                            vm.activePresetSlot = slot
                                             DispatchQueue.global(qos: .userInitiated).async {
                                                 let status = vm.loadPreset(slot: slot)
-                                                if status != PRESET_OK {
-                                                    DispatchQueue.main.async {
-                                                        let alert = NSAlert()
-                                                        alert.messageText = "Load Failed"
-                                                        alert.informativeText = status == PRESET_ERR_CRC
-                                                            ? "Preset data is corrupted."
-                                                            : "Failed to load preset (error \(status))."
-                                                        alert.alertStyle = .warning
-                                                        alert.addButton(withTitle: "OK")
-                                                        alert.runModal()
+                                                print("[PRESET] loadPreset returned status=\(status)")
+                                                DispatchQueue.main.async {
+                                                    if status != PRESET_OK {
+                                                        print("[PRESET] load FAILED status=\(status)")
+                                                        showLoadFailed(status)
+                                                    } else {
+                                                        print("[PRESET] load OK, activeSlot=\(vm.activePresetSlot)")
                                                     }
+                                                    presetSwitchInFlight = false
+                                                    print("[PRESET] inFlight = false")
                                                 }
                                             }
                                         }
@@ -367,7 +438,7 @@ struct ContentView: View {
                             }
                             .fixedSize()
                             .opacity(vm.isDeviceConnected ? 1.0 : 0.4)
-                            .allowsHitTesting(vm.isDeviceConnected)
+                            .allowsHitTesting(vm.isDeviceConnected && !presetSwitchInFlight)
                         }
                         .contextMenu {
                             Button("Save") { saveActivePreset(vm: vm) }
@@ -392,24 +463,30 @@ struct ContentView: View {
 
                         VStack(spacing: 4) {
                             HStack {
-                                Text("Preamp").font(.caption2).foregroundColor(.secondary)
+                                Text("Master Volume").font(.caption2).foregroundColor(.secondary)
                                 Spacer()
-                                ValueField(label: "dB", value: localPreamp, width: 60) {
-                                    localPreamp = $0
-                                    vm.setPreamp($0)
+                                ValueField(label: "dB", value: Self.masterVolDisplayValue(localMasterVolume), width: 60,
+                                           displayOverride: localMasterVolume <= -128 ? "-∞" : nil) {
+                                    localMasterVolume = max(-128, min(0, $0))
+                                    vm.setMasterVolume(localMasterVolume)
                                 }
                             }
-                            Slider(value: $localPreamp, in: -60...10) { editing in
-                                isDraggingPreamp = editing
-                                if !editing { vm.setPreamp(localPreamp) }
+                            Slider(value: Binding(
+                                get: { Self.masterVolDBToSlider(localMasterVolume) },
+                                set: { localMasterVolume = Self.masterVolSliderToDB($0) }
+                            ), in: 0...1) { editing in
+                                isDraggingMasterVolume = editing
+                                if !editing { vm.setMasterVolume(localMasterVolume) }
                             }
                             .controlSize(.small)
-                            .onChange(of: localPreamp) { val in
-                                if isDraggingPreamp { vm.sendPreampToDevice(val) }
+                            .onChange(of: localMasterVolume) { val in
+                                if isDraggingMasterVolume { vm.sendMasterVolumeToDevice(val) }
                             }
-                            .onAppear { localPreamp = vm.preampDB }
-                            .onChange(of: vm.preampDB) { val in if !isDraggingPreamp { localPreamp = val } }
-                            .onRightClick { localPreamp = 0; vm.setPreamp(0) }
+                            .onAppear { localMasterVolume = vm.masterVolumeDB }
+                            .onChange(of: vm.masterVolumeDB) { val in
+                                if !isDraggingMasterVolume { localMasterVolume = val }
+                            }
+                            .onRightClick { localMasterVolume = 0; vm.setMasterVolume(0) }
                         }
 
                         Button(action: { vm.setBypass(!vm.bypass) }) {
@@ -535,6 +612,12 @@ struct ContentView: View {
                     switch selection {
                     case .channel(let channel):
                         VStack(spacing: 16) {
+                            PreampControlView(
+                                channel: channel == .masterLeft ? 0 : 1,
+                                vm: vm
+                            )
+                            .padding(.horizontal)
+
                             FilterListView(
                                 bands: vm.channelData[channel.rawValue] ?? [],
                                 channelId: channel.rawValue,
@@ -648,7 +731,7 @@ extension DSPViewModel {
     static var preview: DSPViewModel {
         let vm = DSPViewModel(usb: USBDevice())
         vm.isDeviceConnected = true
-        vm.preampDB = -3.0
+        vm.preampDB = [-3.0, -3.0]
         vm.meters.status = SystemStatus(peaks: [0.6, 0.55, 0.4, 0.35, 0.25], cpu0: 42, cpu1: 38)
 
         // Add some sample filter data for Master L
