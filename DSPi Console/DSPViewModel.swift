@@ -48,6 +48,11 @@ class DSPViewModel: ObservableObject {
     @Published var mckMultiplier: Int = 128   // 128 or 256
     @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
+    // Input source state
+    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF
+    @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
+    @Published var spdifRxPin: UInt8 = 11             // GPIO pin for SPDIF RX
+
     // Preset state
     @Published var presetOccupied: UInt16 = 0
     @Published var presetNames: [String] = Array(repeating: "", count: 10)
@@ -241,7 +246,8 @@ class DSPViewModel: ObservableObject {
             i2sBckPin: presetIncludePins ? i2sBckPin : nil,
             mckEnabled: presetIncludePins ? mckEnabled : nil,
             mckPin: presetIncludePins ? mckPin : nil,
-            mckMultiplier: presetIncludePins ? mckMultiplier : nil
+            mckMultiplier: presetIncludePins ? mckMultiplier : nil,
+            inputSource: inputSourceSupported ? inputSource : nil
         )
     }
 

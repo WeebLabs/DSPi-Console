@@ -7,7 +7,6 @@ enum SidebarSelection: Hashable {
     case channel(Channel)
     case output(Int)  // Matrix output index 0-8
 }
-
 // MARK: - Main Layout
 
 struct ContentView: View {
@@ -429,6 +428,7 @@ struct ContentView: View {
                                     }
                                 )
                             )
+                            .frame(minWidth: 80)
                             .overlay(alignment: .trailing) {
                                 Image(systemName: "chevron.up.chevron.down")
                                     .font(.system(size: 8, weight: .bold))
@@ -458,6 +458,36 @@ struct ContentView: View {
                                 Button("Clear All Slots…", role: .destructive) {
                                     showPresetClearAllConfirmation(vm: vm)
                                 }
+                            }
+                        }
+
+                        // Input Source Picker (hidden if firmware doesn't support it)
+                        if vm.inputSourceSupported {
+                            HStack {
+                                Text("Source").font(.caption2).foregroundColor(.secondary)
+                                Spacer()
+                                BorderlessPopUpButton(
+                                    items: [0, 1],
+                                    titleForItem: { $0 == 0 ? "USB" : "S/PDIF" },
+                                    selection: Binding(
+                                        get: { vm.inputSource },
+                                        set: { source in
+                                            guard source != vm.inputSource else { return }
+                                            vm.setInputSource(source)
+                                        }
+                                    )
+                                )
+                                .frame(minWidth: 80)
+                                .overlay(alignment: .trailing) {
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                        .padding(.trailing, 4)
+                                        .allowsHitTesting(false)
+                                }
+                                .fixedSize()
+                                .opacity(vm.isDeviceConnected ? 1.0 : 0.4)
+                                .allowsHitTesting(vm.isDeviceConnected)
                             }
                         }
 

@@ -9,6 +9,7 @@ extension DSPViewModel {
     func fetchAll() {
         guard fetchAllParams() else { return }
 
+        fetchInputSource()
         fetchCore1Mode()
         fetchSampleRate()
 
@@ -824,6 +825,36 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Input Source Commands
+
+    /// Probes GET_INPUT_SOURCE. If the device STALLs (nil), the feature is unsupported.
+    func fetchInputSource() {
+        let data = usb.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1)
+        DispatchQueue.main.async {
+            if let data = data, data.count >= 1 {
+                self.inputSourceSupported = true
+                self.inputSource = Int(data[0])
+            } else {
+                self.inputSourceSupported = false
+                self.inputSource = 0
+            }
+        }
+        if data != nil { fetchSpdifRxPin() }
+    }
+
+    func setInputSource(_ source: Int) {
+        DispatchQueue.main.async { self.inputSource = source }
+        let byte = Data([UInt8(source)])
+        usb.sendControlRequest(request: REQ_SET_INPUT_SOURCE, value: 0, index: 2, data: byte)
+    }
+
+    func fetchSpdifRxPin() {
+        if let data = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: 0, index: 2, length: 1),
+           data.count >= 1 {
+            DispatchQueue.main.async { self.spdifRxPin = data[0] }
+        }
+    }
+
     // MARK: - Bulk Parameter Transfer
 
     /// Fetches all DSP parameters in a single 2480-byte USB transfer.
@@ -984,6 +1015,15 @@ extension DSPViewModel {
             masterVol = data.withUnsafeBytes { $0.load(fromByteOffset: 2880, as: Float.self) }
         }
 
+        // --- Input Config (offset 2896, 16 bytes) --- V7 firmware only
+        var bulkInputSource: Int? = nil
+        var bulkSpdifRxPin: UInt8? = nil
+
+        if formatVersion >= 7 && data.count >= 2912 {
+            bulkInputSource = Int(data[2896])
+            bulkSpdifRxPin = data[2897]
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -1029,6 +1069,14 @@ extension DSPViewModel {
 
             self.channelData = channelFilters
             self.channelNames = names
+
+            if let src = bulkInputSource {
+                self.inputSource = src
+                self.inputSourceSupported = true
+            }
+            if let pin = bulkSpdifRxPin {
+                self.spdifRxPin = pin
+            }
 
             // Refresh channel visibility now that outputEnabled is populated
             if self.isOverviewMode {

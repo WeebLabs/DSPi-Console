@@ -54,6 +54,7 @@ struct PresetSnapshot: Equatable {
     let mckEnabled: Bool?
     let mckPin: UInt8?
     let mckMultiplier: Int?
+    let inputSource: Int?  // nil when firmware doesn't support input switching
 }
 
 // MARK: - Diff
@@ -247,6 +248,14 @@ extension PresetSnapshot {
         }
         if let oldVal = old.mckMultiplier, let newVal = new.mckMultiplier, oldVal != newVal {
             changes.append(.init(category: "I2S", description: "MCK multiplier: \(oldVal)x → \(newVal)x"))
+        }
+
+        // Input source
+        if let oldSrc = old.inputSource, let newSrc = new.inputSource, oldSrc != newSrc {
+            let names = ["USB", "S/PDIF"]
+            let oldName = oldSrc < names.count ? names[oldSrc] : "\(oldSrc)"
+            let newName = newSrc < names.count ? names[newSrc] : "\(newSrc)"
+            changes.append(.init(category: "Input", description: "Input source: \(oldName) → \(newName)"))
         }
 
         return PresetDiff(changes: changes)

@@ -102,7 +102,7 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-let BULK_PARAMS_SIZE: UInt16            = 2896
+let BULK_PARAMS_SIZE: UInt16            = 2912
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
@@ -131,6 +131,16 @@ let REQ_SET_MASTER_VOLUME: UInt8       = 0xD2
 let REQ_GET_MASTER_VOLUME: UInt8       = 0xD3
 let REQ_SET_INCLUDE_MASTER_VOL: UInt8  = 0xD4
 let REQ_GET_INCLUDE_MASTER_VOL: UInt8  = 0xD5
+
+// Input source switching request codes
+let REQ_SET_INPUT_SOURCE: UInt8       = 0xE0
+let REQ_GET_INPUT_SOURCE: UInt8       = 0xE1
+let REQ_GET_SPDIF_RX_STATUS: UInt8    = 0xE2
+let REQ_GET_SPDIF_RX_CH_STATUS: UInt8 = 0xE3
+let REQ_SET_SPDIF_RX_PIN: UInt8       = 0xE4
+let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
+
+// Note: REQ_SET_SPDIF_RX_PIN (0xE4) reuses PIN_CONFIG_* status codes (0x00-0x04)
 
 // Firmware update request codes
 let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0

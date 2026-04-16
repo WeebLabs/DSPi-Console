@@ -32,6 +32,106 @@ struct BufferStatsPacket {
     var audioStreaming: Bool { flags & 0x02 != 0 }
 }
 
+// MARK: - SPDIF RX Status Data Model
+
+struct SpdifRxStatus {
+    var state: UInt8 = 0          // 0=INACTIVE, 1=ACQUIRING, 2=LOCKED, 3=RELOCKING
+    var inputSource: UInt8 = 0
+    var lockCount: UInt8 = 0
+    var lossCount: UInt8 = 0
+    var sampleRate: UInt32 = 0
+    var parityErrors: UInt32 = 0
+    var fifoFillPct: UInt16 = 0
+    // Debug fields (bytes 14-15 of status packet)
+    var libState: UInt8 = 0       // Library internal state: 0=NO_SIGNAL, 1=WAITING_STABLE, 2=STABLE
+    var callbackCounts: UInt8 = 0 // High nibble = on_stable count, low nibble = on_lost_stable count
+
+    var isLocked: Bool { state == 2 }
+
+    var stateString: String {
+        switch state {
+        case 0: return "Inactive"
+        case 1: return "Acquiring"
+        case 2: return "Locked"
+        case 3: return "Relocking"
+        default: return "Unknown (\(state))"
+        }
+    }
+
+    var stateColor: Color {
+        switch state {
+        case 0: return .gray
+        case 1: return .yellow
+        case 2: return .green
+        case 3: return .orange
+        default: return .gray
+        }
+    }
+
+    var sourceString: String {
+        inputSource == 1 ? "S/PDIF" : "USB"
+    }
+
+    var sampleRateString: String {
+        guard isLocked, sampleRate > 0 else { return "—" }
+        return String(format: "%.1f kHz", Double(sampleRate) / 1000.0)
+    }
+
+    var libStateString: String {
+        switch libState {
+        case 0: return "No Signal"
+        case 1: return "Waiting Stable"
+        case 2: return "Stable"
+        default: return "Unknown (\(libState))"
+        }
+    }
+
+    var onStableCount: UInt8 { (callbackCounts >> 4) & 0x0F }
+    var onLostStableCount: UInt8 { callbackCounts & 0x0F }
+}
+
+struct SpdifRxChannelStatus {
+    var raw: [UInt8] = Array(repeating: 0, count: 24)
+
+    var isConsumer: Bool { raw[0] & 0x01 == 0 }
+    var isPCM: Bool { raw[0] & 0x02 == 0 }
+    var copyPermitted: Bool { raw[0] & 0x04 != 0 }
+    var categoryCode: UInt8 { raw[1] }
+    var sourceNumber: UInt8 { raw[2] & 0x0F }
+    var channelNumber: UInt8 { (raw[2] >> 4) & 0x0F }
+
+    var categoryString: String {
+        switch categoryCode {
+        case 0x00: return "General"
+        case 0x01: return "CD Player"
+        case 0x02: return "DAT"
+        case 0x03: return "DCC"
+        case 0x04: return "MiniDisc"
+        case 0x06: return "Synthesizer"
+        case 0x08: return "Broadcast Receiver"
+        case 0x09: return "Musical Instrument"
+        case 0x0A: return "A/D Converter"
+        case 0x0C: return "Mixer"
+        case 0x0D: return "Rate Converter"
+        case 0x0E: return "Sampler"
+        case 0x0F: return "Digital Signal Processor"
+        default: return "0x\(String(format: "%02X", categoryCode))"
+        }
+    }
+
+    var wordLengthString: String {
+        switch raw[4] & 0x0F {
+        case 0x00: return "Not indicated"
+        case 0x02: return "16-bit"
+        case 0x04: return "20-bit"
+        case 0x08: return "17-bit"
+        case 0x0A: return "22-bit"
+        case 0x0B: return "24-bit"
+        default: return "—"
+        }
+    }
+}
+
 // MARK: - Stats View Model
 class StatsViewModel: ObservableObject {
     @Published var pdmRingOverruns: UInt32 = 0
@@ -40,6 +140,7 @@ class StatsViewModel: ObservableObject {
     @Published var pdmDmaUnderruns: UInt32 = 0
     @Published var spdifOverruns: UInt32 = 0
     @Published var spdifUnderruns: UInt32 = 0
+    @Published var usbRingOverruns: UInt32 = 0
     @Published var isConnected: Bool = false
 
     // System monitoring values
@@ -66,6 +167,12 @@ class StatsViewModel: ObservableObject {
 
     // Reconnection counter
     @Published var reconnectCount: Int = 0
+
+    // SPDIF RX input status
+    @Published var spdifRxStatus: SpdifRxStatus = SpdifRxStatus()
+    @Published var spdifRxChannelStatus: SpdifRxChannelStatus = SpdifRxChannelStatus()
+    @Published var spdifRxPin: UInt8 = 11
+    @Published var inputSourceSupported: Bool = false
 
     private var previousStarvationTotal: UInt32? = nil
     private var hasConnectedOnce = false
@@ -147,6 +254,12 @@ class StatsViewModel: ObservableObject {
             DispatchQueue.main.async { self.spdifUnderruns = value }
         }
 
+        // wValue=22: USB audio ring overruns
+        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 22, index: 2, length: 4) {
+            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+            DispatchQueue.main.async { self.usbRingOverruns = value }
+        }
+
         // wValue=13: system clock frequency (Hz)
         if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 13, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
@@ -173,6 +286,7 @@ class StatsViewModel: ObservableObject {
 
         fetchBufferStats()
         fetchStarvationStats()
+        fetchSpdifRxStatus()
     }
 
     func fetchBufferStats() {
@@ -252,6 +366,38 @@ class StatsViewModel: ObservableObject {
         }
     }
 
+    func fetchSpdifRxStatus() {
+        guard let usb = usb, isConnected, inputSourceSupported else { return }
+
+        guard let data = usb.getControlRequest(request: REQ_GET_SPDIF_RX_STATUS, value: 0, index: 2, length: 16),
+              data.count >= 16 else { return }
+
+        var status = SpdifRxStatus()
+        status.state = data[0]
+        status.inputSource = data[1]
+        status.lockCount = data[2]
+        status.lossCount = data[3]
+        status.sampleRate = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+        status.parityErrors = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
+        status.fifoFillPct = data.withUnsafeBytes { $0.load(fromByteOffset: 12, as: UInt16.self) }
+        status.libState = data[14]
+        status.callbackCounts = data[15]
+
+        // Fetch IEC 60958 channel status when locked
+        var chStatus = SpdifRxChannelStatus()
+        if status.state == 2 {
+            if let chData = usb.getControlRequest(request: REQ_GET_SPDIF_RX_CH_STATUS, value: 0, index: 2, length: 24),
+               chData.count >= 24 {
+                chStatus.raw = Array(chData.prefix(24))
+            }
+        }
+
+        DispatchQueue.main.async {
+            self.spdifRxStatus = status
+            self.spdifRxChannelStatus = chStatus
+        }
+    }
+
     func resetBufferWatermarks() {
         guard let usb = usb, isConnected else { return }
         _ = usb.getControlRequest(request: REQ_RESET_BUFFER_STATS, value: 1, index: 0, length: 1)
@@ -283,6 +429,18 @@ class StatsViewModel: ObservableObject {
                 self.firmwareVersion = versionStr
                 self.outputCount = outputs
             }
+        }
+
+        // Probe input source feature support
+        if let data = usb.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1),
+           data.count >= 1 {
+            if let pinData = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: 0, index: 2, length: 1),
+               pinData.count >= 1 {
+                DispatchQueue.main.async { self.spdifRxPin = pinData[0] }
+            }
+            DispatchQueue.main.async { self.inputSourceSupported = true }
+        } else {
+            DispatchQueue.main.async { self.inputSourceSupported = false }
         }
     }
 }
@@ -398,6 +556,75 @@ struct StatsView: View {
                     )
                 }
 
+                // S/PDIF Input Section (only shown when supported)
+                if vm.inputSourceSupported {
+                    Divider()
+
+                    Text("S/PDIF Input")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        // State with color indicator
+                        HStack {
+                            Text("State")
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(vm.spdifRxStatus.stateColor)
+                                    .frame(width: 6, height: 6)
+                                Text(vm.spdifRxStatus.stateString)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 1)
+
+                        SystemInfoRow(title: "Active Source", value: vm.spdifRxStatus.sourceString)
+                        SystemInfoRow(title: "Sample Rate", value: vm.spdifRxStatus.sampleRateString)
+                        SystemInfoRow(title: "Lock Count", value: "\(vm.spdifRxStatus.lockCount)")
+                        SystemInfoRow(title: "Loss Count", value: "\(vm.spdifRxStatus.lossCount)")
+                        SystemInfoRow(title: "Parity Errors",
+                                      value: vm.spdifRxStatus.isLocked ? "\(vm.spdifRxStatus.parityErrors)" : "—")
+                        SystemInfoRow(title: "FIFO Fill",
+                                      value: vm.spdifRxStatus.isLocked ? "\(vm.spdifRxStatus.fifoFillPct)%" : "—")
+                        SystemInfoRow(title: "RX Pin", value: "GPIO \(vm.spdifRxPin)")
+
+                        // IEC 60958 Channel Status (only when locked)
+                        if vm.spdifRxStatus.isLocked {
+                            Divider()
+                            Text("Channel Status")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.secondary)
+                            SystemInfoRow(title: "Format",
+                                          value: vm.spdifRxChannelStatus.isConsumer ? "Consumer" : "Professional")
+                            SystemInfoRow(title: "Audio",
+                                          value: vm.spdifRxChannelStatus.isPCM ? "PCM" : "Non-PCM")
+                            SystemInfoRow(title: "Category",
+                                          value: vm.spdifRxChannelStatus.categoryString)
+                            SystemInfoRow(title: "Word Length",
+                                          value: vm.spdifRxChannelStatus.wordLengthString)
+                            SystemInfoRow(title: "Copy",
+                                          value: vm.spdifRxChannelStatus.copyPermitted ? "Permitted" : "Prohibited")
+                        }
+
+                        // Debug fields (from reserved bytes in status packet)
+                        if vm.spdifRxStatus.state != 0 {
+                            Divider()
+                            Text("Debug")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.secondary)
+                            SystemInfoRow(title: "Library State",
+                                          value: vm.spdifRxStatus.libStateString)
+                            SystemInfoRow(title: "Stable Callbacks",
+                                          value: "\(vm.spdifRxStatus.onStableCount)")
+                            SystemInfoRow(title: "Lost Callbacks",
+                                          value: "\(vm.spdifRxStatus.onLostStableCount)")
+                        }
+                    }
+                }
+
                 Divider()
 
                 // PDM Section
@@ -427,6 +654,13 @@ struct StatsView: View {
                 Text("Audio Output")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
+
+                StatRow(
+                    title: "USB Ring",
+                    subtitle: "ISR → Main Loop",
+                    overruns: vm.usbRingOverruns,
+                    underruns: nil
+                )
 
                 StatRow(
                     title: "Buffer Pool",
