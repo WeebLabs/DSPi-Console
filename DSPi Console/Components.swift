@@ -587,9 +587,45 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
             }
         }
 
-        // Only update selection if it actually changed
-        if let index = items.firstIndex(of: selection), button.indexOfSelectedItem != index {
-            button.selectItem(withTag: index)
+        // Reconcile selection in two passes.
+        //
+        // (1) Sync NSPopUpButton's internal selection tracking via
+        //     selectItem(withTag:).  This updates the button-face display
+        //     and AppKit's notion of "the selected item" for key nav /
+        //     accessibility.  The indexOfSelectedItem short-circuit avoids
+        //     redundant work during rapid @Published-driven re-renders.
+        //
+        // (2) Explicitly normalize every NSMenuItem.state.  Defends against
+        //     the case where AppKit's internal _selectedItem pointer has
+        //     desynced from the actual .state fields — which can leave a
+        //     stale .on on the previously-clicked item, manifesting as
+        //     MULTIPLE CHECKMARKS in the popup.
+        //
+        //     Reproducible trigger: rapidly clicking through presets,
+        //     especially empty ones.  Multiple unoccupied slots share the
+        //     title "Empty" (presetDropdownLabel), and AppKit's selectItem
+        //     machinery clears state on whatever it THINKS was previously
+        //     selected — if that internal pointer references an item that
+        //     was displaced by a menu rebuild, or if a native click and a
+        //     selectItem call disagree about "previous", stale .on bits
+        //     accumulate on prior items.  Explicitly walking the menu and
+        //     setting state from the authoritative `selection` binding
+        //     guarantees exactly one .on regardless of AppKit bookkeeping.
+        if let targetIndex = items.firstIndex(of: selection) {
+            if button.indexOfSelectedItem != targetIndex {
+                button.selectItem(withTag: targetIndex)
+            }
+            if let menu = button.menu {
+                for i in 0..<menu.numberOfItems {
+                    if let menuItem = menu.item(at: i) {
+                        let shouldBeOn = (menuItem.tag == targetIndex)
+                        let desired: NSControl.StateValue = shouldBeOn ? .on : .off
+                        if menuItem.state != desired {
+                            menuItem.state = desired
+                        }
+                    }
+                }
+            }
         }
     }
 

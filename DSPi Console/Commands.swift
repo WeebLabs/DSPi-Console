@@ -1159,8 +1159,38 @@ extension DSPViewModel {
         let status = data[0]
         print("[PRESET] loadPreset(\(slot)) device status=\(status)")
         if status == PRESET_OK {
+            // Publish the new active slot BEFORE the bulk refresh so the UI
+            // converges quickly and the NSPopUpButton's native click-set
+            // selection state reconciles with @Binding's view of truth.
+            //
+            // Why this matters: when the user picks a slot from the preset
+            // popup, NSPopUpButton immediately sets .state=.on on the clicked
+            // NSMenuItem (native click handling).  If activePresetSlot never
+            // follows, the next BorderlessPopUpButton.updateNSView call
+            // (triggered by any @Published poll update) will call
+            // selectItem(withTag:) with the STALE activePresetSlot — which,
+            // depending on NSPopUpButton's internal selectedItem-pointer
+            // state vs. the NSMenuItem .state fields, can leave a checkmark
+            // on BOTH the old and new slots until something else resyncs.
+            // Mirroring savePreset's behavior (Commands.swift:~1144) keeps
+            // the invariant "on PRESET_OK, activePresetSlot reflects the
+            // slot the device is now on" uniform across both ops.
+            DispatchQueue.main.async {
+                self.activePresetSlot = slot
+            }
             Thread.sleep(forTimeInterval: 0.1)
             fetchAllParams()
+            // Rebase the unsaved-changes baseline to the just-loaded slot.
+            // Without this, savedSnapshot still reflects whatever slot was
+            // active before this load, and hasUnsavedChanges will spuriously
+            // report differences (firing the "save changes?" dialog on the
+            // very next preset switch).  Queued AFTER fetchAllParams so that
+            // all of fetchAllParams's main.async writes have settled by the
+            // time captureSnapshot() runs — FIFO ordering on the main queue
+            // guarantees this.
+            DispatchQueue.main.async {
+                self.updateSavedSnapshot()
+            }
         }
         return status
     }
