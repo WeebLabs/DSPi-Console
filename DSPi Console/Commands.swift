@@ -14,9 +14,15 @@ extension DSPViewModel {
         fetchSampleRate()
 
         // Fetch preset state
-        fetchPresetDirectory()
+        let occupied = fetchPresetDirectory()
         for slot in 0..<10 {
-            fetchPresetName(slot: slot)
+            if (occupied & UInt16(1 << slot)) != 0 {
+                fetchPresetName(slot: slot)
+            } else {
+                DispatchQueue.main.async {
+                    self.presetNames[slot] = ""
+                }
+            }
         }
         fetchPresetActive()
     }
@@ -1111,12 +1117,21 @@ extension DSPViewModel {
             self.activePresetSlot = Int(lastActive)
             self.presetIncludePins = includePins
             self.presetIncludeMasterVolume = includeMasterVol
+            // Ensure UI cannot show stale names for slots that are not occupied.
+            for slot in 0..<10 where (occupied & UInt16(1 << slot)) == 0 {
+                self.presetNames[slot] = ""
+            }
         }
         return occupied
     }
 
     func fetchPresetName(slot: Int) {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_NAME, value: UInt16(slot), index: 2, length: 32) else { return }
+        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_NAME, value: UInt16(slot), index: 2, length: 32) else {
+            DispatchQueue.main.async {
+                self.presetNames[slot] = ""
+            }
+            return
+        }
         let name: String
         if let nulIndex = data.firstIndex(of: 0) {
             name = String(data: data[0..<nulIndex], encoding: .ascii) ?? ""

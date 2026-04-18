@@ -95,7 +95,13 @@ struct GeneralSettingsTab: View {
 
     private func slotLabel(_ slot: Int) -> String {
         let display = slot + 1
-        let name = vm.presetNames[slot].isEmpty ? "Empty" : vm.presetNames[slot]
+        let name: String
+        if vm.isPresetOccupied(slot) {
+            let trimmed = vm.presetNames[slot].trimmingCharacters(in: .whitespacesAndNewlines)
+            name = trimmed.isEmpty ? "Preset \(slot + 1)" : trimmed
+        } else {
+            name = "Empty"
+        }
         return "\(display): \(name)"
     }
 

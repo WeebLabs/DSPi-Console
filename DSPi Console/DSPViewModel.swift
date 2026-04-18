@@ -123,6 +123,9 @@ class DSPViewModel: ObservableObject {
                 self?.isDeviceConnected = connected
                 if !connected {
                     self?.savedSnapshot = nil
+                    self?.presetOccupied = 0
+                    self?.presetNames = Array(repeating: "", count: 10)
+                    self?.activePresetSlot = 0
                 }
                 if connected {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

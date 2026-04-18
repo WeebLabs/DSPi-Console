@@ -98,12 +98,13 @@ struct ContentView: View {
 
     private func presetLabel(_ slot: Int) -> String {
         let display = slot + 1
-        let name = vm.presetNames[slot].isEmpty ? "Empty" : vm.presetNames[slot]
-        return "\(display): \(name)"
+        return "\(display): \(presetDropdownLabel(slot))"
     }
 
     private func presetDropdownLabel(_ slot: Int) -> String {
-        vm.presetNames[slot].isEmpty ? "Empty" : vm.presetNames[slot]
+        guard vm.isPresetOccupied(slot) else { return "Empty" }
+        let trimmed = vm.presetNames[slot].trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Preset \(slot + 1)" : trimmed
     }
 
     private func saveActivePreset(vm: DSPViewModel) {
