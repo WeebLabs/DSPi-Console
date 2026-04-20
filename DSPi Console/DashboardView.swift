@@ -330,6 +330,7 @@ struct DashboardRow: View {
         case .lowPass: return "LP"
         case .highPass: return "HP"
         case .notch: return "NO"
+        case .allPass: return "AP"
         }
     }
 
