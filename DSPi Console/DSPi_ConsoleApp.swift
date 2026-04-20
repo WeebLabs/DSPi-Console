@@ -1246,6 +1246,7 @@ struct FileMenuActions {
         case .highPass: typeCode = "HP"
         case .lowShelf: typeCode = "LS"
         case .highShelf: typeCode = "HS"
+        case .notch: typeCode = "NO"
         }
 
         let paddedType = typeCode.padding(toLength: 8, withPad: " ", startingAt: 0)
