@@ -548,6 +548,157 @@ private struct InputRoutingRow: View {
 
 // MARK: - Per-Channel Preamp Control
 
+// MARK: - Input Channel Header
+//
+// Top-of-page header for input (master L/R) channel pages.  Combines:
+//   • Link L/R button — toggles `vm.preampLinked`, which (a) synchronizes the
+//     preamp dB values across both channels and (b) mirrors subsequent PEQ
+//     filter edits between L and R (mirroring is wired at the call site that
+//     dispatches filter updates).
+//   • Preamp slider with inline label and dB value field.
+//   • Clear Master PEQ button — resets all bands on both master channels.
+struct InputChannelHeader: View {
+    let channel: Int  // 0 = L, 1 = R
+    @ObservedObject var vm: DSPViewModel
+    let onClearMasterPEQ: () -> Void
+
+    @State private var localPreamp: Float = 0
+    @State private var isDragging = false
+
+    private var linked: Bool { vm.preampLinked }
+
+    var body: some View {
+        // Three sections separated by Dividers, mirroring the output channel
+        // card's section-with-divider pattern.  Each section adds its own
+        // 12-pt horizontal / 8-pt vertical padding so dividers extend the
+        // full card height.
+        HStack(spacing: 0) {
+            // LINK L/R section
+            Button(action: toggleLink) {
+                HStack(spacing: 6) {
+                    Image(systemName: linked ? "link" : "link.badge.plus")
+                        .font(.caption).fontWeight(.medium)
+                    Text("Link L/R")
+                        .font(.caption).fontWeight(.medium)
+                }
+                .foregroundColor(linked ? .accentColor : .secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(linked ? Color.accentColor.opacity(0.18) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            linked ? Color.accentColor.opacity(0.45) : Color.gray.opacity(0.3),
+                            lineWidth: 1
+                        )
+                )
+            }
+            .buttonStyle(.plain)
+            .help(linked ? "Unlink L/R (preamp & PEQ stay independent)" : "Link L/R (preamp & PEQ edits mirrored)")
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            // PREAMP section — label, slider, value.  Inner HStack uses 6-pt
+            // spacing to tighten the slider→value gap.  Spacers on either
+            // side of the content keep the preamp visually centered within
+            // this section's full available width.
+            HStack(spacing: 12) {
+                Spacer()
+
+                Text("Preamp")
+                    .font(.caption).fontWeight(.medium).foregroundColor(.secondary)
+                    .fixedSize()
+
+                HStack(spacing: 6) {
+                    Slider(value: $localPreamp, in: -60...10) { editing in
+                        isDragging = editing
+                        if !editing { vm.setPreampChannel(channel: channel, db: localPreamp) }
+                    }
+                    .controlSize(.small)
+                    .frame(height: 24)
+                    .onChange(of: localPreamp) { val in
+                        if isDragging {
+                            vm.sendPreampChannelToDevice(channel: channel, db: val)
+                            if vm.preampLinked {
+                                // Update the other channel's @Published value so its
+                                // sidebar peak meter / cards reflect the mirrored value
+                                // immediately during drag.
+                                let rounded = (val * 10).rounded() / 10
+                                vm.preampDB[1 - channel] = rounded == -0.0 ? 0.0 : rounded
+                            }
+                        }
+                    }
+                    .onAppear { localPreamp = vm.preampDB[channel] }
+                    .onChange(of: vm.preampDB) { newArr in
+                        if !isDragging { localPreamp = newArr[channel] }
+                    }
+                    .onRightClick {
+                        localPreamp = 0
+                        vm.setPreampChannel(channel: channel, db: 0)
+                    }
+
+                    // Value field is sized to comfortably fit "-60.0" (the slider's
+                    // most negative value) plus the "dB" label without slack.
+                    ValueField(label: "dB", value: localPreamp, width: 44) { v in
+                        localPreamp = v
+                        vm.setPreampChannel(channel: channel, db: v)
+                    }
+                }
+                .frame(maxWidth: 320)
+
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+
+            Divider()
+
+            // CLEAR MASTER PEQ section
+            Button(action: onClearMasterPEQ) {
+                Text("Clear Master PEQ")
+                    .font(.caption).fontWeight(.medium)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Reset all PEQ bands on both master channels")
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .frame(height: 56)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+    }
+
+    private func toggleLink() {
+        vm.preampLinked.toggle()
+        if vm.preampLinked {
+            // Sync the other channel to this channel's value on link-on, matching
+            // the prior PreampControlView behavior.  PEQ filters are not bulk-synced
+            // here — only forward edits are mirrored, per the design note.
+            vm.setPreampChannel(channel: 1 - channel, db: vm.preampDB[channel])
+        }
+    }
+}
+
+// MARK: - Per-Channel Preamp Control (legacy)
+
 struct PreampControlView: View {
     let channel: Int  // 0 = L, 1 = R
     @ObservedObject var vm: DSPViewModel

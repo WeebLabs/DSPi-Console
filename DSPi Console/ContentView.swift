@@ -644,10 +644,12 @@ struct ContentView: View {
                 VStack {
                     switch selection {
                     case .channel(let channel):
+                        let masterCh = channel == .masterLeft ? 0 : 1
                         VStack(spacing: 16) {
-                            PreampControlView(
-                                channel: channel == .masterLeft ? 0 : 1,
-                                vm: vm
+                            InputChannelHeader(
+                                channel: masterCh,
+                                vm: vm,
+                                onClearMasterPEQ: { vm.clearAllMaster() }
                             )
                             .padding(.horizontal)
 
@@ -656,8 +658,15 @@ struct ContentView: View {
                                 channelId: channel.rawValue,
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: channel.rawValue, band: band, p: params)
+                                    // Link L/R mirrors PEQ edits across master channels.
+                                    // Only fan out for master L/R (channels 0/1); other
+                                    // channels never enter this branch since this case
+                                    // only handles .masterLeft/.masterRight.
+                                    if vm.preampLinked {
+                                        vm.setFilter(ch: 1 - masterCh, band: band, p: params)
+                                    }
                                 },
-                                onClear: (channel == .masterLeft || channel == .masterRight) ? { vm.clearAllMaster() } : nil
+                                onClear: nil  // moved to InputChannelHeader's "Clear Master PEQ"
                             )
                         }
 
