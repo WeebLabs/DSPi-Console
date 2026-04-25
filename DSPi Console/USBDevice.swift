@@ -74,6 +74,16 @@ class USBDevice: ObservableObject {
                                                                                  0x5c, 0x81, 0x87, 0xd0, 0x9e, 0xf3, 0x11, 0xd4,
                                                                                  0x8b, 0x45, 0x00, 0x0a, 0x27, 0x05, 0x28, 0x61)
 
+    // kIOUSBInterfaceUserClientTypeID — 2d9786c6-9ef3-11d4-ad51-000a27052861
+    private let kIOUSBInterfaceUserClientTypeID_UUID = CFUUIDGetConstantUUIDWithBytes(nil,
+                                                                                      0x2d, 0x97, 0x86, 0xc6, 0x9e, 0xf3, 0x11, 0xd4,
+                                                                                      0xad, 0x51, 0x00, 0x0a, 0x27, 0x05, 0x28, 0x61)
+
+    // kIOUSBInterfaceInterfaceID500 — 6C0D38C3-B093-4EA7-809B-09FB5DDDAC16
+    private let kIOUSBInterfaceInterfaceID500_UUID = CFUUIDGetConstantUUIDWithBytes(nil,
+                                                                                     0x6c, 0x0d, 0x38, 0xc3, 0xb0, 0x93, 0x4e, 0xa7,
+                                                                                     0x80, 0x9b, 0x09, 0xfb, 0x5d, 0xdd, 0xac, 0x16)
+
     init() {
         // Just setting up monitoring triggers the initial scan automatically
         setupMonitoring()
@@ -474,6 +484,71 @@ class USBDevice: ObservableObject {
                 return Data(bytes: buffer, count: Int(requestPtr.wLenDone))
             }
             return nil
+        }
+    }
+
+    // MARK: - Interface-level Access (for interrupt endpoints)
+
+    typealias InterfaceInterface = IOUSBInterfaceInterface500
+    typealias InterfaceInterfacePtr = UnsafeMutablePointer<UnsafeMutablePointer<InterfaceInterface>?>
+
+    /// Find and open the vendor interface (class 0xFF) on the currently-open
+    /// device.  The interrupt IN endpoint (EP 0x83) for notifications lives
+    /// on this interface.
+    ///
+    /// Returns an opened interface handle the caller is responsible for
+    /// closing via `USBInterfaceClose` + `Release`.  The interface is
+    /// independent of the device handle held by `deviceInterface`; closing
+    /// the device does NOT implicitly close the interface, and vice versa.
+    func openVendorInterface() -> InterfaceInterfacePtr? {
+        return serialQueue.sync { [self] in
+            guard let dev = deviceInterface else { return nil }
+
+            var request = IOUSBFindInterfaceRequest(
+                bInterfaceClass: 0xFF,
+                bInterfaceSubClass: UInt16(kIOUSBFindInterfaceDontCare),
+                bInterfaceProtocol: UInt16(kIOUSBFindInterfaceDontCare),
+                bAlternateSetting: UInt16(kIOUSBFindInterfaceDontCare)
+            )
+
+            var iterator: io_iterator_t = 0
+            let res = dev.pointee!.pointee.CreateInterfaceIterator(dev, &request, &iterator)
+            guard res == kIOReturnSuccess else { return nil }
+            defer { IOObjectRelease(iterator) }
+
+            let service = IOIteratorNext(iterator)
+            guard service != 0 else { return nil }
+            defer { IOObjectRelease(service) }
+
+            var score: Int32 = 0
+            var plugin: UnsafeMutablePointer<UnsafeMutablePointer<IOCFPlugInInterface>?>?
+            let plugInResult = IOCreatePlugInInterfaceForService(
+                service,
+                kIOUSBInterfaceUserClientTypeID_UUID,
+                kIOCFPlugInInterfaceID_UUID,
+                &plugin,
+                &score
+            )
+            guard plugInResult == kIOReturnSuccess, let plugin = plugin else { return nil }
+
+            var tempPtr: UnsafeMutableRawPointer?
+            let qiRes = plugin.pointee!.pointee.QueryInterface(
+                plugin,
+                CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID500_UUID),
+                &tempPtr
+            )
+            _ = plugin.pointee!.pointee.Release(plugin)
+
+            guard qiRes == kIOReturnSuccess, let tempPtr = tempPtr else { return nil }
+
+            let interfacePtr = tempPtr.assumingMemoryBound(to: UnsafeMutablePointer<InterfaceInterface>?.self)
+
+            let openRes = interfacePtr.pointee!.pointee.USBInterfaceOpen(interfacePtr)
+            if openRes != kIOReturnSuccess {
+                _ = interfacePtr.pointee!.pointee.Release(interfacePtr)
+                return nil
+            }
+            return interfacePtr
         }
     }
 }

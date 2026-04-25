@@ -60,7 +60,7 @@ class DSPViewModel: ObservableObject {
     @Published var presetStartupMode: Int = 0     // 0 = specified default, 1 = last active
     @Published var presetDefaultSlot: Int = 0
     @Published var presetIncludePins: Bool = false
-    @Published var presetIncludeMasterVolume: Bool = false
+    @Published var presetMasterVolumeMode: Int = MASTER_VOLUME_MODE_INDEPENDENT
 
     @Published var platformName: String = ""
     @Published var isDeviceConnected: Bool = false
@@ -218,7 +218,7 @@ class DSPViewModel: ObservableObject {
     func captureSnapshot() -> PresetSnapshot {
         PresetSnapshot(
             preampDB: preampDB,
-            masterVolumeDB: presetIncludeMasterVolume ? masterVolumeDB : nil,
+            masterVolumeDB: (presetMasterVolumeMode == MASTER_VOLUME_MODE_WITH_PRESET) ? masterVolumeDB : nil,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
             loudnessRefSPL: loudnessRefSPL,

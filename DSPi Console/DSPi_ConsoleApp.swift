@@ -182,6 +182,33 @@ struct GeneralSettingsTab: View {
             } header: {
                 Label("Startup Preset", systemImage: "power")
             }
+
+            Section {
+                Picker("Mode", selection: Binding(
+                    get: { vm.presetMasterVolumeMode },
+                    set: { mode in
+                        vm.presetMasterVolumeMode = mode
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.setMasterVolumeMode(mode)
+                        }
+                    }
+                )) {
+                    Text("Independent").tag(MASTER_VOLUME_MODE_INDEPENDENT)
+                    Text("With Preset").tag(MASTER_VOLUME_MODE_WITH_PRESET)
+                }
+
+                if vm.presetMasterVolumeMode == MASTER_VOLUME_MODE_INDEPENDENT {
+                    Text("Master volume is stored on the device independently of presets and applied at boot. Loading a preset never changes it.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Master volume is part of each preset. Saved with the preset, restored on preset load.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } header: {
+                Label("Master Volume", systemImage: "speaker.wave.2")
+            }
         }
         .formStyle(.grouped)
         .padding()
@@ -756,22 +783,6 @@ struct HardwareSettingsTab: View {
                 }
                 .toggleStyle(.switch)
 
-                Toggle(isOn: Binding(
-                    get: { vm.presetIncludeMasterVolume },
-                    set: { val in
-                        vm.presetIncludeMasterVolume = val
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            vm.setIncludeMasterVolume(val)
-                        }
-                    }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Include Master Volume")
-                        Text("Restore master volume level when loading a preset")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
             } header: {
                 Label("Presets", systemImage: "square.stack.3d.up")
             }
@@ -1806,6 +1817,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
     @StateObject private var graphWindowController = GraphWindowController()
+    @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
 
     var body: some Scene {
         Window("DSPi Console", id: "main") {
@@ -1816,6 +1828,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
                 .environmentObject(graphWindowController)
+                .environmentObject(interruptMonitorWindowController)
                 .preferredColorScheme(.dark)
                 .onAppear {
                     NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -1920,6 +1933,13 @@ struct DSPi_ConsoleApp: App {
                     statsWindowController.show(usb: AppState.shared.usb)
                 }
                 .keyboardShortcut("T", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Interrupt Monitor...") {
+                    interruptMonitorWindowController.show(usb: AppState.shared.usb)
+                }
+                .keyboardShortcut("I", modifiers: [.command, .shift])
             }
         }
 

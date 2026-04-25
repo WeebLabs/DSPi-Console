@@ -177,6 +177,7 @@ class StatsViewModel: ObservableObject {
     private var previousStarvationTotal: UInt32? = nil
     private var hasConnectedOnce = false
     private var pollTimer: Timer?
+    private var bufferPollTimer: Timer?
     private weak var usb: USBDevice?
     private var cancellables = Set<AnyCancellable>()
 
@@ -204,6 +205,11 @@ class StatsViewModel: ObservableObject {
             self?.fetchStats()
         }
 
+        // Poll buffer fill stats at 60ms for smooth meter updates
+        bufferPollTimer = Timer.scheduledTimer(withTimeInterval: 0.060, repeats: true) { [weak self] _ in
+            self?.fetchBufferStats()
+        }
+
         // Initial fetch
         fetchStats()
         if usb.isConnected {
@@ -213,6 +219,7 @@ class StatsViewModel: ObservableObject {
 
     deinit {
         pollTimer?.invalidate()
+        bufferPollTimer?.invalidate()
     }
 
     func fetchStats() {
@@ -284,7 +291,6 @@ class StatsViewModel: ObservableObject {
             DispatchQueue.main.async { self.systemTempCentiC = value }
         }
 
-        fetchBufferStats()
         fetchStarvationStats()
         fetchSpdifRxStatus()
     }

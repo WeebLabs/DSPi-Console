@@ -307,18 +307,23 @@ extension DSPViewModel {
         }
     }
 
-    // MARK: - Include Master Volume (preset directory flag)
+    // MARK: - Master Volume Mode (preset directory flag)
 
-    func setIncludeMasterVolume(_ include: Bool) {
-        let data = Data([include ? 1 : 0])
-        usb.sendControlRequest(request: REQ_SET_INCLUDE_MASTER_VOL, value: 0, index: 2, data: data)
+    /// Set master-volume persistence mode.
+    /// Pass `MASTER_VOLUME_MODE_INDEPENDENT` (0, default) for the device-wide
+    /// stored value or `MASTER_VOLUME_MODE_WITH_PRESET` (1) to make master
+    /// volume part of each preset.
+    func setMasterVolumeMode(_ mode: Int) {
+        let clamped = UInt8(max(0, min(1, mode)))
+        usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
-    func fetchIncludeMasterVolume() {
-        guard let data = usb.getControlRequest(request: REQ_GET_INCLUDE_MASTER_VOL, value: 0, index: 2, length: 1) else { return }
-        let val = data[0] != 0
+    func fetchMasterVolumeMode() {
+        guard let data = usb.getControlRequest(request: REQ_GET_MASTER_VOLUME_MODE, value: 0, index: 2, length: 1) else { return }
+        let val = Int(data[0])
         DispatchQueue.main.async {
-            self.presetIncludeMasterVolume = val
+            self.presetMasterVolumeMode = (val == MASTER_VOLUME_MODE_WITH_PRESET) ? MASTER_VOLUME_MODE_WITH_PRESET
+                                                                                  : MASTER_VOLUME_MODE_INDEPENDENT
         }
     }
 
@@ -1109,14 +1114,18 @@ extension DSPViewModel {
         let defaultSlot = Int(data[3])
         let lastActive = data[4]
         let includePins = data[5] != 0
-        let includeMasterVol = data.count >= 7 ? (data[6] != 0) : false
+        // Byte [6] carries master_volume_mode (0 = independent, 1 = with preset).
+        // Older firmware that pre-dates the byte returns < 7 bytes; default to mode 0.
+        let masterVolMode: Int = (data.count >= 7 && data[6] == UInt8(MASTER_VOLUME_MODE_WITH_PRESET))
+            ? MASTER_VOLUME_MODE_WITH_PRESET
+            : MASTER_VOLUME_MODE_INDEPENDENT
         DispatchQueue.main.async {
             self.presetOccupied = occupied
             self.presetStartupMode = startupMode
             self.presetDefaultSlot = defaultSlot
             self.activePresetSlot = Int(lastActive)
             self.presetIncludePins = includePins
-            self.presetIncludeMasterVolume = includeMasterVol
+            self.presetMasterVolumeMode = masterVolMode
             // Ensure UI cannot show stale names for slots that are not occupied.
             for slot in 0..<10 where (occupied & UInt16(1 << slot)) == 0 {
                 self.presetNames[slot] = ""

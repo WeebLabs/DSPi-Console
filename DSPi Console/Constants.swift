@@ -127,10 +127,16 @@ let REQ_SET_PREAMP_CH: UInt8           = 0xD0
 let REQ_GET_PREAMP_CH: UInt8           = 0xD1
 
 // Master volume request codes
-let REQ_SET_MASTER_VOLUME: UInt8       = 0xD2
-let REQ_GET_MASTER_VOLUME: UInt8       = 0xD3
-let REQ_SET_INCLUDE_MASTER_VOL: UInt8  = 0xD4
-let REQ_GET_INCLUDE_MASTER_VOL: UInt8  = 0xD5
+let REQ_SET_MASTER_VOLUME: UInt8         = 0xD2
+let REQ_GET_MASTER_VOLUME: UInt8         = 0xD3
+let REQ_SET_MASTER_VOLUME_MODE: UInt8    = 0xD4
+let REQ_GET_MASTER_VOLUME_MODE: UInt8    = 0xD5
+let REQ_SAVE_MASTER_VOLUME: UInt8        = 0xD6
+let REQ_GET_SAVED_MASTER_VOLUME: UInt8   = 0xD7
+
+// Master volume persistence modes (payload of 0xD4 / response of 0xD5)
+let MASTER_VOLUME_MODE_INDEPENDENT: Int  = 0   // Saved in directory, applied at boot, untouched by presets
+let MASTER_VOLUME_MODE_WITH_PRESET: Int  = 1   // Saved with each preset, restored on preset load
 
 // Input source switching request codes
 let REQ_SET_INPUT_SOURCE: UInt8       = 0xE0

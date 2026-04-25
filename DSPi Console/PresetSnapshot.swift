@@ -22,7 +22,7 @@ struct SnapshotFilterParams: Equatable {
 /// values are quantized at the USB protocol level (single-precision, rounded to 0.1 dB).
 struct PresetSnapshot: Equatable {
     let preampDB: [Float]
-    let masterVolumeDB: Float?  // nil when presetIncludeMasterVolume is false
+    let masterVolumeDB: Float?  // nil when presetMasterVolumeMode != MASTER_VOLUME_MODE_WITH_PRESET
     let bypass: Bool
     let loudnessEnabled: Bool
     let loudnessRefSPL: Float
