@@ -166,9 +166,17 @@ class DSPViewModel: ObservableObject {
             if let ch = channel {
                 isOverviewMode = false
                 activeEqChannel = ch.rawValue
-                // Show only the selected master channel
+                let isMaster = (ch == .masterLeft || ch == .masterRight)
+                // When Link L/R is on and the user selects a master channel,
+                // show both master curves on the graph (in addition to keeping
+                // the right pane focused on the clicked channel).
+                let showBothMasters = isMaster && preampLinked
                 for eqCh in 0...10 {
-                    channelVisibility[eqCh] = (eqCh == ch.rawValue)
+                    if showBothMasters && (eqCh == Channel.masterLeft.rawValue || eqCh == Channel.masterRight.rawValue) {
+                        channelVisibility[eqCh] = true
+                    } else {
+                        channelVisibility[eqCh] = (eqCh == ch.rawValue)
+                    }
                 }
             } else {
                 isOverviewMode = true
@@ -181,6 +189,20 @@ class DSPViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Re-runs the current sidebar selection's graph-visibility logic.  Called
+    /// after `preampLinked` changes so the graph immediately reflects whether
+    /// both master curves should be drawn together.  No-op outside master
+    /// selection (e.g. on output channel pages or overview) — those modes
+    /// aren't affected by Link L/R.
+    func refreshLinkedVisibility() {
+        guard let raw = activeEqChannel,
+              let ch = Channel(rawValue: raw),
+              ch == .masterLeft || ch == .masterRight else {
+            return
+        }
+        updateSelection(to: ch)
     }
 
     func updateSelectionToOutput(_ outputIdx: Int) {

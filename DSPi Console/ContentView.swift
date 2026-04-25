@@ -190,7 +190,19 @@ struct ContentView: View {
             List {
                 Section(header: Text("INPUTS")) {
                     ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
-                        ChannelRow(channel: ch, isSelected: selection == .channel(ch),
+                        // When Link L/R is on, both master rows show as
+                        // selected if either master is currently selected.
+                        // The right-pane still tracks the actually-clicked
+                        // channel (via `selection`) — only the visual
+                        // highlight is shared.
+                        let rowSelected: Bool = {
+                            if selection == .channel(ch) { return true }
+                            if vm.preampLinked && (ch == .masterLeft || ch == .masterRight) {
+                                return selection == .channel(.masterLeft) || selection == .channel(.masterRight)
+                            }
+                            return false
+                        }()
+                        ChannelRow(channel: ch, isSelected: rowSelected,
                                   name: vm.channelNames[ch.rawValue], meters: vm.meters,
                                   isRenaming: renamingChannel == ch.rawValue,
                                   renameText: $renameText,

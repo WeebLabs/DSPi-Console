@@ -694,6 +694,9 @@ struct InputChannelHeader: View {
             // here — only forward edits are mirrored, per the design note.
             vm.setPreampChannel(channel: 1 - channel, db: vm.preampDB[channel])
         }
+        // Re-evaluate which master curves are shown on the graph so toggling
+        // link while a master is selected updates immediately.
+        vm.refreshLinkedVisibility()
     }
 }
 
