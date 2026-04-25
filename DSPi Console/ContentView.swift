@@ -320,6 +320,13 @@ struct ContentView: View {
                                 }
                             }
                         )
+
+                        SidebarIconButton(
+                            icon: "xmark",
+                            isActive: vm.bypass,
+                            tooltip: "Bypass Master EQ",
+                            action: { vm.setBypass(!vm.bypass) }
+                        )
                     }
                     .padding(.vertical, 8)
 
@@ -334,7 +341,18 @@ struct ContentView: View {
                             Spacer()
                             BorderlessPopUpButton(
                                 items: Array(0..<10),
-                                titleForItem: { presetDropdownLabel($0) },
+                                titleForItem: { slot in
+                                    // Append "*" to the currently-selected slot's title when
+                                    // unsaved changes are pending.  The popup face shows the
+                                    // selected item's title verbatim, so the asterisk also
+                                    // appears inside the picker box — exactly the dirty marker
+                                    // we want.  Only the active slot ever gets the marker, so
+                                    // when the user opens the menu they see at most one "*".
+                                    let base = presetDropdownLabel(slot)
+                                    return (slot == vm.activePresetSlot && vm.hasUnsavedChanges)
+                                        ? "\(base)*"
+                                        : base
+                                },
                                 selection: Binding(
                                     get: { vm.activePresetSlot },
                                     set: { slot in
@@ -520,22 +538,6 @@ struct ContentView: View {
                             .onRightClick { localMasterVolume = 0; vm.setMasterVolume(0) }
                         }
 
-                        Button(action: { vm.setBypass(!vm.bypass) }) {
-                            Text("Bypass Master EQ")
-                                .font(.caption).fontWeight(.medium)
-                                .foregroundColor(vm.bypass ? .white : .secondary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 5)
-                                        .fill(vm.bypass ? Color(red: 0.4, green: 0.12, blue: 0.12) : Color.white.opacity(0.08))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 5)
-                                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                                )
-                        }
-                        .buttonStyle(.plain)
                     }
                     .padding()
                     // ADDED GESTURE HERE FOR SIDEBAR CONTROLS

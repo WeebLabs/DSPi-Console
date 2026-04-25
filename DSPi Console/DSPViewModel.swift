@@ -218,7 +218,8 @@ class DSPViewModel: ObservableObject {
     func captureSnapshot() -> PresetSnapshot {
         PresetSnapshot(
             preampDB: preampDB,
-            masterVolumeDB: (presetMasterVolumeMode == MASTER_VOLUME_MODE_WITH_PRESET) ? masterVolumeDB : nil,
+            masterVolumeDB: masterVolumeDB,
+            masterVolumeMode: presetMasterVolumeMode,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
             loudnessRefSPL: loudnessRefSPL,
@@ -259,8 +260,14 @@ class DSPViewModel: ObservableObject {
     }
 
     var hasUnsavedChanges: Bool {
-        guard let saved = savedSnapshot else { return false }
-        return captureSnapshot() != saved
+        // Route through computeDiff so the gating matches the alert text exactly:
+        // master volume only counts when both snapshots have it (i.e. when the
+        // current/baseline modes were WITH_PRESET).  Plain Equatable on
+        // PresetSnapshot would say nil != Float and falsely report dirty after
+        // a master-volume-mode flip even though no preset-persistent state
+        // actually changed.
+        guard savedSnapshot != nil else { return false }
+        return !computeDiff().changes.isEmpty
     }
 
     func computeDiff() -> PresetDiff {

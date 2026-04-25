@@ -22,7 +22,11 @@ struct SnapshotFilterParams: Equatable {
 /// values are quantized at the USB protocol level (single-precision, rounded to 0.1 dB).
 struct PresetSnapshot: Equatable {
     let preampDB: [Float]
-    let masterVolumeDB: Float?  // nil when presetMasterVolumeMode != MASTER_VOLUME_MODE_WITH_PRESET
+    // Always captured — the diff function gates the comparison on `masterVolumeMode`
+    // so that flipping modes can correctly mark dirty when the live value diverges
+    // from what's on flash, instead of the comparison being silently skipped.
+    let masterVolumeDB: Float
+    let masterVolumeMode: Int   // The mode at snapshot time (0 = INDEPENDENT, 1 = WITH_PRESET)
     let bypass: Bool
     let loudnessEnabled: Bool
     let loudnessRefSPL: Float
@@ -91,10 +95,17 @@ extension PresetSnapshot {
                 changes.append(.init(category: "Global", description: "Preamp \(preampLabels[ch]): \(formatDB(old.preampDB[ch])) → \(formatDB(new.preampDB[ch]))"))
             }
         }
-        // Master volume (only when included in presets)
-        if let oldVol = old.masterVolumeDB, let newVol = new.masterVolumeDB, oldVol != newVol {
-            let oldStr = oldVol <= -128 ? "-∞ dB" : formatDB(oldVol)
-            let newStr = newVol <= -128 ? "-∞ dB" : formatDB(newVol)
+        // Master volume — only relevant to preset persistence when the device is
+        // currently in WITH_PRESET mode.  Comparing on `new.masterVolumeMode`
+        // (the live mode) ensures that flipping INDEPENDENT → WITH_PRESET marks
+        // dirty when the live value diverges from what was captured at preset
+        // load time, prompting the user to save.  In INDEPENDENT mode this
+        // comparison is skipped entirely — master volume isn't part of the
+        // preset's persistent state in that mode.
+        if new.masterVolumeMode == MASTER_VOLUME_MODE_WITH_PRESET
+            && old.masterVolumeDB != new.masterVolumeDB {
+            let oldStr = old.masterVolumeDB <= -128 ? "-∞ dB" : formatDB(old.masterVolumeDB)
+            let newStr = new.masterVolumeDB <= -128 ? "-∞ dB" : formatDB(new.masterVolumeDB)
             changes.append(.init(category: "Global", description: "Master Volume: \(oldStr) → \(newStr)"))
         }
         if old.bypass != new.bypass {

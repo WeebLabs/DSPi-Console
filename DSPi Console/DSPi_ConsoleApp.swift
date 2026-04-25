@@ -1042,6 +1042,30 @@ struct FileMenuActions {
         }
     }
 
+    /// Persist the device's current live master volume to its independent
+    /// (mode 0) storage, so the value survives a reboot. Action runs on a
+    /// background queue because the underlying USB control transfer is
+    /// synchronous and we don't want to stall the menu / main thread.
+    static func saveMasterVolume() {
+        let vm = AppState.shared.viewModel
+        guard vm.isDeviceConnected else {
+            showError("No device connected.")
+            return
+        }
+        let savedDB = vm.masterVolumeDB
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = vm.saveMasterVolume()
+            DispatchQueue.main.async {
+                if ok {
+                    let display = savedDB <= -128 ? "−∞ dB (mute)" : String(format: "%.1f dB", savedDB)
+                    showSuccess("Master volume saved (\(display)). It will be applied on next boot.")
+                } else {
+                    showError("Failed to save master volume — the device did not acknowledge the request.")
+                }
+            }
+        }
+    }
+
     // MARK: - Parsing
 
     private static func parseREWFile(_ contents: String) -> [FilterParams]? {
@@ -1850,6 +1874,12 @@ struct DSPi_ConsoleApp: App {
                     FileMenuActions.exportFilters()
                 }
                 .keyboardShortcut("e", modifiers: .command)
+
+                Divider()
+
+                Button("Save Master Volume") {
+                    FileMenuActions.saveMasterVolume()
+                }
             }
 
             // AutoEQ Menu

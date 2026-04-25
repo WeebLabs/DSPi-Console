@@ -327,6 +327,28 @@ extension DSPViewModel {
         }
     }
 
+    /// Persist the current live master volume into the directory's independent
+    /// storage. Accepted in any mode (dormant in MASTER_VOLUME_MODE_WITH_PRESET).
+    /// IN-shaped action command: device responds with a 1-byte status (0 = OK).
+    /// Returns true on success, false if the device disconnected or the
+    /// transfer failed.
+    @discardableResult
+    func saveMasterVolume() -> Bool {
+        guard let data = usb.getControlRequest(request: REQ_SAVE_MASTER_VOLUME, value: 0, index: 2, length: 1) else {
+            return false
+        }
+        return data.first == 0  // PRESET_OK
+    }
+
+    /// Read the directory's independent master-volume value (the dB applied at
+    /// boot in MASTER_VOLUME_MODE_INDEPENDENT). Independent of the current
+    /// live value and the current mode. Returns nil if the transfer failed.
+    func fetchSavedMasterVolume() -> Float? {
+        guard let data = usb.getControlRequest(request: REQ_GET_SAVED_MASTER_VOLUME, value: 0, index: 2, length: 4),
+              data.count >= 4 else { return nil }
+        return data.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
     func setBypass(_ enabled: Bool) {
         self.bypass = enabled
         var val: UInt8 = enabled ? 1 : 0
