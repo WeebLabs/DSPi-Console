@@ -306,7 +306,19 @@ struct OutputRow: View {
 
 // MARK: - Channel Settings
 
+/// Header row for the output channel page.  Layout from left to right:
+///   1. Input routing preview — one row per USB input (Master L / Master R) with
+///      a connected indicator, the input's name, the per-crosspoint gain, and a
+///      phase-invert toggle.  Clicking the indicator/name connects/disconnects
+///      that input from the current output; gain & invert are clickable to edit.
+///   2. Output GAIN slider.
+///   3. Output DELAY slider.
+///   4. Output MUTE toggle.
+///
+/// All four panels share the same rounded container and divider visual style.
 struct ChannelSettingsView: View {
+    @ObservedObject var vm: DSPViewModel
+    let outputIndex: Int
     @Binding var gainDB: Float
     @Binding var delayMS: Float
     @Binding var isMuted: Bool
@@ -320,23 +332,34 @@ struct ChannelSettingsView: View {
     @State private var isDraggingDelay = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            // GAIN
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Gain", systemImage: "speaker.wave.2.fill")
+        HStack(alignment: .top, spacing: 0) {
+            // INPUT ROUTING PREVIEW
+            InputRoutingPanel(vm: vm, outputIndex: outputIndex)
+                .padding(.vertical, 8)
+                .padding(.leading, 12)
+                .padding(.trailing, 12)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Divider()
+
+            // GAIN — label + value on top row, slider full width below
+            VStack(spacing: 4) {
+                HStack {
+                    Text("GAIN")
                         .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
+                    Spacer()
                     ValueField(label: "dB", value: localGain, width: 60) {
                         localGain = $0
                         gainDB = $0
                     }
                 }
-                .frame(width: 80, alignment: .leading)
 
                 Slider(value: $localGain, in: -60...10) { editing in
                     isDraggingGain = editing
                     if !editing { gainDB = localGain }
                 }
+                .controlSize(.small)
+                .frame(height: 24)
                 .onChange(of: localGain) { val in
                     if isDraggingGain { onGainDrag?(val) }
                 }
@@ -344,27 +367,30 @@ struct ChannelSettingsView: View {
                 .onChange(of: gainDB) { val in if !isDraggingGain { localGain = val } }
                 .onRightClick { localGain = 0; gainDB = 0 }
             }
-            .padding(12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
 
             Divider()
 
-            // DELAY
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Label("Delay", systemImage: "clock.arrow.circlepath")
+            // DELAY — same layout as GAIN
+            VStack(spacing: 4) {
+                HStack {
+                    Text("DELAY")
                         .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
+                    Spacer()
                     ValueField(label: "ms", value: localDelay, width: 60) {
                         localDelay = $0
                         delayMS = $0
                     }
                 }
-                .frame(width: 80, alignment: .leading)
 
                 Slider(value: $localDelay, in: 0...maxDelay) { editing in
                     isDraggingDelay = editing
                     if !editing { delayMS = localDelay }
                 }
+                .controlSize(.small)
+                .frame(height: 24)
                 .onChange(of: localDelay) { val in
                     if isDraggingDelay { onDelayDrag?(val) }
                 }
@@ -372,12 +398,14 @@ struct ChannelSettingsView: View {
                 .onChange(of: delayMS) { val in if !isDraggingDelay { localDelay = val } }
                 .onRightClick { localDelay = 0; delayMS = 0 }
             }
-            .padding(12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
 
             Divider()
 
-            // MUTE
+            // MUTE — fills full height and centers its icon, otherwise the
+            // top-aligned HStack would pin it to the top of the row.
             Toggle(isOn: $isMuted) {
                 Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .font(.title2)
@@ -386,12 +414,135 @@ struct ChannelSettingsView: View {
             .toggleStyle(.button)
             .buttonStyle(.plain)
             .frame(width: 60)
+            .frame(maxHeight: .infinity)
             .background(isMuted ? Color.red.opacity(0.1) : Color.clear)
         }
-        .frame(height: 60)
+        .frame(height: 68)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(10)
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+    }
+}
+
+// MARK: - Input Routing Panel
+
+/// Shows the matrix routing for a single output column: one row per USB input
+/// channel with a connect indicator, name, per-crosspoint gain, and invert
+/// toggle.  The whole panel is a thin wrapper over `vm.matrixRouting/Gain/Invert`
+/// for the selected output index.
+private struct InputRoutingPanel: View {
+    @ObservedObject var vm: DSPViewModel
+    let outputIndex: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(0..<min(vm.matrixRouting.count, vm.channelNames.count), id: \.self) { input in
+                InputRoutingRow(vm: vm, input: input, output: outputIndex)
+            }
+        }
+    }
+}
+
+/// A single input → output crosspoint row.  Designed to match the screenshot:
+/// `[●] Name   0.00 dB   INV` with active state in the input's color and
+/// disconnected state desaturated.
+private struct InputRoutingRow: View {
+    @ObservedObject var vm: DSPViewModel
+    let input: Int
+    let output: Int
+
+    @State private var localGain: Float = 0
+    @State private var isHoveringRow = false
+
+    private static let inputColors: [Color] = [
+        Color(red: 0.29, green: 0.56, blue: 0.89),  // L — blue
+        Color(red: 0.96, green: 0.45, blue: 0.45),  // R — red
+    ]
+
+    private var connected: Bool { vm.matrixRouting[input][output] }
+    private var inverted: Bool { vm.matrixInvert[input][output] }
+    private var liveGain: Float { vm.matrixGain[input][output] }
+    private var inputColor: Color {
+        Self.inputColors.indices.contains(input) ? Self.inputColors[input] : .accentColor
+    }
+    private var name: String {
+        vm.channelNames.indices.contains(input) ? vm.channelNames[input] : "Input \(input + 1)"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Connect indicator + tappable name
+            Button(action: toggleConnect) {
+                HStack(spacing: 6) {
+                    Image(systemName: connected ? "circle.fill" : "circle")
+                        .font(.system(size: 9))
+                        .foregroundColor(connected ? inputColor : .secondary.opacity(0.55))
+                    Text(name)
+                        .font(.system(size: 11, weight: connected ? .semibold : .regular))
+                        .foregroundColor(connected ? inputColor : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help(connected ? "Disconnect from \(outputName())" : "Connect to \(outputName())")
+
+            // Crosspoint gain — clickable / scrollable.  Greyed when disconnected
+            // but still editable so the user can pre-set a value before connecting.
+            ValueField(label: "dB", value: localGain, width: 44, scrollStep: 0.5, maxDecimals: 2) { v in
+                localGain = v
+                vm.setMatrixRoute(input: input, output: output,
+                                  enabled: connected, gain: v, invert: inverted)
+            }
+            .opacity(connected ? 1.0 : 0.55)
+            .onAppear { localGain = liveGain }
+            .onChange(of: liveGain) { val in localGain = val }
+            .onRightClick {
+                localGain = 0
+                vm.setMatrixRoute(input: input, output: output,
+                                  enabled: connected, gain: 0, invert: inverted)
+            }
+
+            // Phase invert.  Same orange-on / muted-off treatment as the matrix mixer.
+            Button(action: toggleInvert) {
+                Text("INV")
+                    .font(.system(size: 9, weight: inverted ? .bold : .medium))
+                    .foregroundColor(
+                        inverted ? .orange : .secondary.opacity(connected ? 0.45 : 0.3)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(inverted ? "Phase inverted" : "Normal phase")
+            .disabled(!connected)
+        }
+        // No fixed height — the ValueField needs body-sized vertical space to
+        // receive clicks reliably, and clamping the row chops its hit area.
+        .contentShape(Rectangle())
+        .onHover { isHoveringRow = $0 }
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHoveringRow ? Color.primary.opacity(0.04) : Color.clear)
+        )
+    }
+
+    private func outputName() -> String {
+        let eqCh = output + 2  // matches the channelNames indexing for outputs
+        if vm.channelNames.indices.contains(eqCh) {
+            let trimmed = vm.channelNames[eqCh].trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Out \(output + 1)" : trimmed
+        }
+        return "Out \(output + 1)"
+    }
+
+    private func toggleConnect() {
+        vm.setMatrixRoute(input: input, output: output,
+                          enabled: !connected, gain: liveGain, invert: inverted)
+    }
+
+    private func toggleInvert() {
+        vm.setMatrixRoute(input: input, output: output,
+                          enabled: connected, gain: liveGain, invert: !inverted)
     }
 }
 
@@ -824,6 +975,17 @@ class ValueFieldScrollNSView: NSView {
     var onCommit: ((Float) -> Void)?
 
     override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Be transparent to mouse clicks so the underlying SwiftUI `TextField`
+    /// gets focus when the user clicks on the value (enabling click-to-edit).
+    /// Only claim the hit target when the current event is a scrollWheel —
+    /// matches the `RightClickHandler` pattern used elsewhere in this file.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let event = NSApp.currentEvent, event.type == .scrollWheel {
+            return self
+        }
+        return nil
+    }
 
     override func scrollWheel(with event: NSEvent) {
         let delta = Double(event.scrollingDeltaY)

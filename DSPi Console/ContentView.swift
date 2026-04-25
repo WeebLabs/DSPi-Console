@@ -665,6 +665,8 @@ struct ContentView: View {
                         let eqChannel = idx + 2
                         VStack(spacing: 16) {
                             ChannelSettingsView(
+                                vm: vm,
+                                outputIndex: idx,
                                 gainDB: Binding(
                                     get: { vm.outputGainDB[idx] },
                                     set: { vm.setOutputGain(output: idx, db: $0) }
