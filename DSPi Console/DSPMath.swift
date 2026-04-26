@@ -7,6 +7,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
     case highShelf = 3
     case lowPass = 4
     case highPass = 5
+    case notch = 6
     
     var id: Int { rawValue }
     
@@ -18,6 +19,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .highShelf: return "High Shelf"
         case .lowPass: return "Low Pass"
         case .highPass: return "High Pass"
+        case .notch: return "Notch"
         }
     }
 }
@@ -122,6 +124,9 @@ class DSPMath {
             a0 = (A + 1) - (A - 1) * cs + 2 * sqrt(A) * alpha
             a1 = 2 * ((A - 1) - (A + 1) * cs)
             a2 = (A + 1) - (A - 1) * cs - 2 * sqrt(A) * alpha
+        case .notch:
+            b0 = 1; b1 = -2 * cs; b2 = 1.0
+            a0 = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha
         default: break
         }
 
