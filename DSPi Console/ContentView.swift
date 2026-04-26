@@ -7,6 +7,17 @@ enum SidebarSelection: Hashable {
     case channel(Channel)
     case output(Int)  // Matrix output index 0-8
 }
+
+/// Filter types offered to the user, gated on connected-firmware capability.
+/// Notch was added in firmware 1.1.4 — older firmware would reject the type
+/// byte, so it's hidden from the picker until we've confirmed support.
+fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
+    if vm.firmwareSupportsNotch {
+        return FilterType.allCases
+    }
+    return FilterType.allCases.filter { $0 != .notch }
+}
+
 // MARK: - Main Layout
 
 struct ContentView: View {
@@ -685,6 +696,7 @@ struct ContentView: View {
                             FilterListView(
                                 bands: vm.channelData[channel.rawValue] ?? [],
                                 channelId: channel.rawValue,
+                                availableTypes: availableFilterTypes(vm: vm),
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: channel.rawValue, band: band, p: params)
                                     // Link L/R mirrors PEQ edits across master channels.
@@ -726,6 +738,7 @@ struct ContentView: View {
                             FilterListView(
                                 bands: vm.channelData[eqChannel] ?? [],
                                 channelId: eqChannel,
+                                availableTypes: availableFilterTypes(vm: vm),
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: eqChannel, band: band, p: params)
                                 },

@@ -31,9 +31,13 @@ extension DSPViewModel {
     func fetchPlatform() -> String? {
         guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) else { return nil }
         let platform = data[0]
+        let major = Int(data[1])
+        let minor = Int(data[2] >> 4)
+        let patch = Int(data[2] & 0x0F)
         let name = platform == 1 ? "RP2350" : "RP2040"
         DispatchQueue.main.async {
             self.platformName = name
+            self.firmwareVersion = (major: major, minor: minor, patch: patch)
         }
         return name
     }

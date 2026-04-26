@@ -778,6 +778,10 @@ struct PreampControlView: View {
 struct FilterListView: View {
     let bands: [FilterParams]
     let channelId: Int
+    /// Filter types offered in the per-band type picker.  Defaults to all
+    /// types; callers gate this on firmware capability (e.g. notch requires
+    /// firmware 1.1.4+).
+    var availableTypes: [FilterType] = FilterType.allCases
     let onUpdate: (Int, FilterParams) -> Void
     var onClear: (() -> Void)? = nil
 
@@ -806,6 +810,7 @@ struct FilterListView: View {
                         FilterRowView(
                             index: index,
                             params: bands[index],
+                            availableTypes: availableTypes,
                             onChange: { onUpdate(index, $0) }
                         )
                     }
@@ -959,6 +964,9 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
 struct FilterRowView: View {
     let index: Int
     var params: FilterParams
+    /// Filter types offered in the type picker.  Caller gates this on
+    /// firmware capability — e.g. notch requires firmware 1.1.4+.
+    var availableTypes: [FilterType] = FilterType.allCases
     var onChange: (FilterParams) -> Void
 
     var isActive: Bool { params.type != .flat }
@@ -973,7 +981,7 @@ struct FilterRowView: View {
 
             // Type Selector
             BorderlessPopUpButton(
-                items: FilterType.allCases,
+                items: availableTypes,
                 titleForItem: { $0.name },
                 selection: Binding(
                     get: { params.type },

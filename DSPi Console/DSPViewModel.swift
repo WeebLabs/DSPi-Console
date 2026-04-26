@@ -63,6 +63,21 @@ class DSPViewModel: ObservableObject {
     @Published var presetMasterVolumeMode: Int = MASTER_VOLUME_MODE_INDEPENDENT
 
     @Published var platformName: String = ""
+
+    // Firmware version tuple parsed from REQ_GET_PLATFORM (data[1] = major,
+    // data[2] high nibble = minor, data[2] low nibble = patch).  nil before
+    // the first successful fetchPlatform().
+    @Published var firmwareVersion: (major: Int, minor: Int, patch: Int)? = nil
+
+    /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
+    /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
+    /// Defaults to `false` when the version is unknown (pre-connection) so the
+    /// UI is conservative — the option becomes available the moment we confirm
+    /// a supporting firmware.
+    var firmwareSupportsNotch: Bool {
+        guard let v = firmwareVersion else { return false }
+        return (v.major, v.minor, v.patch) >= (1, 1, 4)
+    }
     @Published var isDeviceConnected: Bool = false
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
