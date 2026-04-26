@@ -138,6 +138,78 @@ struct ContentView: View {
         }
     }
 
+    /// Copy the current preset's parameters into another slot.
+    ///
+    /// Implementation:
+    ///  1. If there are unsaved changes, prompt with the standard alert
+    ///     (Save / Discard / Cancel) so the user picks how to handle them.
+    ///  2. Save the live state to `destinationSlot` (writes the current
+    ///     parameters into that slot's flash sector).
+    ///  3. Re-save the live state back to the source slot.  This is the
+    ///     trick that keeps the active selection (and the firmware-side
+    ///     `last_active_slot`) on the source — `preset_save` always sets
+    ///     `last_active = slot`, so without this second write the firmware
+    ///     would consider the destination slot active and a boot in
+    ///     `LAST_ACTIVE` startup mode would land on the wrong preset.
+    ///     Data-wise it's a no-op (writes the same bytes back to source).
+    private func copyActivePreset(to destinationSlot: Int) {
+        let sourceSlot = vm.activePresetSlot
+        guard destinationSlot != sourceSlot else { return }
+
+        enum PreOp { case save, discard, none }
+        let preOp: PreOp
+        if vm.isDeviceConnected && vm.hasUnsavedChanges {
+            let action = PresetAlerts.showUnsavedChangesAlert(diff: vm.computeDiff())
+            switch action {
+            case .save:    preOp = .save
+            case .discard: preOp = .discard
+            case .cancel:  return
+            }
+        } else {
+            preOp = .none
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Pre-op: align live state to source-slot semantics if needed.
+            switch preOp {
+            case .save:
+                if vm.presetNames[sourceSlot].isEmpty {
+                    vm.setPresetName(slot: sourceSlot, name: "Preset \(sourceSlot + 1)")
+                }
+                _ = vm.savePreset(slot: sourceSlot)
+            case .discard:
+                _ = vm.loadPreset(slot: sourceSlot)
+            case .none:
+                break
+            }
+
+            // Default the destination's name if it has none yet, so the
+            // dropdown stops showing "Empty" for it post-copy.  We don't
+            // overwrite an existing destination name — the destination
+            // keeps its identity, only its parameters change.
+            if vm.presetNames[destinationSlot].isEmpty {
+                vm.setPresetName(slot: destinationSlot, name: "Preset \(destinationSlot + 1)")
+            }
+
+            // copyPreset handles the deferred-save sequencing: save→wait→
+            // save→wait, so the firmware actually processes both slot
+            // writes instead of the second one overwriting the first's
+            // pending slot before main-loop dispatch.
+            let status = vm.copyPreset(from: sourceSlot, to: destinationSlot)
+            guard status == PRESET_OK else {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Copy Failed"
+                    alert.informativeText = "Failed to copy preset (error \(status))."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+                return
+            }
+        }
+    }
+
     private func showPresetClearConfirmation(vm: DSPViewModel, slot: Int) {
         let alert = NSAlert()
         alert.messageText = "Clear Preset?"
@@ -151,7 +223,14 @@ struct ContentView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let status = vm.deletePreset(slot: slot)
             if status == PRESET_OK {
-                vm.setPresetName(slot: slot, name: "")
+                // Wait for the firmware's deferred delete to complete before
+                // any followup reads — otherwise fetchPresetDirectory would
+                // observe pre-delete state (slot still occupied) and overwrite
+                // our optimistic local "empty" with that, leaving the UI
+                // showing the slot as still populated.  Firmware clears the
+                // slot name during preset_delete itself, so we don't need a
+                // separate setPresetName(slot, "") call.
+                _ = vm.waitForPresetDeletion(slot: slot)
                 vm.fetchPresetDirectory()
                 // If we cleared the active slot, reload it to apply factory defaults
                 if vm.activePresetSlot == slot {
@@ -182,15 +261,20 @@ struct ContentView: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            for slot in 0..<10 where vm.isPresetOccupied(slot) {
+            // Enqueue a delete for every occupied slot — firmware accumulates
+            // them all into preset_delete_mask and processes them in a single
+            // main-loop pass.  Wait once for everything to drain by polling
+            // each slot's bit until cleared (or timeout).  Same race rationale
+            // as the single-slot clear path.
+            let toDelete = (0..<10).filter { vm.isPresetOccupied($0) }
+            for slot in toDelete {
                 vm.deletePreset(slot: slot)
-                vm.setPresetName(slot: slot, name: "")
+            }
+            for slot in toDelete {
+                _ = vm.waitForPresetDeletion(slot: slot)
             }
             vm.fetchPresetDirectory()
-            for slot in 0..<10 {
-                vm.fetchPresetName(slot: slot)
-            }
-            // Reload active slot to apply factory defaults
+            // Reload active slot to apply factory defaults.
             _ = vm.loadPreset(slot: vm.activePresetSlot)
         }
     }
@@ -483,41 +567,45 @@ struct ContentView: View {
                             .allowsHitTesting(vm.isDeviceConnected && !presetSwitchInFlight)
                         }
                         .contextMenu {
-                            Button("Save") { saveActivePreset(vm: vm) }
-                            Button("Rename…") {
-                                presetRenameSlot = vm.activePresetSlot
-                                presetRenameText = vm.presetNames[vm.activePresetSlot]
-                                showPresetRename = true
-                            }
-                            // Set as Default — pin the current preset as the
-                            // boot-time default.  If the device is currently in
-                            // "Last Used" startup mode, this also switches the
-                            // mode to "Specified Default" implicitly.  Either
-                            // way the underlying call is the same: write
-                            // (mode = 0, defaultSlot = activeSlot).
-                            // Disabled when the active preset is already the
-                            // default in Specified-Default mode (no-op).
-                            Button("Set as Default") {
-                                let slot = vm.activePresetSlot
-                                vm.presetStartupMode = 0
-                                vm.presetDefaultSlot = slot
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    vm.setPresetStartup(mode: 0, defaultSlot: slot)
-                                }
-                            }
-                            .disabled(vm.presetStartupMode == 0 && vm.presetDefaultSlot == vm.activePresetSlot)
-                            if vm.isPresetOccupied(vm.activePresetSlot) {
-                                Divider()
-                                Button("Clear \"\(presetLabel(vm.activePresetSlot))\"…", role: .destructive) {
+                            // Wrapped in an Equatable view so SwiftUI's diff
+                            // skips re-evaluating the menu body when only
+                            // unrelated vm properties (e.g. peak meters) have
+                            // changed.  Without this, the contextMenu's
+                            // @ViewBuilder content is re-evaluated on every
+                            // ContentView body re-render — meter polling
+                            // produces a high-frequency rebuild storm that
+                            // dismisses the open "Copy to…" submenu popover
+                            // (AppKit then re-opens it on the still-hovered
+                            // item, producing a visible open/close cycle).
+                            PresetContextMenuItems(
+                                activeSlot: vm.activePresetSlot,
+                                slotLabels: (0..<10).map { presetLabel($0) },
+                                isCurrentOccupied: vm.isPresetOccupied(vm.activePresetSlot),
+                                anySlotOccupied: vm.presetOccupied != 0,
+                                isStartupSpecified: vm.presetStartupMode == 0,
+                                defaultSlot: vm.presetDefaultSlot,
+                                isDeviceConnected: vm.isDeviceConnected,
+                                onSave: { saveActivePreset(vm: vm) },
+                                onRename: {
+                                    presetRenameSlot = vm.activePresetSlot
+                                    presetRenameText = vm.presetNames[vm.activePresetSlot]
+                                    showPresetRename = true
+                                },
+                                onSetDefault: {
+                                    let slot = vm.activePresetSlot
+                                    vm.presetStartupMode = 0
+                                    vm.presetDefaultSlot = slot
+                                    DispatchQueue.global(qos: .userInitiated).async {
+                                        vm.setPresetStartup(mode: 0, defaultSlot: slot)
+                                    }
+                                },
+                                onCopyTo: { destSlot in copyActivePreset(to: destSlot) },
+                                onClearActive: {
                                     showPresetClearConfirmation(vm: vm, slot: vm.activePresetSlot)
-                                }
-                            }
-                            if vm.presetOccupied != 0 {
-                                Divider()
-                                Button("Clear All Slots…", role: .destructive) {
-                                    showPresetClearAllConfirmation(vm: vm)
-                                }
-                            }
+                                },
+                                onClearAll: { showPresetClearAllConfirmation(vm: vm) }
+                            )
+                            .equatable()
                         }
 
                         // Input Source Picker (hidden if firmware doesn't support it)
@@ -859,3 +947,73 @@ extension DSPViewModel {
         .environmentObject(GraphWindowController())
         .frame(width: 1000, height: 780)
 }
+
+// MARK: - Preset Context Menu Items
+//
+// Equatable view holding the contents of the preset-picker context menu.
+// Conforms to Equatable on the *data* fields only — the closures are excluded
+// from `==` (they're not Equatable in Swift, but they all dispatch through the
+// same long-lived `vm`/`@State`, so identity-of-closure doesn't actually
+// affect what the menu does).
+//
+// Why Equatable matters here: SwiftUI re-evaluates a contextMenu's
+// @ViewBuilder on every parent body re-render.  In ContentView, those happen
+// at meter-polling rate (~60 Hz).  Without `.equatable()`, every re-render
+// rebuilds the underlying NSMenu and dismisses any open submenu — AppKit then
+// auto-reopens it on the still-hovered "Copy to…" item, producing a visible
+// open/close cycle.  With `.equatable()`, SwiftUI compares old/new instances,
+// finds the data fields unchanged, and skips rebuilding the menu entirely.
+private struct PresetContextMenuItems: View, Equatable {
+    let activeSlot: Int
+    let slotLabels: [String]              // index 0..9 → "1: Living Room"
+    let isCurrentOccupied: Bool
+    let anySlotOccupied: Bool
+    let isStartupSpecified: Bool          // presetStartupMode == 0
+    let defaultSlot: Int
+    let isDeviceConnected: Bool
+
+    let onSave: () -> Void
+    let onRename: () -> Void
+    let onSetDefault: () -> Void
+    let onCopyTo: (Int) -> Void
+    let onClearActive: () -> Void
+    let onClearAll: () -> Void
+
+    static func == (lhs: PresetContextMenuItems, rhs: PresetContextMenuItems) -> Bool {
+        lhs.activeSlot == rhs.activeSlot
+            && lhs.slotLabels == rhs.slotLabels
+            && lhs.isCurrentOccupied == rhs.isCurrentOccupied
+            && lhs.anySlotOccupied == rhs.anySlotOccupied
+            && lhs.isStartupSpecified == rhs.isStartupSpecified
+            && lhs.defaultSlot == rhs.defaultSlot
+            && lhs.isDeviceConnected == rhs.isDeviceConnected
+    }
+
+    var body: some View {
+        Group {
+            Button("Save", action: onSave)
+            Button("Rename…", action: onRename)
+            Button("Set as Default", action: onSetDefault)
+                .disabled(isStartupSpecified && defaultSlot == activeSlot)
+
+            Menu("Copy to…") {
+                ForEach(0..<10, id: \.self) { destSlot in
+                    if destSlot != activeSlot {
+                        Button(slotLabels[destSlot]) { onCopyTo(destSlot) }
+                    }
+                }
+            }
+            .disabled(!isDeviceConnected)
+
+            if isCurrentOccupied {
+                Divider()
+                Button("Clear \"\(slotLabels[activeSlot])\"…", role: .destructive, action: onClearActive)
+            }
+            if anySlotOccupied {
+                Divider()
+                Button("Clear All Slots…", role: .destructive, action: onClearAll)
+            }
+        }
+    }
+}
+

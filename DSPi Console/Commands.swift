@@ -1199,6 +1199,37 @@ extension DSPViewModel {
         return status
     }
 
+    /// Copy the current live DSP state into `destinationSlot` while leaving
+    /// `sourceSlot` as the active preset.
+    ///
+    /// Mechanism:
+    ///   1. Save live → destination.  Wait for the deferred firmware save to
+    ///      finish (signaled by REQ_PRESET_GET_ACTIVE returning destinationSlot).
+    ///   2. Re-save live → source.  Wait for that save to finish.
+    ///
+    /// The wait between the two saves is essential: REQ_PRESET_SAVE is
+    /// deferred on the firmware (the USB handler queues a single pending
+    /// slot and returns PRESET_OK immediately, with the actual flash work
+    /// happening in the main loop).  Without the wait, the second save
+    /// overwrites `pending_preset_save_slot` before the first one has been
+    /// processed, so the first slot is never written — the user sees the
+    /// destination slot getting a name (from setPresetName, which writes
+    /// the directory directly) but factory-default parameters when loaded.
+    ///
+    /// Returns PRESET_OK on success, an error code on failure.
+    @discardableResult
+    func copyPreset(from sourceSlot: Int, to destinationSlot: Int) -> UInt8 {
+        let dstStatus = savePreset(slot: destinationSlot)
+        guard dstStatus == PRESET_OK else { return dstStatus }
+        guard waitForPresetActivation(slot: destinationSlot) else { return 0xFF }
+
+        let srcStatus = savePreset(slot: sourceSlot)
+        guard srcStatus == PRESET_OK else { return srcStatus }
+        _ = waitForPresetActivation(slot: sourceSlot)
+
+        return PRESET_OK
+    }
+
     @discardableResult
     func loadPreset(slot: Int) -> UInt8 {
         print("[PRESET] loadPreset(\(slot)) starting")
@@ -1281,6 +1312,35 @@ extension DSPViewModel {
             }
         }
         return status
+    }
+
+    /// Poll REQ_PRESET_GET_DIR until the firmware has actually finished
+    /// processing a deferred delete for `slot` (slot_occupied bit cleared).
+    ///
+    /// Like preset save, REQ_PRESET_DELETE is deferred — the USB handler sets
+    /// `preset_delete_mask |= bit(slot)` and returns PRESET_OK immediately,
+    /// while the actual flash erase + directory flush happens in the main
+    /// loop.  Callers that need to read post-delete directory state (e.g.,
+    /// to refresh `presetOccupied` / `presetNames`) must wait for the bit
+    /// to clear, otherwise they'll race the deferred work and overwrite
+    /// their optimistic local state with the firmware's stale value.
+    ///
+    /// Returns true on observed completion, false on timeout (default 1.5 s
+    /// of polling at 20 ms intervals).
+    @discardableResult
+    func waitForPresetDeletion(slot: Int, timeout: TimeInterval = 1.5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let data = usb.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 7),
+               data.count >= 2 {
+                let occupied = UInt16(data[0]) | (UInt16(data[1]) << 8)
+                if (occupied & UInt16(1 << slot)) == 0 {
+                    return true
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return false
     }
 
     func setPresetName(slot: Int, name: String) {
