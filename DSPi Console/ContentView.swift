@@ -478,6 +478,23 @@ struct ContentView: View {
                                 presetRenameText = vm.presetNames[vm.activePresetSlot]
                                 showPresetRename = true
                             }
+                            // Set as Default — pin the current preset as the
+                            // boot-time default.  If the device is currently in
+                            // "Last Used" startup mode, this also switches the
+                            // mode to "Specified Default" implicitly.  Either
+                            // way the underlying call is the same: write
+                            // (mode = 0, defaultSlot = activeSlot).
+                            // Disabled when the active preset is already the
+                            // default in Specified-Default mode (no-op).
+                            Button("Set as Default") {
+                                let slot = vm.activePresetSlot
+                                vm.presetStartupMode = 0
+                                vm.presetDefaultSlot = slot
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    vm.setPresetStartup(mode: 0, defaultSlot: slot)
+                                }
+                            }
+                            .disabled(vm.presetStartupMode == 0 && vm.presetDefaultSlot == vm.activePresetSlot)
                             if vm.isPresetOccupied(vm.activePresetSlot) {
                                 Divider()
                                 Button("Clear \"\(presetLabel(vm.activePresetSlot))\"…", role: .destructive) {
