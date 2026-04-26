@@ -340,10 +340,23 @@ class USBDevice: ObservableObject {
                 self.availableDevices.removeAll { terminatedSerials.contains($0.serial) }
             }
 
-            // Check if selected device was removed
+            // Check if selected device was removed.
+            //
+            // We treat the selected device as terminated whenever it's no
+            // longer in `availableDevices`, regardless of whether *this*
+            // callback's batch contained its serial.  This catches the race
+            // where two devices are unplugged near-simultaneously and IOKit
+            // delivers two separate `onTerminated` callbacks: the first
+            // removes the selected device A and dispatches a switch to B,
+            // and the second removes B before the switch lands.  Without
+            // this broader check the second callback would see selected==A
+            // (the in-flight switch hasn't updated it yet) and A wouldn't
+            // be in *its* terminatedSerials, so wasTerminated would be
+            // false and the user would end up stuck on dead A with C
+            // unselected.
             if let selected = self.selectedDevice {
                 let wasTerminated = terminatedSerials.contains(selected.serial) ||
-                    (currentSerials != nil && !self.availableDevices.contains(where: { $0.serial == selected.serial }))
+                    !self.availableDevices.contains(where: { $0.serial == selected.serial })
 
                 if wasTerminated {
                     self.serialQueue.sync {
@@ -351,7 +364,15 @@ class USBDevice: ObservableObject {
                     }
                     self.isConnected = false
                     self.errorMessage = "Device Removed"
-                    // Don't clear selectedDevice — allows auto-reconnect on re-plug
+                    // Don't clear selectedDevice — allows auto-reconnect on re-plug.
+
+                    // If another DSPi is still connected, automatically switch
+                    // to it so the user isn't stranded on a phantom selection
+                    // with a disabled dropdown (count==1 hides the picker
+                    // affordance, leaving them unable to pick the survivor).
+                    if let next = self.availableDevices.first {
+                        self.selectDevice(next)
+                    }
                 }
             }
 
