@@ -426,15 +426,25 @@ struct HardwareSettingsTab: View {
         26, 27, 28
     ]
 
-    private func pinInUseBy(_ pin: UInt8, excludingOutput: Int) -> String? {
+    private enum PinConsumer: Equatable {
+        case output(Int)
+        case i2sBck      // also covers LRCLK (BCK + 1)
+        case mck
+        case spdifRx
+    }
+
+    private func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
         for output in visiblePinOutputs {
-            if output.id != excludingOutput && vm.outputPins[output.id] == pin {
+            if consumer != .output(output.id) && vm.outputPins[output.id] == pin {
                 return output.name
             }
         }
-        if pin == vm.i2sBckPin { return "I2S BCK" }
-        if pin == vm.i2sBckPin &+ 1 { return "I2S LRCLK" }
-        if pin == vm.mckPin { return "I2S MCK" }
+        if consumer != .i2sBck {
+            if pin == vm.i2sBckPin { return "I2S BCK" }
+            if pin == vm.i2sBckPin &+ 1 { return "I2S LRCLK" }
+        }
+        if consumer != .mck && pin == vm.mckPin { return "I2S MCK" }
+        if consumer != .spdifRx && vm.inputSourceSupported && pin == vm.spdifRxPin { return "S/PDIF RX" }
         return nil
     }
 
@@ -465,7 +475,7 @@ struct HardwareSettingsTab: View {
             statusIsError = true
             vm.fetchOutputPin(output: outputIndex)
         case PIN_CONFIG_PIN_IN_USE:
-            if let owner = pinInUseBy(pin, excludingOutput: outputIndex) {
+            if let owner = pinInUseBy(pin, excluding: .output(outputIndex)) {
                 statusMessage = "GPIO \(pin) is already assigned to \(owner)"
             } else {
                 statusMessage = "GPIO \(pin) is already in use by another output"
@@ -564,15 +574,8 @@ struct HardwareSettingsTab: View {
                             get: { vm.outputPins[output.id] },
                             set: { setPinForOutput(output.id, pin: $0) }
                         )) {
-                            ForEach(Self.validPins, id: \.self) { pin in
-                                if let owner = pinInUseBy(pin, excludingOutput: output.id) {
-                                    Text("GPIO \(pin) (\(owner))")
-                                        .foregroundColor(.secondary)
-                                        .tag(pin)
-                                } else {
-                                    Text("GPIO \(pin)")
-                                        .tag(pin)
-                                }
+                            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .output(output.id)) == nil }, id: \.self) { pin in
+                                Text("GPIO \(pin)").tag(pin)
                             }
                         }
                         .labelsHidden()
@@ -644,7 +647,7 @@ struct HardwareSettingsTab: View {
                             }
                         }
                     )) {
-                        ForEach(Self.validPins, id: \.self) { pin in
+                        ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .i2sBck) == nil }, id: \.self) { pin in
                             Text("GPIO \(pin)").tag(pin)
                         }
                     }
@@ -712,7 +715,7 @@ struct HardwareSettingsTab: View {
                             }
                         }
                     )) {
-                        ForEach(Self.validPins, id: \.self) { pin in
+                        ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .mck) == nil }, id: \.self) { pin in
                             Text("GPIO \(pin)").tag(pin)
                         }
                     }
@@ -765,6 +768,65 @@ struct HardwareSettingsTab: View {
                 Label("I2S Configuration", systemImage: "waveform.path")
             }
 
+            // MARK: S/PDIF Input
+            if vm.inputSourceSupported {
+                Section {
+                    HStack {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("RX Pin")
+                                .font(.body)
+                            Text("GPIO pin for incoming S/PDIF signal")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.spdifRxPin },
+                            set: { newPin in
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let status = vm.setSpdifRxPin(newPin)
+                                    DispatchQueue.main.async {
+                                        switch status {
+                                        case PIN_CONFIG_SUCCESS:
+                                            statusMessage = "S/PDIF RX pin set to GPIO \(newPin)"
+                                            statusIsError = false
+                                        case PIN_CONFIG_PIN_IN_USE:
+                                            if let owner = pinInUseBy(newPin, excluding: .spdifRx) {
+                                                statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
+                                            } else {
+                                                statusMessage = "GPIO \(newPin) is already in use"
+                                            }
+                                            statusIsError = true
+                                            vm.fetchSpdifRxPin()
+                                        case PIN_CONFIG_INVALID_PIN:
+                                            statusMessage = "GPIO \(newPin) is not available on this platform"
+                                            statusIsError = true
+                                            vm.fetchSpdifRxPin()
+                                        default:
+                                            statusMessage = "Failed to set S/PDIF RX pin"
+                                            statusIsError = true
+                                            vm.fetchSpdifRxPin()
+                                        }
+                                    }
+                                }
+                            }
+                        )) {
+                            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .spdifRx) == nil }, id: \.self) { pin in
+                                Text("GPIO \(pin)").tag(pin)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                } header: {
+                    Label("S/PDIF Input", systemImage: "arrow.down.to.line")
+                }
+            }
+
             Section {
                 Toggle(isOn: Binding(
                     get: { vm.presetIncludePins },
@@ -802,6 +864,9 @@ struct HardwareSettingsTab: View {
                 vm.fetchMckPin()
                 vm.fetchMckMultiplier()
                 vm.fetchSampleRate()
+                if vm.inputSourceSupported {
+                    vm.fetchSpdifRxPin()
+                }
             }
         }
     }

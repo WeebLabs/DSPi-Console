@@ -892,6 +892,20 @@ extension DSPViewModel {
         }
     }
 
+    /// Set the GPIO pin used for the S/PDIF receiver. Requires SPDIF input to be inactive.
+    /// Single IN transfer: wValue = pin. Returns firmware status code.
+    @discardableResult
+    func setSpdifRxPin(_ pin: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_SPDIF_RX_PIN, value: UInt16(pin), index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.spdifRxPin = pin }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
     // MARK: - Bulk Parameter Transfer
 
     /// Fetches all DSP parameters in a single 2480-byte USB transfer.
