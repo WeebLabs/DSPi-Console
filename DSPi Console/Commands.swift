@@ -1419,6 +1419,35 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Notification → State Mirroring
+
+    /// Apply a v2 PARAM_CHANGED notification (already filtered to non-HOST
+    /// sources) to local UI state.  Currently mirrors channel-name edits
+    /// from BULK / PRESET / FACTORY / GPIO writes; extend as more fields
+    /// need cross-source live updates.  Runs on the main thread.
+    func applyNotifiedParamChange(offset: UInt16, size: UInt16, payload: Data) {
+        let off = Int(offset)
+        let sz = Int(size)
+
+        // Channel names: 11 channels × 32 bytes at offset 2480.
+        let channelNamesBase = 2480
+        let channelNameSize = 32
+        let channelCount = 11
+        if sz == channelNameSize,
+           off >= channelNamesBase,
+           off < channelNamesBase + channelCount * channelNameSize,
+           (off - channelNamesBase) % channelNameSize == 0,
+           payload.count >= channelNameSize {
+            let ch = (off - channelNamesBase) / channelNameSize
+            let nulIdx = payload.firstIndex(of: 0) ?? payload.endIndex
+            let slice = payload[payload.startIndex..<nulIdx]
+            let name = String(data: slice, encoding: .utf8)
+                ?? String(data: slice, encoding: .ascii)
+                ?? ""
+            self.channelNames[ch] = name
+        }
+    }
+
     // MARK: - Flash Storage Commands
 
     func saveParams() -> UInt8 {

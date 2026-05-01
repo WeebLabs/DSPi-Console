@@ -381,6 +381,12 @@ class InterruptMonitor: ObservableObject {
     /// dropped FIFO when the cap is reached.
     static let maxEvents = 2000
 
+    /// Fires on the main thread for every v2 PARAM_CHANGED event regardless
+    /// of pause state.  Consumers (e.g. DSPViewModel) use this to mirror
+    /// non-host parameter changes back into the UI without waiting for the
+    /// next bulk fetch.  Pause only affects the display log.
+    var onParamChanged: ((_ offset: UInt16, _ size: UInt16, _ source: UInt8, _ payload: Data) -> Void)?
+
     private let usb: USBDevice
     private var interfacePtr: USBDevice.InterfaceInterfacePtr?
     private var pollThread: Thread?
@@ -504,6 +510,22 @@ class InterruptMonitor: ObservableObject {
     private func enqueueEvent(bytes: [UInt8]) {
         // Idle: single-byte 0x00 packet (kept version-neutral in firmware).
         if bytes.count == 1 && bytes[0] == NOTIFY_EVT_IDLE { return }
+
+        // Dispatch v2 PARAM_CHANGED to non-display consumers regardless of
+        // pause state (pause is only meant to freeze the visible log).
+        if let handler = onParamChanged,
+           bytes.count >= 12,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_PARAM_CHANGED {
+            let offset = UInt16(bytes[4]) | (UInt16(bytes[5]) << 8)
+            let size   = UInt16(bytes[6]) | (UInt16(bytes[7]) << 8)
+            let source = bytes[8]
+            let payloadEnd = min(bytes.count, 12 + Int(size))
+            let payload = Data(bytes[12..<payloadEnd])
+            DispatchQueue.main.async {
+                handler(offset, size, source, payload)
+            }
+        }
 
         // Snapshot pause state on this thread — worst case we lose or add a
         // single event right at a pause/resume edge, which is harmless.
@@ -655,22 +677,19 @@ struct InterruptMonitorView: View {
 
 class InterruptMonitorWindowController: NSObject, ObservableObject {
     private var window: NSWindow?
-    private var monitor: InterruptMonitor?
     @Published var isVisible: Bool = false
 
-    func toggle(usb: USBDevice) {
+    func toggle() {
         if isVisible {
             hide()
         } else {
-            show(usb: usb)
+            show()
         }
     }
 
-    func show(usb: USBDevice) {
+    func show() {
         if window == nil {
-            let m = InterruptMonitor(usb: usb)
-            monitor = m
-            let view = InterruptMonitorView(monitor: m)
+            let view = InterruptMonitorView(monitor: AppState.shared.interruptMonitor)
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 900, height: 480),
@@ -685,14 +704,12 @@ class InterruptMonitorWindowController: NSObject, ObservableObject {
             window?.delegate = self
         }
 
-        monitor?.start()
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         isVisible = true
     }
 
     func hide() {
-        monitor?.stop()
         window?.orderOut(nil)
         isVisible = false
     }
@@ -700,7 +717,6 @@ class InterruptMonitorWindowController: NSObject, ObservableObject {
 
 extension InterruptMonitorWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        monitor?.stop()
         isVisible = false
     }
 }

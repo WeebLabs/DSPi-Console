@@ -13,6 +13,11 @@ class AppState: ObservableObject {
     let usb = USBDevice()
     lazy var viewModel: DSPViewModel = DSPViewModel(usb: usb)
 
+    /// Always-on listener for the device's bulk notification endpoint.
+    /// Lifecycle is driven by DSPViewModel based on device connection state.
+    /// The display window observes this same instance.
+    lazy var interruptMonitor: InterruptMonitor = InterruptMonitor(usb: usb)
+
     private init() {}
 }
 
@@ -2033,7 +2038,7 @@ struct DSPi_ConsoleApp: App {
                 Divider()
 
                 Button("Interrupt Monitor...") {
-                    interruptMonitorWindowController.show(usb: AppState.shared.usb)
+                    interruptMonitorWindowController.show()
                 }
                 .keyboardShortcut("I", modifiers: [.command, .shift])
             }

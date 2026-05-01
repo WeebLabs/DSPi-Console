@@ -131,6 +131,14 @@ class DSPViewModel: ObservableObject {
 
         recomputeAllMagnitudes()
 
+        // Mirror non-host channel-name change notifications back into UI.
+        // Host-originated edits already update channelNames synchronously
+        // in setChannelName(), so we ignore source==1 to avoid clobbering.
+        AppState.shared.interruptMonitor.onParamChanged = { [weak self] offset, size, source, payload in
+            guard source != 1 /* HOST */ else { return }
+            self?.applyNotifiedParamChange(offset: offset, size: size, payload: payload)
+        }
+
         // 1. Subscribe to USB connection changes AND Trigger Fetch
         usb.$isConnected
             .receive(on: RunLoop.main)
@@ -141,8 +149,10 @@ class DSPViewModel: ObservableObject {
                     self?.presetOccupied = 0
                     self?.presetNames = Array(repeating: "", count: 10)
                     self?.activePresetSlot = 0
+                    AppState.shared.interruptMonitor.stop()
                 }
                 if connected {
+                    AppState.shared.interruptMonitor.start()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         self?.updateSelection(to: nil)
                     }
