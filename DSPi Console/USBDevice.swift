@@ -45,7 +45,7 @@ class USBDevice: ObservableObject {
     typealias DeviceInterfacePtr = UnsafeMutablePointer<UnsafeMutablePointer<DeviceInterface>?>?
 
     private var deviceInterface: DeviceInterfacePtr = nil
-    private let vendorID: UInt16 = 0x2e8a
+    private let vendorID: UInt16 = 0x2e8b
     private let productID: UInt16 = 0xfeaa
 
     // Serial queue for thread-safe IOKit operations
