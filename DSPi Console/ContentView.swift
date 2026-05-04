@@ -785,6 +785,7 @@ struct ContentView: View {
                                 bands: vm.channelData[channel.rawValue] ?? [],
                                 channelId: channel.rawValue,
                                 availableTypes: availableFilterTypes(vm: vm),
+                                bypassSupported: vm.firmwareSupportsBandBypass,
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: channel.rawValue, band: band, p: params)
                                     // Link L/R mirrors PEQ edits across master channels.
@@ -793,6 +794,12 @@ struct ContentView: View {
                                     // only handles .masterLeft/.masterRight.
                                     if vm.preampLinked {
                                         vm.setFilter(ch: 1 - masterCh, band: band, p: params)
+                                    }
+                                },
+                                onBypassToggle: { band, bypass in
+                                    vm.setBandBypass(ch: channel.rawValue, band: band, bypass: bypass)
+                                    if vm.preampLinked {
+                                        vm.setBandBypass(ch: 1 - masterCh, band: band, bypass: bypass)
                                     }
                                 },
                                 onClear: nil  // moved to InputChannelHeader's "Clear Master PEQ"
@@ -827,8 +834,12 @@ struct ContentView: View {
                                 bands: vm.channelData[eqChannel] ?? [],
                                 channelId: eqChannel,
                                 availableTypes: availableFilterTypes(vm: vm),
+                                bypassSupported: vm.firmwareSupportsBandBypass,
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: eqChannel, band: band, p: params)
+                                },
+                                onBypassToggle: { band, bypass in
+                                    vm.setBandBypass(ch: eqChannel, band: band, bypass: bypass)
                                 },
                                 onClear: nil
                             )

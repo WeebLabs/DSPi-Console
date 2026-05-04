@@ -8,12 +8,14 @@ struct SnapshotFilterParams: Equatable {
     let freq: Float
     let q: Float
     let gain: Float
+    let bypass: Bool
 
     init(from fp: FilterParams) {
         self.type = fp.type
         self.freq = fp.freq
         self.q = fp.q
         self.gain = fp.gain
+        self.bypass = fp.bypass
     }
 }
 

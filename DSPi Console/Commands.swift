@@ -7,6 +7,10 @@ extension DSPViewModel {
     // --- USB Commands ---
 
     func fetchAll() {
+        // Fetch platform/version first so capability gates (notch filter,
+        // per-band bypass, etc.) are populated before the UI reads them.
+        _ = fetchPlatform()
+
         guard fetchAllParams() else { return }
 
         fetchInputSource()
@@ -178,15 +182,17 @@ extension DSPViewModel {
         if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
 
+        // EqParamPacket layout: [ch, band, type, bypass, freq(4), q(4), gain(4)] = 16 bytes.
+        // Per band_bypass_spec §5: write exactly 0 or 1 — never 0xFF.
         let data = NSMutableData()
         var ch8 = UInt8(ch); data.append(&ch8, length: 1)
         var b8 = UInt8(band); data.append(&b8, length: 1)
         var t8 = UInt8(p.type.rawValue); data.append(&t8, length: 1)
-        var res = UInt8(0); data.append(&res, length: 1)
+        var bp = UInt8(p.bypass ? 1 : 0); data.append(&bp, length: 1)
         var f32 = p.freq; data.append(&f32, length: 4)
         var q32 = p.q; data.append(&q32, length: 4)
         var g32 = p.gain; data.append(&g32, length: 4)
-        
+
         usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
         recomputeMagnitudes(for: ch)
     }
@@ -204,19 +210,52 @@ extension DSPViewModel {
         let freq: Float = getVal(1, defaultVal: 1000.0)
         let q: Float = getVal(2, defaultVal: 0.707)
         let gain: Float = getVal(3, defaultVal: 0.0)
-        
+        // param=4 returns bypass (firmware 1.1.4+); pre-1.1.4 STALLs and we
+        // fall back to 0/active.  Spec §5: only the low byte is meaningful.
+        let bypassRaw: UInt32 = getVal(4, defaultVal: 0)
+        let bypass = (bypassRaw & 0xFF) == 1
+
         let newParams = FilterParams(
             type: FilterType(rawValue: Int(typeRaw)) ?? .flat,
             freq: freq,
             q: q,
-            gain: gain
+            gain: gain,
+            bypass: bypass
         )
-        
+
         DispatchQueue.main.async {
             if self.channelData[ch]?[band] != newParams {
                 self.channelData[ch]?[band] = newParams
             }
         }
+    }
+
+    /// Toggle a single band's bypass flag without touching freq/Q/gain.
+    /// Cheaper than REQ_SET_EQ_PARAM when the user just clicks the bypass
+    /// checkbox, and avoids racing with an in-flight parameter edit.
+    func setBandBypass(ch: Int, band: Int, bypass: Bool) {
+        // Update local cache immediately so the UI is responsive; the
+        // notification echo from the firmware will re-confirm.
+        if var bands = channelData[ch], band < bands.count {
+            bands[band].bypass = bypass
+            channelData[ch] = bands
+            recomputeMagnitudes(for: ch)
+        }
+
+        let wValue = UInt16((ch << 8) | band)
+        let payload = Data([bypass ? 1 : 0])
+        usb.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
+    }
+
+    /// Returns the current bypass state for a single band, or nil if the
+    /// firmware STALLs (pre-1.1.4).  Always normalized to true/false.
+    func fetchBandBypass(ch: Int, band: Int) -> Bool? {
+        let wValue = UInt16((ch << 8) | band)
+        guard let data = usb.getControlRequest(request: REQ_GET_BAND_BYPASS, value: wValue, index: 0, length: 1),
+              data.count >= 1 else {
+            return nil
+        }
+        return data[0] == 1
     }
     
     func setDelay(ch: Int, ms: Float) {
@@ -982,6 +1021,7 @@ extension DSPViewModel {
         }
 
         // --- EQ bands (offset 368, 2112 bytes = 11 channels × 12 bands × 16 bytes) ---
+        // WireBandParams layout: type(1) bypass(1) reserved(2) freq(4) q(4) gain_db(4)
         let bandsInFirmware = 12
         let bandsInApp = 10
         var channelFilters = [Int: [FilterParams]]()
@@ -990,15 +1030,17 @@ extension DSPViewModel {
             bands.reserveCapacity(bandsInApp)
             for band in 0..<bandsInApp {
                 let base = 368 + (ch * bandsInFirmware + band) * 16
-                let type: UInt32 = data.withUnsafeBytes { $0.load(fromByteOffset: base, as: UInt32.self) }
+                let typeByte = data[base]
+                let bypassByte = data[base + 1]
                 let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
                 let q: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
                 let gain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 12, as: Float.self) }
                 bands.append(FilterParams(
-                    type: FilterType(rawValue: Int(type)) ?? .flat,
+                    type: FilterType(rawValue: Int(typeByte)) ?? .flat,
                     freq: freq,
                     q: q,
-                    gain: gain
+                    gain: gain,
+                    bypass: bypassByte == 1
                 ))
             }
             channelFilters[ch] = bands
@@ -1429,10 +1471,49 @@ extension DSPViewModel {
         let off = Int(offset)
         let sz = Int(size)
 
+        // EQ band updates: 11 channels × 12 bands × 16 bytes at offset 368.
+        // Firmware sends a full WireBandParams (16 bytes) on any band change,
+        // including REQ_SET_BAND_BYPASS — see band_bypass_spec §6.4.
+        // Decode and update channelData so other hosts' edits flow into our
+        // UI without a re-poll.
+        let eqBase = 368
+        let bandsInFirmware = 12
+        let bandSize = 16
+        let channelCount = 11
+        if sz == bandSize,
+           off >= eqBase,
+           off < eqBase + channelCount * bandsInFirmware * bandSize,
+           (off - eqBase) % bandSize == 0,
+           payload.count >= bandSize {
+            let flatIdx = (off - eqBase) / bandSize
+            let ch = flatIdx / bandsInFirmware
+            let band = flatIdx % bandsInFirmware
+            // App tracks 10 bands per channel; firmware tracks 12 — ignore
+            // updates for the two bands we don't surface.
+            if band < 10, var bands = self.channelData[ch], band < bands.count {
+                let typeByte = payload[0]
+                let bypassByte = payload[1]
+                let freq: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
+                let q: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 8, as: Float.self) }
+                let gain: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 12, as: Float.self) }
+                var fp = bands[band]
+                fp.type = FilterType(rawValue: Int(typeByte)) ?? .flat
+                fp.freq = freq
+                fp.q = q
+                fp.gain = gain
+                fp.bypass = bypassByte == 1
+                if bands[band] != fp {
+                    bands[band] = fp
+                    self.channelData[ch] = bands
+                    self.recomputeMagnitudes(for: ch)
+                }
+            }
+            return
+        }
+
         // Channel names: 11 channels × 32 bytes at offset 2480.
         let channelNamesBase = 2480
         let channelNameSize = 32
-        let channelCount = 11
         if sz == channelNameSize,
            off >= channelNamesBase,
            off < channelNamesBase + channelCount * channelNameSize,

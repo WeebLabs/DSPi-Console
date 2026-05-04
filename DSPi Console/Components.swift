@@ -782,13 +782,21 @@ struct FilterListView: View {
     /// types; callers gate this on firmware capability (e.g. notch requires
     /// firmware 1.1.4+).
     var availableTypes: [FilterType] = FilterType.allCases
+    /// True when the connected firmware supports per-band bypass (>= 1.1.4).
+    var bypassSupported: Bool = false
     let onUpdate: (Int, FilterParams) -> Void
+    /// Toggle bypass on a single band.  Cheaper than re-sending the full
+    /// EqParamPacket via onUpdate and avoids racing with in-flight edits.
+    var onBypassToggle: ((Int, Bool) -> Void)? = nil
     var onClear: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack(spacing: 12) {
+                if bypassSupported {
+                    Spacer().frame(width: 18)
+                }
                 Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
                 Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 100, alignment: .leading)
                 Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center)
@@ -811,7 +819,9 @@ struct FilterListView: View {
                             index: index,
                             params: bands[index],
                             availableTypes: availableTypes,
-                            onChange: { onUpdate(index, $0) }
+                            bypassSupported: bypassSupported,
+                            onChange: { onUpdate(index, $0) },
+                            onBypassToggle: { newVal in onBypassToggle?(index, newVal) }
                         )
                     }
                 }
@@ -967,16 +977,38 @@ struct FilterRowView: View {
     /// Filter types offered in the type picker.  Caller gates this on
     /// firmware capability — e.g. notch requires firmware 1.1.4+.
     var availableTypes: [FilterType] = FilterType.allCases
+    /// True when the connected firmware supports per-band bypass (>= 1.1.4).
+    /// When false the bypass checkbox is hidden so users don't try to use
+    /// a non-functional control.
+    var bypassSupported: Bool = false
     var onChange: (FilterParams) -> Void
+    /// Toggle just the bypass flag without re-sending freq/Q/gain.  When
+    /// nil, the checkbox is rendered but its action no-ops; callers should
+    /// always wire this when bypassSupported is true.
+    var onBypassToggle: ((Bool) -> Void)? = nil
 
     var isActive: Bool { params.type != .flat }
+    var isBypassed: Bool { params.bypass }
 
     var body: some View {
         HStack(spacing: 12) {
+            // Bypass checkbox (firmware 1.1.4+).  Filled disc only when the
+            // band is both armed (filter type != Off) and not bypassed; an
+            // "Off" band renders the same hollow ring as a bypassed one
+            // since its audio contribution is the same.
+            if bypassSupported {
+                BypassCheckbox(
+                    isActive: isActive && !isBypassed,
+                    isEnabled: isActive,
+                    onToggle: { onBypassToggle?(!isBypassed) }
+                )
+                .frame(width: 18, height: 18)
+            }
+
             // Index
             Text("\(index + 1)")
                 .font(.system(.body))
-                .foregroundColor(isActive ? .primary : .secondary.opacity(0.5))
+                .foregroundColor(isActive && !isBypassed ? .primary : .secondary.opacity(0.5))
                 .frame(width: 24, alignment: .leading)
 
             // Type Selector
@@ -996,6 +1028,7 @@ struct FilterRowView: View {
                     .padding(.trailing, 4)
                     .allowsHitTesting(false)
             }
+            .opacity(isBypassed ? 0.45 : 1.0)
 
             // Controls
             if isActive {
@@ -1019,6 +1052,7 @@ struct FilterRowView: View {
                         var p = params; p.q = $0; onChange(p)
                     }
                 }
+                .opacity(isBypassed ? 0.45 : 1.0)
             } else {
                 Text("Filter Disabled")
                     .font(.caption)
@@ -1037,6 +1071,51 @@ struct FilterRowView: View {
             }
         )
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Bypass Checkbox
+
+/// Stylish round indicator used for per-band bypass.  Filled accent dot
+/// when the band is active; hollow ring with a slash when bypassed.
+/// Dimmed when the band is "Off" (filter type = flat) so the control
+/// reads as inert until a real filter is selected.
+struct BypassCheckbox: View {
+    let isActive: Bool
+    let isEnabled: Bool
+    let onToggle: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: onToggle) {
+            ZStack {
+                // Active: solid accent fill with a subtle radial highlight
+                // for a glassy look.  Inactive: hollow ring on a near-clear
+                // disc so the hit area still covers the interior.
+                Circle()
+                    .fill(isActive ? Color(white: 0.5) : Color.white.opacity(0.001))
+                    .frame(width: 12, height: 12)
+
+                Circle()
+                    .strokeBorder(
+                        isActive
+                            ? Color(white: 0.5)
+                            : Color.secondary.opacity(0.55),
+                        lineWidth: 1.2
+                    )
+                    .frame(width: 12, height: 12)
+            }
+            .frame(width: 18, height: 18)        // larger hit area than the visible 12×12
+            .contentShape(Rectangle())
+            .scaleEffect(hovered && isEnabled ? 1.1 : 1.0)
+            .animation(.easeInOut(duration: 0.12), value: hovered)
+            .animation(.easeInOut(duration: 0.18), value: isActive)
+            .opacity(isEnabled ? 1.0 : 0.35)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { hovered = $0 }
+        .help(isActive ? "Bypass this band" : "Re-enable this band")
     }
 }
 

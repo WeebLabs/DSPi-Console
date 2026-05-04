@@ -126,6 +126,10 @@ let REQ_GET_LEVELLER_GATE: UInt8        = 0xBF
 let REQ_SET_PREAMP_CH: UInt8           = 0xD0
 let REQ_GET_PREAMP_CH: UInt8           = 0xD1
 
+// Per-band bypass request codes (firmware 1.1.4+)
+let REQ_SET_BAND_BYPASS: UInt8         = 0xD8
+let REQ_GET_BAND_BYPASS: UInt8         = 0xD9
+
 // Master volume request codes
 let REQ_SET_MASTER_VOLUME: UInt8         = 0xD2
 let REQ_GET_MASTER_VOLUME: UInt8         = 0xD3

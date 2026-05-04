@@ -31,10 +31,15 @@ struct FilterParams: Equatable, Identifiable {
     var q: Float = 0.707
     var gain: Float = 0.0
     var active: Bool = true // UI Toggle for graph visibility calculation only
+    /// User-controlled per-band bypass flag (firmware 1.1.4+).  When true the
+    /// band is skipped in the audio path and drawn flat in the graph.
+    /// Distinct from `active` (UI-only) and from master-EQ bypass.
+    var bypass: Bool = false
 
     static func == (lhs: FilterParams, rhs: FilterParams) -> Bool {
         lhs.type == rhs.type && lhs.freq == rhs.freq &&
-        lhs.q == rhs.q && lhs.gain == rhs.gain && lhs.active == rhs.active
+        lhs.q == rhs.q && lhs.gain == rhs.gain && lhs.active == rhs.active &&
+        lhs.bypass == rhs.bypass
     }
 }
 
@@ -47,7 +52,7 @@ class DSPMath {
         var magSquaredTotal: Double = 1.0
         let freqD = Double(freq)
 
-        for f in filters where f.type != .flat && f.active {
+        for f in filters where f.type != .flat && f.active && !f.bypass {
             let coeffs = calculateCoefficients(p: f)
             let w = 2.0 * Double.pi * freqD / sampleRate
 

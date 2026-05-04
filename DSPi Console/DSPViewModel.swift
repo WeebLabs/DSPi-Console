@@ -78,6 +78,14 @@ class DSPViewModel: ObservableObject {
         guard let v = firmwareVersion else { return false }
         return (v.major, v.minor, v.patch) >= (1, 1, 4)
     }
+
+    /// Per-band bypass shipped in firmware 1.1.4.  Older firmware STALLs the
+    /// new opcodes; the bypass byte at offset 3 of EqParamPacket is also the
+    /// legacy `reserved` byte, so sending bypass=1 is safe but ignored.
+    var firmwareSupportsBandBypass: Bool {
+        guard let v = firmwareVersion else { return false }
+        return (v.major, v.minor, v.patch) >= (1, 1, 4)
+    }
     @Published var isDeviceConnected: Bool = false
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
