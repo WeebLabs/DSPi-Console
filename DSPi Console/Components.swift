@@ -1048,7 +1048,7 @@ struct FilterRowView: View {
                     }
 
                     // Q
-                    ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3) {
+                    ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
                         var p = params; p.q = $0; onChange(p)
                     }
                 }
@@ -1128,6 +1128,11 @@ struct ValueField: View {
     var scrollStep: Float = 0.1
     var minValue: Float? = nil
     var maxDecimals: Int = 1
+    /// When true, an all-zero decimal portion is dropped entirely (e.g.
+    /// "1.000" → "1") instead of being collapsed to a single trailing zero.
+    /// Useful for Q where "1.0" reads as awkward but mid-precision values
+    /// like "0.707" must still show full precision.
+    var stripTrailingZeros: Bool = false
     var displayOverride: String? = nil
     let onCommit: (Float) -> Void
     @State private var text: String = ""
@@ -1135,12 +1140,14 @@ struct ValueField: View {
 
     private func format(_ v: Float) -> String {
         let full = String(format: "%.\(maxDecimals)f", v)
-        // Trim trailing zeros but keep at least one decimal
+        // Trim trailing zeros from the decimal portion.
         let parts = full.split(separator: ".", maxSplits: 1)
         guard parts.count == 2 else { return full }
         let decimals = String(parts[1])
         let trimmed = decimals.replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
-        if trimmed.isEmpty { return "\(parts[0]).0" }
+        if trimmed.isEmpty {
+            return stripTrailingZeros ? String(parts[0]) : "\(parts[0]).0"
+        }
         return "\(parts[0]).\(trimmed)"
     }
 
