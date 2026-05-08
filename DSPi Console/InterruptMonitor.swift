@@ -270,11 +270,13 @@ private enum ParamOffsetDecoder {
             let band = idx % 12
             if sub == 0 && sz == 16 && payload.count >= 16 {
                 let type = payload[0]
+                let bypass = payload[1]
                 let freq: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
                 let q:    Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 8, as: Float.self) }
                 let gain: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 12, as: Float.self) }
                 return ("eq[\(ch)][\(band)]",
-                        String(format: "type=%u  f=%.1f Hz  Q=%.2f  g=%+.2f dB", type, freq, q, gain))
+                        String(format: "type=%u  byp=%u  f=%.1f Hz  Q=%.2f  g=%+.2f dB",
+                               type, bypass, freq, q, gain))
             }
             return ("eq[\(ch)][\(band)]+0x\(String(format: "%X", sub))", fmtHex(payload))
         }
