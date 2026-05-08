@@ -427,7 +427,12 @@ class StatsViewModel: ObservableObject {
             let patch = Int(data[2] & 0x0F)
             let outputs = Int(data[3])
 
-            let platformStr = platform == 1 ? "RP2350" : "RP2040"
+            let platformStr: String
+            switch platform {
+            case 1:  platformStr = "RP2350"
+            case 2:  platformStr = "STM32H723"
+            default: platformStr = "RP2040"
+            }
             let versionStr = "v\(major).\(minor).\(patch)"
 
             DispatchQueue.main.async {

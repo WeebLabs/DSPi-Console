@@ -38,7 +38,12 @@ extension DSPViewModel {
         let major = Int(data[1])
         let minor = Int(data[2] >> 4)
         let patch = Int(data[2] & 0x0F)
-        let name = platform == 1 ? "RP2350" : "RP2040"
+        let name: String
+        switch platform {
+        case 1:  name = "RP2350"
+        case 2:  name = "STM32H723"
+        default: name = "RP2040"
+        }
         DispatchQueue.main.async {
             self.platformName = name
             self.firmwareVersion = (major: major, minor: minor, patch: patch)
@@ -965,7 +970,12 @@ extension DSPViewModel {
         let platformId = data[1]
         let numCh = Int(data[2])
         let numOutCh = Int(data[3])
-        let platform = platformId == 1 ? "RP2350" : "RP2040"
+        let platform: String
+        switch platformId {
+        case 1:  platform = "RP2350"
+        case 2:  platform = "STM32H723"
+        default: platform = "RP2040"
+        }
 
         // --- Global (offset 16, 16 bytes) ---
         let preamp: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 16, as: Float.self) }
