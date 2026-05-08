@@ -32,63 +32,12 @@ struct ContentView: View {
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
     @State private var renameText = ""
-    @State private var localMasterVolume: Float = 0
-    @State private var isDraggingMasterVolume = false
     @State private var showPresetRename = false
     @State private var presetRenameSlot = 0
     @State private var presetRenameText = ""
     @State private var presetSwitchInFlight = false
     @State private var settingsWindowOpen = false
     @Environment(\.openSettings) private var openSettingsAction
-
-    // Piecewise-linear master volume slider mapping:
-    //   0 to -10 dB:   0.1 dB steps → 100 units (40% of throw)
-    //   -10 to -40 dB: 0.5 dB steps →  60 units (24% of throw)
-    //   -40 to -128 dB: 1.0 dB steps → 88 units (36% of throw)
-    // Slider pos 1.0 = 0 dB, pos 0.0 = -128 dB (mute)
-    private static let mvTotalUnits: Float = 248 // 100 + 60 + 88
-    private static let mvBreak1: Float = 1.0 - 100 / mvTotalUnits  // pos where db = -10
-    private static let mvBreak2: Float = mvBreak1 - 60 / mvTotalUnits // pos where db = -40
-
-    private static func masterVolSliderToDB(_ pos: Float) -> Float {
-        if pos <= 0 { return -128 }
-        if pos >= 1 { return 0 }
-        if pos > mvBreak1 {
-            // Region 1: 0 to -10 dB, 0.1 dB per unit
-            return -(1.0 - pos) * mvTotalUnits * 0.1
-        } else if pos > mvBreak2 {
-            // Region 2: -10 to -40 dB, 0.5 dB per unit
-            return -10 - (mvBreak1 - pos) * mvTotalUnits * 0.5
-        } else {
-            // Region 3: -40 to -128 dB, 1.0 dB per unit
-            return -40 - (mvBreak2 - pos) * mvTotalUnits * 1.0
-        }
-    }
-
-    private static func masterVolDBToSlider(_ db: Float) -> Float {
-        if db <= -128 { return 0 }
-        if db >= 0 { return 1 }
-        if db > -10 {
-            return 1.0 - (-db / 0.1) / mvTotalUnits
-        } else if db > -40 {
-            return mvBreak1 - ((-db - 10) / 0.5) / mvTotalUnits
-        } else {
-            return mvBreak2 - ((-db - 40) / 1.0) / mvTotalUnits
-        }
-    }
-
-    private static func masterVolDisplayValue(_ db: Float) -> Float {
-        if db <= -128 { return -128 }
-        let rounded: Float
-        if db > -10 {
-            rounded = (db * 10).rounded() / 10
-        } else if db > -40 {
-            rounded = (db * 2).rounded() / 2
-        } else {
-            rounded = db.rounded()
-        }
-        return rounded == -0.0 ? 0.0 : rounded
-    }
 
     private func commitRename() {
         guard let idx = renamingChannel else { return }
@@ -638,33 +587,13 @@ struct ContentView: View {
                             }
                         }
 
-                        VStack(spacing: 4) {
-                            HStack {
-                                Text("Master Volume").font(.caption2).foregroundColor(.secondary)
-                                Spacer()
-                                ValueField(label: "dB", value: Self.masterVolDisplayValue(localMasterVolume), width: 60,
-                                           displayOverride: localMasterVolume <= -128 ? "-∞" : nil) {
-                                    localMasterVolume = max(-128, min(0, $0))
-                                    vm.setMasterVolume(localMasterVolume)
-                                }
-                            }
-                            Slider(value: Binding(
-                                get: { Self.masterVolDBToSlider(localMasterVolume) },
-                                set: { localMasterVolume = Self.masterVolSliderToDB($0) }
-                            ), in: 0...1) { editing in
-                                isDraggingMasterVolume = editing
-                                if !editing { vm.setMasterVolume(localMasterVolume) }
-                            }
-                            .controlSize(.small)
-                            .onChange(of: localMasterVolume) { val in
-                                if isDraggingMasterVolume { vm.sendMasterVolumeToDevice(val) }
-                            }
-                            .onAppear { localMasterVolume = vm.masterVolumeDB }
-                            .onChange(of: vm.masterVolumeDB) { val in
-                                if !isDraggingMasterVolume { localMasterVolume = val }
-                            }
-                            .onRightClick { localMasterVolume = 0; vm.setMasterVolume(0) }
-                        }
+                        // Host volume — drives the DSPi audio device's
+                        // CoreAudio scalar volume (USB Audio Class HID),
+                        // which is the same control the menu-bar slider
+                        // and keyboard volume keys operate on.  Two-way
+                        // sync: external changes update the slider via a
+                        // CoreAudio property listener.
+                        HostVolumeSection(controller: AppState.shared.hostVolume)
 
                     }
                     .padding()
@@ -936,6 +865,44 @@ extension DSPViewModel {
         ]
 
         return vm
+    }
+}
+
+// MARK: - Host Volume Section
+//
+// Sidebar control bound to AppState.shared.hostVolume.  The slider
+// position is the device's CoreAudio scalar (0...1); the readout next
+// to the label is converted to dB via CoreAudio's scalar-to-decibels
+// translation property.  External changes (menu-bar slider, F11/F12,
+// other apps using HID volume keys) flow back through the controller's
+// property listener and update the slider in place.
+struct HostVolumeSection: View {
+    @ObservedObject var controller: HostVolumeController
+
+    private var displayString: String {
+        guard controller.isAvailable else { return "—" }
+        if controller.volumeScalar <= 0 { return "-∞ dB" }
+        return String(format: "%.1f dB", controller.volumeDB)
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text("Volume").font(.caption2).foregroundColor(.secondary)
+                Spacer()
+                Text(displayString)
+                    .font(.system(.body).monospacedDigit())
+                    .foregroundColor(controller.isAvailable ? .primary : .secondary)
+            }
+            Slider(value: Binding(
+                get: { Double(controller.volumeScalar) },
+                set: { controller.setVolumeScalar(Float($0)) }
+            ), in: 0...1)
+            .controlSize(.small)
+            .disabled(!controller.isAvailable)
+            .opacity(controller.isAvailable ? 1.0 : 0.4)
+            .onRightClick { controller.setVolumeScalar(0) }
+        }
     }
 }
 

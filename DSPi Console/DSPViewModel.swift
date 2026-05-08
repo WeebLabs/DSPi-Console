@@ -158,9 +158,11 @@ class DSPViewModel: ObservableObject {
                     self?.presetNames = Array(repeating: "", count: 10)
                     self?.activePresetSlot = 0
                     AppState.shared.interruptMonitor.stop()
+                    AppState.shared.hostVolume.detach()
                 }
                 if connected {
                     AppState.shared.interruptMonitor.start()
+                    AppState.shared.hostVolume.attach()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         self?.updateSelection(to: nil)
                     }
