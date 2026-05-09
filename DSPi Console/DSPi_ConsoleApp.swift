@@ -55,6 +55,11 @@ class AppSettings: ObservableObject {
     // Advanced
     @AppStorage("showDebugInfo") var showDebugInfo: Bool = false
 
+    // Sidebar volume slider mode — "auto" (host on USB / user on SPDIF/I2S)
+    // or "master" (drives master volume directly with a red track tint).
+    // String-backed because @AppStorage doesn't support raw enums.
+    @AppStorage("sidebarVolumeMode") var sidebarVolumeMode: String = "auto"
+
     private init() {}
 }
 
@@ -219,6 +224,37 @@ struct GeneralSettingsTab: View {
                 }
             } header: {
                 Label("Master Volume", systemImage: "speaker.wave.2")
+            }
+
+            Section {
+                Toggle(isOn: Binding(
+                    get: { vm.lgSoundSyncEnabled },
+                    set: { en in
+                        vm.lgSoundSyncEnabled = en
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            vm.setLgSoundSyncEnabled(en)
+                        }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Enable LG Sound Sync")
+                            .font(.body)
+                        Text("Decode the LG TV's TOSLINK volume + mute signaling and apply it as the host volume — TV remote becomes the volume control. Per-preset; saved with the active preset.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .disabled(!vm.lgSoundSyncSupported)
+                .padding(.vertical, 4)
+
+                if !vm.lgSoundSyncSupported {
+                    Text("Connected device firmware doesn't support LG Sound Sync. Update to firmware V8 or later.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } header: {
+                Label("LG Sound Sync", systemImage: "tv")
             }
         }
         .formStyle(.grouped)

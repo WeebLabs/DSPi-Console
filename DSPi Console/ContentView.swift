@@ -587,13 +587,28 @@ struct ContentView: View {
                             }
                         }
 
-                        // Host volume — drives the DSPi audio device's
-                        // CoreAudio scalar volume (USB Audio Class HID),
-                        // which is the same control the menu-bar slider
-                        // and keyboard volume keys operate on.  Two-way
-                        // sync: external changes update the slider via a
-                        // CoreAudio property listener.
-                        HostVolumeSection(controller: AppState.shared.hostVolume)
+                        // Volume control — drives the macOS default
+                        // output's CoreAudio volume when the input source
+                        // is USB (so menu-bar slider, keyboard keys, and
+                        // sidebar all stay in sync).  When the source is
+                        // SPDIF or I2S, the host audio path isn't carrying
+                        // the audio, so we drive the firmware's user
+                        // volume directly via REQ_SET_USER_VOLUME — the
+                        // same field the UAC1 host slider writes to.
+                        // Sidebar volume mode is user-selectable (Auto vs
+                        // Master) via the popup-label selector inside each
+                        // section; persisted in AppSettings.  Auto resolves
+                        // to host / user based on inputSource.
+                        switch (SidebarVolumeMode(rawValue: settings.sidebarVolumeMode) ?? .auto,
+                                vm.inputSource) {
+                        case (.master, _):
+                            MasterModeSection(vm: vm)
+                        case (.auto, 0):
+                            HostVolumeSection(controller: AppState.shared.hostVolume,
+                                              vm: vm)
+                        case (.auto, _):
+                            UserVolumeSection(vm: vm)
+                        }
 
                     }
                     .padding()
@@ -605,8 +620,10 @@ struct ContentView: View {
 
                     Divider()
 
-                    // System Status — CPU load only (meters are inline in sidebar rows)
-                    CpuSection(meters: vm.meters)
+                    // System Status — Core 0 utilisation + master volume.
+                    // Core 1 still appears in the Stats window; meters are
+                    // inline in sidebar rows.
+                    CpuSection(vm: vm)
                     .padding()
                     }
                     .background(.ultraThinMaterial)
@@ -623,7 +640,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // Graph + connection status
                 VStack(alignment: .leading, spacing: 0) {
-                    // Header: connection status (always visible)
+                    // Header: graph title (or pop-out close button) on
+                    // the left, connection status on the right.  Master
+                    // volume now lives in the sidebar slider as a mode
+                    // option, so it's no longer surfaced here.
                     HStack {
                         if graphWindowController.isVisible {
                             Button(action: { graphWindowController.hide() }) {
@@ -641,46 +661,7 @@ struct ContentView: View {
 
                         Spacer()
 
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(vm.isDeviceConnected ? .green : .red)
-                                .frame(width: 6, height: 6)
-
-                            if vm.availableDevices.isEmpty {
-                                Text("No Devices").font(.caption).foregroundColor(.red)
-                            } else {
-                                BorderlessPopUpButton(
-                                    items: vm.availableDevices,
-                                    titleForItem: { $0.displayName },
-                                    selection: Binding(
-                                        get: {
-                                            if let selected = vm.selectedDevice,
-                                               vm.availableDevices.contains(selected) {
-                                                return selected
-                                            }
-                                            return vm.availableDevices.first ?? DSPiDevice(serial: "", locationID: 0)
-                                        },
-                                        set: { vm.switchToDevice($0) }
-                                    ),
-                                    font: .systemFont(ofSize: NSFont.smallSystemFontSize),
-                                    enabled: vm.availableDevices.count > 1,
-                                    showsHoverBorder: false,
-                                    onRightClick: { vm.usb.reconnect() }
-                                )
-                                .overlay(alignment: .trailing) {
-                                    if vm.availableDevices.count > 1 {
-                                        Image(systemName: "chevron.up.chevron.down")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundColor(.secondary)
-                                            .offset(y: 1)
-                                            .padding(.trailing, 4)
-                                            .allowsHitTesting(false)
-                                    }
-                                }
-                                .fixedSize()
-                                .allowsHitTesting(vm.availableDevices.count > 1)
-                            }
-                        }
+                        ConnectionStatusIndicator(vm: vm)
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)
@@ -868,6 +849,77 @@ extension DSPViewModel {
     }
 }
 
+// MARK: - User Volume Section (non-USB input)
+//
+// Drives REQ_SET_USER_VOLUME (0xDA) — the vendor-channel access to the
+// same `audio_state.volume` field the UAC1 host slider writes to.  Used
+// in the sidebar when the input source is non-USB (SPDIF / I2S), where
+// the host's CoreAudio volume has no audio path to act on.  The
+// firmware applies this value to vol_mul + the loudness coefficient
+// pointer regardless of source, so equal-loudness compensation tracks
+// changes correctly.
+//
+// On non-USB → USB transitions the controller pushes this value back
+// out to CoreAudio so the menu-bar slider, the device's HID volume
+// state, and `audio_state.volume` re-converge.
+struct UserVolumeSection: View {
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
+
+    // Slider position is "scalar" 0...1 mapped via the SAME taper the
+    // host-volume mode uses (CoreAudio's device-specific translation).
+    // The two sliders therefore feel identical: same thumb position
+    // produces the same dB readout in both modes.  At scalar 0 the
+    // display reads "-∞ dB"; the firmware gets the floor (-60 dB)
+    // since user_volume itself is unmuted-only.
+    @State private var localScalar: Double = 1.0
+    @State private var isDragging = false
+
+    private static let minDB: Float = USER_VOLUME_MIN_DB   // -60
+
+    private static func scalarToDB(_ s: Double) -> Float {
+        if s <= 0 { return minDB }
+        let db = AppState.shared.hostVolume.scalarToDBPublic(Float(s))
+        return max(minDB, db)
+    }
+
+    private static func dbToScalar(_ db: Float) -> Double {
+        if db <= minDB { return 0 }
+        return Double(AppState.shared.hostVolume.dbToScalarPublic(db))
+    }
+
+    private static func displayString(scalar: Double, db: Float) -> String {
+        return String(format: "%.1f dB", db)
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                VolumeModeSelector(modeRaw: $settings.sidebarVolumeMode,
+                                   inputSource: vm.inputSource)
+                Spacer()
+                Text(Self.displayString(scalar: localScalar,
+                                        db: Self.scalarToDB(localScalar)))
+                    .font(.system(.body).monospacedDigit())
+                    .foregroundColor(.primary)
+            }
+            Slider(value: $localScalar, in: 0...1) { editing in
+                isDragging = editing
+                if !editing { vm.setUserVolume(Self.scalarToDB(localScalar)) }
+            }
+            .controlSize(.small)
+            .onChange(of: localScalar) { val in
+                if isDragging { vm.sendUserVolumeToDevice(Self.scalarToDB(val)) }
+            }
+            .onAppear { localScalar = Self.dbToScalar(vm.userVolumeDB) }
+            .onChange(of: vm.userVolumeDB) { val in
+                if !isDragging { localScalar = Self.dbToScalar(val) }
+            }
+            .onRightClick { localScalar = 1; vm.setUserVolume(0) }
+        }
+    }
+}
+
 // MARK: - Host Volume Section
 //
 // Sidebar control bound to AppState.shared.hostVolume.  The slider
@@ -878,17 +930,19 @@ extension DSPViewModel {
 // property listener and update the slider in place.
 struct HostVolumeSection: View {
     @ObservedObject var controller: HostVolumeController
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
 
     private var displayString: String {
         guard controller.isAvailable else { return "—" }
-        if controller.volumeScalar <= 0 { return "-∞ dB" }
         return String(format: "%.1f dB", controller.volumeDB)
     }
 
     var body: some View {
         VStack(spacing: 4) {
             HStack {
-                Text("Volume").font(.caption2).foregroundColor(.secondary)
+                VolumeModeSelector(modeRaw: $settings.sidebarVolumeMode,
+                                   inputSource: vm.inputSource)
                 Spacer()
                 Text(displayString)
                     .font(.system(.body).monospacedDigit())
@@ -901,7 +955,66 @@ struct HostVolumeSection: View {
             .controlSize(.small)
             .disabled(!controller.isAvailable)
             .opacity(controller.isAvailable ? 1.0 : 0.4)
-            .onRightClick { controller.setVolumeScalar(0) }
+            .onRightClick { controller.setVolumeScalar(1) }
+        }
+    }
+}
+
+// MARK: - Master Mode Section
+//
+// Sidebar control bound directly to vm.masterVolumeDB.  Distinguished
+// from Host / User mode by:
+//   1. The popup label reads "Master Volume ▾" (the selector adapts).
+//   2. The slider track is tinted red.
+//   3. The slider taper is the firmware's piecewise-linear master taper
+//      (see MasterVolumeTaper) — different range from host/user (-128 to
+//      0 dB vs -60 to 0 dB) and different step granularity per region.
+// Live drag uses sendMasterVolumeToDevice; commit-on-release uses
+// setMasterVolume.  Right-click resets to 0 dB.  At slider bottom the
+// readout shows "−∞" (mute).
+struct MasterModeSection: View {
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
+
+    @State private var localDB: Float = 0
+    @State private var isDragging = false
+
+    private var sliderPos: Double {
+        Double(MasterVolumeTaper.dbToSlider(localDB))
+    }
+
+    private var displayString: String {
+        if localDB <= -128 { return "−∞" }
+        return MasterVolumeTaper.format(localDB) + " dB"
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                VolumeModeSelector(modeRaw: $settings.sidebarVolumeMode,
+                                   inputSource: vm.inputSource)
+                Spacer()
+                Text(displayString)
+                    .font(.system(.body).monospacedDigit())
+                    .foregroundColor(.primary)
+            }
+            Slider(value: Binding(
+                get: { sliderPos },
+                set: { localDB = MasterVolumeTaper.sliderToDB(Float($0)) }
+            ), in: 0...1) { editing in
+                isDragging = editing
+                if !editing { vm.setMasterVolume(localDB) }
+            }
+            .controlSize(.small)
+            .tint(.red)
+            .onChange(of: localDB) { val in
+                if isDragging { vm.sendMasterVolumeToDevice(val) }
+            }
+            .onAppear { localDB = vm.masterVolumeDB }
+            .onChange(of: vm.masterVolumeDB) { val in
+                if !isDragging { localDB = val }
+            }
+            .onRightClick { localDB = 0; vm.setMasterVolume(0) }
         }
     }
 }

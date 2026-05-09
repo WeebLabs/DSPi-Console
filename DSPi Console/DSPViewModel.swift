@@ -7,6 +7,11 @@ class DSPViewModel: ObservableObject {
     @Published var preampDB: [Float] = [0.0, 0.0]
     @Published var preampLinked: Bool = true
     @Published var masterVolumeDB: Float = 0.0
+    /// Vendor-channel "user volume" — same field as the UAC1 host slider
+    /// (`audio_state.volume`), driven via REQ_SET_USER_VOLUME (0xDA).
+    /// Used as the sidebar volume control when input source is non-USB.
+    /// Range: -60.0 ... 0.0 dB.
+    @Published var userVolumeDB: Float = 0.0
     @Published var bypass: Bool = false
     @Published var channelData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
@@ -52,6 +57,13 @@ class DSPViewModel: ObservableObject {
     @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF
     @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
     @Published var spdifRxPin: UInt8 = 11             // GPIO pin for SPDIF RX
+
+    // LG Sound Sync — per-preset enable for LG TV optical-out volume decode.
+    // `lgSoundSyncSupported` is set when V8+ bulk data is parsed or when an
+    // explicit fetch returns a value.  Live runtime status (present/volume/
+    // muted) is observed by StatsViewModel rather than mirrored here.
+    @Published var lgSoundSyncEnabled: Bool = false
+    @Published var lgSoundSyncSupported: Bool = false
 
     // Preset state
     @Published var presetOccupied: UInt16 = 0
@@ -158,11 +170,9 @@ class DSPViewModel: ObservableObject {
                     self?.presetNames = Array(repeating: "", count: 10)
                     self?.activePresetSlot = 0
                     AppState.shared.interruptMonitor.stop()
-                    AppState.shared.hostVolume.detach()
                 }
                 if connected {
                     AppState.shared.interruptMonitor.start()
-                    AppState.shared.hostVolume.attach()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         self?.updateSelection(to: nil)
                     }

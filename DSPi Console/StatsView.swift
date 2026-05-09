@@ -132,6 +132,32 @@ struct SpdifRxChannelStatus {
     }
 }
 
+// MARK: - LG Sound Sync Status
+
+/// 16-byte runtime status returned by REQ_GET_LG_SOUND_SYNC_STATUS.
+/// Only the first 4 bytes are meaningful today; the remaining 12 are
+/// reserved by the firmware for future fields.
+struct LgSoundSyncStatus {
+    var enabled: Bool = false
+    var present: Bool = false
+    /// 0..100 from the LG channel-status decode; 0xFF means "never decoded
+    /// since boot" (held while `present` is false).
+    var volume: UInt8 = 0xFF
+    var muted: Bool = false
+
+    var volumeString: String {
+        volume == 0xFF ? "—" : "\(volume) / 100"
+    }
+
+    var presentString: String {
+        present ? "Yes" : "No"
+    }
+
+    var presentColor: Color {
+        present ? .green : .gray
+    }
+}
+
 // MARK: - Stats View Model
 class StatsViewModel: ObservableObject {
     @Published var pdmRingOverruns: UInt32 = 0
@@ -173,6 +199,12 @@ class StatsViewModel: ObservableObject {
     @Published var spdifRxChannelStatus: SpdifRxChannelStatus = SpdifRxChannelStatus()
     @Published var spdifRxPin: UInt8 = 11
     @Published var inputSourceSupported: Bool = false
+
+    // LG Sound Sync runtime status (V8+ firmware).  Polled on the same
+    // 2-second cadence as fetchStats; stays at default until a successful
+    // REQ_GET_LG_SOUND_SYNC_STATUS response sets `lgSoundSyncSupported`.
+    @Published var lgSoundSyncStatus: LgSoundSyncStatus = LgSoundSyncStatus()
+    @Published var lgSoundSyncSupported: Bool = false
 
     private var previousStarvationTotal: UInt32? = nil
     private var hasConnectedOnce = false
@@ -293,6 +325,28 @@ class StatsViewModel: ObservableObject {
 
         fetchStarvationStats()
         fetchSpdifRxStatus()
+        fetchLgSoundSyncStatus()
+    }
+
+    /// REQ_GET_LG_SOUND_SYNC_STATUS (0xE8): returns the 16-byte
+    /// LgSoundSyncStatus struct.  STALLs on V7 / older firmware — we
+    /// detect that via the nil response and leave `lgSoundSyncSupported`
+    /// false, which hides the section in the UI.
+    func fetchLgSoundSyncStatus() {
+        guard let usb = usb, isConnected else { return }
+        guard let data = usb.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_STATUS, value: 0, index: 0, length: 16),
+              data.count >= 4 else { return }
+
+        var status = LgSoundSyncStatus()
+        status.enabled = data[0] != 0
+        status.present = data[1] != 0
+        status.volume  = data[2]
+        status.muted   = data[3] != 0
+
+        DispatchQueue.main.async {
+            self.lgSoundSyncStatus = status
+            self.lgSoundSyncSupported = true
+        }
     }
 
     func fetchBufferStats() {
@@ -633,6 +687,42 @@ struct StatsView: View {
                             SystemInfoRow(title: "Lost Callbacks",
                                           value: "\(vm.spdifRxStatus.onLostStableCount)")
                         }
+                    }
+                }
+
+                // LG Sound Sync Section (only shown when supported)
+                if vm.lgSoundSyncSupported {
+                    Divider()
+
+                    Text("LG Sound Sync")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        SystemInfoRow(title: "Enabled",
+                                      value: vm.lgSoundSyncStatus.enabled ? "Yes" : "No")
+
+                        // Detection state with colored dot — mirrors the
+                        // SPDIF "State" row treatment.
+                        HStack {
+                            Text("Present")
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(vm.lgSoundSyncStatus.presentColor)
+                                    .frame(width: 6, height: 6)
+                                Text(vm.lgSoundSyncStatus.presentString)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 1)
+
+                        SystemInfoRow(title: "TV Volume",
+                                      value: vm.lgSoundSyncStatus.volumeString)
+                        SystemInfoRow(title: "TV Mute",
+                                      value: vm.lgSoundSyncStatus.muted ? "On" : "Off")
                     }
                 }
 

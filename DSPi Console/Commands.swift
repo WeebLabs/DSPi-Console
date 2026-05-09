@@ -16,6 +16,8 @@ extension DSPViewModel {
         fetchInputSource()
         fetchCore1Mode()
         fetchSampleRate()
+        fetchUserVolume()
+        fetchLgSoundSyncEnabled()
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -353,6 +355,67 @@ extension DSPViewModel {
                 }
             }
         }
+    }
+
+    // MARK: - User Volume (vendor channel for audio_state.volume)
+
+    /// Send a user-volume value (firmware applies it to the same field
+    /// the UAC1 host slider drives — works across USB / SPDIF / I2S).
+    /// Used during slider drag for live updates without re-publishing.
+    func sendUserVolumeToDevice(_ db: Float) {
+        var val = Self.clampUserVolume(db)
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_USER_VOLUME, value: 0, index: 0, data: data)
+    }
+
+    /// Set user volume — publish locally + send to device.  Range is
+    /// clamped to the firmware-defined [-60, 0] dB window.
+    func setUserVolume(_ db: Float) {
+        var val = Self.clampUserVolume(db)
+        self.userVolumeDB = val
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_USER_VOLUME, value: 0, index: 0, data: data)
+    }
+
+    func fetchUserVolume() {
+        if let d = usb.getControlRequest(request: REQ_GET_USER_VOLUME, value: 0, index: 0, length: 4) {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.userVolumeDB - val) > 0.01 {
+                    self.userVolumeDB = val
+                }
+            }
+        }
+    }
+
+    // MARK: - LG Sound Sync
+
+    /// Set the user-facing enable flag.  Per-preset; saved with REQ_SAVE_PRESET.
+    /// Firmware emits a PARAM_CHANGED notification on the lg_sound_sync.enabled
+    /// field at bulk offset 2912 — applyNotifiedParamChange mirrors that back
+    /// for non-HOST sources, so other hosts' edits flow through automatically.
+    func setLgSoundSyncEnabled(_ enabled: Bool) {
+        DispatchQueue.main.async { self.lgSoundSyncEnabled = enabled }
+        usb.sendControlRequest(request: REQ_SET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0,
+                               data: Data([enabled ? 1 : 0]))
+    }
+
+    /// Probe the firmware for LG Sound Sync support and read the current
+    /// enable flag.  STALLs on firmware older than V8.
+    func fetchLgSoundSyncEnabled() {
+        if let d = usb.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0, length: 1),
+           d.count >= 1 {
+            let en = d[0] != 0
+            DispatchQueue.main.async {
+                self.lgSoundSyncEnabled = en
+                self.lgSoundSyncSupported = true
+            }
+        }
+    }
+
+    private static func clampUserVolume(_ db: Float) -> Float {
+        let clamped = max(USER_VOLUME_MIN_DB, min(USER_VOLUME_MAX_DB, db))
+        return clamped == -0.0 ? 0.0 : clamped
     }
 
     // MARK: - Master Volume Mode (preset directory flag)
@@ -924,9 +987,44 @@ extension DSPViewModel {
     }
 
     func setInputSource(_ source: Int) {
-        DispatchQueue.main.async { self.inputSource = source }
+        let previous = self.inputSource
         let byte = Data([UInt8(source)])
+
+        // Anchor the destination sidebar view's value in the SAME main-queue
+        // tick that flips `inputSource`, so the SwiftUI swap doesn't render
+        // once with the stale binding before the real value lands.
+        //
+        // Both modes drive the same firmware field (audio_state.volume) and
+        // share the same scalar↔dB taper, so seeding the destination with
+        // the source's current dB is identity — slider position and dB
+        // readout stay put across the swap.  Any later USB-roundtrip
+        // correction (host→user via fetchUserVolume on the input_source
+        // notification at offset 2896) is at most a tiny rounding nudge.
+        DispatchQueue.main.async {
+            if source == 0 && previous != 0 {
+                // user → host: push our user volume into the host
+                // controller (sync publish, async CoreAudio write) so
+                // HostVolumeSection appears with the right slider position.
+                AppState.shared.hostVolume.applyVolumeDBImmediate(self.userVolumeDB)
+            } else if source != 0 && previous == 0 {
+                // host → user: anchor user view at the host's current dB
+                // before the swap so UserVolumeSection.onAppear seeds
+                // localScalar from the right value.
+                let hostDB = AppState.shared.hostVolume.volumeDB
+                if hostDB.isFinite {
+                    self.userVolumeDB = hostDB
+                }
+            }
+            self.inputSource = source
+        }
+
         usb.sendControlRequest(request: REQ_SET_INPUT_SOURCE, value: 0, index: 2, data: byte)
+
+        // No follow-up fetch here — the firmware emits an
+        // `input_config.input_source` notification at the end of its
+        // deferred switch handler (main.c:1662).  applyNotifiedParamChange
+        // catches that and triggers fetchUserVolume() at the right
+        // moment instead of guessing a sleep duration.
     }
 
     func fetchSpdifRxPin() {
@@ -1127,6 +1225,23 @@ extension DSPViewModel {
             bulkSpdifRxPin = data[2897]
         }
 
+        // --- LG Sound Sync (offset 2912, 16 bytes) --- V8 firmware only
+        // Only `enabled` is honoured on bulk SET; present/volume/muted are
+        // runtime telemetry, polled via REQ_GET_LG_SOUND_SYNC_STATUS by the
+        // Stats window for live monitoring.
+        var bulkLgEnabled: Bool? = nil
+        if formatVersion >= 8 && data.count >= 2928 {
+            bulkLgEnabled = data[2912] != 0
+        }
+
+        // --- User Volume (offset 2928, 16 bytes) --- V9 firmware only
+        // Mirrors audio_state.volume — same field UAC1 host slider drives,
+        // surfaced via REQ_SET_USER_VOLUME for non-USB modes.
+        var bulkUserVolume: Float? = nil
+        if formatVersion >= 9 && data.count >= 2944 {
+            bulkUserVolume = data.withUnsafeBytes { $0.load(fromByteOffset: 2928, as: Float.self) }
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -1179,6 +1294,13 @@ extension DSPViewModel {
             }
             if let pin = bulkSpdifRxPin {
                 self.spdifRxPin = pin
+            }
+            if let userVol = bulkUserVolume {
+                self.userVolumeDB = userVol
+            }
+            if let lgEn = bulkLgEnabled {
+                self.lgSoundSyncEnabled = lgEn
+                self.lgSoundSyncSupported = true
             }
 
             // Refresh channel visibility now that outputEnabled is populated
@@ -1536,6 +1658,52 @@ extension DSPViewModel {
                 ?? String(data: slice, encoding: .ascii)
                 ?? ""
             self.channelNames[ch] = name
+            return
+        }
+
+        // user_volume.user_volume_db (offset 2928, 4 bytes float dB).
+        // Fired on REQ_SET_USER_VOLUME and bulk apply.  Note: UAC1 host
+        // slider writes go through audio_set_volume() in firmware, which
+        // does NOT emit a notification — so during USB playback our
+        // userVolumeDB only refreshes on input-source switch (below) or
+        // explicit fetch.
+        if off == 2928 && sz == 4 && payload.count >= 4 {
+            let db: Float = payload.withUnsafeBytes { $0.load(as: Float.self) }
+            if abs(self.userVolumeDB - db) > 0.01 {
+                self.userVolumeDB = db
+            }
+            return
+        }
+
+        // lg_sound_sync.enabled (offset 2912, 1 byte).  Fired by
+        // lg_sound_sync_set_enabled() on the firmware side, and on bulk
+        // apply.  Mirrors the user-controlled gate so external hosts /
+        // preset loads flow into our Settings toggle without a re-poll.
+        if off == 2912 && sz == 1 && payload.count >= 1 {
+            let en = payload[0] != 0
+            if self.lgSoundSyncEnabled != en {
+                self.lgSoundSyncEnabled = en
+            }
+            self.lgSoundSyncSupported = true
+            return
+        }
+
+        // input_config.input_source (offset 2896, 1 byte).  Fired at the
+        // tail of the firmware's deferred input-source switch handler —
+        // i.e. after all per-source thaw/init work has run (including
+        // the SPDIF→USB audio_set_volume() thaw).  Use this as the
+        // "switch complete" trigger to refresh user volume so the
+        // slider lands on the firmware's authoritative value, regardless
+        // of which direction we switched.
+        if off == 2896 && sz == 1 && payload.count >= 1 {
+            let src = Int(payload[0])
+            if self.inputSource != src {
+                self.inputSource = src
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.fetchUserVolume()
+            }
+            return
         }
     }
 

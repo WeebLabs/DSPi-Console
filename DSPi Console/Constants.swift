@@ -102,7 +102,7 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-let BULK_PARAMS_SIZE: UInt16            = 2912
+let BULK_PARAMS_SIZE: UInt16            = 2944
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
@@ -130,6 +130,16 @@ let REQ_GET_PREAMP_CH: UInt8           = 0xD1
 let REQ_SET_BAND_BYPASS: UInt8         = 0xD8
 let REQ_GET_BAND_BYPASS: UInt8         = 0xD9
 
+// User volume request codes — vendor-channel access to the same field
+// the UAC1 host slider drives (audio_state.volume).  Applies regardless
+// of input source so SPDIF/I2S playback honours user-perceived volume
+// changes (and loudness compensation tracks them).
+// Range: float dB, clamped to [-CENTER_VOLUME_INDEX, 0] = [-60, 0] dB.
+let REQ_SET_USER_VOLUME: UInt8         = 0xDA
+let REQ_GET_USER_VOLUME: UInt8         = 0xDB
+let USER_VOLUME_MIN_DB: Float          = -60.0
+let USER_VOLUME_MAX_DB: Float          = 0.0
+
 // Master volume request codes
 let REQ_SET_MASTER_VOLUME: UInt8         = 0xD2
 let REQ_GET_MASTER_VOLUME: UInt8         = 0xD3
@@ -149,6 +159,15 @@ let REQ_GET_SPDIF_RX_STATUS: UInt8    = 0xE2
 let REQ_GET_SPDIF_RX_CH_STATUS: UInt8 = 0xE3
 let REQ_SET_SPDIF_RX_PIN: UInt8       = 0xE4
 let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
+
+// LG Sound Sync request codes (firmware V8+ wire format)
+// SET payload: 1 byte (0=off, anything else=on).
+// GET_ENABLE returns: 1 byte.
+// GET_STATUS returns: 16-byte LgSoundSyncStatus (enabled, present,
+// volume 0..100 / 0xFF, muted, 12 reserved).
+let REQ_SET_LG_SOUND_SYNC_ENABLE: UInt8 = 0xE6
+let REQ_GET_LG_SOUND_SYNC_ENABLE: UInt8 = 0xE7
+let REQ_GET_LG_SOUND_SYNC_STATUS: UInt8 = 0xE8
 
 // Note: REQ_SET_SPDIF_RX_PIN (0xE4) reuses PIN_CONFIG_* status codes (0x00-0x04)
 

@@ -133,13 +133,203 @@ struct CpuMeter: View {
 }
 
 struct CpuSection: View {
-    @ObservedObject var meters: DSPMeterModel
+    @ObservedObject var vm: DSPViewModel
     var body: some View {
         HStack {
-            CpuMeter(core: 0, load: meters.status.cpu0)
+            CpuMeter(core: 0, load: vm.meters.status.cpu0)
             Spacer()
-            CpuMeter(core: 1, load: meters.status.cpu1)
+            CpuMeter(core: 1, load: vm.meters.status.cpu1)
         }
+    }
+}
+
+// Connection state dot + device picker.  Extracted from ContentView's
+// graph header so it can also live in the sidebar status row.  Right-click
+// the picker to force a USB reconnect.
+struct ConnectionStatusIndicator: View {
+    @ObservedObject var vm: DSPViewModel
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(vm.isDeviceConnected ? Color.green : Color.red)
+                .frame(width: 6, height: 6)
+
+            if vm.availableDevices.isEmpty {
+                Text("No Devices").font(.caption).foregroundColor(.red)
+            } else {
+                BorderlessPopUpButton(
+                    items: vm.availableDevices,
+                    titleForItem: { $0.displayName },
+                    selection: Binding(
+                        get: {
+                            if let selected = vm.selectedDevice,
+                               vm.availableDevices.contains(selected) {
+                                return selected
+                            }
+                            return vm.availableDevices.first ?? DSPiDevice(serial: "", locationID: 0)
+                        },
+                        set: { vm.switchToDevice($0) }
+                    ),
+                    font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                    enabled: vm.availableDevices.count > 1,
+                    showsHoverBorder: false,
+                    onRightClick: { vm.usb.reconnect() }
+                )
+                .overlay(alignment: .trailing) {
+                    if vm.availableDevices.count > 1 {
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .offset(y: 1)
+                            .padding(.trailing, 4)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .fixedSize()
+                .allowsHitTesting(vm.availableDevices.count > 1)
+            }
+        }
+    }
+}
+
+// Compact dB readout / editor sized to match CpuMeter.  Plain TextField
+// rather than ValueField so the font matches the surrounding caption2
+// status row.  Commits on Return / blur, falls back to the live value
+// when the entered text isn't a number.  "−∞" is shown at -128 dB (mute);
+// to leave mute, the user types a number.
+// MARK: - Sidebar Volume Mode + Master Volume Taper
+//
+// Mode for the sidebar volume slider.  `auto` preserves the input-source-
+// driven host/user split; `master` drives masterVolumeDB directly.
+// Persisted as a String via @AppStorage in AppSettings so a user's choice
+// survives relaunches.
+enum SidebarVolumeMode: String { case auto, master }
+
+// Piecewise-linear master volume taper used by MasterModeSection (the
+// sidebar slider in master mode).  Encodes the firmware's per-region
+// step sizes:
+//   0 to -10 dB:   0.1 dB steps over 100 units (~40% of throw)
+//  -10 to -40 dB:  0.5 dB steps over  60 units (~24% of throw)
+//  -40 to -128 dB: 1.0 dB steps over  88 units (~36% of throw)
+// Slider position 1.0 = 0 dB; 0.0 = -128 dB (mute, displayed as "−∞").
+enum MasterVolumeTaper {
+    static let totalUnits: Float = 248
+    static let break1: Float = 1.0 - 100 / totalUnits   // pos at -10 dB
+    static let break2: Float = break1 - 60 / totalUnits // pos at -40 dB
+
+    static func sliderToDB(_ pos: Float) -> Float {
+        if pos <= 0 { return -128 }
+        if pos >= 1 { return 0 }
+        if pos > break1 {
+            return -(1.0 - pos) * totalUnits * 0.1
+        } else if pos > break2 {
+            return -10 - (break1 - pos) * totalUnits * 0.5
+        } else {
+            return -40 - (break2 - pos) * totalUnits * 1.0
+        }
+    }
+
+    static func dbToSlider(_ db: Float) -> Float {
+        if db <= -128 { return 0 }
+        if db >= 0 { return 1 }
+        if db > -10 {
+            return 1.0 - (-db / 0.1) / totalUnits
+        } else if db > -40 {
+            return break1 - ((-db - 10) / 0.5) / totalUnits
+        } else {
+            return break2 - ((-db - 40) / 1.0) / totalUnits
+        }
+    }
+
+    /// Snap a dB value to the closest step the firmware actually applies
+    /// in each region (0.1 / 0.5 / 1.0 dB).  Used by the readout so the
+    /// number on screen matches what the device acts on.
+    static func displayValue(_ db: Float) -> Float {
+        if db <= -128 { return -128 }
+        let rounded: Float
+        if db > -10 { rounded = (db * 10).rounded() / 10 }
+        else if db > -40 { rounded = (db * 2).rounded() / 2 }
+        else { rounded = db.rounded() }
+        return rounded == -0.0 ? 0.0 : rounded
+    }
+
+    /// Pretty-print: "−∞" at -128 (mute), otherwise "%.1f dB" with trailing
+    /// ".0" stripped (e.g. "0", "-12", "-7.5").
+    static func format(_ db: Float) -> String {
+        if db <= -128 { return "−∞" }
+        let v = displayValue(db)
+        let s = String(format: "%.1f", v)
+        return s.hasSuffix(".0") ? String(s.dropLast(2)) : s
+    }
+}
+
+// MARK: - Volume Mode Selector
+//
+// Compact popup label used as the section heading on the sidebar volume
+// slider.  Renders as e.g. "User Volume ▾" (the input-source-driven host/
+// user path) or "Master Volume ▾" (master attenuator); clicking opens a
+// menu with those two choices.  The `inputSource` parameter is retained
+// for callers but no longer reflected in the menu — the user-facing label
+// reads "User Volume" regardless of whether the underlying path is the
+// CoreAudio host slider (USB) or REQ_SET_USER_VOLUME (SPDIF/I2S).
+struct VolumeModeSelector: View {
+    @Binding var modeRaw: String
+    /// Retained for API compatibility with callers; not used in the menu.
+    let inputSource: Int
+
+    private var mode: SidebarVolumeMode {
+        SidebarVolumeMode(rawValue: modeRaw) ?? .auto
+    }
+
+    private var headingText: String {
+        switch mode {
+        case .auto:   return "User Volume"
+        case .master: return "Master Volume"
+        }
+    }
+
+    var body: some View {
+        Menu {
+            Button {
+                modeRaw = SidebarVolumeMode.auto.rawValue
+            } label: {
+                if mode == .auto {
+                    Label("User Volume", systemImage: "checkmark")
+                } else {
+                    Text("User Volume")
+                }
+            }
+            Button {
+                modeRaw = SidebarVolumeMode.master.rawValue
+            } label: {
+                if mode == .master {
+                    Label("Master Volume", systemImage: "checkmark")
+                } else {
+                    Text("Master Volume")
+                }
+            }
+        } label: {
+            // The chevron is part of the text string rather than a
+            // sibling Image — `.menuStyle(.borderlessButton)` on macOS
+            // injects its own indicator and shuffles HStack siblings,
+            // so the only reliable way to place a chevron on the right
+            // is to bake it into the title.  `.menuIndicator(.hidden)`
+            // suppresses the system one.  Concatenated Texts keep the
+            // label at caption2 (matching "Source" and other sidebar
+            // labels) while bumping the chevron larger.
+            (Text(headingText).font(.caption2)
+             + Text(" ▾").font(.system(size: 11, weight: .bold)))
+                .foregroundColor(.secondary)
+                .contentShape(Rectangle())
+        }
+        // `.button` menu style + `.plain` button style strips the
+        // ~8pt horizontal padding that `.borderlessButton` adds, so
+        // the label sits flush left with sibling sidebar labels like
+        // "Source".
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 }
 

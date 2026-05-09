@@ -2,93 +2,157 @@
 //  HostVolumeController.swift
 //  DSPi Console
 //
-//  Drives the DSPi audio device's CoreAudio scalar volume via the standard
-//  USB Audio Class HID volume control.  When the user moves the sidebar
-//  slider, macOS sends Set Cur volume to the device exactly the same way
-//  the menu-bar volume slider does — so the firmware's USB volume state,
-//  the menu-bar slider, the keyboard volume keys, and our slider all
-//  remain in sync via a single property listener.
-//
-//  This is independent of REQ_SET_MASTER_VOLUME (the firmware's vendor
-//  attenuator).  The two attenuators would multiply if both surfaced in
-//  the UI; we leave the vendor MV machinery intact for presets but hide
-//  its sidebar control.
+//  Drives whatever audio device is currently the macOS *default* output —
+//  the same control the menu-bar slider, the keyboard volume keys, and
+//  most third-party mixers operate on.  Two-way sync via CoreAudio
+//  property listeners on (a) the default-output assignment so we follow
+//  the user's device switch, and (b) the current device's scalar volume
+//  so external changes (menu bar, F11/F12, etc.) update the slider in
+//  place.
 //
 
 import Foundation
 import Combine
 import CoreAudio
-import IOKit
-import IOKit.usb
 
 final class HostVolumeController: ObservableObject {
 
     // MARK: - Published State (main thread)
 
-    /// True when a DSPi audio device has been located and supports
-    /// volume control on its main output element.
+    /// True when the current default output device supports scalar volume
+    /// control.  Some virtual / aggregate devices don't expose it.
     @Published private(set) var isAvailable: Bool = false
 
-    /// 0.0 ... 1.0 scalar.  Mirrors the device's output volume; updated
-    /// both from user input and from external changes (menu-bar slider,
-    /// keyboard keys, etc.) via a property listener.
+    /// 0.0 ... 1.0 scalar.  Mirrors the current default output device's
+    /// volume; updated both from user input and from external changes.
     @Published private(set) var volumeScalar: Float = 0
 
     /// Cached dB conversion of `volumeScalar` for display.  May be
-    /// `-.infinity` at scalar = 0.  Refreshed on every scalar update.
+    /// `-.infinity` at scalar = 0.
     @Published private(set) var volumeDB: Float = -.infinity
 
     /// Decibel range reported by the device for its main output element.
-    /// Used by the display to pin the bottom of the slider's dB readout.
     @Published private(set) var dbRange: ClosedRange<Float> = -60.0 ... 0.0
 
+    /// User-facing name of the current default output device (e.g. "DSPi",
+    /// "MacBook Pro Speakers"), or "" when no default is set.
     @Published private(set) var deviceName: String = ""
 
     // MARK: - Private State
 
     private var deviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
     private let queue = DispatchQueue(label: "com.foxdac.hostVolume", qos: .userInitiated)
-    private var devicesListenerInstalled = false
+    private var defaultListenerInstalled = false
     private var volumeListenerInstalled = false
-
-    // Match config — the macOS audio device's display name typically
-    // mirrors the USB Product string descriptor.  We accept anything
-    // containing this token (case-insensitive) so the spelling can vary.
-    private static let nameToken = "DSPi"
-
-    // Also try matching against the device's ModelUID by USB VID/PID.
-    private static let vidHex = "2e8a"
-    private static let pidHex = "feaa"
 
     // MARK: - Lifecycle
 
-    /// Start listening for the DSPi audio device and install volume
-    /// listeners.  Idempotent — calling twice is safe.
-    func attach() {
+    init() {
         queue.async { [weak self] in
-            guard let self = self else { return }
-            self.installDevicesListener()
-            self.locateDeviceAndBind()
+            self?.installDefaultDeviceListener()
+            self?.rebindToCurrentDefault()
         }
     }
 
-    /// Tear down listeners and clear state.  Called on USB disconnect or
-    /// when the audio device disappears.
-    func detach() {
-        queue.async { [weak self] in
-            guard let self = self else { return }
+    deinit {
+        // CoreAudio listeners are cleaned up by the process exit; we only
+        // bother to uninstall here for tidiness during ad-hoc lifecycle
+        // testing.  Synchronous on the queue to avoid racing teardown.
+        queue.sync {
             self.uninstallVolumeListener()
-            self.uninstallDevicesListener()
-            self.clearDevice()
+            self.uninstallDefaultDeviceListener()
         }
     }
 
     // MARK: - User Actions
 
-    /// Apply a new scalar value (0...1) to the device.  Updates the
-    /// published value optimistically, then writes to CoreAudio.  The
-    /// property listener will reconcile if the device reports a different
-    /// value.
+    /// Convert a dB value to scalar (using the current device's taper if
+    /// available) and apply it.  Useful when re-syncing the host volume
+    /// from a non-USB source on a source switch back to USB.
+    func setVolumeDB(_ db: Float) {
+        queue.async { [weak self] in
+            guard let self = self,
+                  self.deviceID != AudioDeviceID(kAudioObjectUnknown) else { return }
+            let scalar = self.dbToScalar(db)
+            DispatchQueue.main.async {
+                self.volumeScalar = scalar
+                self.volumeDB = db
+            }
+            var v = scalar
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            _ = AudioObjectSetPropertyData(self.deviceID, &addr, 0, nil,
+                                           UInt32(MemoryLayout<Float>.size), &v)
+        }
+    }
+
+    /// Synchronous-publish counterpart of `setVolumeDB`.  MUST be called
+    /// on the main thread.  Updates `volumeScalar` / `volumeDB` in the
+    /// same runloop tick as the caller, so a SwiftUI view that swaps in
+    /// during this tick reads the new values immediately rather than
+    /// rendering once with the stale ones.  The CoreAudio device write
+    /// is still queued through `queue` to stay ordered with other writes.
+    /// Used during input-source switches to anchor the host-volume slider
+    /// at the user-volume value before the sidebar swaps modes.
+    func applyVolumeDBImmediate(_ db: Float) {
+        let scalar = self.dbToScalar(db)
+        self.volumeScalar = scalar
+        self.volumeDB = db
+        queue.async { [weak self] in
+            guard let self = self,
+                  self.deviceID != AudioDeviceID(kAudioObjectUnknown) else { return }
+            var v = scalar
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            _ = AudioObjectSetPropertyData(self.deviceID, &addr, 0, nil,
+                                           UInt32(MemoryLayout<Float>.size), &v)
+        }
+    }
+
+    /// Public scalar→dB conversion using the current default device's
+    /// taper (or a `20·log10` fallback if no device is bound).  Used by
+    /// the user-volume sidebar so both volume modes share the same
+    /// slider feel — same scalar position produces the same dB value.
+    func scalarToDBPublic(_ scalar: Float) -> Float {
+        return scalarToDB(scalar)
+    }
+
+    /// Public dB→scalar conversion using the current default device's
+    /// taper.  Counterpart of `scalarToDBPublic`.
+    func dbToScalarPublic(_ db: Float) -> Float {
+        return dbToScalar(db)
+    }
+
+    /// Inverse of `scalarToDB` — uses CoreAudio's
+    /// `kAudioDevicePropertyVolumeDecibelsToScalar` translation, or a
+    /// 10^(dB/20) fallback.  Always returns a value clamped to [0, 1].
+    private func dbToScalar(_ db: Float) -> Float {
+        guard deviceID != AudioDeviceID(kAudioObjectUnknown) else { return 0 }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeDecibelsToScalar,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(deviceID, &addr) {
+            var v = db
+            var size = UInt32(MemoryLayout<Float>.size)
+            if AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &v) == noErr {
+                return max(0, min(1, v))
+            }
+        }
+        let s = pow(10.0, Double(db) / 20.0)
+        return max(0, min(1, Float(s)))
+    }
+
+    /// Apply a new scalar value (0...1) to the current default device.
+    /// Updates the published value optimistically; the property listener
+    /// reconciles afterwards.
     func setVolumeScalar(_ value: Float) {
         let clamped = max(0, min(1, value))
         DispatchQueue.main.async {
@@ -109,127 +173,66 @@ final class HostVolumeController: ObservableObject {
         }
     }
 
-    // MARK: - Device Discovery
+    // MARK: - Default-device tracking
 
-    /// Enumerate all audio devices, find the DSPi, and install the volume
-    /// listener.  Runs on `queue`.
-    private func locateDeviceAndBind() {
-        let found = scanForDSPiDevice()
-        if let id = found, id != deviceID {
-            uninstallVolumeListener()
-            deviceID = id
-            installVolumeListener()
-            refreshDeviceMetadata()
+    /// Read the system's current default output device and rebind our
+    /// volume listener to it.  Runs on `queue`.
+    private func rebindToCurrentDefault() {
+        let newID = readDefaultOutputDevice()
+        if newID == deviceID {
+            // Same device — refresh the cached values in case anything
+            // changed (e.g. dB range on a hot-plug).
             refreshVolume()
-            DispatchQueue.main.async { self.isAvailable = true }
-        } else if found == nil && deviceID != AudioDeviceID(kAudioObjectUnknown) {
-            // Device disappeared
-            uninstallVolumeListener()
-            clearDevice()
+            refreshDeviceMetadata()
+            return
         }
-    }
 
-    /// Returns the DSPi device's AudioDeviceID, or nil if not found.
-    private func scanForDSPiDevice() -> AudioDeviceID? {
-        let devices = enumerateAudioDevices()
+        uninstallVolumeListener()
+        deviceID = newID
 
-        for id in devices {
-            // Must be USB transport
-            guard transportType(of: id) == kAudioDeviceTransportTypeUSB else { continue }
-
-            // Must have at least one output stream
-            guard hasOutputStreams(id) else { continue }
-
-            // Must support a scalar volume on the main output element
-            var volAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyVolumeScalar,
-                mScope: kAudioObjectPropertyScopeOutput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            guard AudioObjectHasProperty(id, &volAddr) else { continue }
-
-            // Match by display name OR ModelUID embedding VID/PID
-            let name = (deviceName(of: id) ?? "").lowercased()
-            let modelUID = (modelUID(of: id) ?? "").lowercased()
-            let nameMatch = name.contains(Self.nameToken.lowercased())
-            let uidMatch = modelUID.contains(Self.vidHex) && modelUID.contains(Self.pidHex)
-
-            if nameMatch || uidMatch {
-                return id
+        guard newID != AudioDeviceID(kAudioObjectUnknown) else {
+            DispatchQueue.main.async {
+                self.isAvailable = false
+                self.deviceName = ""
+                self.volumeScalar = 0
+                self.volumeDB = -.infinity
             }
+            return
         }
-        return nil
-    }
 
-    private func enumerateAudioDevices() -> [AudioDeviceID] {
+        // Verify scalar volume is supported on this device's main output.
         var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject),
-                                             &addr, 0, nil, &size) == noErr else {
-            return []
-        }
-        let count = Int(size) / MemoryLayout<AudioDeviceID>.size
-        var ids = [AudioDeviceID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
-                                         &addr, 0, nil, &size, &ids) == noErr else {
-            return []
-        }
-        return ids
-    }
-
-    private func hasOutputStreams(_ id: AudioDeviceID) -> Bool {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioObjectPropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr else { return false }
-        let bufList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: Int(size))
-        defer { bufList.deallocate() }
-        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, bufList) == noErr else { return false }
-        return bufList.pointee.mNumberBuffers > 0
+        let supportsVolume = AudioObjectHasProperty(newID, &addr)
+
+        DispatchQueue.main.async { self.isAvailable = supportsVolume }
+        refreshDeviceMetadata()
+
+        if supportsVolume {
+            installVolumeListener()
+            refreshVolume()
+        }
     }
 
-    private func transportType(of id: AudioDeviceID) -> UInt32 {
+    private func readDefaultOutputDevice() -> AudioDeviceID {
         var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var value: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr else { return 0 }
-        return value
+        var id = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
+                                         &addr, 0, nil, &size, &id) == noErr else {
+            return AudioObjectID(kAudioObjectUnknown)
+        }
+        return id
     }
 
-    private func deviceName(of id: AudioDeviceID) -> String? {
-        readCFString(id, selector: kAudioObjectPropertyName)
-    }
-
-    private func modelUID(of id: AudioDeviceID) -> String? {
-        readCFString(id, selector: kAudioDevicePropertyModelUID)
-    }
-
-    private func readCFString(_ id: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var cf: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        let err = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &cf)
-        guard err == noErr, let unmanaged = cf else { return nil }
-        let s = unmanaged.takeRetainedValue() as String
-        return s
-    }
-
-    // MARK: - Volume Read / Listener
+    // MARK: - Volume read
 
     private func refreshVolume() {
         guard deviceID != AudioDeviceID(kAudioObjectUnknown) else { return }
@@ -252,7 +255,7 @@ final class HostVolumeController: ObservableObject {
     }
 
     private func refreshDeviceMetadata() {
-        let name = deviceName(of: deviceID) ?? ""
+        let name = readCFString(deviceID, selector: kAudioObjectPropertyName) ?? ""
         DispatchQueue.main.async { self.deviceName = name }
     }
 
@@ -291,7 +294,21 @@ final class HostVolumeController: ObservableObject {
         return Float(range.mMinimum) ... Float(range.mMaximum)
     }
 
-    // MARK: - Property Listeners
+    private func readCFString(_ id: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {
+        guard id != AudioDeviceID(kAudioObjectUnknown) else { return nil }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var cf: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let err = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &cf)
+        guard err == noErr, let unmanaged = cf else { return nil }
+        return unmanaged.takeRetainedValue() as String
+    }
+
+    // MARK: - Property listeners
 
     private func installVolumeListener() {
         guard !volumeListenerInstalled,
@@ -304,9 +321,7 @@ final class HostVolumeController: ObservableObject {
         let status = AudioObjectAddPropertyListenerBlock(deviceID, &addr, queue) { [weak self] _, _ in
             self?.refreshVolume()
         }
-        if status == noErr {
-            volumeListenerInstalled = true
-        }
+        if status == noErr { volumeListenerInstalled = true }
     }
 
     private func uninstallVolumeListener() {
@@ -317,53 +332,39 @@ final class HostVolumeController: ObservableObject {
             mScope: kAudioObjectPropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        // We registered with a fresh closure capture each time; remove all
-        // listeners on this property by passing an empty block.  CoreAudio
-        // matches blocks by identity, so we can't strictly remove the
-        // exact one we added without retaining it — using a no-op here is
-        // a known limitation; the listener will simply ignore the dead
-        // weak self reference.
+        // CoreAudio matches blocks by identity; we can't recover the
+        // exact closure we registered with, so this no-op block call is
+        // effectively defensive cleanup.  The previous closure captures
+        // `weak self` and becomes inert once `self` is released.
         AudioObjectRemovePropertyListenerBlock(deviceID, &addr, queue) { _, _ in }
         volumeListenerInstalled = false
     }
 
-    private func installDevicesListener() {
-        guard !devicesListenerInstalled else { return }
+    private func installDefaultDeviceListener() {
+        guard !defaultListenerInstalled else { return }
         var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         let status = AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr, queue
         ) { [weak self] _, _ in
-            self?.locateDeviceAndBind()
+            self?.rebindToCurrentDefault()
         }
-        if status == noErr {
-            devicesListenerInstalled = true
-        }
+        if status == noErr { defaultListenerInstalled = true }
     }
 
-    private func uninstallDevicesListener() {
-        guard devicesListenerInstalled else { return }
+    private func uninstallDefaultDeviceListener() {
+        guard defaultListenerInstalled else { return }
         var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
         AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr, queue
         ) { _, _ in }
-        devicesListenerInstalled = false
-    }
-
-    private func clearDevice() {
-        deviceID = AudioDeviceID(kAudioObjectUnknown)
-        DispatchQueue.main.async {
-            self.isAvailable = false
-            self.volumeScalar = 0
-            self.volumeDB = -.infinity
-            self.deviceName = ""
-        }
+        defaultListenerInstalled = false
     }
 }
