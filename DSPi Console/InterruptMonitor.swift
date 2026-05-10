@@ -335,6 +335,25 @@ private enum ParamOffsetDecoder {
             return ("input_config.spdif_rx_pin", fmtUInt8(payload))
         }
 
+        // LG Sound Sync (2912..2927) — first 4 bytes are meaningful; rest reserved.
+        if off == 2912 && sz == 1 { return ("lg_sound_sync.enabled", fmtBool(payload)) }
+        if off == 2913 && sz == 1 { return ("lg_sound_sync.present", fmtBool(payload)) }
+        if off == 2914 && sz == 1 {
+            let v = payload.first ?? 0xFF
+            return ("lg_sound_sync.volume", v == 0xFF ? "—" : "\(v) / 100")
+        }
+        if off == 2915 && sz == 1 { return ("lg_sound_sync.muted", fmtBool(payload)) }
+
+        // User volume (2928..2943) — float dB at +0, mute byte at +4.
+        if off == 2928 && sz == 4 {
+            let db: Float = payload.withUnsafeBytes { $0.load(as: Float.self) }
+            let v = db <= -128 ? "MUTE" : String(format: "%+7.2f dB", db)
+            return ("user_volume.user_volume_db", v)
+        }
+        if off == 2932 && sz == 1 {
+            return ("user_volume.user_mute", fmtBool(payload))
+        }
+
         // Fallback — unknown offset
         return (String(format: "offset=0x%04X size=%d", off, sz), fmtHex(payload))
     }

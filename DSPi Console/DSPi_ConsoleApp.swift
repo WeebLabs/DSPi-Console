@@ -473,6 +473,28 @@ struct HardwareSettingsTab: View {
         26, 27, 28
     ]
 
+    /// Whether the connected device's hardware allows slot `slot` to be
+    /// I2S given the current state of its dependency parents.  Per
+    /// `runtime_output_type_switch_spec.md` §2 (STM32H723 build):
+    ///   • Slot 1 = I2S requires Slot 0 = I2S (SAI1_B borrows SAI1_A clocks)
+    ///   • Slot 2 = I2S requires Slot 0 = I2S (SAI4_A sync-external to SAI1)
+    ///   • Slot 3 = I2S requires Slot 2 = I2S (SAI4_B borrows SAI4_A clocks)
+    /// On RP firmware the four slots have no inter-slot constraint, so
+    /// the I2S option is always allowed.
+    private func i2sAllowedFor(slot: Int) -> Bool {
+        guard vm.platformName == "STM32H723" else { return true }
+        switch slot {
+        case 0:    return true
+        case 1, 2: return vm.outputSlotTypes[0] == 1
+        case 3:    return vm.outputSlotTypes[2] == 1
+        default:   return true
+        }
+    }
+
+    private var isSTM32: Bool {
+        vm.platformName == "STM32H723"
+    }
+
     /// CLK_GPOUTn-capable GPIOs per master_clock_spec.md §2.2.  MCK is
     /// driven directly from one of the chip's hardware clock outputs, so
     /// only pins that map to CLK_GPOUTn are accepted by the firmware:
@@ -610,8 +632,20 @@ struct HardwareSettingsTab: View {
                             Picker("", selection: Binding(
                                 get: { vm.outputSlotTypes[output.id] },
                                 set: { newType in
+                                    let slotID = output.id
                                     DispatchQueue.global(qos: .userInitiated).async {
-                                        let status = vm.setOutputSlotType(slot: output.id, type: newType)
+                                        let status = vm.setOutputSlotType(slot: slotID, type: newType)
+                                        // STM32 firmware silently coerces dependent
+                                        // I2S slots down to S/PDIF when their parent
+                                        // goes S/PDIF (per
+                                        // runtime_output_type_switch_spec.md §2).
+                                        // Refetch every slot so the UI reflects any
+                                        // cascade.
+                                        if status == PIN_CONFIG_SUCCESS && self.isSTM32 {
+                                            for s in 0..<vm.numOutputSlots {
+                                                vm.fetchOutputSlotType(slot: s)
+                                            }
+                                        }
                                         DispatchQueue.main.async {
                                             if status != PIN_CONFIG_SUCCESS {
                                                 statusMessage = "Failed to change \(output.name) type"
@@ -625,7 +659,9 @@ struct HardwareSettingsTab: View {
                                 }
                             )) {
                                 Text("S/PDIF").tag(UInt8(0))
-                                Text("I2S").tag(UInt8(1))
+                                if i2sAllowedFor(slot: output.id) {
+                                    Text("I2S").tag(UInt8(1))
+                                }
                             }
                             .labelsHidden()
                             .frame(width: 80, alignment: .trailing)
@@ -640,16 +676,22 @@ struct HardwareSettingsTab: View {
 
                         Spacer()
 
-                        Picker("", selection: Binding(
-                            get: { vm.outputPins[output.id] },
-                            set: { setPinForOutput(output.id, pin: $0) }
-                        )) {
-                            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .output(output.id)) == nil }, id: \.self) { pin in
-                                Text("GPIO \(pin)").tag(pin)
+                        // GPIO pin pickers are RP-only — on STM32 the SAI
+                        // peripherals drive fixed pins (PE6, PE3, PD11, PA0
+                        // for slot data; PE2/5/4 for I2S clocks) so there's
+                        // nothing to assign.
+                        if !isSTM32 {
+                            Picker("", selection: Binding(
+                                get: { vm.outputPins[output.id] },
+                                set: { setPinForOutput(output.id, pin: $0) }
+                            )) {
+                                ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .output(output.id)) == nil }, id: \.self) { pin in
+                                    Text("GPIO \(pin)").tag(pin)
+                                }
                             }
+                            .labelsHidden()
+                            .fixedSize()
                         }
-                        .labelsHidden()
-                        .fixedSize()
                     }
                     .padding(.vertical, 2)
                 }
@@ -666,19 +708,27 @@ struct HardwareSettingsTab: View {
                 }
             } header: {
                 HStack {
-                    Label("Output Assignment", systemImage: "cpu")
+                    Label(isSTM32 ? "Output Types" : "Output Assignment", systemImage: "cpu")
                     Spacer()
-                    Button("Reset Pins") {
-                        resetToDefaults()
+                    if !isSTM32 {
+                        Button("Reset Pins") {
+                            resetToDefaults()
+                        }
+                        .font(.caption)
+                        .buttonStyle(.plain)
+                        .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
+                        .disabled(!vm.isDeviceConnected)
                     }
-                    .font(.caption)
-                    .buttonStyle(.plain)
-                    .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
-                    .disabled(!vm.isDeviceConnected)
                 }
             }
 
             // MARK: I2S Clock
+            // BCK / MCK pin selection and MCK enable / multiplier are
+            // GPIO-mux concerns specific to the RP firmware.  STM32's SAI
+            // peripheral drives fixed clock pins (PE2 MCLK, PE5 BCK, PE4
+            // LRCLK) — there's nothing to assign — so we hide the whole
+            // section there.
+            if !isSTM32 {
             Section {
                 HStack {
                     Image(systemName: "waveform.path")
@@ -836,6 +886,7 @@ struct HardwareSettingsTab: View {
                 }
             } header: {
                 Label("I2S Configuration", systemImage: "waveform.path")
+            }
             }
 
             // MARK: S/PDIF Input

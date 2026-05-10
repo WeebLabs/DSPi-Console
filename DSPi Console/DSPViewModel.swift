@@ -151,9 +151,13 @@ class DSPViewModel: ObservableObject {
 
         recomputeAllMagnitudes()
 
-        // Mirror non-host channel-name change notifications back into UI.
-        // Host-originated edits already update channelNames synchronously
-        // in setChannelName(), so we ignore source==1 to avoid clobbering.
+        // Mirror non-host change notifications back into UI.  Host-
+        // originated edits already update local state synchronously at
+        // the setter call site (e.g. setChannelName, setUserVolume),
+        // so we ignore source==HOST to avoid clobbering an in-flight
+        // edit with its own stale notification echo.  Non-HOST sources
+        // (BULK / PRESET / FACTORY / GPIO / INTERNAL) are the real
+        // payload we care about here.
         AppState.shared.interruptMonitor.onParamChanged = { [weak self] offset, size, source, payload in
             guard source != 1 /* HOST */ else { return }
             self?.applyNotifiedParamChange(offset: offset, size: size, payload: payload)
