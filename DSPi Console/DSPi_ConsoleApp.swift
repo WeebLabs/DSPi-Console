@@ -473,6 +473,29 @@ struct HardwareSettingsTab: View {
         26, 27, 28
     ]
 
+    /// CLK_GPOUTn-capable GPIOs per master_clock_spec.md §2.2.  MCK is
+    /// driven directly from one of the chip's hardware clock outputs, so
+    /// only pins that map to CLK_GPOUTn are accepted by the firmware:
+    ///
+    ///   • RP2040 — GPIO 21 only (other GPOUTn pins 23/24/25 are board-reserved)
+    ///   • RP2350 — GPIO 13, 15, 21
+    ///
+    /// On RP2350, GPIO 15 is `clk_gpout1` but is also the I2S LRCLK pin
+    /// (BCK + 1) when any output slot is configured for I2S, so it's
+    /// hidden from the picker in that case.  Choosing it would always
+    /// fail the firmware's `is_pin_in_use()` check.
+    private var mckValidPins: [UInt8] {
+        if vm.platformName == "RP2040" {
+            return [21]
+        }
+        // RP2350: filter out 15 when an I2S slot is active (LRCLK conflict).
+        var pins: [UInt8] = [13, 15, 21]
+        if vm.anySlotIsI2S {
+            pins.removeAll { $0 == 15 }
+        }
+        return pins
+    }
+
     private enum PinConsumer: Equatable {
         case output(Int)
         case i2sBck      // also covers LRCLK (BCK + 1)
@@ -762,7 +785,7 @@ struct HardwareSettingsTab: View {
                             }
                         }
                     )) {
-                        ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .mck) == nil }, id: \.self) { pin in
+                        ForEach(mckValidPins.filter { pinInUseBy($0, excluding: .mck) == nil }, id: \.self) { pin in
                             Text("GPIO \(pin)").tag(pin)
                         }
                     }
