@@ -1459,6 +1459,16 @@ extension DSPViewModel {
             // guarantees this.
             DispatchQueue.main.async {
                 self.updateSavedSnapshot()
+                // Sync the macOS host volume to the newly-loaded preset's
+                // user volume so the menu-bar slider, F11/F12 keys, and
+                // audio_state.volume (via UAC1) all re-converge with what
+                // the preset says.  Same field the host slider already
+                // drives via UAC1 — applyVolumeDBImmediate updates the
+                // controller's published value synchronously on main and
+                // queues the CoreAudio device write.  Idempotent: if the
+                // preset's value matches the current host volume, the
+                // CoreAudio write is a no-op.
+                AppState.shared.hostVolume.applyVolumeDBImmediate(self.userVolumeDB)
             }
         }
         return status
