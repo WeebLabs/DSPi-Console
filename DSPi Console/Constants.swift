@@ -160,6 +160,20 @@ let REQ_GET_SPDIF_RX_CH_STATUS: UInt8 = 0xE3
 let REQ_SET_SPDIF_RX_PIN: UInt8       = 0xE4
 let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
 
+// DAC hardware-mute request codes (firmware V10+ wire format).  SET takes
+// a 16-byte DacHwMuteConfig OUT payload; GET returns 16 bytes; TEST is a
+// fire-and-forget command that asserts mute for ~1 s.  See
+// `dac_hardware_mute_spec.md`.
+let REQ_SET_DAC_HW_MUTE_CONFIG: UInt8 = 0xEA
+let REQ_GET_DAC_HW_MUTE_CONFIG: UInt8 = 0xEB
+let REQ_TEST_DAC_HW_MUTE: UInt8       = 0xEC
+
+let DAC_HW_MUTE_PIN_NONE: UInt8       = 0xFF
+let DAC_HW_MUTE_HOLD_MIN_MS: UInt16   = 1
+let DAC_HW_MUTE_HOLD_MAX_MS: UInt16   = 500
+let DAC_HW_MUTE_RELEASE_MIN_MS: UInt16 = 0
+let DAC_HW_MUTE_RELEASE_MAX_MS: UInt16 = 500
+
 // LG Sound Sync request codes (firmware V8+ wire format)
 // SET payload: 1 byte (0=off, anything else=on).
 // GET_ENABLE returns: 1 byte.

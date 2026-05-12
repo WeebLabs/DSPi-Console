@@ -66,7 +66,7 @@ class AppSettings: ObservableObject {
 // MARK: - Settings View
 struct SettingsView: View {
     private enum Tabs: Hashable {
-        case general, appearance, graphing, hardware, advanced
+        case general, global, appearance, graphing, hardware, advanced
     }
 
     var body: some View {
@@ -76,6 +76,12 @@ struct SettingsView: View {
                     Label("General", systemImage: "gear")
                 }
                 .tag(Tabs.general)
+
+            GlobalSettingsTab()
+                .tabItem {
+                    Label("Global", systemImage: "externaldrive")
+                }
+                .tag(Tabs.global)
 
             AppearanceSettingsTab()
                 .tabItem {
@@ -108,18 +114,6 @@ struct SettingsView: View {
 
 struct GeneralSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
-
-    private func slotLabel(_ slot: Int) -> String {
-        let display = slot + 1
-        let name: String
-        if vm.isPresetOccupied(slot) {
-            let trimmed = vm.presetNames[slot].trimmingCharacters(in: .whitespacesAndNewlines)
-            name = trimmed.isEmpty ? "Preset \(slot + 1)" : trimmed
-        } else {
-            name = "Empty"
-        }
-        return "\(display): \(name)"
-    }
 
     var body: some View {
         Form {
@@ -163,70 +157,6 @@ struct GeneralSettingsTab: View {
             }
 
             Section {
-                Picker("Mode", selection: Binding(
-                    get: { vm.presetStartupMode },
-                    set: { mode in
-                        vm.presetStartupMode = mode
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            vm.setPresetStartup(mode: mode, defaultSlot: vm.presetDefaultSlot)
-                        }
-                    }
-                )) {
-                    Text("Specified Default").tag(0)
-                    Text("Last Used").tag(1)
-                }
-
-                if vm.presetStartupMode == 0 {
-                    Picker("Default Preset", selection: Binding(
-                        get: { vm.presetDefaultSlot },
-                        set: { slot in
-                            vm.presetDefaultSlot = slot
-                            DispatchQueue.global(qos: .userInitiated).async {
-                                vm.setPresetStartup(mode: vm.presetStartupMode, defaultSlot: slot)
-                            }
-                        }
-                    )) {
-                        ForEach(0..<10, id: \.self) { slot in
-                            Text(slotLabel(slot)).tag(slot)
-                        }
-                    }
-                }
-
-                Text("Choose which preset loads when the device powers on.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } header: {
-                Label("Startup Preset", systemImage: "power")
-            }
-
-            Section {
-                Picker("Mode", selection: Binding(
-                    get: { vm.presetMasterVolumeMode },
-                    set: { mode in
-                        vm.presetMasterVolumeMode = mode
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            vm.setMasterVolumeMode(mode)
-                        }
-                    }
-                )) {
-                    Text("Independent").tag(MASTER_VOLUME_MODE_INDEPENDENT)
-                    Text("With Preset").tag(MASTER_VOLUME_MODE_WITH_PRESET)
-                }
-
-                if vm.presetMasterVolumeMode == MASTER_VOLUME_MODE_INDEPENDENT {
-                    Text("Master volume is stored on the device independently of presets and applied at boot. Loading a preset never changes it.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Master volume is part of each preset. Saved with the preset, restored on preset load.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } header: {
-                Label("Master Volume", systemImage: "speaker.wave.2")
-            }
-
-            Section {
                 Toggle(isOn: Binding(
                     get: { vm.lgSoundSyncEnabled },
                     set: { en in
@@ -259,6 +189,350 @@ struct GeneralSettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+}
+
+// MARK: - Global Settings Tab
+//
+// Houses every setting that lives in the device's flash directory
+// (board-level configuration that doesn't travel with presets).
+// Unlike the rest of the Settings tabs, edits here are staged in a
+// local draft and not pushed to the firmware until the user clicks
+// Save — that way the firmware's directory sector isn't written on
+// every individual picker change.
+//
+// Settings included:
+//   • Startup Preset (mode + default slot)
+//   • Master Volume persistence mode
+//   • "Include pin configuration in preset" toggle
+//   • DAC Hardware Mute config (enable / polarity / pin / hold / release)
+struct GlobalSettingsDraft: Equatable {
+    var presetStartupMode: Int
+    var presetDefaultSlot: Int
+    var presetMasterVolumeMode: Int
+    var presetIncludePins: Bool
+    var dacHwMuteConfig: DacHwMuteConfig
+
+    static func from(_ vm: DSPViewModel) -> GlobalSettingsDraft {
+        GlobalSettingsDraft(
+            presetStartupMode:      vm.presetStartupMode,
+            presetDefaultSlot:      vm.presetDefaultSlot,
+            presetMasterVolumeMode: vm.presetMasterVolumeMode,
+            presetIncludePins:      vm.presetIncludePins,
+            dacHwMuteConfig:        vm.dacHwMuteConfig
+        )
+    }
+}
+
+struct GlobalSettingsTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+    @State private var draft: GlobalSettingsDraft = GlobalSettingsDraft(
+        presetStartupMode: 0,
+        presetDefaultSlot: 0,
+        presetMasterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT,
+        presetIncludePins: false,
+        dacHwMuteConfig: DacHwMuteConfig()
+    )
+
+    private var hasChanges: Bool {
+        draft != GlobalSettingsDraft.from(vm)
+    }
+
+    private func slotLabel(_ slot: Int) -> String {
+        let display = slot + 1
+        let name: String
+        if vm.isPresetOccupied(slot) {
+            let trimmed = vm.presetNames[slot].trimmingCharacters(in: .whitespacesAndNewlines)
+            name = trimmed.isEmpty ? "Preset \(slot + 1)" : trimmed
+        } else {
+            name = "Empty"
+        }
+        return "\(display): \(name)"
+    }
+
+    var body: some View {
+        Form {
+            // MARK: Startup Preset
+            Section {
+                Picker("Mode", selection: $draft.presetStartupMode) {
+                    Text("Specified Default").tag(0)
+                    Text("Last Used").tag(1)
+                }
+
+                if draft.presetStartupMode == 0 {
+                    Picker("Default Preset", selection: $draft.presetDefaultSlot) {
+                        ForEach(0..<10, id: \.self) { slot in
+                            Text(slotLabel(slot)).tag(slot)
+                        }
+                    }
+                }
+
+                Text("Choose which preset loads when the device powers on.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } header: {
+                Label("Startup Preset", systemImage: "power")
+            }
+
+            // MARK: Master Volume Persistence
+            Section {
+                Picker("Mode", selection: $draft.presetMasterVolumeMode) {
+                    Text("Independent").tag(MASTER_VOLUME_MODE_INDEPENDENT)
+                    Text("With Preset").tag(MASTER_VOLUME_MODE_WITH_PRESET)
+                }
+
+                if draft.presetMasterVolumeMode == MASTER_VOLUME_MODE_INDEPENDENT {
+                    Text("Master volume is stored on the device independently of presets and applied at boot. Loading a preset never changes it.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Master volume is part of each preset. Saved with the preset, restored on preset load.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } header: {
+                Label("Master Volume", systemImage: "speaker.wave.2")
+            }
+
+            // MARK: Presets — Include Pin Configuration
+            Section {
+                Toggle(isOn: $draft.presetIncludePins) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Include Pin Configuration")
+                        Text("Restore GPIO pin assignments when loading a preset")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+            } header: {
+                Label("Presets", systemImage: "square.stack.3d.up")
+            }
+
+            // MARK: DAC Hardware Mute (only when firmware supports it)
+            if vm.dacHwMuteSupported {
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { draft.dacHwMuteConfig.enabled },
+                        set: { newVal in
+                            draft.dacHwMuteConfig.enabled = newVal
+                            // Enabling with no pin is nonsensical — auto-
+                            // assign the first available GPIO so the user
+                            // doesn't see an empty picker the moment they
+                            // flip the switch on.
+                            if newVal && draft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE {
+                                if let firstFree = HardwareSettingsTab.validPins.first(where: {
+                                    vm.pinInUseBy($0, excluding: .dacMute) == nil
+                                }) {
+                                    draft.dacHwMuteConfig.pin = firstFree
+                                }
+                            }
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Enable Automatic Mute")
+                                .font(.body)
+                            Text("Briefly mute an external DAC or amplifier to suppress loud pops during system state changes.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+
+                    if draft.dacHwMuteConfig.enabled {
+                        HStack {
+                            Image(systemName: "bolt.horizontal")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            Text("Polarity")
+                            Spacer()
+                            Picker("", selection: $draft.dacHwMuteConfig.activeLow) {
+                                Text("Active Low").tag(true)
+                                Text("Active High").tag(false)
+                            }
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+
+                        HStack {
+                            Image(systemName: "speaker.slash")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            Text("Mute Pin")
+                            Spacer()
+                            Picker("", selection: $draft.dacHwMuteConfig.pin) {
+                                // No "None" entry — the enable toggle is
+                                // the master switch.  Filter pins through
+                                // vm.pinInUseBy so claims in the Hardware
+                                // tab (output pins, I2S BCK/MCK, S/PDIF RX)
+                                // don't appear as free here.
+                                ForEach(HardwareSettingsTab.validPins.filter {
+                                    vm.pinInUseBy($0, excluding: .dacMute) == nil
+                                }, id: \.self) { pin in
+                                    Text("GPIO \(pin)").tag(pin)
+                                }
+                            }
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+
+                        // Hold / release timing — same fixed-option pickers
+                        // as the per-tab embed used to use, but bound to
+                        // the local draft instead of immediately committing.
+                        globalMsPicker(label: "Hold Time",
+                                       tooltip: "Mute-attack wait before clock-stop",
+                                       options: [5, 10, 20, 50, 100],
+                                       binding: $draft.dacHwMuteConfig.holdMs)
+
+                        globalMsPicker(label: "Release Time",
+                                       tooltip: "Wait after un-mute before audio resumes",
+                                       options: [0, 5, 10, 20, 50, 100],
+                                       binding: $draft.dacHwMuteConfig.releaseMs)
+
+                        HStack {
+                            Image(systemName: "play.circle")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Test")
+                                Text("Toggle automatic mute for one second to confirm hardware configuration.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button("Start") {
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    _ = vm.testDacHwMute()
+                                }
+                            }
+                            .disabled(vm.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE
+                                      || !vm.dacHwMuteConfig.enabled
+                                      || hasChanges)
+                            .help(hasChanges
+                                  ? "Save your changes first to test the mute pin."
+                                  : "Begins one-second test.")
+                        }
+                    }
+                } header: {
+                    Label("External Mute Control", systemImage: "speaker.slash")
+                }
+            }
+
+        }
+        .formStyle(.grouped)
+        .padding()
+        // Permanent footer bar — the macOS / Primer convention for
+        // explicit save flows.  Every dynamic alternative (animated
+        // safeAreaInset, conditional Section, VStack with grow,
+        // contentMargins, overlay-only) either reflows the Form's
+        // ScrollView or fights the Settings scene's window-resize
+        // policy, and the user perceives that as a jump.  A fixed
+        // footer doesn't move, so nothing jumps.  The bar's STATE
+        // signals dirty/clean (status label + button enabled state)
+        // rather than its presence.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            saveBar
+        }
+        .onAppear { revert() }
+        .onChange(of: vm.isDeviceConnected) { connected in
+            // Re-sync from device on (re)connect so the draft reflects
+            // freshly-fetched firmware values rather than stale state
+            // from before the disconnect.
+            if connected { revert() }
+        }
+    }
+
+    private var saveBar: some View {
+        HStack(spacing: 10) {
+            // Status indicator — visible only when there's pending state
+            // to save.  Uses opacity (not conditional rendering) so the
+            // bar's intrinsic width never changes between clean / dirty
+            // states.
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundColor(.orange)
+                Text("Unsaved changes")
+                    .foregroundColor(.secondary)
+            }
+            .font(.caption)
+            .opacity(hasChanges ? 1 : 0)
+            .animation(.easeInOut(duration: 0.18), value: hasChanges)
+
+            Spacer()
+
+            Button("Revert") { revert() }
+                .disabled(!hasChanges)
+            Button("Save") { save() }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!hasChanges || !vm.isDeviceConnected)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)        // Subtle bottom-bar material matching
+                                 // macOS toolbar conventions; sits flush
+                                 // against the form's bottom edge.
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 0.5)
+        }
+    }
+
+    @ViewBuilder
+    private func globalMsPicker(label: String,
+                                tooltip: String,
+                                options: [UInt16],
+                                binding: Binding<UInt16>) -> some View {
+        HStack {
+            Image(systemName: "timer")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            Text(label).help(tooltip)
+            Spacer()
+            Picker("", selection: binding) {
+                ForEach(options, id: \.self) { ms in
+                    Text("\(ms) ms").tag(ms)
+                }
+                if !options.contains(binding.wrappedValue) {
+                    Text("\(binding.wrappedValue) ms").tag(binding.wrappedValue)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    /// Push every draft field whose value differs from the device's
+    /// current view-model state.  Each setter publishes optimistically
+    /// in addition to sending the USB transfer, so by the time the
+    /// background work returns, vm == draft.
+    private func save() {
+        let snapshot = GlobalSettingsDraft.from(vm)
+        let pendingDraft = draft
+        DispatchQueue.global(qos: .userInitiated).async {
+            if pendingDraft.presetStartupMode != snapshot.presetStartupMode
+                || pendingDraft.presetDefaultSlot != snapshot.presetDefaultSlot {
+                vm.setPresetStartup(mode: pendingDraft.presetStartupMode,
+                                    defaultSlot: pendingDraft.presetDefaultSlot)
+            }
+            if pendingDraft.presetMasterVolumeMode != snapshot.presetMasterVolumeMode {
+                vm.setMasterVolumeMode(pendingDraft.presetMasterVolumeMode)
+            }
+            if pendingDraft.presetIncludePins != snapshot.presetIncludePins {
+                vm.setPresetIncludePins(pendingDraft.presetIncludePins)
+            }
+            if pendingDraft.dacHwMuteConfig != snapshot.dacHwMuteConfig {
+                vm.setDacHwMuteConfig(pendingDraft.dacHwMuteConfig)
+            }
+        }
+    }
+
+    private func revert() {
+        draft = GlobalSettingsDraft.from(vm)
     }
 }
 
@@ -467,7 +741,7 @@ struct HardwareSettingsTab: View {
     }
 
     // RP2040 valid GPIO pins (excludes 12=UART, 23-25=system)
-    private static let validPins: [UInt8] = [
+    static let validPins: [UInt8] = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
         13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
         26, 27, 28
@@ -518,27 +792,14 @@ struct HardwareSettingsTab: View {
         return pins
     }
 
-    private enum PinConsumer: Equatable {
-        case output(Int)
-        case i2sBck      // also covers LRCLK (BCK + 1)
-        case mck
-        case spdifRx
+    /// Thin pass-through to `vm.pinInUseBy` so existing call sites in
+    /// this struct keep their concise signature.  `PinConsumer` lives
+    /// on the view-model so other tabs can share the same conflict
+    /// matrix.
+    private func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
+        vm.pinInUseBy(pin, excluding: consumer)
     }
 
-    private func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
-        for output in visiblePinOutputs {
-            if consumer != .output(output.id) && vm.outputPins[output.id] == pin {
-                return output.name
-            }
-        }
-        if consumer != .i2sBck {
-            if pin == vm.i2sBckPin { return "I2S BCK" }
-            if pin == vm.i2sBckPin &+ 1 { return "I2S LRCLK" }
-        }
-        if consumer != .mck && pin == vm.mckPin { return "I2S MCK" }
-        if consumer != .spdifRx && vm.inputSourceSupported && pin == vm.spdifRxPin { return "S/PDIF RX" }
-        return nil
-    }
 
     private func setPinForOutput(_ outputIndex: Int, pin: UInt8) {
         guard vm.isDeviceConnected else {
@@ -946,28 +1207,6 @@ struct HardwareSettingsTab: View {
                 } header: {
                     Label("S/PDIF Input", systemImage: "arrow.down.to.line")
                 }
-            }
-
-            Section {
-                Toggle(isOn: Binding(
-                    get: { vm.presetIncludePins },
-                    set: { val in
-                        vm.presetIncludePins = val
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            vm.setPresetIncludePins(val)
-                        }
-                    }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Include Pin Configuration")
-                        Text("Restore GPIO pin assignments when loading a preset")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
-
-            } header: {
-                Label("Presets", systemImage: "square.stack.3d.up")
             }
         }
         .formStyle(.grouped)

@@ -18,6 +18,7 @@ extension DSPViewModel {
         fetchSampleRate()
         fetchUserVolume()
         fetchLgSoundSyncEnabled()
+        fetchDacHwMuteConfig()
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -398,6 +399,46 @@ extension DSPViewModel {
         DispatchQueue.main.async { self.lgSoundSyncEnabled = enabled }
         usb.sendControlRequest(request: REQ_SET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0,
                                data: Data([enabled ? 1 : 0]))
+    }
+
+    // MARK: - DAC Hardware Mute
+
+    /// Write the full 16-byte DAC hardware mute config to the firmware.
+    /// Optimistic local publish — the firmware emits a PARAM_CHANGED on the
+    /// `dac_hw_mute` section in WireBulkParams which `applyNotifiedParamChange`
+    /// will pick up for non-HOST sources, keeping multi-host clients in sync.
+    func setDacHwMuteConfig(_ config: DacHwMuteConfig) {
+        DispatchQueue.main.async { self.dacHwMuteConfig = config }
+        usb.sendControlRequest(request: REQ_SET_DAC_HW_MUTE_CONFIG,
+                               value: 0, index: 0, data: config.toData())
+    }
+
+    /// Read the current DAC hardware mute config.  STALLs on firmware older
+    /// than V10; if the call returns nil, `dacHwMuteSupported` stays false
+    /// and the Settings section hides itself.
+    func fetchDacHwMuteConfig() {
+        guard let d = usb.getControlRequest(request: REQ_GET_DAC_HW_MUTE_CONFIG,
+                                            value: 0, index: 0, length: 16),
+              let cfg = DacHwMuteConfig.fromData(d) else { return }
+        DispatchQueue.main.async {
+            self.dacHwMuteConfig = cfg
+            self.dacHwMuteSupported = true
+        }
+    }
+
+    /// Pulse the DAC mute line for ~1 s so the installer can audibly verify
+    /// the pin / polarity wiring.  IN-direction vendor request — returns
+    /// a 1-byte status (PIN_CONFIG_SUCCESS on success, PIN_CONFIG_INVALID_OUTPUT
+    /// when the feature is disabled).  The audible pulse runs deferred on
+    /// the firmware's main loop after the status returns.
+    @discardableResult
+    func testDacHwMute() -> UInt8 {
+        guard let d = usb.getControlRequest(request: REQ_TEST_DAC_HW_MUTE,
+                                            value: 0, index: 0, length: 1),
+              d.count >= 1 else {
+            return 0xFF
+        }
+        return d[0]
     }
 
     /// Probe the firmware for LG Sound Sync support and read the current
@@ -1242,6 +1283,13 @@ extension DSPViewModel {
             bulkUserVolume = data.withUnsafeBytes { $0.load(fromByteOffset: 2928, as: Float.self) }
         }
 
+        // --- DAC Hardware Mute (offset 2944, 16 bytes) --- V10 firmware only
+        // Board-level mute-pin config stored in the directory sector.
+        var bulkDacHwMute: DacHwMuteConfig? = nil
+        if formatVersion >= 10 && data.count >= 2960 {
+            bulkDacHwMute = DacHwMuteConfig.fromData(data.subdata(in: 2944..<2960))
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -1301,6 +1349,10 @@ extension DSPViewModel {
             if let lgEn = bulkLgEnabled {
                 self.lgSoundSyncEnabled = lgEn
                 self.lgSoundSyncSupported = true
+            }
+            if let cfg = bulkDacHwMute {
+                self.dacHwMuteConfig = cfg
+                self.dacHwMuteSupported = true
             }
 
             // Refresh channel visibility now that outputEnabled is populated
@@ -1668,6 +1720,17 @@ extension DSPViewModel {
                 ?? String(data: slice, encoding: .ascii)
                 ?? ""
             self.channelNames[ch] = name
+            return
+        }
+
+        // dac_hw_mute (offset 2944, full 16-byte struct).  Emitted by the
+        // firmware on a successful REQ_SET_DAC_HW_MUTE_CONFIG or after a
+        // factory-reset rewrite of the directory.  Mirror back so the UI
+        // stays in sync with non-HOST writes.
+        if off == 2944 && sz == 16 && payload.count >= 16,
+           let cfg = DacHwMuteConfig.fromData(payload) {
+            self.dacHwMuteConfig = cfg
+            self.dacHwMuteSupported = true
             return
         }
 

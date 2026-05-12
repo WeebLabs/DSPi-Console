@@ -1,6 +1,72 @@
 import SwiftUI
 import Combine
 
+// MARK: - GPIO Pin Conflict Resolution
+//
+// Top-level enum + view-model method so any tab that needs to filter
+// pin pickers shares one source of truth.  Without this, each tab that
+// owns a pin assignment maintains its own conflict list and a pin set
+// in one tab would silently appear "available" in another.
+enum PinConsumer: Equatable {
+    case output(Int)    // slot or PDM index — indexes vm.outputPins[]
+    case i2sBck         // also covers LRCLK (BCK + 1)
+    case mck
+    case spdifRx
+    case dacMute
+}
+
+// MARK: - DAC Hardware Mute Config
+//
+// 16-byte wire-format struct mirroring firmware `DacHwMuteConfig` in
+// `dac_hardware_mute_spec.md` §4.1.  Stored in the firmware's directory
+// sector (board-level config — not per preset).  A single shared GPIO
+// drives the DAC's MUTE input; pipeline reset is global so there's no
+// per-slot granularity (installations with multiple DACs wire their
+// MUTE pins together to one RP2 GPIO).
+//
+// Byte layout:
+//   0:    enabled
+//   1:    active_low
+//   2:    pin (0xFF = none)
+//   3:    reserved0 (alignment for hold_ms)
+//   4-5:  hold_ms  (little-endian)
+//   6-7:  release_ms (little-endian)
+//   8-15: reserved
+struct DacHwMuteConfig: Equatable {
+    var enabled: Bool = false
+    var activeLow: Bool = true
+    var pin: UInt8 = DAC_HW_MUTE_PIN_NONE
+    var holdMs: UInt16 = 0
+    var releaseMs: UInt16 = 0
+
+    /// Serialize to the 16-byte wire layout.  Reserved bytes are zero-filled.
+    func toData() -> Data {
+        var d = Data(count: 16)
+        d[0] = enabled ? 1 : 0
+        d[1] = activeLow ? 1 : 0
+        d[2] = pin
+        d[3] = 0  // reserved0 alignment
+        d[4] = UInt8(holdMs & 0xFF)
+        d[5] = UInt8((holdMs >> 8) & 0xFF)
+        d[6] = UInt8(releaseMs & 0xFF)
+        d[7] = UInt8((releaseMs >> 8) & 0xFF)
+        return d
+    }
+
+    /// Parse the 16-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> DacHwMuteConfig? {
+        guard data.count >= 16 else { return nil }
+        let base = data.startIndex
+        return DacHwMuteConfig(
+            enabled:   data[base + 0] != 0,
+            activeLow: data[base + 1] != 0,
+            pin:       data[base + 2],
+            holdMs:    UInt16(data[base + 4]) | (UInt16(data[base + 5]) << 8),
+            releaseMs: UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
+        )
+    }
+}
+
 // MARK: - View Model
 
 class DSPViewModel: ObservableObject {
@@ -65,6 +131,14 @@ class DSPViewModel: ObservableObject {
     @Published var lgSoundSyncEnabled: Bool = false
     @Published var lgSoundSyncSupported: Bool = false
 
+    // DAC hardware mute — board-level config that drives a GPIO pin into
+    // the DAC's mute input before clock-stop on pipeline reset.  Per-board
+    // attribute, persisted in the firmware's directory sector (not per
+    // preset).  `dacHwMuteSupported` flips true when the firmware responds
+    // to REQ_GET_DAC_HW_MUTE_CONFIG (V10+ wire format).
+    @Published var dacHwMuteConfig: DacHwMuteConfig = DacHwMuteConfig()
+    @Published var dacHwMuteSupported: Bool = false
+
     // Preset state
     @Published var presetOccupied: UInt16 = 0
     @Published var presetNames: [String] = Array(repeating: "", count: 10)
@@ -124,6 +198,43 @@ class DSPViewModel: ObservableObject {
     }
 
     func isPresetOccupied(_ slot: Int) -> Bool { presetOccupied & (1 << slot) != 0 }
+
+    /// Returns the name of the feature currently claiming `pin`, or nil
+    /// if free.  `excluding` lets the caller skip its own claim — e.g.
+    /// the DAC-mute picker passes `.dacMute` so its own pin isn't
+    /// reported as a conflict against itself.
+    ///
+    /// Single source of truth: HardwareSettingsTab AND GlobalSettingsTab
+    /// both call this so a pin assigned in one tab can't quietly appear
+    /// as "available" in the other.
+    func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
+        // SPDIF / I2S output slot pins.
+        for slot in 0..<numOutputSlots {
+            if consumer != .output(slot) && outputPins[slot] == pin {
+                return "Output \(slot + 1)"
+            }
+        }
+        // PDM (Subwoofer) — its outputPins index is numOutputSlots.
+        let pdmIdx = numOutputSlots
+        if pdmIdx < outputPins.count,
+           consumer != .output(pdmIdx),
+           outputPins[pdmIdx] == pin {
+            return "Subwoofer"
+        }
+        if consumer != .i2sBck {
+            if pin == i2sBckPin { return "I2S BCK" }
+            if pin == i2sBckPin &+ 1 { return "I2S LRCLK" }
+        }
+        if consumer != .mck && pin == mckPin { return "I2S MCK" }
+        if consumer != .spdifRx && inputSourceSupported && pin == spdifRxPin { return "S/PDIF RX" }
+        if consumer != .dacMute,
+           dacHwMuteConfig.enabled,
+           dacHwMuteConfig.pin != DAC_HW_MUTE_PIN_NONE,
+           pin == dacHwMuteConfig.pin {
+            return "DAC Mute"
+        }
+        return nil
+    }
 
     let usb: USBDevice
     private var cancellables = Set<AnyCancellable>()
