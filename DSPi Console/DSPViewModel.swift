@@ -165,6 +165,16 @@ class DSPViewModel: ObservableObject {
         return (v.major, v.minor, v.patch) >= (1, 1, 4)
     }
 
+    /// AllPass filter shipped in firmware 1.1.4.  Older firmware won't
+    /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
+    /// Defaults to `false` when the version is unknown (pre-connection) so the
+    /// UI is conservative — the option becomes available the moment we confirm
+    /// a supporting firmware.
+    var firmwareSupportsAllPass: Bool {
+        guard let v = firmwareVersion else { return false }
+        return (v.major, v.minor, v.patch) >= (1, 1, 4)
+    }
+
     /// Per-band bypass shipped in firmware 1.1.4.  Older firmware STALLs the
     /// new opcodes; the bypass byte at offset 3 of EqParamPacket is also the
     /// legacy `reserved` byte, so sending bypass=1 is safe but ignored.

@@ -12,10 +12,16 @@ enum SidebarSelection: Hashable {
 /// Notch was added in firmware 1.1.4 — older firmware would reject the type
 /// byte, so it's hidden from the picker until we've confirmed support.
 fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
-    if vm.firmwareSupportsNotch {
-        return FilterType.allCases
+    var filters: [FilterType] = FilterType.allCases
+
+    if vm.firmwareSupportsNotch == false {
+        filters = filters.filter { $0 != .notch }
     }
-    return FilterType.allCases.filter { $0 != .notch }
+
+    if vm.firmwareSupportsAllPass == false {
+        filters = filters.filter { $0 != .allPass }
+    }
+    return filters
 }
 
 // MARK: - Main Layout

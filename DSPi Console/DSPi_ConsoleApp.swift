@@ -1719,6 +1719,7 @@ struct FileMenuActions {
         case .lowShelf: typeCode = "LS"
         case .highShelf: typeCode = "HS"
         case .notch: typeCode = "NO"
+        case .allPass: typeCode = "AP"
         }
 
         let paddedType = typeCode.padding(toLength: 8, withPad: " ", startingAt: 0)
@@ -1729,8 +1730,8 @@ struct FileMenuActions {
             line += String(format: "  Gain %+5.1f dB", filter.gain)
         }
 
-        // Add Q for peaking filters
-        if filter.type == .peaking {
+        // Add Q for peaking and allpass filters
+        if filter.type == .peaking || filter.type == .allPass {
             line += String(format: "  Q %5.2f", filter.q)
         }
 
