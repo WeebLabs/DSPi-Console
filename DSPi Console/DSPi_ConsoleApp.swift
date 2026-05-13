@@ -453,10 +453,16 @@ struct GlobalSettingsTab: View {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundColor(.orange)
-                Text("Unsaved changes")
-                    .foregroundColor(.secondary)
+                    .font(.caption)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Unsaved changes")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Once saved, these settings are written directly to flash.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
-            .font(.caption)
             .opacity(hasChanges ? 1 : 0)
             .animation(.easeInOut(duration: 0.18), value: hasChanges)
 
