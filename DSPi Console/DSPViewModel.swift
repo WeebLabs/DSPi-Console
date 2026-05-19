@@ -80,6 +80,11 @@ class DSPViewModel: ObservableObject {
     @Published var userVolumeDB: Float = 0.0
     @Published var bypass: Bool = false
     @Published var channelData: [Int: [FilterParams]] = [:]
+    /// Crossover bands per EQ channel.  Only output channels (eqCh >= 2) carry
+    /// real entries; master channels are kept empty since crossover is
+    /// rejected pre-matrix-mixer per spec §1.  Always 4 bands per channel
+    /// (the 16-byte WireBandParams entries mapped to wire band indices 12..15).
+    @Published var xoverData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
     @Published var channelDelays: [Int: Float] = [:]
     @Published var loudnessEnabled: Bool = false
@@ -182,6 +187,19 @@ class DSPViewModel: ObservableObject {
         guard let v = firmwareVersion else { return false }
         return (v.major, v.minor, v.patch) >= (1, 1, 4)
     }
+
+    /// Crossover stage (V11 wire format) shipped alongside crossover_filters_spec.
+    /// Tracked via the bulk-transfer format version: firmware that returns a
+    /// V11 payload accepts crossover writes at band indices 12..15.  Defaults
+    /// to false until we've parsed a bulk reply, so the UI tab can hide itself
+    /// on pre-V11 firmware.
+    @Published var firmwareSupportsCrossover: Bool = false
+
+    /// Wire band index for the i-th crossover band (0..3 → 12..15).  Single
+    /// source of truth so view-model and view code agree about addressing.
+    static func crossoverWireBand(_ localBand: Int) -> Int { 12 + localBand }
+    static let crossoverBandsPerChannel = 4
+    static let firstCrossoverWireBand = 12
     @Published var isDeviceConnected: Bool = false
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
@@ -264,6 +282,9 @@ class DSPViewModel: ObservableObject {
         for outputIdx in 0..<9 {
             let eqCh = outputIdx + 2
             channelData[eqCh] = Array(repeating: FilterParams(), count: 10)
+            // Crossover bands default to FLAT (= bypassed) per spec §7.
+            xoverData[eqCh] = Array(repeating:
+                FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0), count: 4)
             channelVisibility[eqCh] = outputEnabled[outputIdx]
         }
 
@@ -391,14 +412,16 @@ class DSPViewModel: ObservableObject {
     @Published var cachedMagnitudes: [Int: [Double]] = [:]
 
     func recomputeMagnitudes(for eqChannel: Int) {
-        let filters = channelData[eqChannel] ?? []
+        let peqFilters = channelData[eqChannel] ?? []
+        let xoverFilters = (eqChannel >= 2) ? (xoverData[eqChannel] ?? []) : []
+        let allFilters = peqFilters + xoverFilters
         let isBypassed = bypass && (eqChannel <= 1)
         var results = [Double]()
         results.reserveCapacity(201)
         let logMin = log10(Float(10.0)), logMax = log10(Float(20000.0))
         for i in 0...200 {
             let freq = pow(10, logMin + Float(i) / 200.0 * (logMax - logMin))
-            results.append(Double(isBypassed ? 0 : DSPMath.responseAt(freq: freq, filters: filters)))
+            results.append(Double(isBypassed ? 0 : DSPMath.responseAt(freq: freq, filters: allFilters)))
         }
         cachedMagnitudes[eqChannel] = results
     }
@@ -439,6 +462,7 @@ class DSPViewModel: ObservableObject {
             outputGainDB: outputGainDB,
             outputDelayMS: outputDelayMS,
             channelFilters: channelData.mapValues { $0.map { SnapshotFilterParams(from: $0) } },
+            crossoverFilters: xoverData.mapValues { $0.map { SnapshotFilterParams(from: $0) } },
             channelNames: channelNames,
             // Output configuration is captured unconditionally; PresetSnapshot.diff
             // gates the comparison on outputConfigMode so it only contributes to

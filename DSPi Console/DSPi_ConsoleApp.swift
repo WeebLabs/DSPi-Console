@@ -1758,6 +1758,10 @@ struct FileMenuActions {
         case .highShelf: typeCode = "HS"
         case .notch: typeCode = "NO"
         case .allPass: typeCode = "AP"
+        default:
+            // Crossover types live in xoverData, not channelData; this REW-style
+            // export only covers PEQ bands.
+            typeCode = filter.type.shortLabel
         }
 
         let paddedType = typeCode.padding(toLength: 8, withPad: " ", startingAt: 0)

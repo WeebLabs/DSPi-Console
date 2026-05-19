@@ -965,6 +965,93 @@ struct PreampControlView: View {
 
 // MARK: - Filter List
 
+/// Optional tab entry rendered in FilterListView's header row.
+/// This keeps the band-list mode selector local to the list without spending
+/// another horizontal row.
+struct FilterListTab {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+}
+
+/// Compact pill button used in FilterListView's header row.  Matches the
+/// caption-font / small-padding / outlined-rect treatment shared with the
+/// Link L/R button and the matrix INV toggle elsewhere in the UI.
+private struct FilterListHeaderButton: View {
+    let title: String
+    let tint: Color
+    let action: () -> Void
+    var help: String? = nil
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption).fontWeight(.medium)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help ?? "")
+    }
+}
+
+struct FilterListTabToggle: View {
+    let tabs: [FilterListTab]
+
+    private var selectedTab: FilterListTab? {
+        tabs.first { $0.isSelected }
+    }
+
+    private var targetTab: FilterListTab? {
+        tabs.first { !$0.isSelected }
+    }
+
+    private var helpText: String {
+        guard let targetTab else { return "" }
+        return targetTab.title == "XO" ? "Switch to crossover bands" : "Switch to PEQ bands"
+    }
+
+    var body: some View {
+        Button(action: { targetTab?.action() }) {
+            ZStack {
+                // Invisible copies of every tab title reserve width for the
+                // widest label so the button stays a fixed size across
+                // PEQ/XO selections; the visible label is centered on top.
+                ForEach(tabs.indices, id: \.self) { i in
+                    Text(tabs[i].title)
+                        .font(.caption).fontWeight(.medium)
+                        .opacity(0)
+                }
+                Text(selectedTab?.title ?? "")
+                    .font(.caption).fontWeight(.medium)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+        .disabled(targetTab == nil)
+    }
+}
+
 struct FilterListView: View {
     let bands: [FilterParams]
     let channelId: Int
@@ -974,6 +1061,9 @@ struct FilterListView: View {
     var availableTypes: [FilterType] = FilterType.allCases
     /// True when the connected firmware supports per-band bypass (>= 1.1.4).
     var bypassSupported: Bool = false
+    /// Optional tabs rendered at the top of the card (above the column header).
+    /// Empty by default so existing call sites are unaffected.
+    var tabs: [FilterListTab] = []
     let onUpdate: (Int, FilterParams) -> Void
     /// Toggle bypass on a single band.  Cheaper than re-sending the full
     /// EqParamPacket via onUpdate and avoids racing with in-flight edits.
@@ -982,7 +1072,8 @@ struct FilterListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+            // Header — column labels on the left, optional Clear All + tabs
+            // share the right-aligned area that was otherwise empty.
             HStack(spacing: 12) {
                 if bypassSupported {
                     Spacer().frame(width: 18)
@@ -993,12 +1084,22 @@ struct FilterListView: View {
                 Text("GAIN").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 84, alignment: .center)
                 Text("WIDTH").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 74, alignment: .center)
                 Spacer()
-                if let onClear = onClear {
-                    Button("Clear All", role: .destructive, action: onClear)
-                        .controlSize(.mini)
+                HStack(spacing: 8) {
+                    if let onClear = onClear {
+                        FilterListHeaderButton(
+                            title: "Clear All",
+                            tint: .secondary,
+                            action: onClear,
+                            help: "Reset all bands"
+                        )
+                    }
+                    if !tabs.isEmpty {
+                        FilterListTabToggle(tabs: tabs)
+                    }
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(.leading, 16)
+            .padding(.trailing, 8)
             .padding(.vertical, 8)
             .background(Color(NSColor.controlBackgroundColor))
 
@@ -1237,9 +1338,13 @@ struct FilterRowView: View {
                         Spacer().frame(width: 60 + 24) // Placeholder
                     }
 
-                    // Q
-                    ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
-                        var p = params; p.q = $0; onChange(p)
+                    // Q (hidden for crossover types — firmware ignores Q on those).
+                    if params.type.isCrossover {
+                        Spacer().frame(width: 50 + 24)
+                    } else {
+                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
+                            var p = params; p.q = $0; onChange(p)
+                        }
                     }
                 }
                 .opacity(isBypassed ? 0.45 : 1.0)

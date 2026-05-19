@@ -114,7 +114,21 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-let BULK_PARAMS_SIZE: UInt16            = 2944
+/// V11 bulk transfer size (3664 bytes) — adds 704 bytes of crossover state on
+/// top of V10 (2960).  Firmware accepts any size between V2 (2832) and the
+/// current max, so requesting V11 size is safe across versions: older
+/// firmware returns its smaller payload and we parse what we receive.
+let BULK_PARAMS_SIZE: UInt16            = 3664
+let BULK_PARAMS_V10_SIZE: Int           = 2960
+let BULK_PARAMS_V11_SIZE: Int           = 3664
+/// Offset of the WireCrossoverConfig section inside the V11 wire format.
+let BULK_CROSSOVER_OFFSET: Int          = 2960
+/// Bytes per WireBandParams (matches firmware EqParamPacket layout).
+let WIRE_BAND_PARAMS_SIZE: Int          = 16
+/// Crossover bands per channel in the V11 wire layout.
+let WIRE_MAX_XOVER_BANDS: Int           = 4
+/// Channels in the V11 wire layout (11 even on RP2040 — wire layout is fixed).
+let WIRE_MAX_CHANNELS: Int              = 11
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0

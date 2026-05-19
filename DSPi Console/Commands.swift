@@ -265,7 +265,87 @@ extension DSPViewModel {
         }
         return data[0] == 1
     }
-    
+
+    // MARK: - Crossover Bands
+    //
+    // Crossover uses the existing EQ-band addressing (REQ_SET/GET_EQ_PARAM)
+    // with band indices 12..15 reserved for the four crossover bands per
+    // output channel.  See crossover_filters_spec.md §3.  The wValue layout
+    // for SET is unused; the recipe is in the 16-byte payload.
+
+    /// Set a single crossover band on an output channel.  `localBand` is 0..3;
+    /// the wire band index is 12+localBand.  No-op for master channels (the
+    /// firmware would reject them anyway) and for invalid band indices.
+    func setCrossoverBand(ch: Int, localBand: Int, p: FilterParams) {
+        guard ch >= 2,
+              localBand >= 0,
+              localBand < DSPViewModel.crossoverBandsPerChannel else { return }
+
+        let wireBand = DSPViewModel.crossoverWireBand(localBand)
+        var p = p
+        // Crossover types ignore Q / gain in firmware; we keep the values for
+        // round-trip but normalize so saved snapshots compare cleanly.
+        p.gain = 0
+        if p.q <= 0 { p.q = 0.707 }
+        if var bands = xoverData[ch], localBand < bands.count {
+            bands[localBand] = p
+            xoverData[ch] = bands
+            recomputeMagnitudes(for: ch)
+        }
+
+        // EqParamPacket: [ch, band, type, bypass, freq(4), q(4), gain(4)] = 16
+        let data = NSMutableData()
+        var ch8 = UInt8(ch); data.append(&ch8, length: 1)
+        var b8 = UInt8(wireBand); data.append(&b8, length: 1)
+        var t8 = UInt8(p.type.rawValue); data.append(&t8, length: 1)
+        var bp = UInt8(p.bypass ? 1 : 0); data.append(&bp, length: 1)
+        var f32 = p.freq; data.append(&f32, length: 4)
+        var q32 = p.q;    data.append(&q32, length: 4)
+        var g32 = p.gain; data.append(&g32, length: 4)
+
+        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
+    }
+
+    /// Toggle a single crossover band's bypass flag.  Uses REQ_SET_BAND_BYPASS
+    /// (0xD8) — same opcode as PEQ.  No-op for master channels.
+    func setCrossoverBandBypass(ch: Int, localBand: Int, bypass: Bool) {
+        guard ch >= 2,
+              localBand >= 0,
+              localBand < DSPViewModel.crossoverBandsPerChannel else { return }
+        let wireBand = DSPViewModel.crossoverWireBand(localBand)
+        if var bands = xoverData[ch], localBand < bands.count {
+            bands[localBand].bypass = bypass
+            xoverData[ch] = bands
+            recomputeMagnitudes(for: ch)
+        }
+        let wValue = UInt16((ch << 8) | wireBand)
+        let payload = Data([bypass ? 1 : 0])
+        usb.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
+    }
+
+    /// Clear all crossover bands on an output channel by writing the default
+    /// (FLAT, 1000 Hz, Q=0.707, gain=0, bypass=0) recipe to each.
+    func clearCrossoverBands(ch: Int) {
+        guard ch >= 2 else { return }
+        for i in 0..<DSPViewModel.crossoverBandsPerChannel {
+            let defaults = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
+            setCrossoverBand(ch: ch, localBand: i, p: defaults)
+        }
+    }
+
+    /// Clear all PEQ bands on a single channel by writing the default
+    /// (FLAT, 1000 Hz, Q=0.707, gain=0) recipe to each.  Mirrors
+    /// `clearAllMaster` but scoped to one channel — used by the Clear All
+    /// button on output channel PEQ tabs.
+    func clearPEQBands(ch: Int) {
+        let bandCount = channelData[ch]?.count ?? 10
+        let defaults = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
+        for b in 0..<bandCount {
+            setFilter(ch: ch, band: b, p: defaults)
+        }
+        recomputeMagnitudes(for: ch)
+    }
+
     func setDelay(ch: Int, ms: Float) {
         var val = ms.rounded()
         if val == -0.0 { val = 0.0 }
@@ -1268,6 +1348,38 @@ extension DSPViewModel {
             bulkDacHwMute = DacHwMuteConfig.fromData(data.subdata(in: 2944..<2960))
         }
 
+        // --- Crossover Config (offset 2960, 704 bytes) --- V11 firmware only
+        // WireCrossoverConfig: bands[11 channels][4 bands][16 bytes].  Master
+        // rows (channels 0..1) come back zeroed and we mirror that into the
+        // app's empty xoverData entries for those channels.  See
+        // crossover_filters_spec.md §4.
+        var bulkCrossovers: [Int: [FilterParams]]? = nil
+        if formatVersion >= 11 && data.count >= BULK_PARAMS_V11_SIZE {
+            var xovers = [Int: [FilterParams]]()
+            for ch in 0..<numCh {
+                var bands: [FilterParams] = []
+                bands.reserveCapacity(WIRE_MAX_XOVER_BANDS)
+                for band in 0..<WIRE_MAX_XOVER_BANDS {
+                    let base = BULK_CROSSOVER_OFFSET
+                            + (ch * WIRE_MAX_XOVER_BANDS + band) * WIRE_BAND_PARAMS_SIZE
+                    let typeByte = data[base]
+                    let bypassByte = data[base + 1]
+                    let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
+                    let q: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
+                    let gain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 12, as: Float.self) }
+                    bands.append(FilterParams(
+                        type: FilterType(rawValue: Int(typeByte)) ?? .flat,
+                        freq: max(freq, 10),
+                        q: q > 0 ? q : 0.707,
+                        gain: gain,
+                        bypass: bypassByte == 1
+                    ))
+                }
+                xovers[ch] = bands
+            }
+            bulkCrossovers = xovers
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -1331,6 +1443,16 @@ extension DSPViewModel {
             if let cfg = bulkDacHwMute {
                 self.dacHwMuteConfig = cfg
                 self.dacHwMuteSupported = true
+            }
+
+            if let xovers = bulkCrossovers {
+                self.firmwareSupportsCrossover = true
+                // Replace the entire xoverData dictionary so deletions on the
+                // wire propagate.  Master rows are stored too (they'll be all
+                // zeros / FLAT) but the UI hides them.
+                self.xoverData = xovers
+            } else {
+                self.firmwareSupportsCrossover = false
             }
 
             // Refresh channel visibility now that outputEnabled is populated
@@ -1706,6 +1828,42 @@ extension DSPViewModel {
                     self.channelData[ch] = bands
                     self.recomputeMagnitudes(for: ch)
                 }
+            }
+            return
+        }
+
+        // Crossover band updates: 11 channels × 4 bands × 16 bytes at the
+        // V11 crossover offset (2960).  Layout mirrors PEQ but in its own
+        // WireCrossoverConfig section.  Master rows (channels 0..1) come
+        // through zeroed and we just store-but-don't-render them.
+        let xoverBase = BULK_CROSSOVER_OFFSET
+        let xoverChannelStride = WIRE_MAX_XOVER_BANDS * WIRE_BAND_PARAMS_SIZE
+        if sz == WIRE_BAND_PARAMS_SIZE,
+           off >= xoverBase,
+           off < xoverBase + WIRE_MAX_CHANNELS * xoverChannelStride,
+           (off - xoverBase) % WIRE_BAND_PARAMS_SIZE == 0,
+           payload.count >= WIRE_BAND_PARAMS_SIZE {
+            let flatIdx = (off - xoverBase) / WIRE_BAND_PARAMS_SIZE
+            let ch = flatIdx / WIRE_MAX_XOVER_BANDS
+            let localBand = flatIdx % WIRE_MAX_XOVER_BANDS
+            if var bands = self.xoverData[ch], localBand < bands.count {
+                let typeByte = payload[0]
+                let bypassByte = payload[1]
+                let freq: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
+                let q: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 8, as: Float.self) }
+                let gain: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 12, as: Float.self) }
+                var fp = bands[localBand]
+                fp.type = FilterType(rawValue: Int(typeByte)) ?? .flat
+                fp.freq = freq
+                fp.q = q
+                fp.gain = gain
+                fp.bypass = bypassByte == 1
+                if bands[localBand] != fp {
+                    bands[localBand] = fp
+                    self.xoverData[ch] = bands
+                    self.recomputeMagnitudes(for: ch)
+                }
+                self.firmwareSupportsCrossover = true
             }
             return
         }

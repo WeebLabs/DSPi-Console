@@ -8,11 +8,13 @@ enum SidebarSelection: Hashable {
     case output(Int)  // Matrix output index 0-8
 }
 
-/// Filter types offered to the user, gated on connected-firmware capability.
-/// Notch was added in firmware 1.1.4 — older firmware would reject the type
-/// byte, so it's hidden from the picker until we've confirmed support.
+/// Filter types offered to the user in the PEQ picker, gated on connected-firmware
+/// capability.  Crossover filter types live in their own picker on the Crossover
+/// tab and never appear here.  Notch / AllPass were added in firmware 1.1.4 —
+/// older firmware would reject the type byte, so they're hidden until we've
+/// confirmed support.
 fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
-    var filters: [FilterType] = FilterType.allCases
+    var filters: [FilterType] = FilterType.allCases.filter { !$0.isCrossover }
 
     if vm.firmwareSupportsNotch == false {
         filters = filters.filter { $0 != .notch }
@@ -719,43 +721,8 @@ struct ContentView: View {
                         }
 
                     case .output(let idx):
-                        let eqChannel = idx + 2
-                        VStack(spacing: 16) {
-                            ChannelSettingsView(
-                                vm: vm,
-                                outputIndex: idx,
-                                gainDB: Binding(
-                                    get: { vm.outputGainDB[idx] },
-                                    set: { vm.setOutputGain(output: idx, db: $0) }
-                                ),
-                                delayMS: Binding(
-                                    get: { vm.outputDelayMS[idx] },
-                                    set: { vm.setOutputDelay(output: idx, ms: $0) }
-                                ),
-                                isMuted: Binding(
-                                    get: { vm.outputMuted[idx] },
-                                    set: { vm.setOutputMute(output: idx, muted: $0) }
-                                ),
-                                maxDelay: vm.platformName == "RP2040" ? 42 : 85,
-                                onGainDrag: { vm.sendOutputGainToDevice(output: idx, db: $0) },
-                                onDelayDrag: { vm.sendOutputDelayToDevice(output: idx, ms: $0) }
-                            )
-                            .padding(.horizontal)
-
-                            FilterListView(
-                                bands: vm.channelData[eqChannel] ?? [],
-                                channelId: eqChannel,
-                                availableTypes: availableFilterTypes(vm: vm),
-                                bypassSupported: vm.firmwareSupportsBandBypass,
-                                onUpdate: { band, params in
-                                    vm.setFilter(ch: eqChannel, band: band, p: params)
-                                },
-                                onBypassToggle: { band, bypass in
-                                    vm.setBandBypass(ch: eqChannel, band: band, bypass: bypass)
-                                },
-                                onClear: nil
-                            )
-                        }
+                        OutputChannelDetail(vm: vm, outputIndex: idx,
+                                            availableTypes: availableFilterTypes(vm: vm))
 
                     case .overview:
                         ScrollView {
@@ -847,7 +814,112 @@ extension DSPViewModel {
             FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams(), FilterParams()
         ]
 
+        // Enable crossover tab in preview so the new UI is visible.
+        vm.firmwareSupportsCrossover = true
+
         return vm
+    }
+}
+
+// MARK: - Output Channel Detail
+//
+// Right-pane content for an output channel.  Shared output-settings card on
+// top, then a tab bar that switches the band list below between PEQ and
+// crossover bands.  Both tabs render the same FilterListView — only the
+// `bands`, `availableTypes`, and update callbacks differ.
+
+enum OutputChannelTab: Hashable {
+    case peq
+    case crossover
+}
+
+/// PEQ-only filter types (everything in `FilterType.allCases` except the
+/// crossover entries) — kept here as a stand-alone helper because the
+/// crossover tab needs the complement.
+fileprivate func availableCrossoverTypes(vm: DSPViewModel) -> [FilterType] {
+    // FLAT is included so the user can disarm a band by picking "Off".
+    [.flat] + FilterType.allCases.filter { $0.isCrossover }
+}
+
+struct OutputChannelDetail: View {
+    @ObservedObject var vm: DSPViewModel
+    let outputIndex: Int
+    let availableTypes: [FilterType]
+    @State private var tab: OutputChannelTab = .peq
+
+    private var eqChannel: Int { outputIndex + 2 }
+    private var crossoverSupported: Bool { vm.firmwareSupportsCrossover }
+
+    private var filterListTabs: [FilterListTab] {
+        guard crossoverSupported else { return [] }
+        return [
+            FilterListTab(title: "PEQ",       isSelected: tab == .peq)       { tab = .peq },
+            FilterListTab(title: "XO",        isSelected: tab == .crossover) { tab = .crossover },
+        ]
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            ChannelSettingsView(
+                vm: vm,
+                outputIndex: outputIndex,
+                gainDB: Binding(
+                    get: { vm.outputGainDB[outputIndex] },
+                    set: { vm.setOutputGain(output: outputIndex, db: $0) }
+                ),
+                delayMS: Binding(
+                    get: { vm.outputDelayMS[outputIndex] },
+                    set: { vm.setOutputDelay(output: outputIndex, ms: $0) }
+                ),
+                isMuted: Binding(
+                    get: { vm.outputMuted[outputIndex] },
+                    set: { vm.setOutputMute(output: outputIndex, muted: $0) }
+                ),
+                maxDelay: vm.platformName == "RP2040" ? 42 : 85,
+                onGainDrag: { vm.sendOutputGainToDevice(output: outputIndex, db: $0) },
+                onDelayDrag: { vm.sendOutputDelayToDevice(output: outputIndex, ms: $0) }
+            )
+            .padding(.horizontal)
+
+            switch tab {
+            case .peq:
+                FilterListView(
+                    bands: vm.channelData[eqChannel] ?? [],
+                    channelId: eqChannel,
+                    availableTypes: availableTypes,
+                    bypassSupported: vm.firmwareSupportsBandBypass,
+                    tabs: filterListTabs,
+                    onUpdate: { band, params in
+                        vm.setFilter(ch: eqChannel, band: band, p: params)
+                    },
+                    onBypassToggle: { band, bypass in
+                        vm.setBandBypass(ch: eqChannel, band: band, bypass: bypass)
+                    },
+                    onClear: { vm.clearPEQBands(ch: eqChannel) }
+                )
+            case .crossover:
+                FilterListView(
+                    bands: vm.xoverData[eqChannel] ?? [],
+                    channelId: eqChannel,
+                    availableTypes: availableCrossoverTypes(vm: vm),
+                    bypassSupported: vm.firmwareSupportsBandBypass,
+                    tabs: filterListTabs,
+                    onUpdate: { localBand, params in
+                        vm.setCrossoverBand(ch: eqChannel, localBand: localBand, p: params)
+                    },
+                    onBypassToggle: { localBand, bypass in
+                        vm.setCrossoverBandBypass(ch: eqChannel, localBand: localBand, bypass: bypass)
+                    },
+                    onClear: { vm.clearCrossoverBands(ch: eqChannel) }
+                )
+            }
+        }
+        .onChange(of: crossoverSupported) { supported in
+            // If we lose crossover support (e.g. user switches to a pre-V11
+            // device), bounce back to the PEQ tab so we don't show an
+            // unreachable selection.
+            if !supported && tab == .crossover { tab = .peq }
+        }
     }
 }
 
@@ -1070,4 +1142,3 @@ private struct PresetContextMenuItems: View, Equatable {
         }
     }
 }
-

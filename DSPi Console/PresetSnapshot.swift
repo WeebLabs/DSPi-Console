@@ -58,6 +58,7 @@ struct PresetSnapshot: Equatable {
     let outputGainDB: [Float]
     let outputDelayMS: [Float]
     let channelFilters: [Int: [SnapshotFilterParams]]
+    let crossoverFilters: [Int: [SnapshotFilterParams]]
     let channelNames: [String]
     // Output configuration (the IO block governed by outputConfigMode).  Always
     // captured; the diff gates these on outputConfigMode == WITH_PRESET.
@@ -228,6 +229,25 @@ extension PresetSnapshot {
             if changedCount > 0 {
                 let name = ch < channelNames.count ? channelNames[ch] : "Ch \(ch)"
                 changes.append(.init(category: "\(name) EQ", description: "\(changedCount) band\(changedCount == 1 ? "" : "s") changed on \(name)"))
+            }
+        }
+
+        // Crossover bands (per output channel)
+        let allXoverKeys = Set(old.crossoverFilters.keys).union(new.crossoverFilters.keys)
+        for ch in allXoverKeys.sorted() where ch >= 2 {
+            let oldBands = old.crossoverFilters[ch] ?? []
+            let newBands = new.crossoverFilters[ch] ?? []
+            let maxBands = max(oldBands.count, newBands.count)
+            var changedCount = 0
+            for b in 0..<maxBands {
+                let oldB = b < oldBands.count ? oldBands[b] : nil
+                let newB = b < newBands.count ? newBands[b] : nil
+                if oldB != newB { changedCount += 1 }
+            }
+            if changedCount > 0 {
+                let name = ch < channelNames.count ? channelNames[ch] : "Ch \(ch)"
+                changes.append(.init(category: "\(name) Crossover",
+                                     description: "\(changedCount) crossover band\(changedCount == 1 ? "" : "s") changed on \(name)"))
             }
         }
 

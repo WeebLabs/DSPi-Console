@@ -331,6 +331,7 @@ struct DashboardRow: View {
         case .highPass: return "HP"
         case .notch: return "NO"
         case .allPass: return "AP"
+        default: return params.type.shortLabel
         }
     }
 
