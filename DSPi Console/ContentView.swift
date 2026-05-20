@@ -904,6 +904,7 @@ struct OutputChannelDetail: View {
                     availableTypes: availableCrossoverTypes(vm: vm),
                     bypassSupported: vm.firmwareSupportsBandBypass,
                     tabs: filterListTabs,
+                    isCrossoverMode: true,
                     onUpdate: { localBand, params in
                         vm.setCrossoverBand(ch: eqChannel, localBand: localBand, p: params)
                     },

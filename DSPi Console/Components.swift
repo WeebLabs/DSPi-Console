@@ -1064,6 +1064,10 @@ struct FilterListView: View {
     /// Optional tabs rendered at the top of the card (above the column header).
     /// Empty by default so existing call sites are unaffected.
     var tabs: [FilterListTab] = []
+    /// When true the row layout swaps the GAIN column for an ORDER column and
+    /// the TYPE picker collapses to family + LP/HP — used by the XO tab where
+    /// gain is meaningless and crossover order is the meaningful axis.
+    var isCrossoverMode: Bool = false
     let onUpdate: (Int, FilterParams) -> Void
     /// Toggle bypass on a single band.  Cheaper than re-sending the full
     /// EqParamPacket via onUpdate and avoids racing with in-flight edits.
@@ -1072,32 +1076,50 @@ struct FilterListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header — column labels on the left, optional Clear All + tabs
-            // share the right-aligned area that was otherwise empty.
-            HStack(spacing: 12) {
-                if bypassSupported {
-                    Spacer().frame(width: 18)
+            // Header — column labels on the left.  Clear All + tabs are
+            // overlaid on the right via ZStack so they share the same
+            // horizontal space as the columns; this lets wide column sets
+            // (e.g. the XO tab) extend underneath the buttons when the
+            // panel is narrow, instead of forcing the panel wider and
+            // pushing the sidebar.
+            ZStack {
+                HStack(spacing: 12) {
+                    if bypassSupported {
+                        Spacer().frame(width: 18)
+                    }
+                    Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
+                    Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 100, alignment: .leading).padding(.leading, isCrossoverMode ? -15 : 0)
+                    if isCrossoverMode {
+                        Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: 84, alignment: .leading).padding(.leading, 23)
+                        Text("SLOPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 7).frame(width: 80, alignment: .leading).padding(.leading, 25)
+                        Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center).padding(.leading, -3)
+                    } else {
+                        Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center)
+                        Text("GAIN").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 84, alignment: .center)
+                        Text("WIDTH").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 74, alignment: .center)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
-                Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 100, alignment: .leading)
-                Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center)
-                Text("GAIN").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 84, alignment: .center)
-                Text("WIDTH").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 74, alignment: .center)
-                Spacer()
-                HStack(spacing: 8) {
-                    if let onClear = onClear {
-                        FilterListHeaderButton(
-                            title: "Clear All",
-                            tint: .secondary,
-                            action: onClear,
-                            help: "Reset all bands"
-                        )
+
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    HStack(spacing: 8) {
+                        if let onClear = onClear {
+                            FilterListHeaderButton(
+                                title: "Clear All",
+                                tint: .secondary,
+                                action: onClear,
+                                help: "Reset all bands"
+                            )
+                        }
+                        if !tabs.isEmpty {
+                            FilterListTabToggle(tabs: tabs)
+                        }
                     }
-                    if !tabs.isEmpty {
-                        FilterListTabToggle(tabs: tabs)
-                    }
+                    .fixedSize()
                 }
             }
+            .frame(height: 24)
             .padding(.leading, 16)
             .padding(.trailing, 8)
             .padding(.vertical, 8)
@@ -1111,6 +1133,7 @@ struct FilterListView: View {
                             params: bands[index],
                             availableTypes: availableTypes,
                             bypassSupported: bypassSupported,
+                            isCrossoverMode: isCrossoverMode,
                             onChange: { onUpdate(index, $0) },
                             onBypassToggle: { newVal in onBypassToggle?(index, newVal) }
                         )
@@ -1272,6 +1295,9 @@ struct FilterRowView: View {
     /// When false the bypass checkbox is hidden so users don't try to use
     /// a non-functional control.
     var bypassSupported: Bool = false
+    /// When true the row renders the XO-tab layout: a shape (family+LP/HP)
+    /// picker, a separate order picker, freq, and an empty width column.
+    var isCrossoverMode: Bool = false
     var onChange: (FilterParams) -> Void
     /// Toggle just the bypass flag without re-sending freq/Q/gain.  When
     /// nil, the checkbox is rendered but its action no-ops; callers should
@@ -1302,57 +1328,10 @@ struct FilterRowView: View {
                 .foregroundColor(isActive && !isBypassed ? .primary : .secondary.opacity(0.5))
                 .frame(width: 24, alignment: .leading)
 
-            // Type Selector
-            BorderlessPopUpButton(
-                items: availableTypes,
-                titleForItem: { $0.name },
-                selection: Binding(
-                    get: { params.type },
-                    set: { var p = params; p.type = $0; onChange(p) }
-                )
-            )
-            .frame(width: 100, height: 20)
-            .overlay(alignment: .trailing) {
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundColor(.secondary)
-                    .padding(.trailing, 4)
-                    .allowsHitTesting(false)
-            }
-            .opacity(isBypassed ? 0.45 : 1.0)
-
-            // Controls
-            if isActive {
-                HStack(spacing: 12) {
-                    // Freq
-                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
-                        var p = params; p.freq = $0; onChange(p)
-                    }
-
-                    // Gain
-                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
-                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
-                            var p = params; p.gain = $0; onChange(p)
-                        }
-                    } else {
-                        Spacer().frame(width: 60 + 24) // Placeholder
-                    }
-
-                    // Q (hidden for crossover types — firmware ignores Q on those).
-                    if params.type.isCrossover {
-                        Spacer().frame(width: 50 + 24)
-                    } else {
-                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
-                            var p = params; p.q = $0; onChange(p)
-                        }
-                    }
-                }
-                .opacity(isBypassed ? 0.45 : 1.0)
+            if isCrossoverMode {
+                crossoverRowContent
             } else {
-                Text("Filter Disabled")
-                    .font(.caption)
-                    .foregroundColor(.secondary.opacity(0.5))
-                    .frame(width: 104, alignment: .center)
+                peqRowContent
             }
 
             Spacer()
@@ -1366,6 +1345,238 @@ struct FilterRowView: View {
             }
         )
         .contentShape(Rectangle())
+    }
+
+    // MARK: PEQ-tab row layout
+
+    @ViewBuilder
+    private var peqRowContent: some View {
+        // Type Selector
+        BorderlessPopUpButton(
+            items: availableTypes,
+            titleForItem: { $0.name },
+            selection: Binding(
+                get: { params.type },
+                set: { var p = params; p.type = $0; onChange(p) }
+            )
+        )
+        .frame(width: 100, height: 20)
+        .overlay(alignment: .trailing) {
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundColor(.secondary)
+                .padding(.trailing, 4)
+                .allowsHitTesting(false)
+        }
+        .opacity(isBypassed ? 0.45 : 1.0)
+
+        // Controls
+        if isActive {
+            HStack(spacing: 12) {
+                // Freq
+                ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
+                    var p = params; p.freq = $0; onChange(p)
+                }
+
+                // Gain
+                if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
+                    ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
+                        var p = params; p.gain = $0; onChange(p)
+                    }
+                } else {
+                    Spacer().frame(width: 60 + 24) // Placeholder
+                }
+
+                // Q (hidden for crossover types — firmware ignores Q on those).
+                if params.type.isCrossover {
+                    Spacer().frame(width: 50 + 24)
+                } else {
+                    ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
+                        var p = params; p.q = $0; onChange(p)
+                    }
+                }
+            }
+            .opacity(isBypassed ? 0.45 : 1.0)
+        } else {
+            Text("Filter Disabled")
+                .font(.caption)
+                .foregroundColor(.secondary.opacity(0.5))
+                .frame(width: 104, alignment: .center)
+        }
+    }
+
+    // MARK: XO-tab row layout
+
+    private var currentFamilyOption: CrossoverFamilyOption {
+        CrossoverFamilyOption(from: params.type)
+    }
+
+    private var currentLowPass: Bool {
+        params.type.crossoverIsLowPass ?? true
+    }
+
+    /// Family options offered in the XO TYPE picker — Off plus the unique
+    /// crossover families present in `availableTypes`.
+    private var availableFamilies: [CrossoverFamilyOption] {
+        var seen = Set<CrossoverFamilyOption>()
+        var out: [CrossoverFamilyOption] = [.off]
+        seen.insert(.off)
+        for t in availableTypes {
+            let opt = CrossoverFamilyOption(from: t)
+            if seen.insert(opt).inserted { out.append(opt) }
+        }
+        return out
+    }
+
+    private var availableOrdersForFamily: [Int] {
+        currentFamilyOption.family?.availableOrders ?? []
+    }
+
+    @ViewBuilder
+    private var crossoverRowContent: some View {
+        // TYPE picker — full family name only (LP/HP lives in its own column).
+        BorderlessPopUpButton(
+            items: availableFamilies,
+            titleForItem: { $0.label },
+            selection: Binding(
+                get: { currentFamilyOption },
+                set: { applyFamily($0) }
+            )
+        )
+        .frame(width: 110, height: 20)
+        .overlay(alignment: .trailing) {
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundColor(.secondary)
+                .padding(.trailing, 4)
+                .allowsHitTesting(false)
+        }
+        .padding(.leading, -15)
+        .opacity(isBypassed ? 0.45 : 1.0)
+
+        if isActive {
+            HStack(spacing: 12) {
+                // LP/HP picker — splits direction out of TYPE so each axis
+                // is independently selectable.
+                BorderlessPopUpButton(
+                    items: [true, false],
+                    titleForItem: { $0 ? "Low Pass" : "High Pass" },
+                    selection: Binding(
+                        get: { currentLowPass },
+                        set: { applyLowPass($0) }
+                    )
+                )
+                .frame(width: 84, height: 20)
+                .overlay(alignment: .trailing) {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.trailing, 4)
+                        .allowsHitTesting(false)
+                }
+                .padding(.leading, 23)
+
+                // Slope picker — order shown as its dB/octave equivalent
+                // (order × 6).  Internal data model is still order; only
+                // the label changes for user-facing clarity.
+                BorderlessPopUpButton(
+                    items: availableOrdersForFamily,
+                    titleForItem: { "\($0 * 6) dB/oct" },
+                    selection: Binding(
+                        get: { params.type.crossoverOrder },
+                        set: { applyOrder($0) }
+                    )
+                )
+                .frame(width: 80, height: 20)
+                .overlay(alignment: .trailing) {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .padding(.trailing, 4)
+                        .allowsHitTesting(false)
+                }
+                .padding(.leading, 25)
+
+                // Freq
+                ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
+                    var p = params; p.freq = $0; onChange(p)
+                }
+                .padding(.leading, -3)
+            }
+            .opacity(isBypassed ? 0.45 : 1.0)
+        } else {
+            Text("Filter Disabled")
+                .font(.caption)
+                .foregroundColor(.secondary.opacity(0.5))
+                .frame(width: 23 + 84 + 12 + 25 + 80 + 12 - 3 + 104, alignment: .center)
+        }
+    }
+
+    private func applyFamily(_ option: CrossoverFamilyOption) {
+        var p = params
+        switch option {
+        case .off:
+            p.type = .flat
+        case .family(let family):
+            // Preserve current order if valid for the new family, else
+            // snap to the closest available.  Preserve current LP/HP
+            // (defaults to LP when transitioning from Off).
+            let orders = family.availableOrders
+            let currentOrder = params.type.crossoverOrder
+            let order = orders.contains(currentOrder)
+                ? currentOrder
+                : (orders.min(by: { abs($0 - currentOrder) < abs($1 - currentOrder) }) ?? orders.first ?? 2)
+            let lp = params.type.crossoverIsLowPass ?? true
+            guard let newType = family.filterType(order: order, lowPass: lp) else { return }
+            p.type = newType
+        }
+        onChange(p)
+    }
+
+    private func applyLowPass(_ lowPass: Bool) {
+        guard let family = currentFamilyOption.family,
+              let newType = family.filterType(order: params.type.crossoverOrder, lowPass: lowPass) else { return }
+        var p = params
+        p.type = newType
+        onChange(p)
+    }
+
+    private func applyOrder(_ order: Int) {
+        guard let family = currentFamilyOption.family,
+              let newType = family.filterType(order: order, lowPass: currentLowPass) else { return }
+        var p = params
+        p.type = newType
+        onChange(p)
+    }
+}
+
+/// User-facing TYPE option on the XO tab — the crossover family name
+/// (Linkwitz-Riley, Butterworth, Bessel) plus an "Off" sentinel.  LP/HP
+/// and order are selected in separate columns.
+fileprivate enum CrossoverFamilyOption: Hashable {
+    case off
+    case family(CrossoverFamily)
+
+    init(from type: FilterType) {
+        if type == .flat {
+            self = .off
+        } else if let f = type.crossoverFamily {
+            self = .family(f)
+        } else {
+            self = .off
+        }
+    }
+
+    var family: CrossoverFamily? {
+        if case .family(let f) = self { return f }
+        return nil
+    }
+
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .family(let f): return f.name
+        }
     }
 }
 
