@@ -1088,7 +1088,7 @@ struct FilterListView: View {
                         Spacer().frame(width: 18)
                     }
                     Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
-                    Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 100, alignment: .leading).padding(.leading, isCrossoverMode ? -15 : 0)
+                    Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 100, alignment: .leading).padding(.leading, -15)
                     if isCrossoverMode {
                         Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: 84, alignment: .leading).padding(.leading, 23)
                         Text("SLOPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 7).frame(width: 80, alignment: .leading).padding(.leading, 25)
@@ -1368,6 +1368,7 @@ struct FilterRowView: View {
                 .padding(.trailing, 4)
                 .allowsHitTesting(false)
         }
+        .padding(.leading, -15)
         .opacity(isBypassed ? 0.45 : 1.0)
 
         // Controls
