@@ -988,14 +988,14 @@ private struct FilterListHeaderButton: View {
             Text(title)
                 .font(.caption).fontWeight(.medium)
                 .foregroundColor(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: 6)
                         .fill(Color.clear)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.gray.opacity(0.3), lineWidth: 1)
                 )
         }
@@ -1004,51 +1004,76 @@ private struct FilterListHeaderButton: View {
     }
 }
 
+/// Toggle button that bypasses every band in the list at once.  Shares
+/// the pill styling with FilterListHeaderButton, with a filled background
+/// when "on" (all bands currently bypassed).
+private struct BypassAllToggle: View {
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Bypass All")
+                .font(.caption).fontWeight(.medium)
+                .foregroundColor(isOn ? .primary : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isOn ? Color.gray.opacity(0.22) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(isOn ? "Re-enable all bands" : "Bypass all bands")
+    }
+}
+
 struct FilterListTabToggle: View {
     let tabs: [FilterListTab]
 
-    private var selectedTab: FilterListTab? {
-        tabs.first { $0.isSelected }
-    }
-
-    private var targetTab: FilterListTab? {
-        tabs.first { !$0.isSelected }
-    }
-
-    private var helpText: String {
-        guard let targetTab else { return "" }
-        return targetTab.title == "XO" ? "Switch to crossover bands" : "Switch to PEQ bands"
-    }
-
     var body: some View {
-        Button(action: { targetTab?.action() }) {
-            ZStack {
-                // Invisible copies of every tab title reserve width for the
-                // widest label so the button stays a fixed size across
-                // PEQ/XO selections; the visible label is centered on top.
-                ForEach(tabs.indices, id: \.self) { i in
-                    Text(tabs[i].title)
-                        .font(.caption).fontWeight(.medium)
-                        .opacity(0)
+        HStack(spacing: 0) {
+            ForEach(tabs.indices, id: \.self) { i in
+                if i > 0 {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(width: 1, height: 16)
                 }
-                Text(selectedTab?.title ?? "")
-                    .font(.caption).fontWeight(.medium)
-                    .foregroundColor(.secondary)
+                let tab = tabs[i]
+                Button(action: { if !tab.isSelected { tab.action() } }) {
+                    ZStack {
+                        // Reserve width to the widest tab title so each
+                        // segment is the same width regardless of label.
+                        ForEach(tabs.indices, id: \.self) { j in
+                            Text(tabs[j].title)
+                                .font(.caption).fontWeight(.medium)
+                                .opacity(0)
+                        }
+                        Text(tab.title)
+                            .font(.caption).fontWeight(.medium)
+                            .foregroundColor(tab.isSelected ? .primary : .secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Rectangle()
+                            .fill(tab.isSelected ? Color.gray.opacity(0.22) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(tab.isSelected ? "Currently showing \(tab.title) bands" : "Switch to \(tab.title) bands")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .disabled(targetTab == nil)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+        )
     }
 }
 
@@ -1074,41 +1099,108 @@ struct FilterListView: View {
     var onBypassToggle: ((Int, Bool) -> Void)? = nil
     var onClear: (() -> Void)? = nil
 
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header — column labels on the left.  Clear All + tabs are
-            // overlaid on the right via ZStack so they share the same
-            // horizontal space as the columns; this lets wide column sets
-            // (e.g. the XO tab) extend underneath the buttons when the
-            // panel is narrow, instead of forcing the panel wider and
-            // pushing the sidebar.
-            ZStack {
-                HStack(spacing: 12) {
-                    if bypassSupported {
-                        Spacer().frame(width: 18)
-                    }
-                    Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
-                    Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 100, alignment: .leading).padding(.leading, -15)
-                    if isCrossoverMode {
-                        Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: 84, alignment: .leading).padding(.leading, 23)
-                        Text("SLOPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 7).frame(width: 80, alignment: .leading).padding(.leading, 25)
-                        Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center).padding(.leading, -3)
-                    } else {
-                        Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center)
-                        Text("GAIN").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 84, alignment: .center)
-                        Text("WIDTH").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 74, alignment: .center)
-                    }
-                    Spacer(minLength: 0)
-                }
+    /// Snapshot of each band's bypass flag at the moment "Bypass All" was
+    /// engaged.  When non-nil, the toggle is "on"; clicking it again
+    /// restores these per-band states (so a mixed bypass configuration is
+    /// preserved across the engage/disengage cycle).
+    @State private var savedBypassStates: [Bool]? = nil
 
+    var body: some View {
+        // ScrollView contains the full list of rows.  Header and footer are
+        // attached as safeAreaInset views so they stay pinned at the top
+        // and bottom while the row content scrolls UNDERNEATH them — that
+        // lets us use `.ultraThinMaterial` for a true translucent vibrancy
+        // effect that picks up the row colors moving behind.
+        ScrollView {
+            LazyVStack(spacing: 1) {
+                ForEach(0..<bands.count, id: \.self) { index in
+                    FilterRowView(
+                        index: index,
+                        params: bands[index],
+                        availableTypes: availableTypes,
+                        bypassSupported: bypassSupported,
+                        isCrossoverMode: isCrossoverMode,
+                        onChange: { onUpdate(index, $0) },
+                        onBypassToggle: { newVal in
+                            // Re-enabling a band while "Bypass All" is engaged
+                            // disengages the toggle and discards its snapshot,
+                            // since the user is now actively editing.
+                            if !newVal && savedBypassStates != nil {
+                                savedBypassStates = nil
+                            }
+                            onBypassToggle?(index, newVal)
+                        }
+                    )
+                }
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(spacing: 12) {
+                if bypassSupported {
+                    Spacer().frame(width: 18)
+                }
+                Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
+                Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 100, alignment: .leading).padding(.leading, -15)
+                if isCrossoverMode {
+                    Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: 84, alignment: .leading).padding(.leading, 23)
+                    Text("SLOPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 7).frame(width: 80, alignment: .leading).padding(.leading, 25)
+                    Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center).padding(.leading, -3)
+                } else {
+                    Text("FREQ").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 104, alignment: .center)
+                    Text("GAIN").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 84, alignment: .center)
+                    Text("WIDTH").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 74, alignment: .center)
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(height: 16)
+            .padding(.leading, 16)
+            .padding(.trailing, 8)
+            .padding(.vertical, 8)
+            .background(
+                ZStack {
+                    Color(NSColor.controlBackgroundColor)
+                    Color.black.opacity(0.01)
+                }
+            )
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if onClear != nil || !tabs.isEmpty || (bypassSupported && onBypassToggle != nil) {
                 HStack(spacing: 0) {
+                    if bypassSupported, let onBypassToggle = onBypassToggle {
+                        BypassAllToggle(isOn: savedBypassStates != nil) {
+                            if let saved = savedBypassStates {
+                                // Disengage: restore each band to its saved state.
+                                for i in 0..<min(saved.count, bands.count) {
+                                    onBypassToggle(i, saved[i])
+                                }
+                                savedBypassStates = nil
+                            } else {
+                                // Engage: snapshot current state, then bypass all.
+                                savedBypassStates = bands.map { $0.bypass }
+                                for i in bands.indices {
+                                    onBypassToggle(i, true)
+                                }
+                            }
+                        }
+                        .fixedSize()
+                    }
                     Spacer(minLength: 0)
                     HStack(spacing: 8) {
                         if let onClear = onClear {
                             FilterListHeaderButton(
                                 title: "Clear All",
                                 tint: .secondary,
-                                action: onClear,
+                                action: {
+                                    let alert = NSAlert()
+                                    alert.messageText = "Clear All Bands?"
+                                    alert.informativeText = "Every band in this list will be reset to its default (flat) state. This cannot be undone."
+                                    alert.alertStyle = .warning
+                                    alert.addButton(withTitle: "Clear All")
+                                    alert.addButton(withTitle: "Cancel")
+                                    if alert.runModal() == .alertFirstButtonReturn {
+                                        onClear()
+                                    }
+                                },
                                 help: "Reset all bands"
                             )
                         }
@@ -1118,27 +1210,10 @@ struct FilterListView: View {
                     }
                     .fixedSize()
                 }
-            }
-            .frame(height: 24)
-            .padding(.leading, 16)
-            .padding(.trailing, 8)
-            .padding(.vertical, 8)
-            .background(Color(NSColor.controlBackgroundColor))
-
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(0..<bands.count, id: \.self) { index in
-                        FilterRowView(
-                            index: index,
-                            params: bands[index],
-                            availableTypes: availableTypes,
-                            bypassSupported: bypassSupported,
-                            isCrossoverMode: isCrossoverMode,
-                            onChange: { onUpdate(index, $0) },
-                            onBypassToggle: { newVal in onBypassToggle?(index, newVal) }
-                        )
-                    }
-                }
+                .padding(.leading, 16)
+                .padding(.trailing, 8)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
             }
         }
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
