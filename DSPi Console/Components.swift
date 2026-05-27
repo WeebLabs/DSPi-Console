@@ -1004,31 +1004,65 @@ private struct FilterListHeaderButton: View {
     }
 }
 
-/// Toggle button that bypasses every band in the list at once.  Shares
-/// the pill styling with FilterListHeaderButton, with a filled background
-/// when "on" (all bands currently bypassed).
-private struct BypassAllToggle: View {
-    let isOn: Bool
+/// Split-pill control with two pure actions — "Enable All" and "Bypass
+/// All".  No stored toggle state; each half is a one-shot action that
+/// applies to every band.  A half is disabled (and dimmed) when its
+/// action would be a no-op, giving passive feedback about the list's
+/// current uniformity without turning the control itself into a toggle.
+private struct BypassAllControls: View {
+    let allBypassed: Bool
+    let allEnabled: Bool
+    let onEnableAll: () -> Void
+    let onBypassAll: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            BypassActionHalf(
+                title: "Enable All",
+                isDisabled: allEnabled,
+                action: onEnableAll
+            )
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(width: 1, height: 16)
+            BypassActionHalf(
+                title: "Bypass All",
+                isDisabled: allBypassed,
+                action: onBypassAll
+            )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+
+private struct BypassActionHalf: View {
+    let title: String
+    let isDisabled: Bool
     let action: () -> Void
+    @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Text("Bypass All")
+            Text(title)
                 .font(.caption).fontWeight(.medium)
-                .foregroundColor(isOn ? .primary : .secondary)
+                .foregroundColor(.secondary)
+                .opacity(isDisabled ? 0.4 : 1.0)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(isOn ? Color.gray.opacity(0.22) : Color.clear)
+                    Rectangle()
+                        .fill(hovered && !isDisabled ? Color.gray.opacity(0.22) : Color.clear)
                 )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(isOn ? "Re-enable all bands" : "Bypass all bands")
+        .disabled(isDisabled)
+        .onHover { hovered = $0 }
+        .help(isDisabled ? "" : title)
     }
 }
 
@@ -1099,12 +1133,6 @@ struct FilterListView: View {
     var onBypassToggle: ((Int, Bool) -> Void)? = nil
     var onClear: (() -> Void)? = nil
 
-    /// Snapshot of each band's bypass flag at the moment "Bypass All" was
-    /// engaged.  When non-nil, the toggle is "on"; clicking it again
-    /// restores these per-band states (so a mixed bypass configuration is
-    /// preserved across the engage/disengage cycle).
-    @State private var savedBypassStates: [Bool]? = nil
-
     var body: some View {
         // ScrollView contains the full list of rows.  Header and footer are
         // attached as safeAreaInset views so they stay pinned at the top
@@ -1122,12 +1150,6 @@ struct FilterListView: View {
                         isCrossoverMode: isCrossoverMode,
                         onChange: { onUpdate(index, $0) },
                         onBypassToggle: { newVal in
-                            // Re-enabling a band while "Bypass All" is engaged
-                            // disengages the toggle and discards its snapshot,
-                            // since the user is now actively editing.
-                            if !newVal && savedBypassStates != nil {
-                                savedBypassStates = nil
-                            }
                             onBypassToggle?(index, newVal)
                         }
                     )
@@ -1167,21 +1189,27 @@ struct FilterListView: View {
             if onClear != nil || !tabs.isEmpty || (bypassSupported && onBypassToggle != nil) {
                 HStack(spacing: 0) {
                     if bypassSupported, let onBypassToggle = onBypassToggle {
-                        BypassAllToggle(isOn: savedBypassStates != nil) {
-                            if let saved = savedBypassStates {
-                                // Disengage: restore each band to its saved state.
-                                for i in 0..<min(saved.count, bands.count) {
-                                    onBypassToggle(i, saved[i])
+                        // Off bands (type == .flat) have no audio effect, so
+                        // their bypass flag is meaningless — exclude them from
+                        // both the disable logic and the click action.  When
+                        // every band is Off, `actionable` is empty and
+                        // allSatisfy returns true for both predicates, which
+                        // greys out both halves of the control.
+                        let actionable = bands.filter { $0.type != .flat }
+                        BypassAllControls(
+                            allBypassed: actionable.allSatisfy { $0.bypass },
+                            allEnabled: actionable.allSatisfy { !$0.bypass },
+                            onEnableAll: {
+                                for i in bands.indices where bands[i].type != .flat {
+                                    onBypassToggle(i, false)
                                 }
-                                savedBypassStates = nil
-                            } else {
-                                // Engage: snapshot current state, then bypass all.
-                                savedBypassStates = bands.map { $0.bypass }
-                                for i in bands.indices {
+                            },
+                            onBypassAll: {
+                                for i in bands.indices where bands[i].type != .flat {
                                     onBypassToggle(i, true)
                                 }
                             }
-                        }
+                        )
                         .fixedSize()
                     }
                     Spacer(minLength: 0)
