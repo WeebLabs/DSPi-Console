@@ -1444,7 +1444,7 @@ struct FilterRowView: View {
                 .allowsHitTesting(false)
         }
         .padding(.leading, -15)
-        .opacity(isBypassed ? 0.45 : 1.0)
+        .opacity(isBypassed || !isActive ? 0.45 : 1.0)
 
         // Controls
         if isActive {
@@ -1528,7 +1528,7 @@ struct FilterRowView: View {
                 .allowsHitTesting(false)
         }
         .padding(.leading, -15)
-        .opacity(isBypassed ? 0.45 : 1.0)
+        .opacity(isBypassed || !isActive ? 0.45 : 1.0)
 
         if isActive {
             HStack(spacing: 12) {
