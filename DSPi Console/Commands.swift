@@ -467,6 +467,9 @@ extension DSPViewModel {
     /// volume part of each preset.
     func setMasterVolumeMode(_ mode: Int) {
         let clamped = UInt8(max(0, min(1, mode)))
+        let normalized = (Int(clamped) == MASTER_VOLUME_MODE_WITH_PRESET) ? MASTER_VOLUME_MODE_WITH_PRESET
+                                                                          : MASTER_VOLUME_MODE_INDEPENDENT
+        DispatchQueue.main.async { self.presetMasterVolumeMode = normalized }
         usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
@@ -1604,6 +1607,10 @@ extension DSPViewModel {
 
     func setPresetStartup(mode: Int, defaultSlot: Int) {
         let data = Data([UInt8(mode), UInt8(defaultSlot)])
+        DispatchQueue.main.async {
+            self.presetStartupMode = mode
+            self.presetDefaultSlot = defaultSlot
+        }
         usb.sendControlRequest(request: REQ_PRESET_SET_STARTUP, value: 0, index: 2, data: data)
     }
 
@@ -1619,6 +1626,7 @@ extension DSPViewModel {
 
     func setPresetIncludePins(_ include: Bool) {
         let data = Data([include ? 1 : 0])
+        DispatchQueue.main.async { self.presetIncludePins = include }
         usb.sendControlRequest(request: REQ_PRESET_SET_INCLUDE_PINS, value: 0, index: 2, data: data)
     }
 

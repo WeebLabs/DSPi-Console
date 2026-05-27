@@ -2275,6 +2275,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
     @StateObject private var graphWindowController = GraphWindowController()
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
+    @ObservedObject private var vm = AppState.shared.viewModel
 
     var body: some Scene {
         Window("DSPi Console", id: "main") {
@@ -2363,10 +2364,15 @@ struct DSPi_ConsoleApp: App {
                     ToolsMenuActions.factoryReset()
                 }
 
-                Divider()
+                // STM32H723 firmware cannot self-reboot into a USB bootloader
+                // — there's no UF2 path on that platform, so hide the entry
+                // entirely rather than show a non-functional menu item.
+                if vm.platformName != "STM32H723" {
+                    Divider()
 
-                Button("Firmware Update...") {
-                    ToolsMenuActions.enterFirmwareUpdateMode()
+                    Button("Firmware Update...") {
+                        ToolsMenuActions.enterFirmwareUpdateMode()
+                    }
                 }
 
                 Divider()
