@@ -1476,11 +1476,13 @@ extension DSPViewModel {
     @discardableResult
     func loadPreset(slot: Int) -> UInt8 {
         print("[PRESET] loadPreset(\(slot)) starting")
-        guard let data = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1) else {
-            print("[PRESET] loadPreset(\(slot)) USB request failed (nil)")
+        guard let status = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1)?.first else {
+            // nil = USB request failed; empty Data = device returned no status
+            // byte (e.g. it reset/disconnected mid-transfer).  Treat both as a
+            // failure rather than indexing [0] on an empty buffer (which traps).
+            print("[PRESET] loadPreset(\(slot)) USB request failed (nil/empty)")
             return 0xFF
         }
-        let status = data[0]
         print("[PRESET] loadPreset(\(slot)) device status=\(status)")
         if status == PRESET_OK {
             // Publish the new active slot BEFORE the bulk refresh so the UI
@@ -1800,15 +1802,24 @@ extension DSPViewModel {
 
     func loadParams() -> UInt8 {
         guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        if let data = usb.getControlRequest(request: REQ_LOAD_PARAMS, value: 0, index: 0, length: 1) {
-            let result = data[0]
-            if result == FLASH_OK {
-                // Re-fetch all params to update UI
-                fetchAll()
-            }
-            return result
+        // "Revert to Saved" reloads the active preset slot from flash,
+        // discarding unsaved live edits.  Route it through the DEFERRED
+        // REQ_PRESET_LOAD path (loadPreset) instead of the legacy synchronous
+        // REQ_LOAD_PARAMS (0x52): the legacy command runs the flash write +
+        // state apply inside the device's USB-IRQ handler WITHOUT stopping the
+        // SPDIF receiver, which crashes the device when SPDIF is the active
+        // input (its decode-timeout alarm tears down DMA/PIO during the ~45 ms
+        // flash blackout).  loadPreset defers on-device — it stops RX, fences
+        // Core 1, and resyncs the pipeline — so it is safe on every input
+        // source, and it also refreshes the UI and rebaselines the
+        // unsaved-changes snapshot.
+        let status = loadPreset(slot: activePresetSlot)
+        // Map preset status codes onto the FLASH_* codes the caller expects.
+        switch status {
+        case PRESET_OK:      return FLASH_OK
+        case PRESET_ERR_CRC: return FLASH_ERR_CRC
+        default:             return FLASH_ERR_WRITE   // invalid slot / USB failure (0xFF)
         }
-        return FLASH_ERR_WRITE
     }
 
     func factoryReset() -> UInt8 {
