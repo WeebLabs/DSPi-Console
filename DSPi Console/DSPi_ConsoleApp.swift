@@ -204,13 +204,13 @@ struct GeneralSettingsTab: View {
 // Settings included:
 //   • Startup Preset (mode + default slot)
 //   • Master Volume persistence mode
-//   • "Include pin configuration in preset" toggle
+//   • Output Configuration persistence mode (independent / with-preset)
 //   • DAC Hardware Mute config (enable / polarity / pin / hold / release)
 struct GlobalSettingsDraft: Equatable {
     var presetStartupMode: Int
     var presetDefaultSlot: Int
     var presetMasterVolumeMode: Int
-    var presetIncludePins: Bool
+    var presetOutputConfigMode: Int
     var dacHwMuteConfig: DacHwMuteConfig
 
     static func from(_ vm: DSPViewModel) -> GlobalSettingsDraft {
@@ -218,7 +218,7 @@ struct GlobalSettingsDraft: Equatable {
             presetStartupMode:      vm.presetStartupMode,
             presetDefaultSlot:      vm.presetDefaultSlot,
             presetMasterVolumeMode: vm.presetMasterVolumeMode,
-            presetIncludePins:      vm.presetIncludePins,
+            presetOutputConfigMode: vm.presetOutputConfigMode,
             dacHwMuteConfig:        vm.dacHwMuteConfig
         )
     }
@@ -230,7 +230,7 @@ struct GlobalSettingsTab: View {
         presetStartupMode: 0,
         presetDefaultSlot: 0,
         presetMasterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT,
-        presetIncludePins: false,
+        presetOutputConfigMode: OUTPUT_CONFIG_MODE_WITH_PRESET,
         dacHwMuteConfig: DacHwMuteConfig()
     )
 
@@ -294,18 +294,24 @@ struct GlobalSettingsTab: View {
                 Label("Master Volume", systemImage: "speaker.wave.2")
             }
 
-            // MARK: Presets — Include Pin Configuration
+            // MARK: Output Configuration Persistence
             Section {
-                Toggle(isOn: $draft.presetIncludePins) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Include Pin Configuration")
-                        Text("Restore GPIO pin assignments when loading a preset")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
+                Picker("Mode", selection: $draft.presetOutputConfigMode) {
+                    Text("Independent").tag(OUTPUT_CONFIG_MODE_INDEPENDENT)
+                    Text("With Preset").tag(OUTPUT_CONFIG_MODE_WITH_PRESET)
                 }
-                .toggleStyle(.switch)
+
+                if draft.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT {
+                    Text("Input and output configuration is stored on the device independently and applied at boot. Loading a preset never changes your wiring.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Input and output configuration is part of each preset. Saved with the preset and restored on preset load.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             } header: {
-                Label("Presets", systemImage: "square.stack.3d.up")
+                Label("Output Configuration", systemImage: "cable.connector")
             }
 
             // MARK: DAC Hardware Mute (only when firmware supports it)
@@ -528,8 +534,8 @@ struct GlobalSettingsTab: View {
             if pendingDraft.presetMasterVolumeMode != snapshot.presetMasterVolumeMode {
                 vm.setMasterVolumeMode(pendingDraft.presetMasterVolumeMode)
             }
-            if pendingDraft.presetIncludePins != snapshot.presetIncludePins {
-                vm.setPresetIncludePins(pendingDraft.presetIncludePins)
+            if pendingDraft.presetOutputConfigMode != snapshot.presetOutputConfigMode {
+                vm.setOutputConfigMode(pendingDraft.presetOutputConfigMode)
             }
             if pendingDraft.dacHwMuteConfig != snapshot.dacHwMuteConfig {
                 vm.setDacHwMuteConfig(pendingDraft.dacHwMuteConfig)
@@ -1497,6 +1503,30 @@ struct FileMenuActions {
         }
     }
 
+    /// Persist the device's current live output configuration (output pins,
+    /// output types, I2S clocks, S/PDIF RX pin) to its independent (directory)
+    /// storage so it survives a reboot. Relevant in INDEPENDENT mode, where
+    /// per-field edits apply live but only persist after an explicit save.
+    /// Runs on a background queue because the underlying USB control transfer
+    /// is synchronous.
+    static func saveOutputConfig() {
+        let vm = AppState.shared.viewModel
+        guard vm.isDeviceConnected else {
+            showError("No device connected.")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = vm.saveOutputConfig()
+            DispatchQueue.main.async {
+                if ok {
+                    showSuccess("Output configuration saved. It will be applied on next boot.")
+                } else {
+                    showError("Failed to save output configuration — the device did not acknowledge the request.")
+                }
+            }
+        }
+    }
+
     // MARK: - Parsing
 
     private static func parseREWFile(_ contents: String) -> [FilterParams]? {
@@ -2313,6 +2343,10 @@ struct DSPi_ConsoleApp: App {
 
                 Button("Save Master Volume") {
                     FileMenuActions.saveMasterVolume()
+                }
+
+                Button("Save Output Configuration") {
+                    FileMenuActions.saveOutputConfig()
                 }
             }
 

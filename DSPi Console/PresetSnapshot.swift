@@ -29,6 +29,11 @@ struct PresetSnapshot: Equatable {
     // from what's on flash, instead of the comparison being silently skipped.
     let masterVolumeDB: Float
     let masterVolumeMode: Int   // The mode at snapshot time (0 = INDEPENDENT, 1 = WITH_PRESET)
+    // Like masterVolumeMode: the output-config mode at snapshot time.  The diff
+    // gates the output-config comparison on this so the wiring only counts
+    // toward preset dirtiness in WITH_PRESET mode (in INDEPENDENT mode it lives
+    // in the device directory and is saved explicitly).
+    let outputConfigMode: Int   // 0 = INDEPENDENT, 1 = WITH_PRESET
     let bypass: Bool
     let loudnessEnabled: Bool
     let loudnessRefSPL: Float
@@ -54,12 +59,15 @@ struct PresetSnapshot: Equatable {
     let outputDelayMS: [Float]
     let channelFilters: [Int: [SnapshotFilterParams]]
     let channelNames: [String]
-    let outputPins: [UInt8]?  // nil when presetIncludePins is false
-    let outputSlotTypes: [UInt8]?  // nil when presetIncludePins is false
-    let i2sBckPin: UInt8?
-    let mckEnabled: Bool?
-    let mckPin: UInt8?
-    let mckMultiplier: Int?
+    // Output configuration (the IO block governed by outputConfigMode).  Always
+    // captured; the diff gates these on outputConfigMode == WITH_PRESET.
+    let outputPins: [UInt8]
+    let outputSlotTypes: [UInt8]
+    let i2sBckPin: UInt8
+    let mckEnabled: Bool
+    let mckPin: UInt8
+    let mckMultiplier: Int
+    let spdifRxPin: UInt8
     let inputSource: Int?  // nil when firmware doesn't support input switching
 }
 
@@ -229,38 +237,43 @@ extension PresetSnapshot {
             }
         }
 
-        // Pin config (only if both snapshots track pins)
-        if let oldPins = old.outputPins, let newPins = new.outputPins {
+        // Output configuration — pins, output types, I2S clocks, and the
+        // S/PDIF RX pin.  Like master volume, these are captured
+        // unconditionally; the comparison is gated on the live mode so it only
+        // contributes to preset dirtiness in WITH_PRESET mode.  In INDEPENDENT
+        // mode the wiring lives in the device directory (saved explicitly via
+        // Save Output Configuration), so preset diffs ignore it.
+        if new.outputConfigMode == OUTPUT_CONFIG_MODE_WITH_PRESET {
             var pinChanges = 0
-            for i in 0..<min(oldPins.count, newPins.count) {
-                if oldPins[i] != newPins[i] { pinChanges += 1 }
+            for i in 0..<min(old.outputPins.count, new.outputPins.count) {
+                if old.outputPins[i] != new.outputPins[i] { pinChanges += 1 }
             }
             if pinChanges > 0 {
                 changes.append(.init(category: "Pins", description: "\(pinChanges) pin assignment\(pinChanges == 1 ? "" : "s") changed"))
             }
-        }
 
-        // I2S config (only if both snapshots track it)
-        if let oldTypes = old.outputSlotTypes, let newTypes = new.outputSlotTypes {
             var typeChanges = 0
-            for i in 0..<min(oldTypes.count, newTypes.count) {
-                if oldTypes[i] != newTypes[i] { typeChanges += 1 }
+            for i in 0..<min(old.outputSlotTypes.count, new.outputSlotTypes.count) {
+                if old.outputSlotTypes[i] != new.outputSlotTypes[i] { typeChanges += 1 }
             }
             if typeChanges > 0 {
                 changes.append(.init(category: "I2S", description: "\(typeChanges) output type\(typeChanges == 1 ? "" : "s") changed"))
             }
-        }
-        if let oldPin = old.i2sBckPin, let newPin = new.i2sBckPin, oldPin != newPin {
-            changes.append(.init(category: "I2S", description: "BCK pin: GPIO \(oldPin) → GPIO \(newPin)"))
-        }
-        if let oldVal = old.mckEnabled, let newVal = new.mckEnabled, oldVal != newVal {
-            changes.append(.init(category: "I2S", description: "MCK: \(newVal ? "enabled" : "disabled")"))
-        }
-        if let oldPin = old.mckPin, let newPin = new.mckPin, oldPin != newPin {
-            changes.append(.init(category: "I2S", description: "MCK pin: GPIO \(oldPin) → GPIO \(newPin)"))
-        }
-        if let oldVal = old.mckMultiplier, let newVal = new.mckMultiplier, oldVal != newVal {
-            changes.append(.init(category: "I2S", description: "MCK multiplier: \(oldVal)x → \(newVal)x"))
+            if old.i2sBckPin != new.i2sBckPin {
+                changes.append(.init(category: "I2S", description: "BCK pin: GPIO \(old.i2sBckPin) → GPIO \(new.i2sBckPin)"))
+            }
+            if old.mckEnabled != new.mckEnabled {
+                changes.append(.init(category: "I2S", description: "MCK: \(new.mckEnabled ? "enabled" : "disabled")"))
+            }
+            if old.mckPin != new.mckPin {
+                changes.append(.init(category: "I2S", description: "MCK pin: GPIO \(old.mckPin) → GPIO \(new.mckPin)"))
+            }
+            if old.mckMultiplier != new.mckMultiplier {
+                changes.append(.init(category: "I2S", description: "MCK multiplier: \(old.mckMultiplier)x → \(new.mckMultiplier)x"))
+            }
+            if old.spdifRxPin != new.spdifRxPin {
+                changes.append(.init(category: "S/PDIF", description: "S/PDIF RX pin: GPIO \(old.spdifRxPin) → GPIO \(new.spdifRxPin)"))
+            }
         }
 
         // Input source

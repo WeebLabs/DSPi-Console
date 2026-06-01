@@ -1382,7 +1382,12 @@ extension DSPViewModel {
         let startupMode = Int(data[2])
         let defaultSlot = Int(data[3])
         let lastActive = data[4]
-        let includePins = data[5] != 0
+        // Byte [5] carries output_config_mode (0 = independent, 1 = with preset,
+        // the repurposed former include_pins flag).  Anything other than 1
+        // (including legacy 0) reads as independent.
+        let outputConfigMode: Int = (data[5] == UInt8(OUTPUT_CONFIG_MODE_WITH_PRESET))
+            ? OUTPUT_CONFIG_MODE_WITH_PRESET
+            : OUTPUT_CONFIG_MODE_INDEPENDENT
         // Byte [6] carries master_volume_mode (0 = independent, 1 = with preset).
         // Older firmware that pre-dates the byte returns < 7 bytes; default to mode 0.
         let masterVolMode: Int = (data.count >= 7 && data[6] == UInt8(MASTER_VOLUME_MODE_WITH_PRESET))
@@ -1393,7 +1398,7 @@ extension DSPViewModel {
             self.presetStartupMode = startupMode
             self.presetDefaultSlot = defaultSlot
             self.activePresetSlot = Int(lastActive)
-            self.presetIncludePins = includePins
+            self.presetOutputConfigMode = outputConfigMode
             self.presetMasterVolumeMode = masterVolMode
             // Ensure UI cannot show stale names for slots that are not occupied.
             for slot in 0..<10 where (occupied & UInt16(1 << slot)) == 0 {
@@ -1626,18 +1631,43 @@ extension DSPViewModel {
         }
     }
 
-    func setPresetIncludePins(_ include: Bool) {
-        let data = Data([include ? 1 : 0])
-        DispatchQueue.main.async { self.presetIncludePins = include }
-        usb.sendControlRequest(request: REQ_PRESET_SET_INCLUDE_PINS, value: 0, index: 2, data: data)
+    // MARK: - Output Config Mode (preset directory flag)
+
+    /// Set output-config persistence mode (the repurposed include-pins flag).
+    /// Pass `OUTPUT_CONFIG_MODE_WITH_PRESET` (1, default) to make the whole IO
+    /// block — pins, output types, I2S MCK/BCK, and the S/PDIF RX pin — part of
+    /// each preset, or `OUTPUT_CONFIG_MODE_INDEPENDENT` (0) for device-global
+    /// wiring that's stored in the directory and applied at boot.
+    func setOutputConfigMode(_ mode: Int) {
+        let clamped = UInt8(max(0, min(1, mode)))
+        let normalized = (Int(clamped) == OUTPUT_CONFIG_MODE_WITH_PRESET) ? OUTPUT_CONFIG_MODE_WITH_PRESET
+                                                                          : OUTPUT_CONFIG_MODE_INDEPENDENT
+        DispatchQueue.main.async { self.presetOutputConfigMode = normalized }
+        usb.sendControlRequest(request: REQ_SET_OUTPUT_CONFIG_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
-    func fetchPresetIncludePins() {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_INCLUDE_PINS, value: 0, index: 2, length: 1) else { return }
-        let val = data[0] != 0
+    func fetchOutputConfigMode() {
+        guard let data = usb.getControlRequest(request: REQ_GET_OUTPUT_CONFIG_MODE, value: 0, index: 2, length: 1) else { return }
+        let val = Int(data[0])
         DispatchQueue.main.async {
-            self.presetIncludePins = val
+            self.presetOutputConfigMode = (val == OUTPUT_CONFIG_MODE_WITH_PRESET) ? OUTPUT_CONFIG_MODE_WITH_PRESET
+                                                                                  : OUTPUT_CONFIG_MODE_INDEPENDENT
         }
+    }
+
+    /// Persist the current live output configuration into the directory's
+    /// independent storage so it survives a reboot. Relevant in
+    /// `OUTPUT_CONFIG_MODE_INDEPENDENT`, where per-field edits (pins, output
+    /// types, I2S clocks, S/PDIF RX pin) apply live but only persist after an
+    /// explicit save. IN-shaped action command: device responds with a 1-byte
+    /// status (0 = PRESET_OK); the flash write is deferred on-device. Returns
+    /// true on success, false if the device disconnected or the transfer failed.
+    @discardableResult
+    func saveOutputConfig() -> Bool {
+        guard let data = usb.getControlRequest(request: REQ_SAVE_OUTPUT_CONFIG, value: 0, index: 2, length: 1) else {
+            return false
+        }
+        return data.first == 0  // PRESET_OK
     }
 
     // MARK: - Channel Names
@@ -1804,15 +1834,15 @@ extension DSPViewModel {
         guard isDeviceConnected else { return FLASH_ERR_WRITE }
         // "Revert to Saved" reloads the active preset slot from flash,
         // discarding unsaved live edits.  Route it through the DEFERRED
-        // REQ_PRESET_LOAD path (loadPreset) instead of the legacy synchronous
-        // REQ_LOAD_PARAMS (0x52): the legacy command runs the flash write +
-        // state apply inside the device's USB-IRQ handler WITHOUT stopping the
-        // SPDIF receiver, which crashes the device when SPDIF is the active
-        // input (its decode-timeout alarm tears down DMA/PIO during the ~45 ms
-        // flash blackout).  loadPreset defers on-device — it stops RX, fences
-        // Core 1, and resyncs the pipeline — so it is safe on every input
-        // source, and it also refreshes the UI and rebaselines the
-        // unsaved-changes snapshot.
+        // REQ_PRESET_LOAD path (loadPreset) rather than a synchronous load: a
+        // synchronous flash read + state apply inside the device's USB-IRQ
+        // handler WITHOUT stopping the SPDIF receiver crashes the device when
+        // SPDIF is the active input (its decode-timeout alarm tears down
+        // DMA/PIO during the ~45 ms flash blackout).  loadPreset defers
+        // on-device — it stops RX, fences Core 1, and resyncs the pipeline — so
+        // it is safe on every input source, and it also refreshes the UI and
+        // rebaselines the unsaved-changes snapshot.  (The legacy synchronous
+        // load opcode 0x52 has since been repurposed as REQ_SAVE_OUTPUT_CONFIG.)
         let status = loadPreset(slot: activePresetSlot)
         // Map preset status codes onto the FLASH_* codes the caller expects.
         switch status {

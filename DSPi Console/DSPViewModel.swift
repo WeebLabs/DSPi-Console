@@ -145,7 +145,7 @@ class DSPViewModel: ObservableObject {
     @Published var activePresetSlot: Int = 0      // 0-9, always valid
     @Published var presetStartupMode: Int = 0     // 0 = specified default, 1 = last active
     @Published var presetDefaultSlot: Int = 0
-    @Published var presetIncludePins: Bool = false
+    @Published var presetOutputConfigMode: Int = OUTPUT_CONFIG_MODE_WITH_PRESET
     @Published var presetMasterVolumeMode: Int = MASTER_VOLUME_MODE_INDEPENDENT
 
     @Published var platformName: String = ""
@@ -412,6 +412,7 @@ class DSPViewModel: ObservableObject {
             preampDB: preampDB,
             masterVolumeDB: masterVolumeDB,
             masterVolumeMode: presetMasterVolumeMode,
+            outputConfigMode: presetOutputConfigMode,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
             loudnessRefSPL: loudnessRefSPL,
@@ -437,12 +438,16 @@ class DSPViewModel: ObservableObject {
             outputDelayMS: outputDelayMS,
             channelFilters: channelData.mapValues { $0.map { SnapshotFilterParams(from: $0) } },
             channelNames: channelNames,
-            outputPins: presetIncludePins ? outputPins : nil,
-            outputSlotTypes: presetIncludePins ? outputSlotTypes : nil,
-            i2sBckPin: presetIncludePins ? i2sBckPin : nil,
-            mckEnabled: presetIncludePins ? mckEnabled : nil,
-            mckPin: presetIncludePins ? mckPin : nil,
-            mckMultiplier: presetIncludePins ? mckMultiplier : nil,
+            // Output configuration is captured unconditionally; PresetSnapshot.diff
+            // gates the comparison on outputConfigMode so it only contributes to
+            // preset dirtiness in WITH_PRESET mode (the master-volume pattern).
+            outputPins: outputPins,
+            outputSlotTypes: outputSlotTypes,
+            i2sBckPin: i2sBckPin,
+            mckEnabled: mckEnabled,
+            mckPin: mckPin,
+            mckMultiplier: mckMultiplier,
+            spdifRxPin: spdifRxPin,
             inputSource: inputSourceSupported ? inputSource : nil
         )
     }

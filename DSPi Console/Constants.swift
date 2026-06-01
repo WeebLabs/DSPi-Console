@@ -13,7 +13,9 @@ let REQ_SET_DELAY: UInt8    = 0x48
 let REQ_GET_DELAY: UInt8    = 0x49
 let REQ_GET_STATUS: UInt8   = 0x50
 let REQ_SAVE_PARAMS: UInt8  = 0x51
-let REQ_LOAD_PARAMS: UInt8  = 0x52
+// 0x52 was the deprecated synchronous REQ_LOAD_PARAMS; repurposed as the
+// device-global output-config save (see REQ_SAVE_OUTPUT_CONFIG below).
+let REQ_SAVE_OUTPUT_CONFIG: UInt8 = 0x52
 let REQ_FACTORY_RESET: UInt8 = 0x53
 let REQ_SET_CHANNEL_GAIN: UInt8 = 0x54
 let REQ_GET_CHANNEL_GAIN: UInt8 = 0x55
@@ -91,9 +93,19 @@ let REQ_PRESET_SET_NAME: UInt8          = 0x94
 let REQ_PRESET_GET_DIR: UInt8           = 0x95
 let REQ_PRESET_SET_STARTUP: UInt8       = 0x96
 let REQ_PRESET_GET_STARTUP: UInt8       = 0x97
-let REQ_PRESET_SET_INCLUDE_PINS: UInt8  = 0x98
-let REQ_PRESET_GET_INCLUDE_PINS: UInt8  = 0x99
+// 0x98/0x99 were REQ_PRESET_SET/GET_INCLUDE_PINS; repurposed as the
+// output-config persistence mode (the former include-pins flag is now a
+// mode governing the whole IO block — pins, output types, I2S MCK/BCK, and
+// the S/PDIF RX pin).  Payload/return is the 0/1 mode byte.
+let REQ_SET_OUTPUT_CONFIG_MODE: UInt8   = 0x98
+let REQ_GET_OUTPUT_CONFIG_MODE: UInt8   = 0x99
 let REQ_PRESET_GET_ACTIVE: UInt8        = 0x9A
+
+// Output-config persistence modes (payload of 0x98 / response of 0x99, and
+// byte [5] of the REQ_PRESET_GET_DIR summary).  Mirrors the master-volume
+// independent/with-preset mechanism, but defaults to WITH_PRESET.
+let OUTPUT_CONFIG_MODE_INDEPENDENT: Int = 0   // Stored in directory, applied at boot, untouched by presets
+let OUTPUT_CONFIG_MODE_WITH_PRESET: Int = 1   // Saved with each preset, restored on preset load (default)
 
 // Channel name request codes
 let REQ_SET_CHANNEL_NAME: UInt8  = 0x9B
