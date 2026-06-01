@@ -448,7 +448,8 @@ class DSPViewModel: ObservableObject {
             mckPin: mckPin,
             mckMultiplier: mckMultiplier,
             spdifRxPin: spdifRxPin,
-            inputSource: inputSourceSupported ? inputSource : nil
+            inputSource: inputSourceSupported ? inputSource : nil,
+            lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil
         )
     }
 

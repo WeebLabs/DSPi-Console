@@ -69,6 +69,7 @@ struct PresetSnapshot: Equatable {
     let mckMultiplier: Int
     let spdifRxPin: UInt8
     let inputSource: Int?  // nil when firmware doesn't support input switching
+    let lgSoundSyncEnabled: Bool?  // nil when firmware doesn't support LG Sound Sync
 }
 
 // MARK: - Diff
@@ -282,6 +283,11 @@ extension PresetSnapshot {
             let oldName = oldSrc < names.count ? names[oldSrc] : "\(oldSrc)"
             let newName = newSrc < names.count ? names[newSrc] : "\(newSrc)"
             changes.append(.init(category: "Input", description: "Input source: \(oldName) → \(newName)"))
+        }
+
+        // LG Sound Sync — per-preset enable (only when firmware supports it)
+        if let oldVal = old.lgSoundSyncEnabled, let newVal = new.lgSoundSyncEnabled, oldVal != newVal {
+            changes.append(.init(category: "LG Sound Sync", description: "LG Sound Sync: \(newVal ? "enabled" : "disabled")"))
         }
 
         return PresetDiff(changes: changes)
