@@ -115,18 +115,32 @@ struct SettingsView: View {
 struct GeneralSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
 
+    /// App version string, read from the bundle (CFBundleShortVersionString,
+    /// driven by MARKETING_VERSION) so it stays in sync with the build settings
+    /// and the standard macOS About window.
+    static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
     var body: some View {
         Form {
             Section {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Image(systemName: "speaker.wave.3.fill")
+                        Image(systemName: "speaker.wave.3.fill")
                             .font(.system(size: 32))
                             .foregroundColor(.accentColor)
-                        VStack(alignment: .leading) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text("DSPi Console")
                                 .font(.headline)
                             Text("USB Audio DSP Controller")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("Version \(Self.appVersion)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("Made with love by Weeb Labs")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -2325,6 +2339,30 @@ struct DSPi_ConsoleApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            // Customize the standard "About DSPi Console" window. The panel
+            // renders the bundle's name + version (CFBundleShortVersionString =
+            // MARKETING_VERSION) automatically; we supply the credits string so
+            // it shows our sign-off.
+            CommandGroup(replacing: .appInfo) {
+                Button("About DSPi Console") {
+                    let credits = NSAttributedString(
+                        string: "Made with love by Weeb Labs",
+                        attributes: [
+                            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                            .foregroundColor: NSColor.secondaryLabelColor,
+                            .paragraphStyle: {
+                                let style = NSMutableParagraphStyle()
+                                style.alignment = .center
+                                return style
+                            }()
+                        ]
+                    )
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        .credits: credits
+                    ])
+                }
+            }
+
             // Add to native File menu
             CommandGroup(after: .newItem) {
                 Divider()
