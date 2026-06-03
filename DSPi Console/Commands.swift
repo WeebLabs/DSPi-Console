@@ -1031,34 +1031,9 @@ extension DSPViewModel {
     }
 
     func setInputSource(_ source: Int) {
-        let previous = self.inputSource
         let byte = Data([UInt8(source)])
 
-        // Anchor the destination sidebar view's value in the SAME main-queue
-        // tick that flips `inputSource`, so the SwiftUI swap doesn't render
-        // once with the stale binding before the real value lands.
-        //
-        // Both modes drive the same firmware field (audio_state.volume) and
-        // share the same scalar↔dB taper, so seeding the destination with
-        // the source's current dB is identity — slider position and dB
-        // readout stay put across the swap.  Any later USB-roundtrip
-        // correction (host→user via fetchUserVolume on the input_source
-        // notification at offset 2896) is at most a tiny rounding nudge.
         DispatchQueue.main.async {
-            if source == 0 && previous != 0 {
-                // user → host: push our user volume into the host
-                // controller (sync publish, async CoreAudio write) so
-                // HostVolumeSection appears with the right slider position.
-                AppState.shared.hostVolume.applyVolumeDBImmediate(self.userVolumeDB)
-            } else if source != 0 && previous == 0 {
-                // host → user: anchor user view at the host's current dB
-                // before the swap so UserVolumeSection.onAppear seeds
-                // localScalar from the right value.
-                let hostDB = AppState.shared.hostVolume.volumeDB
-                if hostDB.isFinite {
-                    self.userVolumeDB = hostDB
-                }
-            }
             self.inputSource = source
         }
 
@@ -1521,16 +1496,6 @@ extension DSPViewModel {
             // guarantees this.
             DispatchQueue.main.async {
                 self.updateSavedSnapshot()
-                // Sync the macOS host volume to the newly-loaded preset's
-                // user volume so the menu-bar slider, F11/F12 keys, and
-                // audio_state.volume (via UAC1) all re-converge with what
-                // the preset says.  Same field the host slider already
-                // drives via UAC1 — applyVolumeDBImmediate updates the
-                // controller's published value synchronously on main and
-                // queues the CoreAudio device write.  Idempotent: if the
-                // preset's value matches the current host volume, the
-                // CoreAudio write is a no-op.
-                AppState.shared.hostVolume.applyVolumeDBImmediate(self.userVolumeDB)
             }
         }
         return status
@@ -1775,11 +1740,14 @@ extension DSPViewModel {
         }
 
         // user_volume.user_volume_db (offset 2928, 4 bytes float dB).
-        // Fired on REQ_SET_USER_VOLUME and bulk apply.  Note: UAC1 host
-        // slider writes go through audio_set_volume() in firmware, which
-        // does NOT emit a notification — so during USB playback our
-        // userVolumeDB only refreshes on input-source switch (below) or
-        // explicit fetch.
+        // Fired on REQ_SET_USER_VOLUME (PARAM_SRC_HOST_SET — ignored
+        // upstream as our own echo), bulk apply, and — crucially — on
+        // OS volume-slider moves via UAC1, which the firmware reports
+        // with PARAM_SRC_UAC1.  Those UAC1 events are how the in-app
+        // slider stays synced with the OS volume control during USB
+        // playback (UAC1 can't push the value the other direction, so
+        // this notification is the only signal we get).  GPIO/INTERNAL
+        // (hardware-knob / firmware) writes flow through here too.
         if off == 2928 && sz == 4 && payload.count >= 4 {
             let db: Float = payload.withUnsafeBytes { $0.load(as: Float.self) }
             if abs(self.userVolumeDB - db) > 0.01 {

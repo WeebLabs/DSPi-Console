@@ -18,12 +18,6 @@ class AppState: ObservableObject {
     /// The display window observes this same instance.
     lazy var interruptMonitor: InterruptMonitor = InterruptMonitor(usb: usb)
 
-    /// Drives the DSPi audio device's CoreAudio scalar volume so the
-    /// sidebar volume control stays in sync with the macOS menu-bar
-    /// slider, keyboard volume keys, and the device's USB Audio Class
-    /// volume state.
-    let hostVolume = HostVolumeController()
-
     private init() {}
 }
 

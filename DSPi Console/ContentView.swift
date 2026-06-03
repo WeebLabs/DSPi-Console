@@ -593,26 +593,22 @@ struct ContentView: View {
                             }
                         }
 
-                        // Volume control — drives the macOS default
-                        // output's CoreAudio volume when the input source
-                        // is USB (so menu-bar slider, keyboard keys, and
-                        // sidebar all stay in sync).  When the source is
-                        // SPDIF or I2S, the host audio path isn't carrying
-                        // the audio, so we drive the firmware's user
-                        // volume directly via REQ_SET_USER_VOLUME — the
-                        // same field the UAC1 host slider writes to.
+                        // Volume control — always drives the firmware's
+                        // user volume directly via REQ_SET_USER_VOLUME (the
+                        // same `audio_state.volume` field the OS volume
+                        // slider writes via UAC1), regardless of input
+                        // source.  We no longer touch the macOS system
+                        // volume from here; instead the firmware reports
+                        // OS-slider changes back as UAC1-tagged
+                        // PARAM_CHANGED notifications, which keep this
+                        // slider in sync (see applyNotifiedParamChange).
                         // Sidebar volume mode is user-selectable (Auto vs
                         // Master) via the popup-label selector inside each
-                        // section; persisted in AppSettings.  Auto resolves
-                        // to host / user based on inputSource.
-                        switch (SidebarVolumeMode(rawValue: settings.sidebarVolumeMode) ?? .auto,
-                                vm.inputSource) {
-                        case (.master, _):
+                        // section; persisted in AppSettings.
+                        switch SidebarVolumeMode(rawValue: settings.sidebarVolumeMode) ?? .auto {
+                        case .master:
                             MasterModeSection(vm: vm)
-                        case (.auto, 0):
-                            HostVolumeSection(controller: AppState.shared.hostVolume,
-                                              vm: vm)
-                        case (.auto, _):
+                        case .auto:
                             UserVolumeSection(vm: vm)
                         }
 
@@ -855,29 +851,28 @@ extension DSPViewModel {
     }
 }
 
-// MARK: - User Volume Section (non-USB input)
+// MARK: - User Volume Section
 //
 // Drives REQ_SET_USER_VOLUME (0xDA) — the vendor-channel access to the
-// same `audio_state.volume` field the UAC1 host slider writes to.  Used
-// in the sidebar when the input source is non-USB (SPDIF / I2S), where
-// the host's CoreAudio volume has no audio path to act on.  The
-// firmware applies this value to vol_mul + the loudness coefficient
+// same `audio_state.volume` field the OS volume slider writes via UAC1.
+// This is the sole "Auto" volume control for every input source: the
+// firmware applies the value to vol_mul + the loudness coefficient
 // pointer regardless of source, so equal-loudness compensation tracks
 // changes correctly.
 //
-// On non-USB → USB transitions the controller pushes this value back
-// out to CoreAudio so the menu-bar slider, the device's HID volume
-// state, and `audio_state.volume` re-converge.
+// We never touch the macOS system volume.  Instead, OS volume changes
+// flow OS → device (over UAC1) → UAC1-tagged PARAM_CHANGED notification
+// → vm.userVolumeDB, so this slider stays synced with the OS slider.
+// The reverse (slider → OS volume) isn't possible under UAC1.
 struct UserVolumeSection: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject private var settings = AppSettings.shared
 
-    // Slider position is "scalar" 0...1 mapped via the SAME taper the
-    // host-volume mode uses (CoreAudio's device-specific translation).
-    // The two sliders therefore feel identical: same thumb position
-    // produces the same dB readout in both modes.  At scalar 0 the
-    // display reads "-∞ dB"; the firmware gets the floor (-60 dB)
-    // since user_volume itself is unmuted-only.
+    // Slider position is a "scalar" 0...1 mapped to dB over [minDB, 0]
+    // via a square-root power taper: more travel is given to the loud
+    // (top) region for fine control, with the quiet region compressed
+    // toward the bottom.  At scalar 0 the firmware gets the floor
+    // (minDB) since user_volume is unmuted-only.
     @State private var localScalar: Double = 1.0
     @State private var isDragging = false
 
@@ -885,13 +880,15 @@ struct UserVolumeSection: View {
 
     private static func scalarToDB(_ s: Double) -> Float {
         if s <= 0 { return minDB }
-        let db = AppState.shared.hostVolume.scalarToDBPublic(Float(s))
-        return max(minDB, db)
+        let span = Double(-minDB)               // 60
+        return Float(Double(minDB) + span * sqrt(min(1, s)))
     }
 
     private static func dbToScalar(_ db: Float) -> Double {
         if db <= minDB { return 0 }
-        return Double(AppState.shared.hostVolume.dbToScalarPublic(db))
+        let span = Double(-minDB)               // 60
+        let frac = Double(db - minDB) / span    // 0...1
+        return min(1, frac * frac)
     }
 
     private static func displayString(scalar: Double, db: Float) -> String {
@@ -922,46 +919,6 @@ struct UserVolumeSection: View {
                 if !isDragging { localScalar = Self.dbToScalar(val) }
             }
             .onRightClick { localScalar = 1; vm.setUserVolume(0) }
-        }
-    }
-}
-
-// MARK: - Host Volume Section
-//
-// Sidebar control bound to AppState.shared.hostVolume.  The slider
-// position is the device's CoreAudio scalar (0...1); the readout next
-// to the label is converted to dB via CoreAudio's scalar-to-decibels
-// translation property.  External changes (menu-bar slider, F11/F12,
-// other apps using HID volume keys) flow back through the controller's
-// property listener and update the slider in place.
-struct HostVolumeSection: View {
-    @ObservedObject var controller: HostVolumeController
-    @ObservedObject var vm: DSPViewModel
-    @ObservedObject private var settings = AppSettings.shared
-
-    private var displayString: String {
-        guard controller.isAvailable else { return "—" }
-        return String(format: "%.1f dB", controller.volumeDB)
-    }
-
-    var body: some View {
-        VStack(spacing: 4) {
-            HStack {
-                VolumeModeSelector(modeRaw: $settings.sidebarVolumeMode,
-                                   inputSource: vm.inputSource)
-                Spacer()
-                Text(displayString)
-                    .font(.system(.body).monospacedDigit())
-                    .foregroundColor(controller.isAvailable ? .primary : .secondary)
-            }
-            Slider(value: Binding(
-                get: { Double(controller.volumeScalar) },
-                set: { controller.setVolumeScalar(Float($0)) }
-            ), in: 0...1)
-            .controlSize(.small)
-            .disabled(!controller.isAvailable)
-            .opacity(controller.isAvailable ? 1.0 : 0.4)
-            .onRightClick { controller.setVolumeScalar(1) }
         }
     }
 }

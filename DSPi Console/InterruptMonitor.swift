@@ -49,6 +49,7 @@ private func sourceLabel(_ src: UInt8) -> String {
     case 4: return "FACTORY"
     case 5: return "GPIO"
     case 6: return "INTERNAL"
+    case 7: return "UAC1"
     default: return String(format: "src=0x%02X", src)
     }
 }
