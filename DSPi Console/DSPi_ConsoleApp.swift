@@ -227,6 +227,8 @@ struct SettingsView: View {
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(190)
+            // Must be on the sidebar content (not the split view) to take effect.
+            .toolbar(removing: .sidebarToggle)
         } detail: {
             detailContent
                 // Size the detail COLUMN (not just its content). NavigationSplitView's
