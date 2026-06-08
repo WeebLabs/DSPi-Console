@@ -31,6 +31,8 @@ class AppSettings: ObservableObject {
     // Graphing
     @AppStorage("graphLineWidth") var graphLineWidth: Double = 2.0
     @AppStorage("graphAnimationSpeed") var graphAnimationSpeed: Double = 0.2
+    @AppStorage("showPhase") var showPhase: Bool = false
+    @AppStorage("phaseUnwrapped") var phaseUnwrapped: Bool = false
 
     // Scale & Labels
     @AppStorage("showFrequencyLabels") var showFrequencyLabels: Bool = true
@@ -782,6 +784,31 @@ struct GraphingSettingsTab: View {
                     }
                 }
                 .toggleStyle(.switch)
+                .padding(.vertical, 4)
+
+                Toggle(isOn: $settings.showPhase) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Phase Response")
+                            .font(.body)
+                        Text("Overlay the selected channel's phase (degrees) as a dotted line")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+
+                Toggle(isOn: $settings.phaseUnwrapped) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Unwrap Phase")
+                            .font(.body)
+                        Text("Show continuous phase instead of wrapping at \u{00B1}180\u{00B0}")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .disabled(!settings.showPhase)
                 .padding(.vertical, 4)
             } header: {
                 Label("Graph Appearance", systemImage: "sparkles")
