@@ -11,42 +11,46 @@ enum FilterType: Int, CaseIterable, Identifiable {
     case notch = 6
     case allPass = 7
 
-    // Crossover types (8..37)
+    // Crossover types (8..39).  Raw values MUST match the firmware FilterType
+    // enum (config.h) exactly - they are sent verbatim as the type byte in
+    // REQ_SET_EQ_PARAM.  LR6 was inserted at 12/13, shifting LR8/BW/BES up.
     case lr2_lp = 8
     case lr2_hp = 9
     case lr4_lp = 10
     case lr4_hp = 11
-    case lr8_lp = 12
-    case lr8_hp = 13
-    case bw1_lp = 14
-    case bw1_hp = 15
-    case bw2_lp = 16
-    case bw2_hp = 17
-    case bw3_lp = 18
-    case bw3_hp = 19
-    case bw4_lp = 20
-    case bw4_hp = 21
-    case bw5_lp = 22
-    case bw5_hp = 23
-    case bw6_lp = 24
-    case bw6_hp = 25
-    case bw7_lp = 26
-    case bw7_hp = 27
-    case bw8_lp = 28
-    case bw8_hp = 29
-    case bes2_lp = 30
-    case bes2_hp = 31
-    case bes4_lp = 32
-    case bes4_hp = 33
-    case bes6_lp = 34
-    case bes6_hp = 35
-    case bes8_lp = 36
-    case bes8_hp = 37
+    case lr6_lp = 12
+    case lr6_hp = 13
+    case lr8_lp = 14
+    case lr8_hp = 15
+    case bw1_lp = 16
+    case bw1_hp = 17
+    case bw2_lp = 18
+    case bw2_hp = 19
+    case bw3_lp = 20
+    case bw3_hp = 21
+    case bw4_lp = 22
+    case bw4_hp = 23
+    case bw5_lp = 24
+    case bw5_hp = 25
+    case bw6_lp = 26
+    case bw6_hp = 27
+    case bw7_lp = 28
+    case bw7_hp = 29
+    case bw8_lp = 30
+    case bw8_hp = 31
+    case bes2_lp = 32
+    case bes2_hp = 33
+    case bes4_lp = 34
+    case bes4_hp = 35
+    case bes6_lp = 36
+    case bes6_hp = 37
+    case bes8_lp = 38
+    case bes8_hp = 39
 
     var id: Int { rawValue }
 
     /// True if this is a crossover filter type (LR / BW / BES family).
-    var isCrossover: Bool { rawValue >= 8 && rawValue <= 37 }
+    var isCrossover: Bool { rawValue >= 8 && rawValue <= 39 }
 
     var name: String {
         switch self {
@@ -62,6 +66,8 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .lr2_hp: return "LR2 High Pass"
         case .lr4_lp: return "LR4 Low Pass"
         case .lr4_hp: return "LR4 High Pass"
+        case .lr6_lp: return "LR6 Low Pass"
+        case .lr6_hp: return "LR6 High Pass"
         case .lr8_lp: return "LR8 Low Pass"
         case .lr8_hp: return "LR8 High Pass"
         case .bw1_lp: return "BW1 Low Pass"
@@ -106,6 +112,8 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .lr2_hp: return "LR2 HP"
         case .lr4_lp: return "LR4 LP"
         case .lr4_hp: return "LR4 HP"
+        case .lr6_lp: return "LR6 LP"
+        case .lr6_hp: return "LR6 HP"
         case .lr8_lp: return "LR8 LP"
         case .lr8_hp: return "LR8 HP"
         case .bw1_lp: return "BW1 LP"
@@ -138,7 +146,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
     /// Crossover family decomposition.  Returns nil for PEQ types.
     var crossoverFamily: CrossoverFamily? {
         switch self {
-        case .lr2_lp, .lr2_hp, .lr4_lp, .lr4_hp, .lr8_lp, .lr8_hp: return .linkwitzRiley
+        case .lr2_lp, .lr2_hp, .lr4_lp, .lr4_hp, .lr6_lp, .lr6_hp, .lr8_lp, .lr8_hp: return .linkwitzRiley
         case .bw1_lp, .bw1_hp, .bw2_lp, .bw2_hp, .bw3_lp, .bw3_hp, .bw4_lp, .bw4_hp,
              .bw5_lp, .bw5_hp, .bw6_lp, .bw6_hp, .bw7_lp, .bw7_hp, .bw8_lp, .bw8_hp:
             return .butterworth
@@ -159,6 +167,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
         switch self {
         case .lr2_lp, .lr2_hp: return 2
         case .lr4_lp, .lr4_hp: return 4
+        case .lr6_lp, .lr6_hp: return 6
         case .lr8_lp, .lr8_hp: return 8
         case .bw1_lp, .bw1_hp: return 1
         case .bw2_lp, .bw2_hp: return 2
@@ -215,7 +224,7 @@ enum CrossoverFamily: Int, CaseIterable, Identifiable {
     /// Available orders for this family.
     var availableOrders: [Int] {
         switch self {
-        case .linkwitzRiley: return [2, 4, 8]
+        case .linkwitzRiley: return [2, 4, 6, 8]
         case .butterworth: return [1, 2, 3, 4, 5, 6, 7, 8]
         case .bessel: return [2, 4, 6, 8]
         }
@@ -228,6 +237,8 @@ enum CrossoverFamily: Int, CaseIterable, Identifiable {
         case (.linkwitzRiley, 2, false): return .lr2_hp
         case (.linkwitzRiley, 4, true):  return .lr4_lp
         case (.linkwitzRiley, 4, false): return .lr4_hp
+        case (.linkwitzRiley, 6, true):  return .lr6_lp
+        case (.linkwitzRiley, 6, false): return .lr6_hp
         case (.linkwitzRiley, 8, true):  return .lr8_lp
         case (.linkwitzRiley, 8, false): return .lr8_hp
         case (.butterworth, 1, true):    return .bw1_lp
@@ -466,32 +477,33 @@ class DSPMath {
         return poles
     }
 
-    /// Bessel pole locations, normalised to -3 dB at omega = 1 (Rane / Williams
-    /// convention — matches firmware).  Values are tabulated; pairs are listed
-    /// as (sigma, omega) with sigma > 0 (LHP).
+    /// Bessel pole locations, normalised to -3 dB at omega = 1.  Values match
+    /// the firmware tables verbatim (config.h / crossover.c), verified against
+    /// scipy `signal.bessel(N, 1.0, ..., norm='mag')`.  Pairs are listed as
+    /// (sigma, omega) with sigma > 0 (LHP), ordered low-Q first.
     private static func besselPoles(order: Int) -> [ProtoPole] {
         switch order {
         case 2:
             return [
-                ProtoPole(sigma: 1.1016, omega: 0.6360, isFirstOrder: false)
+                ProtoPole(sigma: 1.10160, omega: 0.63601, isFirstOrder: false)
             ]
         case 4:
             return [
-                ProtoPole(sigma: 1.3700, omega: 0.4102, isFirstOrder: false),
-                ProtoPole(sigma: 0.9952, omega: 1.2571, isFirstOrder: false)
+                ProtoPole(sigma: 1.37007, omega: 0.41025, isFirstOrder: false),
+                ProtoPole(sigma: 0.99521, omega: 1.25711, isFirstOrder: false)
             ]
         case 6:
             return [
-                ProtoPole(sigma: 1.5060, omega: 0.3213, isFirstOrder: false),
-                ProtoPole(sigma: 1.3819, omega: 0.9715, isFirstOrder: false),
-                ProtoPole(sigma: 0.9318, omega: 1.6620, isFirstOrder: false)
+                ProtoPole(sigma: 1.57149, omega: 0.32090, isFirstOrder: false),
+                ProtoPole(sigma: 1.38186, omega: 0.97147, isFirstOrder: false),
+                ProtoPole(sigma: 0.93066, omega: 1.66186, isFirstOrder: false)
             ]
         case 8:
             return [
-                ProtoPole(sigma: 1.6043, omega: 0.2638, isFirstOrder: false),
-                ProtoPole(sigma: 1.5596, omega: 0.7912, isFirstOrder: false),
-                ProtoPole(sigma: 1.3789, omega: 1.3214, isFirstOrder: false),
-                ProtoPole(sigma: 0.8924, omega: 1.9844, isFirstOrder: false)
+                ProtoPole(sigma: 1.75741, omega: 0.27287, isFirstOrder: false),
+                ProtoPole(sigma: 1.63694, omega: 0.82280, isFirstOrder: false),
+                ProtoPole(sigma: 1.37384, omega: 1.38836, isFirstOrder: false),
+                ProtoPole(sigma: 0.89287, omega: 1.99833, isFirstOrder: false)
             ]
         default:
             return []

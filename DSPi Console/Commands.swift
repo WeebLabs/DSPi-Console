@@ -206,8 +206,12 @@ extension DSPViewModel {
     }
     
     func fetchFilter(ch: Int, band: Int) {
+        // REQ_GET_EQ_PARAM wValue: bits[15:8]=channel, bits[7:3]=band (5 bits,
+        // 0..31), bits[2:0]=param (0=type, 1=freq, 2=Q, 3=gain, 4=bypass).  The
+        // band field is 5 bits (not the original 4) so crossover bands at
+        // 20..23 stay addressable after the reserved PEQ gap widened to 10..19.
         func getVal<T>(_ param: Int, defaultVal: T) -> T {
-            let wVal = UInt16((ch << 8) | (band << 4) | param)
+            let wVal = UInt16((ch << 8) | (band << 3) | param)
             if let d = usb.getControlRequest(request: REQ_GET_EQ_PARAM, value: wVal, index: 0, length: 4) {
                 return d.withUnsafeBytes { $0.load(as: T.self) }
             }
@@ -269,12 +273,12 @@ extension DSPViewModel {
     // MARK: - Crossover Bands
     //
     // Crossover uses the existing EQ-band addressing (REQ_SET/GET_EQ_PARAM)
-    // with band indices 12..15 reserved for the four crossover bands per
+    // with band indices 20..23 reserved for the four crossover bands per
     // output channel.  See crossover_filters_spec.md §3.  The wValue layout
     // for SET is unused; the recipe is in the 16-byte payload.
 
     /// Set a single crossover band on an output channel.  `localBand` is 0..3;
-    /// the wire band index is 12+localBand.  No-op for master channels (the
+    /// the wire band index is 20+localBand.  No-op for master channels (the
     /// firmware would reject them anyway) and for invalid band indices.
     func setCrossoverBand(ch: Int, localBand: Int, p: FilterParams) {
         guard ch >= 2,

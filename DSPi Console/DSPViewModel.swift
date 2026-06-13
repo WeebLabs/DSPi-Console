@@ -83,7 +83,7 @@ class DSPViewModel: ObservableObject {
     /// Crossover bands per EQ channel.  Only output channels (eqCh >= 2) carry
     /// real entries; master channels are kept empty since crossover is
     /// rejected pre-matrix-mixer per spec §1.  Always 4 bands per channel
-    /// (the 16-byte WireBandParams entries mapped to wire band indices 12..15).
+    /// (the 16-byte WireBandParams entries mapped to wire band indices 20..23).
     @Published var xoverData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
     @Published var channelDelays: [Int: Float] = [:]
@@ -190,16 +190,18 @@ class DSPViewModel: ObservableObject {
 
     /// Crossover stage (V11 wire format) shipped alongside crossover_filters_spec.
     /// Tracked via the bulk-transfer format version: firmware that returns a
-    /// V11 payload accepts crossover writes at band indices 12..15.  Defaults
+    /// V11 payload accepts crossover writes at band indices 20..23.  Defaults
     /// to false until we've parsed a bulk reply, so the UI tab can hide itself
     /// on pre-V11 firmware.
     @Published var firmwareSupportsCrossover: Bool = false
 
-    /// Wire band index for the i-th crossover band (0..3 → 12..15).  Single
+    /// Wire band index for the i-th crossover band (0..3 → 20..23).  Single
     /// source of truth so view-model and view code agree about addressing.
-    static func crossoverWireBand(_ localBand: Int) -> Int { 12 + localBand }
+    /// Crossover moved to base 20 (XOVER_BAND_BASE) to open a reserved gap at
+    /// bands 10..19 for future PEQ-count growth - see firmware config.h.
+    static func crossoverWireBand(_ localBand: Int) -> Int { 20 + localBand }
     static let crossoverBandsPerChannel = 4
-    static let firstCrossoverWireBand = 12
+    static let firstCrossoverWireBand = 20
     @Published var isDeviceConnected: Bool = false
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
