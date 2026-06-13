@@ -422,6 +422,7 @@ class DSPViewModel: ObservableObject {
             masterVolumeDB: masterVolumeDB,
             masterVolumeMode: presetMasterVolumeMode,
             outputConfigMode: presetOutputConfigMode,
+            platformName: platformName,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
             loudnessRefSPL: loudnessRefSPL,

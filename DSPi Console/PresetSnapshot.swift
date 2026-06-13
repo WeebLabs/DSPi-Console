@@ -34,6 +34,10 @@ struct PresetSnapshot: Equatable {
     // toward preset dirtiness in WITH_PRESET mode (in INDEPENDENT mode it lives
     // in the device directory and is saved explicitly).
     let outputConfigMode: Int   // 0 = INDEPENDENT, 1 = WITH_PRESET
+    // Captured so the Names diff can compute the per-config default channel
+    // names (which depend on platform layout + slot types) and ignore a
+    // type-driven default->default rename - see the Names section in diff().
+    let platformName: String
     let bypass: Bool
     let loudnessEnabled: Bool
     let loudnessRefSPL: Float
@@ -231,11 +235,23 @@ extension PresetSnapshot {
             }
         }
 
-        // Channel names
+        // Channel names.  Output-channel default names are derived from the slot
+        // type (e.g. "SPDIF 1 L" vs "I2S 1 L"), so flipping an output type makes
+        // the firmware auto-rename any channel still at its default and notify us.
+        // That default->default rename is a consequence of the output-config
+        // change, not a user edit, so it must not dirty the preset (especially in
+        // INDEPENDENT mode, where the type change itself is intentionally ignored).
+        // The firmware only auto-renames channels that are at their default, so
+        // skipping default->default transitions never suppresses a real rename.
+        let oldDefaultNames = DSPViewModel.defaultChannelNames(for: old.platformName, slotTypes: old.outputSlotTypes)
+        let newDefaultNames = DSPViewModel.defaultChannelNames(for: new.platformName, slotTypes: new.outputSlotTypes)
         for i in 0..<min(old.channelNames.count, new.channelNames.count) {
-            if old.channelNames[i] != new.channelNames[i] && !(old.channelNames[i].isEmpty && new.channelNames[i].isEmpty) {
-                changes.append(.init(category: "Names", description: "'\(old.channelNames[i])' → '\(new.channelNames[i])'"))
-            }
+            guard old.channelNames[i] != new.channelNames[i],
+                  !(old.channelNames[i].isEmpty && new.channelNames[i].isEmpty) else { continue }
+            let wasDefault = i < oldDefaultNames.count && old.channelNames[i] == oldDefaultNames[i]
+            let isDefault = i < newDefaultNames.count && new.channelNames[i] == newDefaultNames[i]
+            if wasDefault && isDefault { continue }
+            changes.append(.init(category: "Names", description: "'\(old.channelNames[i])' → '\(new.channelNames[i])'"))
         }
 
         // Output configuration — pins, output types, I2S clocks, and the

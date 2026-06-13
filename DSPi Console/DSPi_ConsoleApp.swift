@@ -192,6 +192,7 @@ final class SettingsNavigator: ObservableObject {
 
 struct SettingsView: View {
     @ObservedObject private var vm = AppState.shared.viewModel
+    @ObservedObject private var saveCoordinator = SettingsSaveCoordinator.shared
     /// Persisted so the window reopens on the page you left it on.
     @AppStorage("settingsSelectedTab") private var selection: SettingsCategory = .general
 
@@ -231,6 +232,16 @@ struct SettingsView: View {
             .toolbar(removing: .sidebarToggle)
         } detail: {
             detailContent
+                // Shared save bar - appears on whatever page you're on while
+                // there are pending changes (global draft and/or live
+                // output-config edits not yet flashed).
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if saveCoordinator.hasPendingChanges {
+                        SettingsSaveBar()
+                            .transition(.move(edge: .bottom))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: saveCoordinator.hasPendingChanges)
                 // Size the detail COLUMN (not just its content). NavigationSplitView's
                 // detail column has a large default minimum width; `.frame` only
                 // shrinks the content inside it, leaving the column — and thus the
@@ -433,20 +444,210 @@ struct GlobalSettingsDraft: Equatable {
     }
 }
 
+/// Snapshot of the device-global output configuration (pins, output types, I2S
+/// clocks, S/PDIF RX). These edits apply live to RAM; this captures a baseline
+/// so we can detect/revert changes that haven't been flashed yet.
+struct OutputConfigSnapshot: Equatable {
+    var outputPins: [UInt8]
+    var outputSlotTypes: [UInt8]
+    var i2sBckPin: UInt8
+    var mckEnabled: Bool
+    var mckPin: UInt8
+    var mckMultiplier: Int
+    var spdifRxPin: UInt8
+}
+
+/// App-lifetime owner of pending (unsaved) Settings changes, so the save bar
+/// survives navigation between pages and the Settings window being closed and
+/// reopened. Two independent categories of pending change:
+///
+///  - Global parameters: staged in `globalDraft` and not applied until saved
+///    (the firmware setters apply + persist on Save).
+///  - Output config (independent mode only): pin/type/clock/RX edits apply
+///    LIVE to RAM as they're made; "dirty" means they haven't been flashed yet.
+///    Save calls `saveOutputConfig()`; Revert re-applies the captured baseline.
+///
+/// One Save / one Revert acts on whatever is pending. Dirtiness is gated on
+/// actual user edits, so fresh device data (on connect) never looks unsaved.
+final class SettingsSaveCoordinator: ObservableObject {
+    static let shared = SettingsSaveCoordinator()
+    private var vm: DSPViewModel { AppState.shared.viewModel }
+
+    // Category B - Global Parameters
+    @Published var globalDraft: GlobalSettingsDraft
+    /// True once the user has edited the global draft since the last clean point.
+    @Published var globalUserEdited = false
+
+    // Category A - Output config (live edits, flash on save)
+    @Published var outputConfigDirty = false
+    private var outputBaseline: OutputConfigSnapshot
+
+    private init() {
+        let vm = AppState.shared.viewModel
+        globalDraft = GlobalSettingsDraft.from(vm)
+        outputBaseline = SettingsSaveCoordinator.snapshot(vm)
+    }
+
+    private static func snapshot(_ vm: DSPViewModel) -> OutputConfigSnapshot {
+        OutputConfigSnapshot(
+            outputPins: vm.outputPins,
+            outputSlotTypes: vm.outputSlotTypes,
+            i2sBckPin: vm.i2sBckPin,
+            mckEnabled: vm.mckEnabled,
+            mckPin: vm.mckPin,
+            mckMultiplier: vm.mckMultiplier,
+            spdifRxPin: vm.spdifRxPin
+        )
+    }
+
+    // MARK: Dirty state
+
+    var globalDirty: Bool { globalUserEdited && globalDraft != GlobalSettingsDraft.from(vm) }
+    var outputDirty: Bool {
+        outputConfigDirty && vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT
+    }
+    var hasPendingChanges: Bool { globalDirty || outputDirty }
+
+    // MARK: Global draft editing
+
+    /// Binding for a global-draft field that marks the draft user-edited on write.
+    func draftBinding<T>(_ keyPath: WritableKeyPath<GlobalSettingsDraft, T>) -> Binding<T> {
+        Binding(
+            get: { self.globalDraft[keyPath: keyPath] },
+            set: { self.globalDraft[keyPath: keyPath] = $0; self.globalUserEdited = true }
+        )
+    }
+
+    /// Re-sync the draft to the device's current values (for display) when the
+    /// user hasn't edited it - called when the Global page appears / reconnects.
+    func refreshGlobalDraftIfClean() {
+        if !globalUserEdited { globalDraft = GlobalSettingsDraft.from(vm) }
+    }
+
+    // MARK: Output-config editing
+
+    /// Call at the start of any output-config edit. On the first edit since the
+    /// last clean point (independent mode only), captures the pre-edit committed
+    /// config as the revert baseline.
+    func beginOutputEdit() {
+        guard vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT else { return }
+        if !outputConfigDirty {
+            outputBaseline = SettingsSaveCoordinator.snapshot(vm)
+            outputConfigDirty = true
+        }
+    }
+
+    // MARK: Save / Revert
+
+    func save() {
+        let doGlobal = globalDirty
+        let doOutput = outputDirty
+        guard doGlobal || doOutput else { return }
+        let pending = globalDraft
+        let deviceState = GlobalSettingsDraft.from(vm)
+        let vm = self.vm
+        DispatchQueue.global(qos: .userInitiated).async {
+            if doGlobal {
+                if pending.presetStartupMode != deviceState.presetStartupMode
+                    || pending.presetDefaultSlot != deviceState.presetDefaultSlot {
+                    vm.setPresetStartup(mode: pending.presetStartupMode, defaultSlot: pending.presetDefaultSlot)
+                }
+                if pending.presetMasterVolumeMode != deviceState.presetMasterVolumeMode {
+                    vm.setMasterVolumeMode(pending.presetMasterVolumeMode)
+                }
+                if pending.presetOutputConfigMode != deviceState.presetOutputConfigMode {
+                    vm.setOutputConfigMode(pending.presetOutputConfigMode)
+                }
+                if pending.dacHwMuteConfig != deviceState.dacHwMuteConfig {
+                    vm.setDacHwMuteConfig(pending.dacHwMuteConfig)
+                }
+            }
+            if doOutput {
+                _ = vm.saveOutputConfig()
+            }
+            DispatchQueue.main.async {
+                self.globalUserEdited = false
+                self.outputConfigDirty = false
+                self.globalDraft = GlobalSettingsDraft.from(vm)
+            }
+        }
+    }
+
+    func revert() {
+        if globalDirty {
+            globalUserEdited = false
+            globalDraft = GlobalSettingsDraft.from(vm)
+        }
+        if outputDirty {
+            let base = outputBaseline
+            let vm = self.vm
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Best-effort restore of the live config to the baseline.
+                for slot in 0..<min(vm.numOutputSlots, base.outputSlotTypes.count)
+                where vm.outputSlotTypes[slot] != base.outputSlotTypes[slot] {
+                    _ = vm.setOutputSlotType(slot: slot, type: base.outputSlotTypes[slot])
+                }
+                for i in 0..<min(vm.outputPins.count, base.outputPins.count)
+                where vm.outputPins[i] != base.outputPins[i] {
+                    _ = vm.setOutputPin(output: i, pin: base.outputPins[i])
+                }
+                if vm.i2sBckPin != base.i2sBckPin { _ = vm.setI2SBckPin(base.i2sBckPin) }
+                if vm.mckEnabled != base.mckEnabled { _ = vm.setMckEnable(base.mckEnabled) }
+                if vm.mckPin != base.mckPin { _ = vm.setMckPin(base.mckPin) }
+                if vm.mckMultiplier != base.mckMultiplier { _ = vm.setMckMultiplier(base.mckMultiplier) }
+                if vm.spdifRxPin != base.spdifRxPin { _ = vm.setSpdifRxPin(base.spdifRxPin) }
+                DispatchQueue.main.async { self.outputConfigDirty = false }
+            }
+        }
+    }
+}
+
+/// Shared save/revert bar shown at the bottom of any Settings page while there
+/// are pending changes (global draft and/or live output-config edits not yet
+/// flashed). One Save / one Revert acts on whatever is pending.
+private struct SettingsSaveBar: View {
+    @ObservedObject var coordinator = SettingsSaveCoordinator.shared
+    @ObservedObject var vm = AppState.shared.viewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Unsaved changes")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Saving writes these settings to the device's flash.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            Button("Revert") { coordinator.revert() }
+            Button("Save") { coordinator.save() }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!vm.isDeviceConnected)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
+        }
+    }
+}
+
 struct GlobalSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
     @ObservedObject private var navigator = SettingsNavigator.shared
-    @State private var draft: GlobalSettingsDraft = GlobalSettingsDraft(
-        presetStartupMode: 0,
-        presetDefaultSlot: 0,
-        presetMasterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT,
-        presetOutputConfigMode: OUTPUT_CONFIG_MODE_WITH_PRESET,
-        dacHwMuteConfig: DacHwMuteConfig()
-    )
+    @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
 
-    private var hasChanges: Bool {
-        draft != GlobalSettingsDraft.from(vm)
-    }
+    /// Read access to the shared global-params draft. Edits go through
+    /// `coordinator.draftBinding(...)` so they're tracked centrally.
+    private var draft: GlobalSettingsDraft { coordinator.globalDraft }
 
     private func slotLabel(_ slot: Int) -> String {
         let display = slot + 1
@@ -465,13 +666,13 @@ struct GlobalSettingsTab: View {
         Form {
             // MARK: Startup Preset
             Section {
-                Picker("Mode", selection: $draft.presetStartupMode) {
+                Picker("Mode", selection: coordinator.draftBinding(\.presetStartupMode)) {
                     Text("Specified Default").tag(0)
                     Text("Last Used").tag(1)
                 }
 
                 if draft.presetStartupMode == 0 {
-                    Picker("Default Preset", selection: $draft.presetDefaultSlot) {
+                    Picker("Default Preset", selection: coordinator.draftBinding(\.presetDefaultSlot)) {
                         ForEach(0..<10, id: \.self) { slot in
                             Text(slotLabel(slot)).tag(slot)
                         }
@@ -491,18 +692,18 @@ struct GlobalSettingsTab: View {
                     Toggle(isOn: Binding(
                         get: { draft.dacHwMuteConfig.enabled },
                         set: { newVal in
-                            draft.dacHwMuteConfig.enabled = newVal
-                            // Enabling with no pin is nonsensical — auto-
-                            // assign the first available GPIO so the user
-                            // doesn't see an empty picker the moment they
-                            // flip the switch on.
-                            if newVal && draft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE {
+                            coordinator.globalDraft.dacHwMuteConfig.enabled = newVal
+                            // Enabling with no pin is nonsensical - auto-assign
+                            // the first available GPIO so the user doesn't see an
+                            // empty picker the moment they flip the switch on.
+                            if newVal && coordinator.globalDraft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE {
                                 if let firstFree = HardwareSettingsTab.validPins.first(where: {
                                     vm.pinInUseBy($0, excluding: .dacMute) == nil
                                 }) {
-                                    draft.dacHwMuteConfig.pin = firstFree
+                                    coordinator.globalDraft.dacHwMuteConfig.pin = firstFree
                                 }
                             }
+                            coordinator.globalUserEdited = true
                         }
                     )) {
                         VStack(alignment: .leading, spacing: 1) {
@@ -523,7 +724,7 @@ struct GlobalSettingsTab: View {
                                 .frame(width: 16)
                             Text("Polarity")
                             Spacer()
-                            Picker("", selection: $draft.dacHwMuteConfig.activeLow) {
+                            Picker("", selection: coordinator.draftBinding(\.dacHwMuteConfig.activeLow)) {
                                 Text("Active Low").tag(true)
                                 Text("Active High").tag(false)
                             }
@@ -538,9 +739,9 @@ struct GlobalSettingsTab: View {
                                 .frame(width: 16)
                             Text("Mute Pin")
                             Spacer()
-                            Picker("", selection: $draft.dacHwMuteConfig.pin) {
-                                // No "None" entry — the enable toggle is
-                                // the master switch.  Filter pins through
+                            Picker("", selection: coordinator.draftBinding(\.dacHwMuteConfig.pin)) {
+                                // No "None" entry - the enable toggle is the
+                                // master switch.  Filter pins through
                                 // vm.pinInUseBy so claims in the Hardware
                                 // tab (output pins, I2S BCK/MCK, S/PDIF RX)
                                 // don't appear as free here.
@@ -554,18 +755,16 @@ struct GlobalSettingsTab: View {
                             .fixedSize()
                         }
 
-                        // Hold / release timing — same fixed-option pickers
-                        // as the per-tab embed used to use, but bound to
-                        // the local draft instead of immediately committing.
+                        // Hold / release timing, staged in the draft.
                         globalMsPicker(label: "Hold Time",
                                        tooltip: "Mute-attack wait before clock-stop",
                                        options: [5, 10, 20, 50, 100],
-                                       binding: $draft.dacHwMuteConfig.holdMs)
+                                       binding: coordinator.draftBinding(\.dacHwMuteConfig.holdMs))
 
                         globalMsPicker(label: "Release Time",
                                        tooltip: "Wait after un-mute before audio resumes",
                                        options: [0, 5, 10, 20, 50, 100],
-                                       binding: $draft.dacHwMuteConfig.releaseMs)
+                                       binding: coordinator.draftBinding(\.dacHwMuteConfig.releaseMs))
 
                         HStack {
                             Image(systemName: "play.circle")
@@ -586,8 +785,8 @@ struct GlobalSettingsTab: View {
                             }
                             .disabled(vm.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE
                                       || !vm.dacHwMuteConfig.enabled
-                                      || hasChanges)
-                            .help(hasChanges
+                                      || coordinator.globalDirty)
+                            .help(coordinator.globalDirty
                                   ? "Save your changes first to test the mute pin."
                                   : "Begins one-second test.")
                         }
@@ -599,7 +798,7 @@ struct GlobalSettingsTab: View {
 
             // MARK: Master Volume Persistence
             Section {
-                Picker("Mode", selection: $draft.presetMasterVolumeMode) {
+                Picker("Mode", selection: coordinator.draftBinding(\.presetMasterVolumeMode)) {
                     Text("Independent").tag(MASTER_VOLUME_MODE_INDEPENDENT)
                     Text("With Preset").tag(MASTER_VOLUME_MODE_WITH_PRESET)
                 }
@@ -619,7 +818,7 @@ struct GlobalSettingsTab: View {
 
             // MARK: Output Configuration Persistence
             Section {
-                Picker("Mode", selection: $draft.presetOutputConfigMode) {
+                Picker("Mode", selection: coordinator.draftBinding(\.presetOutputConfigMode)) {
                     Text("Independent").tag(OUTPUT_CONFIG_MODE_INDEPENDENT)
                     Text("With Preset").tag(OUTPUT_CONFIG_MODE_WITH_PRESET)
                 }
@@ -641,25 +840,19 @@ struct GlobalSettingsTab: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            revert()
+            coordinator.refreshGlobalDraftIfClean()
             scrollToOutputConfigIfNeeded(proxy)
         }
         .onChange(of: vm.isDeviceConnected) { connected in
-            // Re-sync from device on (re)connect so the draft reflects
-            // freshly-fetched firmware values rather than stale state
-            // from before the disconnect.
-            if connected { revert() }
+            // On (re)connect, refresh the draft from the device's freshly
+            // fetched values - but only when the user hasn't staged edits.
+            if connected { coordinator.refreshGlobalDraftIfClean() }
         }
         .onChange(of: navigator.scrollTarget) { _ in
             scrollToOutputConfigIfNeeded(proxy)
         }
         }
-        // Permanent footer bar - the macOS convention for explicit save flows.
-        // A fixed footer doesn't move, so nothing jumps; its STATE (status label
-        // + button enabled state) signals dirty/clean rather than its presence.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            saveBar
-        }
+        // The save bar is shared across all Settings pages (see SettingsView).
     }
 
     /// Deep-link handler: when another page sets the scroll target to
@@ -669,49 +862,6 @@ struct GlobalSettingsTab: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             withAnimation { proxy.scrollTo("outputConfig", anchor: .top) }
             navigator.scrollTarget = nil
-        }
-    }
-
-    private var saveBar: some View {
-        HStack(spacing: 10) {
-            // Status indicator — visible only when there's pending state
-            // to save.  Uses opacity (not conditional rendering) so the
-            // bar's intrinsic width never changes between clean / dirty
-            // states.
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundColor(.orange)
-                    .font(.caption)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Unsaved changes")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("Once saved, these settings are written directly to flash.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .opacity(hasChanges ? 1 : 0)
-            .animation(.easeInOut(duration: 0.18), value: hasChanges)
-
-            Spacer()
-
-            Button("Revert") { revert() }
-                .disabled(!hasChanges)
-            Button("Save") { save() }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(!hasChanges || !vm.isDeviceConnected)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)        // Subtle bottom-bar material matching
-                                 // macOS toolbar conventions; sits flush
-                                 // against the form's bottom edge.
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 0.5)
         }
     }
 
@@ -740,34 +890,6 @@ struct GlobalSettingsTab: View {
         }
     }
 
-    /// Push every draft field whose value differs from the device's
-    /// current view-model state.  Each setter publishes optimistically
-    /// in addition to sending the USB transfer, so by the time the
-    /// background work returns, vm == draft.
-    private func save() {
-        let snapshot = GlobalSettingsDraft.from(vm)
-        let pendingDraft = draft
-        DispatchQueue.global(qos: .userInitiated).async {
-            if pendingDraft.presetStartupMode != snapshot.presetStartupMode
-                || pendingDraft.presetDefaultSlot != snapshot.presetDefaultSlot {
-                vm.setPresetStartup(mode: pendingDraft.presetStartupMode,
-                                    defaultSlot: pendingDraft.presetDefaultSlot)
-            }
-            if pendingDraft.presetMasterVolumeMode != snapshot.presetMasterVolumeMode {
-                vm.setMasterVolumeMode(pendingDraft.presetMasterVolumeMode)
-            }
-            if pendingDraft.presetOutputConfigMode != snapshot.presetOutputConfigMode {
-                vm.setOutputConfigMode(pendingDraft.presetOutputConfigMode)
-            }
-            if pendingDraft.dacHwMuteConfig != snapshot.dacHwMuteConfig {
-                vm.setDacHwMuteConfig(pendingDraft.dacHwMuteConfig)
-            }
-        }
-    }
-
-    private func revert() {
-        draft = GlobalSettingsDraft.from(vm)
-    }
 }
 
 struct GraphingSettingsTab: View {
@@ -969,8 +1091,6 @@ struct HardwareSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
     @State private var statusMessage: String?
     @State private var statusIsError = false
-    /// Same key as SettingsView's selection — writing it deep-links to another page.
-    @AppStorage("settingsSelectedTab") private var settingsSelection: SettingsCategory = .general
 
     /// Inline success/error feedback for pin changes, shown on whichever
     /// hardware page is active.
@@ -1221,6 +1341,7 @@ struct HardwareSettingsTab: View {
                     Picker("", selection: Binding(
                         get: { vm.i2sBckPin },
                         set: { newPin in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
                             DispatchQueue.global(qos: .userInitiated).async {
                                 let status = vm.setI2SBckPin(newPin)
                                 DispatchQueue.main.async {
@@ -1263,6 +1384,7 @@ struct HardwareSettingsTab: View {
                 Toggle(isOn: Binding(
                     get: { vm.mckEnabled },
                     set: { newVal in
+                        SettingsSaveCoordinator.shared.beginOutputEdit()
                         DispatchQueue.global(qos: .userInitiated).async {
                             let status = vm.setMckEnable(newVal)
                             DispatchQueue.main.async {
@@ -1296,6 +1418,7 @@ struct HardwareSettingsTab: View {
                     Picker("", selection: Binding(
                         get: { vm.mckPin },
                         set: { newPin in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
                             DispatchQueue.global(qos: .userInitiated).async {
                                 let status = vm.setMckPin(newPin)
                                 DispatchQueue.main.async {
@@ -1336,6 +1459,7 @@ struct HardwareSettingsTab: View {
                     Picker("", selection: Binding(
                         get: { vm.mckMultiplier },
                         set: { newVal in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
                             DispatchQueue.global(qos: .userInitiated).async {
                                 let status = vm.setMckMultiplier(newVal)
                                 DispatchQueue.main.async {
@@ -1368,8 +1492,6 @@ struct HardwareSettingsTab: View {
                 }
 
                 statusRow
-            } footer: {
-                outputConfigNotice
             }
             }
 
@@ -1392,6 +1514,7 @@ struct HardwareSettingsTab: View {
                         Picker("", selection: Binding(
                             get: { vm.spdifRxPin },
                             set: { newPin in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
                                 DispatchQueue.global(qos: .userInitiated).async {
                                     let status = vm.setSpdifRxPin(newPin)
                                     DispatchQueue.main.async {
@@ -1429,8 +1552,6 @@ struct HardwareSettingsTab: View {
                     }
 
                     statusRow
-                } footer: {
-                    outputConfigNotice
                 }
 
                 // LG Sound Sync decodes the LG TV's TOSLINK (S/PDIF) signaling.
@@ -1469,36 +1590,6 @@ struct HardwareSettingsTab: View {
         .formStyle(.grouped)
     }
 
-    /// A subtle card, shown below a page's content, describing how the current
-    /// Output Configuration persistence mode affects the pin/wiring changes made
-    /// on this page. The "Global Parameters" link deep-links to that page and
-    /// scrolls to the Output Configuration option.
-    @ViewBuilder
-    private var outputConfigNotice: some View {
-        let independent = vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.yellow)
-            Text(independent
-                 ? "These parameters are currently applied independently of presets and must be saved separately. You can change this behavior in [Global Parameters](dspi://output-config)."
-                 : "These parameters are currently saved as part of each preset and restored when you load one. You can change this behavior in [Global Parameters](dspi://output-config).")
-                .font(.caption)
-                .foregroundStyle(Color(white: 0.55))
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.secondary.opacity(0.08))
-        )
-        .environment(\.openURL, OpenURLAction { _ in
-            settingsSelection = .globalParams
-            SettingsNavigator.shared.scrollTarget = "outputConfig"
-            return .handled
-        })
-    }
-
     // MARK: - Outputs page (custom full-width cards)
 
     private var outputsView: some View {
@@ -1525,8 +1616,6 @@ struct HardwareSettingsTab: View {
                         }
                     }
                 }
-            } footer: {
-                outputConfigNotice
             }
         }
         .formStyle(.grouped)
@@ -1690,6 +1779,7 @@ struct HardwareSettingsTab: View {
         Binding(
             get: { vm.outputSlotTypes[output.id] },
             set: { newType in
+                SettingsSaveCoordinator.shared.beginOutputEdit()
                 let slotID = output.id
                 DispatchQueue.global(qos: .userInitiated).async {
                     let status = vm.setOutputSlotType(slot: slotID, type: newType)
@@ -1717,7 +1807,10 @@ struct HardwareSettingsTab: View {
     private func outputPinBinding(_ output: PinOutput) -> Binding<UInt8> {
         Binding(
             get: { vm.outputPins[output.id] },
-            set: { setPinForOutput(output.id, pin: $0) }
+            set: {
+                SettingsSaveCoordinator.shared.beginOutputEdit()
+                setPinForOutput(output.id, pin: $0)
+            }
         )
     }
 }
