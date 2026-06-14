@@ -12,6 +12,7 @@ enum PinConsumer: Equatable {
     case i2sBck         // also covers LRCLK (BCK + 1)
     case mck
     case spdifRx
+    case i2sRx          // I2S input data pin
     case dacMute
 }
 
@@ -125,9 +126,16 @@ class DSPViewModel: ObservableObject {
     @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
     // Input source state
-    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF
+    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S
     @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
     @Published var spdifRxPin: UInt8 = 11             // GPIO pin for SPDIF RX
+
+    // I2S input state (firmware wire format V12+).  `i2sInputSupported` is
+    // false on older firmware that STALLs REQ_GET_I2S_RX_PIN (0xF2) or returns
+    // a pre-V12 bulk payload.  See i2s_input_spec.md.
+    @Published var i2sInputSupported: Bool = false
+    @Published var i2sRxPin: UInt8 = I2S_RX_PIN_DEFAULT          // GPIO data pin for I2S RX
+    @Published var i2sInputRateHz: UInt32 = 48000               // selected I2S input rate
 
     // LG Sound Sync — per-preset enable for LG TV optical-out volume decode.
     // `lgSoundSyncSupported` is set when V8+ bulk data is parsed or when an
@@ -257,6 +265,7 @@ class DSPViewModel: ObservableObject {
         }
         if consumer != .mck && pin == mckPin { return "I2S MCK" }
         if consumer != .spdifRx && inputSourceSupported && pin == spdifRxPin { return "S/PDIF RX" }
+        if consumer != .i2sRx && i2sInputSupported && pin == i2sRxPin { return "I2S RX" }
         if consumer != .dacMute,
            dacHwMuteConfig.enabled,
            dacHwMuteConfig.pin != DAC_HW_MUTE_PIN_NONE,
@@ -477,6 +486,8 @@ class DSPViewModel: ObservableObject {
             mckMultiplier: mckMultiplier,
             spdifRxPin: spdifRxPin,
             inputSource: inputSourceSupported ? inputSource : nil,
+            i2sRxPin: i2sInputSupported ? i2sRxPin : nil,
+            i2sInputRate: i2sInputSupported ? i2sInputRateHz : nil,
             lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil
         )
     }

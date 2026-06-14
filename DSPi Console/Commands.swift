@@ -1111,7 +1111,10 @@ extension DSPViewModel {
                 self.inputSource = 0
             }
         }
-        if data != nil { fetchSpdifRxPin() }
+        if data != nil {
+            fetchSpdifRxPin()
+            fetchI2SInputConfig()
+        }
     }
 
     func setInputSource(_ source: Int) {
@@ -1145,6 +1148,61 @@ extension DSPViewModel {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.spdifRxPin = pin }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    // MARK: - I2S Input Commands
+
+    /// Probes I2S input support (firmware V12+).  REQ_GET_I2S_RX_PIN STALLs on
+    /// older firmware; on success we also read the selected input rate.
+    func fetchI2SInputConfig() {
+        guard let data = usb.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: 0, index: 2, length: 1),
+              data.count >= 1 else {
+            DispatchQueue.main.async { self.i2sInputSupported = false }
+            return
+        }
+        let pin = data[0]
+        DispatchQueue.main.async {
+            self.i2sInputSupported = true
+            self.i2sRxPin = pin
+        }
+        fetchInputRate()
+    }
+
+    /// Reads {current pipeline Hz, selected I2S Hz} via REQ_GET_INPUT_RATE.
+    /// Only the selected I2S rate drives the picker; the current rate is valid
+    /// for all sources but we already track it via REQ_GET_STATUS.
+    func fetchInputRate() {
+        guard let data = usb.getControlRequest(request: REQ_GET_INPUT_RATE, value: 0, index: 2, length: 8),
+              data.count >= 8 else { return }
+        let selected: UInt32 = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+        DispatchQueue.main.async { self.i2sInputRateHz = selected }
+    }
+
+    /// Selects the I2S input sample rate (44100 / 48000 / 96000 Hz).  Always
+    /// stored by the firmware; applied immediately if I2S is the active source.
+    /// Invalid rates are silently ignored by the firmware (no SET response).
+    func setInputRate(_ hz: UInt32) {
+        guard I2S_INPUT_RATES_HZ.contains(hz) else { return }
+        DispatchQueue.main.async { self.i2sInputRateHz = hz }
+        var le = hz.littleEndian
+        let payload = withUnsafeBytes(of: &le) { Data($0) }
+        usb.sendControlRequest(request: REQ_SET_INPUT_RATE, value: 0, index: 2, data: payload)
+    }
+
+    /// Sets the GPIO data pin used for the I2S receiver.  Single IN transfer:
+    /// wValue = pin.  Returns the firmware PIN_CONFIG_* status code.  Hot-swap
+    /// is supported (input restarts on the new pin if I2S is active).
+    @discardableResult
+    func setI2SRxPin(_ pin: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_I2S_RX_PIN, value: UInt16(pin), index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.i2sRxPin = pin }
             }
             return status
         }
@@ -1328,6 +1386,15 @@ extension DSPViewModel {
             bulkSpdifRxPin = data[2897]
         }
 
+        // I2S input fields claimed two previously-reserved bytes in V12.
+        // byte 2898 = i2s_rx_pin, byte 2899 = i2s_input_rate (enum 0/1/2).
+        var bulkI2SRxPin: UInt8? = nil
+        var bulkI2SInputRateHz: UInt32? = nil
+        if formatVersion >= 12 && data.count >= 2912 {
+            bulkI2SRxPin = data[2898]
+            bulkI2SInputRateHz = i2sRateEnumToHz(data[2899])
+        }
+
         // --- LG Sound Sync (offset 2912, 16 bytes) --- V8 firmware only
         // Only `enabled` is honoured on bulk SET; present/volume/muted are
         // runtime telemetry, polled via REQ_GET_LG_SOUND_SYNC_STATUS by the
@@ -1436,6 +1503,13 @@ extension DSPViewModel {
             }
             if let pin = bulkSpdifRxPin {
                 self.spdifRxPin = pin
+            }
+            if let pin = bulkI2SRxPin {
+                self.i2sInputSupported = true
+                self.i2sRxPin = pin
+            }
+            if let rate = bulkI2SInputRateHz {
+                self.i2sInputRateHz = rate
             }
             if let userVol = bulkUserVolume {
                 self.userVolumeDB = userVol
@@ -1946,6 +2020,22 @@ extension DSPViewModel {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.fetchUserVolume()
             }
+            return
+        }
+
+        // input_config.i2s_rx_pin (offset 2898, 1 byte) — fires when 0xF1
+        // succeeds, bulk apply changes it, or a preset load changes it.
+        if off == 2898 && sz == 1 && payload.count >= 1 {
+            self.i2sInputSupported = true
+            self.i2sRxPin = payload[0]
+            return
+        }
+
+        // input_config.i2s_input_rate (offset 2899, 1 byte, enum 0/1/2) —
+        // fires when 0xED accepts a rate.
+        if off == 2899 && sz == 1 && payload.count >= 1 {
+            self.i2sInputSupported = true
+            self.i2sInputRateHz = i2sRateEnumToHz(payload[0])
             return
         }
     }

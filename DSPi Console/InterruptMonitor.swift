@@ -329,11 +329,19 @@ private enum ParamOffsetDecoder {
         // Input config (2896..2911)
         if off == 2896 && sz == 1 {
             let src = payload.first ?? 0
-            let label = src == 0 ? "USB" : (src == 1 ? "SPDIF" : "?")
+            let label = src == 0 ? "USB" : (src == 1 ? "SPDIF" : (src == 2 ? "I2S" : "?"))
             return ("input_config.input_source", "\(src) (\(label))")
         }
         if off == 2897 && sz == 1 {
             return ("input_config.spdif_rx_pin", fmtUInt8(payload))
+        }
+        if off == 2898 && sz == 1 {
+            return ("input_config.i2s_rx_pin", fmtUInt8(payload))
+        }
+        if off == 2899 && sz == 1 {
+            let raw = payload.first ?? 0
+            let hz = raw < 3 ? ["44100", "48000", "96000"][Int(raw)] : "?"
+            return ("input_config.i2s_input_rate", "\(raw) (\(hz) Hz)")
         }
 
         // LG Sound Sync (2912..2927) — first 4 bytes are meaningful; rest reserved.

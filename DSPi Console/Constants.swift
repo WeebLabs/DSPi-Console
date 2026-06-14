@@ -186,6 +186,36 @@ let REQ_GET_SPDIF_RX_CH_STATUS: UInt8 = 0xE3
 let REQ_SET_SPDIF_RX_PIN: UInt8       = 0xE4
 let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
 
+// Input source enum values (payload of 0xE0 / response of 0xE1, and
+// WireInputConfig byte 0).
+let INPUT_SOURCE_USB: Int   = 0
+let INPUT_SOURCE_SPDIF: Int = 1
+let INPUT_SOURCE_I2S: Int   = 2
+
+// I2S input request codes (firmware wire format V12+).  See
+// Documentation/Features/i2s_input_spec.md.  The SET pin command is an
+// IN-direction transfer carrying the pin in wValue and returning a
+// PIN_CONFIG_* status byte (same shape as REQ_SET_SPDIF_RX_PIN).
+let REQ_SET_INPUT_RATE: UInt8         = 0xED   // OUT 4 bytes: uint32 LE Hz
+let REQ_GET_INPUT_RATE: UInt8         = 0xEE   // IN 8 bytes: {current_hz, selected_i2s_hz}
+let REQ_SET_I2S_RX_PIN: UInt8         = 0xF1   // IN: wValue = new pin, returns status
+let REQ_GET_I2S_RX_PIN: UInt8         = 0xF2   // IN 1 byte: current data pin
+
+// I2S input defaults and rate table.  The wire/preset encoding stores the
+// rate as an enum (0/1/2); vendor SET/GET commands use Hz.
+let I2S_RX_PIN_DEFAULT: UInt8         = 4
+let I2S_INPUT_RATES_HZ: [UInt32]      = [44100, 48000, 96000]
+
+/// Map the wire rate enum (0/1/2) to Hz; out-of-range falls back to 48 kHz.
+func i2sRateEnumToHz(_ raw: UInt8) -> UInt32 {
+    Int(raw) < I2S_INPUT_RATES_HZ.count ? I2S_INPUT_RATES_HZ[Int(raw)] : 48000
+}
+
+/// Map Hz to the wire rate enum (0/1/2); unknown rates fall back to 48 kHz (1).
+func i2sRateHzToEnum(_ hz: UInt32) -> UInt8 {
+    UInt8(I2S_INPUT_RATES_HZ.firstIndex(of: hz) ?? 1)
+}
+
 // DAC hardware-mute request codes (firmware V10+ wire format).  SET takes
 // a 16-byte DacHwMuteConfig OUT payload; GET returns 16 bytes; TEST is a
 // fire-and-forget command that asserts mute for ~1 s.  See

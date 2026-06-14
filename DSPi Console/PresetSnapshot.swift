@@ -70,6 +70,8 @@ struct PresetSnapshot: Equatable {
     let mckMultiplier: Int
     let spdifRxPin: UInt8
     let inputSource: Int?  // nil when firmware doesn't support input switching
+    let i2sRxPin: UInt8?   // nil when firmware doesn't support I2S input (pre-V12)
+    let i2sInputRate: UInt32?  // selected I2S rate in Hz; nil when unsupported
     let lgSoundSyncEnabled: Bool?  // nil when firmware doesn't support LG Sound Sync
 }
 
@@ -295,11 +297,17 @@ extension PresetSnapshot {
             if old.spdifRxPin != new.spdifRxPin {
                 changes.append(.init(category: "S/PDIF", description: "S/PDIF RX pin: GPIO \(old.spdifRxPin) → GPIO \(new.spdifRxPin)"))
             }
+            if let oldPin = old.i2sRxPin, let newPin = new.i2sRxPin, oldPin != newPin {
+                changes.append(.init(category: "I2S Input", description: "I2S RX pin: GPIO \(oldPin) → GPIO \(newPin)"))
+            }
+            if let oldRate = old.i2sInputRate, let newRate = new.i2sInputRate, oldRate != newRate {
+                changes.append(.init(category: "I2S Input", description: "I2S rate: \(oldRate) Hz → \(newRate) Hz"))
+            }
         }
 
         // Input source
         if let oldSrc = old.inputSource, let newSrc = new.inputSource, oldSrc != newSrc {
-            let names = ["USB", "S/PDIF"]
+            let names = ["USB", "S/PDIF", "I2S"]
             let oldName = oldSrc < names.count ? names[oldSrc] : "\(oldSrc)"
             let newName = newSrc < names.count ? names[newSrc] : "\(newSrc)"
             changes.append(.init(category: "Input", description: "Input source: \(oldName) → \(newName)"))

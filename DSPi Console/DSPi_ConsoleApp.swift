@@ -1228,6 +1228,101 @@ struct HardwareSettingsTab: View {
                     Label("S/PDIF Input", systemImage: "arrow.down.to.line")
                 }
             }
+
+            // MARK: I2S Input
+            if vm.i2sInputSupported {
+                Section {
+                    // Data pin
+                    HStack {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("RX Pin")
+                                .font(.body)
+                            Text("GPIO data pin for incoming I2S signal")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.i2sRxPin },
+                            set: { newPin in
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let status = vm.setI2SRxPin(newPin)
+                                    DispatchQueue.main.async {
+                                        switch status {
+                                        case PIN_CONFIG_SUCCESS:
+                                            statusMessage = "I2S RX pin set to GPIO \(newPin)"
+                                            statusIsError = false
+                                        case PIN_CONFIG_PIN_IN_USE:
+                                            if let owner = pinInUseBy(newPin, excluding: .i2sRx) {
+                                                statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
+                                            } else {
+                                                statusMessage = "GPIO \(newPin) is already in use"
+                                            }
+                                            statusIsError = true
+                                            vm.fetchI2SInputConfig()
+                                        case PIN_CONFIG_INVALID_PIN:
+                                            statusMessage = "GPIO \(newPin) is not available on this platform"
+                                            statusIsError = true
+                                            vm.fetchI2SInputConfig()
+                                        default:
+                                            statusMessage = "Failed to set I2S RX pin"
+                                            statusIsError = true
+                                            vm.fetchI2SInputConfig()
+                                        }
+                                    }
+                                }
+                            }
+                        )) {
+                            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .i2sRx) == nil }, id: \.self) { pin in
+                                Text("GPIO \(pin)").tag(pin)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+
+                    // Sample rate (I2S only — the device is the clock master,
+                    // so it picks the rate and the source follows).
+                    HStack {
+                        Image(systemName: "metronome")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Sample Rate")
+                                .font(.body)
+                            Text("DSPi drives the clocks; the source must follow")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.i2sInputRateHz },
+                            set: { newRate in
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    vm.setInputRate(newRate)
+                                }
+                            }
+                        )) {
+                            ForEach(I2S_INPUT_RATES_HZ, id: \.self) { hz in
+                                Text("\(hz % 1000 == 0 ? "\(hz / 1000)" : String(format: "%.1f", Double(hz) / 1000)) kHz").tag(hz)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                } header: {
+                    Label("I2S Input", systemImage: "waveform.path")
+                } footer: {
+                    Text("DSPi is the I2S clock master and drives BCK/LRCLK, so the connected I2S input device must be configured as a slave.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
@@ -1246,6 +1341,7 @@ struct HardwareSettingsTab: View {
                 vm.fetchSampleRate()
                 if vm.inputSourceSupported {
                     vm.fetchSpdifRxPin()
+                    vm.fetchI2SInputConfig()
                 }
             }
         }

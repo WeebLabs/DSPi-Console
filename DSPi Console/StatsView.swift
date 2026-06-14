@@ -69,7 +69,11 @@ struct SpdifRxStatus {
     }
 
     var sourceString: String {
-        inputSource == 1 ? "S/PDIF" : "USB"
+        switch inputSource {
+        case 1: return "S/PDIF"
+        case 2: return "I2S"
+        default: return "USB"
+        }
     }
 
     var sampleRateString: String {
