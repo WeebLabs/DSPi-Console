@@ -1162,7 +1162,7 @@ struct FilterListView: View {
                     Spacer().frame(width: 18)
                 }
                 Text("#").font(.caption).fontWeight(.bold).foregroundColor(.secondary).frame(width: 24, alignment: .leading)
-                Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 100, alignment: .leading).padding(.leading, -15)
+                Text(isCrossoverMode ? "FAMILY" : "TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: isCrossoverMode ? 110 : 140, alignment: .leading).padding(.leading, -15)
                 if isCrossoverMode {
                     Text("TYPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 8).frame(width: 84, alignment: .leading).padding(.leading, 23)
                     Text("SLOPE").font(.caption).fontWeight(.bold).foregroundColor(.secondary).padding(.leading, 7).frame(width: 80, alignment: .leading).padding(.leading, 25)
@@ -1205,8 +1205,28 @@ struct FilterListView: View {
                                 }
                             },
                             onBypassAll: {
-                                for i in bands.indices where bands[i].type != .flat {
-                                    onBypassToggle(i, true)
+                                let doBypassAll = {
+                                    for i in bands.indices where bands[i].type != .flat {
+                                        onBypassToggle(i, true)
+                                    }
+                                }
+                                // Bypassing a crossover removes the high/low-pass
+                                // protection, sending full-range audio to the
+                                // drivers — which can destroy a tweeter.  Require
+                                // explicit confirmation on the XO tab.  Re-enabling
+                                // is safe, so onEnableAll stays unprompted.
+                                if isCrossoverMode {
+                                    let alert = NSAlert()
+                                    alert.messageText = "Bypass All Crossovers?"
+                                    alert.informativeText = "This sends full-range audio to every output, with no crossover protection. It can damage unprotected drivers such as tweeters. Continue only if you are sure."
+                                    alert.alertStyle = .critical
+                                    alert.addButton(withTitle: "Bypass All")
+                                    alert.addButton(withTitle: "Cancel")
+                                    if alert.runModal() == .alertFirstButtonReturn {
+                                        doBypassAll()
+                                    }
+                                } else {
+                                    doBypassAll()
                                 }
                             }
                         )
@@ -1454,16 +1474,27 @@ struct FilterRowView: View {
 
     @ViewBuilder
     private var peqRowContent: some View {
-        // Type Selector
-        BorderlessPopUpButton(
-            items: availableTypes,
-            titleForItem: { $0.name },
-            selection: Binding(
-                get: { params.type },
-                set: { var p = params; p.type = $0; onChange(p) }
-            )
-        )
-        .frame(width: 100, height: 20)
+        // Type Selector - a hierarchical menu.  Top level is the filter shape;
+        // shapes with multiple orders (shelves, all-pass) open a submenu of
+        // their order variants (e.g. "Low Shelf" ▸ "6 dB" / "12 dB").  The
+        // button face shows the full name of the selected type.
+        Menu {
+            peqTypeMenuItems
+        } label: {
+            Text(params.type.name)
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .foregroundColor(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        // `.button` style + `.plain` strips the ~8pt padding `.borderlessButton`
+        // adds so the label sits flush-left under the TYPE header; the chevron
+        // is an overlay (not an HStack sibling, which borderless menus shuffle).
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .frame(width: 140, height: 20, alignment: .leading)
         .overlay(alignment: .trailing) {
             Image(systemName: "chevron.up.chevron.down")
                 .font(.system(size: 8, weight: .bold))
@@ -1483,7 +1514,8 @@ struct FilterRowView: View {
                 }
 
                 // Gain
-                if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
+                if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf
+                    || params.type == .lowShelf1 || params.type == .highShelf1 {
                     ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
                         var p = params; p.gain = $0; onChange(p)
                     }
@@ -1491,8 +1523,9 @@ struct FilterRowView: View {
                     Spacer().frame(width: 60 + 24) // Placeholder
                 }
 
-                // Q (hidden for crossover types — firmware ignores Q on those).
-                if params.type.isCrossover {
+                // Q (hidden for crossover and first-order PEQ types — firmware
+                // ignores Q on those).
+                if params.type.isCrossover || params.type.isFirstOrderPEQ {
                     Spacer().frame(width: 50 + 24)
                 } else {
                     ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
@@ -1501,11 +1534,53 @@ struct FilterRowView: View {
                 }
             }
             .opacity(isBypassed ? 0.45 : 1.0)
-        } else {
-            Text("Filter Disabled")
-                .font(.caption)
-                .foregroundColor(.secondary.opacity(0.5))
-                .frame(width: 104, alignment: .center)
+        }
+    }
+
+    /// A shape in the PEQ type menu and its order variants (gentler first).
+    /// Single-variant shapes render as a plain item; multi-variant shapes
+    /// (shelves, all-pass) render as a submenu of their `orderLabel`s.
+    private struct PEQMenuGroup { let name: String; let variants: [FilterType] }
+
+    private static let peqMenuGroups: [PEQMenuGroup] = [
+        PEQMenuGroup(name: "Off",        variants: [.flat]),
+        PEQMenuGroup(name: "Peaking",    variants: [.peaking]),
+        PEQMenuGroup(name: "Low Shelf",  variants: [.lowShelf1, .lowShelf]),
+        PEQMenuGroup(name: "High Shelf", variants: [.highShelf1, .highShelf]),
+        PEQMenuGroup(name: "High Cut",   variants: [.lowPass]),
+        PEQMenuGroup(name: "Low Cut",    variants: [.highPass]),
+        PEQMenuGroup(name: "Notch",      variants: [.notch]),
+        PEQMenuGroup(name: "All Pass",   variants: [.allPass1, .allPass]),
+    ]
+
+    @ViewBuilder
+    private var peqTypeMenuItems: some View {
+        ForEach(Self.peqMenuGroups, id: \.name) { group in
+            // Gate each shape's variants on firmware capability via the
+            // caller-supplied `availableTypes`.
+            let avail = group.variants.filter { availableTypes.contains($0) }
+            if avail.count == 1 {
+                peqTypeButton(avail[0], title: group.name)
+            } else if avail.count > 1 {
+                Menu(group.name) {
+                    ForEach(avail, id: \.self) { type in
+                        peqTypeButton(type, title: type.orderLabel ?? type.name)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func peqTypeButton(_ type: FilterType, title: String) -> some View {
+        Button {
+            var p = params; p.type = type; onChange(p)
+        } label: {
+            if params.type == type {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
         }
     }
 
@@ -1608,11 +1683,6 @@ struct FilterRowView: View {
                 .padding(.leading, -3)
             }
             .opacity(isBypassed ? 0.45 : 1.0)
-        } else {
-            Text("Filter Disabled")
-                .font(.caption)
-                .foregroundColor(.secondary.opacity(0.5))
-                .frame(width: 23 + 84 + 12 + 25 + 80 + 12 - 3 + 104, alignment: .center)
         }
     }
 

@@ -1652,6 +1652,12 @@ struct FileMenuActions {
                 filterType = .lowPass
             } else if upperLine.contains(" HP ") || upperLine.contains(" HPQ ") {
                 filterType = .highPass
+            } else if upperLine.contains(" LS1 ") {
+                filterType = .lowShelf1
+            } else if upperLine.contains(" HS1 ") {
+                filterType = .highShelf1
+            } else if upperLine.contains(" AP1 ") {
+                filterType = .allPass1
             } else if upperLine.contains(" LS ") || upperLine.contains(" LSC ") {
                 filterType = .lowShelf
             } else if upperLine.contains(" HS ") || upperLine.contains(" HSC ") {
@@ -1767,6 +1773,12 @@ struct FileMenuActions {
                 filterType = .lowPass
             } else if upperLine.contains(" HP ") || upperLine.contains(" HPQ ") {
                 filterType = .highPass
+            } else if upperLine.contains(" LS1 ") {
+                filterType = .lowShelf1
+            } else if upperLine.contains(" HS1 ") {
+                filterType = .highShelf1
+            } else if upperLine.contains(" AP1 ") {
+                filterType = .allPass1
             } else if upperLine.contains(" LS ") || upperLine.contains(" LSC ") {
                 filterType = .lowShelf
             } else if upperLine.contains(" HS ") || upperLine.contains(" HSC ") {
@@ -1854,6 +1866,9 @@ struct FileMenuActions {
         case .highShelf: typeCode = "HS"
         case .notch: typeCode = "NO"
         case .allPass: typeCode = "AP"
+        case .allPass1: typeCode = "AP1"
+        case .lowShelf1: typeCode = "LS1"
+        case .highShelf1: typeCode = "HS1"
         default:
             // Crossover types live in xoverData, not channelData; this REW-style
             // export only covers PEQ bands.
@@ -1864,7 +1879,8 @@ struct FileMenuActions {
         var line = String(format: "Filter %2d: ON  %@Fc %7.1f Hz", index, paddedType, filter.freq)
 
         // Add gain for types that use it
-        if filter.type == .peaking || filter.type == .lowShelf || filter.type == .highShelf {
+        if filter.type == .peaking || filter.type == .lowShelf || filter.type == .highShelf
+            || filter.type == .lowShelf1 || filter.type == .highShelf1 {
             line += String(format: "  Gain %+5.1f dB", filter.gain)
         }
 

@@ -1,7 +1,11 @@
 import Foundation
 
 enum FilterType: Int, CaseIterable, Identifiable {
-    // PEQ types (0..7)
+    // PEQ types.  Raw values MUST match the firmware FilterType enum (config.h)
+    // exactly - they are sent verbatim as the type byte in REQ_SET_EQ_PARAM and
+    // persisted in flash.  The value space is partitioned (firmware "FilterType
+    // value-space contract"): 0..7 core PEQ, 8..10 first-order PEQ, 11..31
+    // reserved for future PEQ, 32..63 crossover.
     case flat = 0
     case peaking = 1
     case lowShelf = 2
@@ -9,59 +13,95 @@ enum FilterType: Int, CaseIterable, Identifiable {
     case lowPass = 4
     case highPass = 5
     case notch = 6
-    case allPass = 7
+    case allPass = 7            // 2nd-order RBJ all-pass
 
-    // Crossover types (8..39).  Raw values MUST match the firmware FilterType
-    // enum (config.h) exactly - they are sent verbatim as the type byte in
-    // REQ_SET_EQ_PARAM.  LR6 was inserted at 12/13, shifting LR8/BW/BES up.
-    case lr2_lp = 8
-    case lr2_hp = 9
-    case lr4_lp = 10
-    case lr4_hp = 11
-    case lr6_lp = 12
-    case lr6_hp = 13
-    case lr8_lp = 14
-    case lr8_hp = 15
-    case bw1_lp = 16
-    case bw1_hp = 17
-    case bw2_lp = 18
-    case bw2_hp = 19
-    case bw3_lp = 20
-    case bw3_hp = 21
-    case bw4_lp = 22
-    case bw4_hp = 23
-    case bw5_lp = 24
-    case bw5_hp = 25
-    case bw6_lp = 26
-    case bw6_hp = 27
-    case bw7_lp = 28
-    case bw7_hp = 29
-    case bw8_lp = 30
-    case bw8_hp = 31
-    case bes2_lp = 32
-    case bes2_hp = 33
-    case bes4_lp = 34
-    case bes4_hp = 35
-    case bes6_lp = 36
-    case bes6_hp = 37
-    case bes8_lp = 38
-    case bes8_hp = 39
+    // First-order PEQ types (wire format V13/V14).  Genuine 1st-order sections
+    // (b2 = a2 = 0).  All-pass: flat magnitude, phase 0 -> -180 (-90 at fc),
+    // freq only.  Shelves: gentle 6 dB/oct, monotonic (no Q), freq + gain.
+    case allPass1 = 8          // 1st-order all-pass (wire V13+)
+    case lowShelf1 = 9         // 1st-order low shelf  (wire V14+)
+    case highShelf1 = 10       // 1st-order high shelf (wire V14+)
+
+    // 11..31 reserved for future PEQ types.
+
+    // Crossover types (32..63, wire format V13+).  Each value encodes
+    // (family, order, LP/HP).  Renumbered from the old 8..39 range on
+    // 2026-06-17 to open a contiguous PEQ block below FILTER_XOVER_FIRST=32.
+    case lr2_lp = 32
+    case lr2_hp = 33
+    case lr4_lp = 34
+    case lr4_hp = 35
+    case lr6_lp = 36
+    case lr6_hp = 37
+    case lr8_lp = 38
+    case lr8_hp = 39
+    case bw1_lp = 40
+    case bw1_hp = 41
+    case bw2_lp = 42
+    case bw2_hp = 43
+    case bw3_lp = 44
+    case bw3_hp = 45
+    case bw4_lp = 46
+    case bw4_hp = 47
+    case bw5_lp = 48
+    case bw5_hp = 49
+    case bw6_lp = 50
+    case bw6_hp = 51
+    case bw7_lp = 52
+    case bw7_hp = 53
+    case bw8_lp = 54
+    case bw8_hp = 55
+    case bes2_lp = 56
+    case bes2_hp = 57
+    case bes4_lp = 58
+    case bes4_hp = 59
+    case bes6_lp = 60
+    case bes6_hp = 61
+    case bes8_lp = 62
+    case bes8_hp = 63
 
     var id: Int { rawValue }
 
     /// True if this is a crossover filter type (LR / BW / BES family).
-    var isCrossover: Bool { rawValue >= 8 && rawValue <= 39 }
+    /// Mirrors the firmware FILTER_XOVER_FIRST..FILTER_XOVER_LAST range.
+    var isCrossover: Bool { rawValue >= 32 && rawValue <= 63 }
+
+    /// True if this is one of the first-order PEQ sections (all-pass / shelves).
+    var isFirstOrderPEQ: Bool {
+        switch self {
+        case .allPass1, .lowShelf1, .highShelf1: return true
+        default: return false
+        }
+    }
+
+    /// Order/phase label for the shelf & all-pass variants - used as the
+    /// submenu child title on the PEQ type picker, where the shape name is the
+    /// parent menu (e.g. "Low Shelf" ▸ "6 dB/oct" / "12 dB/oct").  Spells out
+    /// "/oct" here since the submenu has room; the compact selected-face label
+    /// (FilterType.name) drops it.  nil for shapes with no order choice.
+    var orderLabel: String? {
+        switch self {
+        case .lowShelf1, .highShelf1: return "6 dB/oct"
+        case .lowShelf, .highShelf:   return "12 dB/oct"
+        case .allPass1:               return "180°"
+        case .allPass:                return "360°"
+        default:                      return nil
+        }
+    }
 
     var name: String {
         switch self {
         case .flat: return "Off"
         case .peaking: return "Peaking"
-        case .lowShelf: return "Low Shelf"
-        case .highShelf: return "High Shelf"
-        case .lowPass: return "Low Pass"
-        case .highPass: return "High Pass"
+        case .lowShelf: return "Low Shelf (12dB)"
+        case .highShelf: return "High Shelf (12dB)"
+        case .lowPass: return "High Cut"
+        case .highPass: return "Low Cut"
         case .notch: return "Notch"
-        case .allPass: return "All Pass"
+        case .allPass: return "All Pass (360°)"
+        case .allPass1: return "All Pass (180°)"
+        case .lowShelf1: return "Low Shelf (6dB)"
+        case .highShelf1: return "High Shelf (6dB)"
         case .lr2_lp: return "LR2 Low Pass"
         case .lr2_hp: return "LR2 High Pass"
         case .lr4_lp: return "LR4 Low Pass"
@@ -108,6 +148,9 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .highPass: return "HP"
         case .notch: return "NT"
         case .allPass: return "AP"
+        case .allPass1: return "AP1"
+        case .lowShelf1: return "LS1"
+        case .highShelf1: return "HS1"
         case .lr2_lp: return "LR2 LP"
         case .lr2_hp: return "LR2 HP"
         case .lr4_lp: return "LR4 LP"
@@ -384,6 +427,24 @@ class DSPMath {
         case .allPass:
             b0 = 1 - alpha; b1 = -2 * cs; b2 = 1 + alpha
             a0 = 1 + alpha; a1 = -2 * cs; a2 = 1 - alpha
+        case .allPass1:
+            // First-order all-pass (degenerate biquad, b2 = a2 = 0): flat
+            // magnitude, phase 0 -> -180 (-90 at fc).  freq only; Q/gain unused.
+            // ap = (tan(pi*fc/Fs) - 1) / (tan(pi*fc/Fs) + 1)
+            let ta = tan(omega / 2.0)
+            let ap = (ta - 1.0) / (ta + 1.0)
+            b0 = ap; b1 = 1.0; b2 = 0
+            a0 = 1.0; a1 = ap; a2 = 0
+        case .lowShelf1:
+            // First-order low shelf (degenerate biquad): DC gain A^2, unity at
+            // Nyquist.  Q unused.  Matches firmware FILTER_LOWSHELF1.
+            b0 = (A * sn) + 1 + cs; b1 = (A * sn) - 1 - cs; b2 = 0
+            a0 = (sn / A) + 1 + cs; a1 = (sn / A) - 1 - cs; a2 = 0
+        case .highShelf1:
+            // First-order high shelf (degenerate biquad): unity at DC, gain A^2
+            // at Nyquist.  Q unused.  Matches firmware FILTER_HIGHSHELF1.
+            b0 = sn + A + (A * cs); b1 = sn - A - (A * cs); b2 = 0
+            a0 = sn + (1 / A) + (cs / A); a1 = sn - (1 / A) - (cs / A); a2 = 0
         default: break
         }
 

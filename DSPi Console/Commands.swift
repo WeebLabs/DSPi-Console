@@ -1523,7 +1523,13 @@ extension DSPViewModel {
                 self.dacHwMuteSupported = true
             }
 
-            if let xovers = bulkCrossovers {
+            self.firmwareWireFormatVersion = Int(formatVersion)
+
+            // Crossover types were renumbered to 32..63 in wire format V13.  A
+            // V11/V12 firmware still returns a crossover payload but with the
+            // old 8..39 numbering, which no longer matches FilterType - so only
+            // expose crossover (and send the new type bytes) on V13+.
+            if let xovers = bulkCrossovers, formatVersion >= 13 {
                 self.firmwareSupportsCrossover = true
                 // Replace the entire xoverData dictionary so deletions on the
                 // wire propagate.  Master rows are stored too (they'll be all

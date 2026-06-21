@@ -168,6 +168,25 @@ class DSPViewModel: ObservableObject {
     // the first successful fetchPlatform().
     @Published var firmwareVersion: (major: Int, minor: Int, patch: Int)? = nil
 
+    /// Bulk wire-format version (WIRE_FORMAT_VERSION), captured from byte 0 of
+    /// the last REQ_GET_BULK_PARAMS reply.  This - not the firmware release
+    /// version, which lagged behind - is the reliable signal for filter-type
+    /// capabilities: the crossover-type renumber and first-order all-pass
+    /// shipped in V13, the first-order shelves in V14.  0 before the first
+    /// successful bulk fetch.
+    @Published var firmwareWireFormatVersion: Int = 0
+
+    /// First-order all-pass (FilterType.allPass1) shipped in wire format V13,
+    /// which also renumbered the crossover types to 32..63.  Hidden from the
+    /// PEQ picker until we've confirmed a V13+ firmware so we never send the
+    /// new type byte (or the renumbered crossover values) to firmware that
+    /// would misinterpret it.
+    var firmwareSupportsFirstOrderAllPass: Bool { firmwareWireFormatVersion >= 13 }
+
+    /// First-order low/high shelves (FilterType.lowShelf1 / .highShelf1)
+    /// shipped in wire format V14.  Hidden from the PEQ picker until confirmed.
+    var firmwareSupportsFirstOrderShelves: Bool { firmwareWireFormatVersion >= 14 }
+
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
     /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
     /// Defaults to `false` when the version is unknown (pre-connection) so the

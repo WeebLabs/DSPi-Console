@@ -10,9 +10,11 @@ enum SidebarSelection: Hashable {
 
 /// Filter types offered to the user in the PEQ picker, gated on connected-firmware
 /// capability.  Crossover filter types live in their own picker on the Crossover
-/// tab and never appear here.  Notch / AllPass were added in firmware 1.1.4 —
+/// tab and never appear here.  Notch / AllPass were added in firmware 1.1.4 -
 /// older firmware would reject the type byte, so they're hidden until we've
-/// confirmed support.
+/// confirmed support.  The first-order all-pass (wire V13) and first-order
+/// shelves (wire V14) are gated on the bulk wire-format version, since the
+/// firmware release version did not advance with them.
 fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
     var filters: [FilterType] = FilterType.allCases.filter { !$0.isCrossover }
 
@@ -22,6 +24,14 @@ fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
 
     if vm.firmwareSupportsAllPass == false {
         filters = filters.filter { $0 != .allPass }
+    }
+
+    if vm.firmwareSupportsFirstOrderAllPass == false {
+        filters = filters.filter { $0 != .allPass1 }
+    }
+
+    if vm.firmwareSupportsFirstOrderShelves == false {
+        filters = filters.filter { $0 != .lowShelf1 && $0 != .highShelf1 }
     }
     return filters
 }
