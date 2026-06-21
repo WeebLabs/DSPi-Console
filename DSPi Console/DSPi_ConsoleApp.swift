@@ -31,6 +31,8 @@ class AppSettings: ObservableObject {
     // Graphing
     @AppStorage("graphLineWidth") var graphLineWidth: Double = 2.0
     @AppStorage("graphAnimationSpeed") var graphAnimationSpeed: Double = 0.2
+    @AppStorage("showPhase") var showPhase: Bool = false
+    @AppStorage("phaseUnwrapped") var phaseUnwrapped: Bool = false
 
     // Scale & Labels
     @AppStorage("showFrequencyLabels") var showFrequencyLabels: Bool = true
@@ -58,57 +60,285 @@ class AppSettings: ObservableObject {
 }
 
 // MARK: - Settings View
-struct SettingsView: View {
-    private enum Tabs: Hashable {
-        case general, global, appearance, graphing, hardware, advanced
+
+/// One selectable page in the Settings sidebar. Carries its own title, SF
+/// Symbol, and tint so the sidebar row and the detail navigation title stay in
+/// sync from a single source of truth.
+private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
+    case general, graphing, advanced
+    case globalParams, outputAssignment, i2sConfig, spdifInput
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general:          return "About"
+        case .graphing:         return "Graphing"
+        case .advanced:         return "Advanced"
+        case .globalParams:     return "Global Parameters"
+        case .outputAssignment: return "Outputs"
+        case .i2sConfig:        return "I2S Configuration"
+        case .spdifInput:       return "Inputs"
+        }
     }
 
-    var body: some View {
-        TabView {
-            GeneralSettingsTab()
-                .tabItem {
-                    Label("General", systemImage: "gear")
-                }
-                .tag(Tabs.general)
-
-            GlobalSettingsTab()
-                .tabItem {
-                    Label("Global", systemImage: "externaldrive")
-                }
-                .tag(Tabs.global)
-
-            AppearanceSettingsTab()
-                .tabItem {
-                    Label("Appearance", systemImage: "paintbrush")
-                }
-                .tag(Tabs.appearance)
-
-            GraphingSettingsTab()
-                .tabItem {
-                    Label("Graphing", systemImage: "waveform.path.ecg")
-                }
-                .tag(Tabs.graphing)
-
-            HardwareSettingsTab()
-                .tabItem {
-                    Label("Hardware", systemImage: "cpu")
-                }
-                .tag(Tabs.hardware)
-
-            AdvancedSettingsTab()
-                .tabItem {
-                    Label("Advanced", systemImage: "gearshape.2")
-                }
-                .tag(Tabs.advanced)
+    var icon: String {
+        switch self {
+        case .general:          return "gear"
+        case .graphing:         return "waveform.path.ecg"
+        case .advanced:         return "gearshape.2"
+        case .globalParams:     return "externaldrive"
+        case .outputAssignment: return "cable.connector"
+        case .i2sConfig:        return "waveform.path"
+        case .spdifInput:       return "arrow.down.to.line"
         }
-        .frame(width: 450, height: nil)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Icon-badge tint. A single cohesive cool palette (slate → teal → cyan →
+    /// blue → indigo) — distinct shades per page, but no warm colors, so the
+    /// sidebar reads as one harmonious theme.
+    var tint: Color {
+        switch self {
+        case .general:          return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
+        case .advanced:         return Color(red: 0.38, green: 0.47, blue: 0.60)  // steel blue-gray
+        case .graphing:         return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
+        case .globalParams:     return Color(red: 0.21, green: 0.49, blue: 0.82)  // blue
+        case .outputAssignment: return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
+        case .i2sConfig:        return Color(red: 0.16, green: 0.41, blue: 0.74)  // ocean blue
+        case .spdifInput:       return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
+        }
+    }
+
+    /// Some hardware pages only apply to certain platforms/firmware. A page
+    /// that isn't applicable is hidden from the sidebar entirely.
+    func isAvailable(_ vm: DSPViewModel) -> Bool {
+        switch self {
+        case .i2sConfig:    return vm.platformName != "STM32H723"
+        case .spdifInput:   return vm.inputSourceSupported
+        default:            return true
+        }
+    }
+
+    /// Non-collapsible sidebar groups, in display order.
+    static let groups: [(title: String, items: [SettingsCategory])] = [
+        ("Application", [.general, .advanced]),
+        ("Display",     [.graphing]),
+        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .globalParams]),
+    ]
+}
+
+/// A rounded, tinted icon badge with a white SF Symbol — the System-Settings
+/// sidebar glyph.
+private struct SettingsBadge: View {
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(tint.gradient)
+            .frame(width: 15, height: 15)
+            .overlay(
+                Image(systemName: systemImage)
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.white)
+            )
+            .shadow(color: tint.opacity(0.35), radius: 1, y: 0.5)
+    }
+}
+
+/// Reaches the hosting `NSWindow` to compact its title bar and drop the title
+/// text. SwiftUI's `.windowToolbarStyle` scene modifier is ignored by the
+/// `Settings` scene, so we set `toolbarStyle` on the window directly.
+///
+/// Configuration happens in `viewDidMoveToWindow` — i.e. synchronously, before
+/// the window's first paint — rather than an async dispatch from
+/// `updateNSView`, which would run after the window is already on screen in its
+/// default `.expanded` style and produce a visible "tall title bar" flash.
+private struct SettingsWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { ConfiguratorView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ConfiguratorView)?.applyConfig()
+    }
+
+    private final class ConfiguratorView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applyConfig()
+        }
+
+        func applyConfig() {
+            guard let window = window else { return }
+            window.toolbarStyle = .unifiedCompact
+            window.titleVisibility = .hidden   // no "DSPi Console Settings" text
+            // Fully transparent title bar (paired with a hidden toolbar
+            // background in SwiftUI). A scroll-driven material overlay supplies
+            // the blur once content scrolls under the bar, so at rest the bar is
+            // transparent - the macOS Settings behavior.
+            window.titlebarAppearsTransparent = true
+        }
+    }
+}
+
+/// Cross-page navigation signal for Settings — lets one page deep-link to a
+/// specific control on another (e.g. the persistence notice jumping to the
+/// Output Configuration option on the Global Parameters page).
+final class SettingsNavigator: ObservableObject {
+    static let shared = SettingsNavigator()
+    /// Set to the `.id` of the control to scroll to once its page appears.
+    @Published var scrollTarget: String?
+    private init() {}
+}
+
+struct SettingsView: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+    @ObservedObject private var saveCoordinator = SettingsSaveCoordinator.shared
+    /// Persisted so the window reopens on the page you left it on.
+    @AppStorage("settingsSelectedTab") private var selection: SettingsCategory = .general
+
+    // Visited-page history powering the toolbar's back/forward buttons, à la
+    // macOS System Settings. `selection` remains the source of truth for what's
+    // shown; this just records the trail through it.
+    @State private var history: [SettingsCategory] = []
+    @State private var historyIndex = 0
+    /// Set while back/forward is driving `selection` so the resulting change
+    /// isn't recorded as a brand-new history entry (which would defeat forward).
+    @State private var navigatingViaHistory = false
+
+    private var canGoBack: Bool { historyIndex > 0 }
+    private var canGoForward: Bool { historyIndex < history.count - 1 }
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $selection) {
+                ForEach(SettingsCategory.groups, id: \.title) { group in
+                    let items = group.items.filter { $0.isAvailable(vm) }
+                    if !items.isEmpty {
+                        Section(group.title) {
+                            ForEach(items) { category in
+                                HStack(spacing: 6) {
+                                    SettingsBadge(systemImage: category.icon, tint: category.tint)
+                                    Text(category.title)
+                                }
+                                .tag(category)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(190)
+            // Must be on the sidebar content (not the split view) to take effect.
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            detailContent
+                // Shared save bar - appears on whatever page you're on while
+                // there are pending changes (global draft and/or live
+                // output-config edits not yet flashed).
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if saveCoordinator.hasPendingChanges {
+                        SettingsSaveBar()
+                            .transition(.move(edge: .bottom))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: saveCoordinator.hasPendingChanges)
+                // Size the detail COLUMN (not just its content). NavigationSplitView's
+                // detail column has a large default minimum width; `.frame` only
+                // shrinks the content inside it, leaving the column — and thus the
+                // window — wide. This is what actually narrows the window.
+                .navigationSplitViewColumnWidth(450)
+                // Empty title suppresses the window's default "DSPi Console Settings"
+                // text. The page name is shown by our custom toolbar item below.
+                .navigationTitle("")
+                // Back/forward + current page name, integrated into the title bar
+                // like macOS System Settings.
+                .toolbar {
+                    ToolbarItemGroup(placement: .navigation) {
+                        Button(action: goBack) {
+                            Image(systemName: "chevron.backward")
+                        }
+                        .disabled(!canGoBack)
+                        .help("Back")
+
+                        Button(action: goForward) {
+                            Image(systemName: "chevron.forward")
+                        }
+                        .disabled(!canGoForward)
+                        .help("Forward")
+
+                        Text(selection.title)
+                            .font(.headline)
+                    }
+                }
+                // Hide the toolbar's own material so the title-bar area shows the
+                // detail content background - fully integrated, like macOS Settings.
+                .toolbarBackground(.hidden, for: .windowToolbar)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .frame(minHeight: 480, idealHeight: 580)
+        // The `Settings` scene ignores `.windowToolbarStyle`, so set the
+        // NSWindow's toolbar style directly: `.expanded` (the default) stacks
+        // the title bar above the toolbar, doubling its height; `.unifiedCompact`
+        // collapses them into one short row.
+        .background(SettingsWindowConfigurator())
+        .onAppear {
+            ensureSelectionAvailable()
+            if history.isEmpty {
+                history = [selection]
+                historyIndex = 0
+            }
+        }
+        // Keep the selection valid as devices come and go — a page that the
+        // current hardware doesn't support disappears from the sidebar, so
+        // fall back to General rather than leaving a blank detail pane.
+        .onChange(of: vm.isDeviceConnected) { _ in ensureSelectionAvailable() }
+        .onChange(of: selection) { newValue in
+            if navigatingViaHistory {
+                navigatingViaHistory = false
+                return
+            }
+            // A fresh navigation: drop any forward entries, then append.
+            if historyIndex < history.count - 1 {
+                history.removeSubrange((historyIndex + 1)...)
+            }
+            history.append(newValue)
+            historyIndex = history.count - 1
+        }
+    }
+
+    private func goBack() {
+        guard canGoBack else { return }
+        historyIndex -= 1
+        navigatingViaHistory = true
+        selection = history[historyIndex]
+    }
+
+    private func goForward() {
+        guard canGoForward else { return }
+        historyIndex += 1
+        navigatingViaHistory = true
+        selection = history[historyIndex]
+    }
+
+    private func ensureSelectionAvailable() {
+        if !selection.isAvailable(vm) { selection = .general }
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch selection {
+        case .general:          GeneralSettingsTab()
+        case .graphing:         GraphingSettingsTab()
+        case .advanced:         AdvancedSettingsTab()
+        case .globalParams:     GlobalSettingsTab()
+        case .outputAssignment: HardwareSettingsTab(section: .outputs)
+        case .i2sConfig:        HardwareSettingsTab(section: .i2s)
+        case .spdifInput:       HardwareSettingsTab(section: .spdif)
+        }
     }
 }
 
 struct GeneralSettingsTab: View {
-    @ObservedObject private var vm = AppState.shared.viewModel
-
     /// App version string, read from the bundle (CFBundleShortVersionString,
     /// driven by MARKETING_VERSION) so it stays in sync with the build settings
     /// and the standard macOS About window.
@@ -116,87 +346,69 @@ struct GeneralSettingsTab: View {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
     }
 
+    /// A support/social link with a brand-colored icon in a fixed-width slot
+    /// (so all the labels line up) and normal light-gray label text.
+    @ViewBuilder
+    private func supportLink(_ title: String, _ url: String, icon: String, color: Color) -> some View {
+        Link(destination: URL(string: url)!) {
+            Label {
+                Text(title)
+                    // Explicit gray, not `.secondary` (which inherits the link's
+                    // blue tint and renders faint blue).
+                    .foregroundStyle(Color(white: 0.72))
+            } icon: {
+                Image(systemName: icon)
+                    .foregroundStyle(color)
+                    .frame(width: 24, alignment: .center)
+            }
+        }
+    }
+
     var body: some View {
         Form {
             Section {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Image(systemName: "speaker.wave.3.fill")
-                        Image(systemName: "speaker.wave.3.fill")
-                            .font(.system(size: 32))
-                            .foregroundColor(.accentColor)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("DSPi Console")
-                                .font(.headline)
-                            Text("USB Audio DSP Controller")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text("Version \(Self.appVersion)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Text("Made with love by Weeb Labs")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Divider()
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Channel Names")
-                                .font(.body)
-                            Text("Reset all channel names to factory defaults")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Button("Reset") {
-                            let defaults = DSPViewModel.defaultChannelNames(for: vm.platformName)
-                            DispatchQueue.global(qos: .userInitiated).async {
-                                for ch in 0..<vm.numChannels {
-                                    vm.setChannelName(channel: ch, name: defaults[ch])
-                                }
-                            }
-                        }
+                HStack(spacing: 14) {
+                    Image(systemName: "speaker.wave.3.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.accentColor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("DSPi Console")
+                            .font(.headline)
+                        Text("USB Audio DSP Controller")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("Version \(Self.appVersion)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("Made with love by Weeb Labs")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding(.vertical, 8)
             }
 
             Section {
-                Toggle(isOn: Binding(
-                    get: { vm.lgSoundSyncEnabled },
-                    set: { en in
-                        vm.lgSoundSyncEnabled = en
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            vm.setLgSoundSyncEnabled(en)
-                        }
-                    }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Enable LG Sound Sync")
-                            .font(.body)
-                        Text("Decode the LG TV's TOSLINK volume + mute signaling and apply it as the host volume — TV remote becomes the volume control. Per-preset; saved with the active preset.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
-                .disabled(!vm.lgSoundSyncSupported)
-                .padding(.vertical, 4)
+                Text("DSPi Firmware and Console are free, open-source software that I develop in my spare time. Contributions of any kind - code, feedback, funding, or otherwise - are always immensely appreciated.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
 
-                if !vm.lgSoundSyncSupported {
-                    Text("Connected device firmware doesn't support LG Sound Sync. Update to firmware V8 or later.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                supportLink("YouTube", "https://youtube.com/weeblabs",
+                            icon: "play.rectangle.fill", color: .red)
+                supportLink("GitHub", "https://github.com/weeblabs",
+                            icon: "chevron.left.forwardslash.chevron.right", color: Color(white: 0.72))
+                supportLink("Discord", "https://discord.gg/RCyqxAQ5xS",
+                            icon: "bubble.left.and.bubble.right.fill", color: Color(red: 0.345, green: 0.396, blue: 0.949))
+                supportLink("Patreon", "https://patreon.com/weeblabs",
+                            icon: "heart.fill", color: .orange)
+                supportLink("Ko-fi", "https://ko-fi.com/weeblabs",
+                            icon: "cup.and.saucer.fill", color: Color(red: 0.443, green: 0.620, blue: 0.737))
             } header: {
-                Label("LG Sound Sync", systemImage: "tv")
+                Label("Links & Support", systemImage: "heart.text.square")
             }
         }
         .formStyle(.grouped)
-        .padding()
     }
 }
 
@@ -232,19 +444,210 @@ struct GlobalSettingsDraft: Equatable {
     }
 }
 
+/// Snapshot of the device-global output configuration (pins, output types, I2S
+/// clocks, S/PDIF RX). These edits apply live to RAM; this captures a baseline
+/// so we can detect/revert changes that haven't been flashed yet.
+struct OutputConfigSnapshot: Equatable {
+    var outputPins: [UInt8]
+    var outputSlotTypes: [UInt8]
+    var i2sBckPin: UInt8
+    var mckEnabled: Bool
+    var mckPin: UInt8
+    var mckMultiplier: Int
+    var spdifRxPin: UInt8
+}
+
+/// App-lifetime owner of pending (unsaved) Settings changes, so the save bar
+/// survives navigation between pages and the Settings window being closed and
+/// reopened. Two independent categories of pending change:
+///
+///  - Global parameters: staged in `globalDraft` and not applied until saved
+///    (the firmware setters apply + persist on Save).
+///  - Output config (independent mode only): pin/type/clock/RX edits apply
+///    LIVE to RAM as they're made; "dirty" means they haven't been flashed yet.
+///    Save calls `saveOutputConfig()`; Revert re-applies the captured baseline.
+///
+/// One Save / one Revert acts on whatever is pending. Dirtiness is gated on
+/// actual user edits, so fresh device data (on connect) never looks unsaved.
+final class SettingsSaveCoordinator: ObservableObject {
+    static let shared = SettingsSaveCoordinator()
+    private var vm: DSPViewModel { AppState.shared.viewModel }
+
+    // Category B - Global Parameters
+    @Published var globalDraft: GlobalSettingsDraft
+    /// True once the user has edited the global draft since the last clean point.
+    @Published var globalUserEdited = false
+
+    // Category A - Output config (live edits, flash on save)
+    @Published var outputConfigDirty = false
+    private var outputBaseline: OutputConfigSnapshot
+
+    private init() {
+        let vm = AppState.shared.viewModel
+        globalDraft = GlobalSettingsDraft.from(vm)
+        outputBaseline = SettingsSaveCoordinator.snapshot(vm)
+    }
+
+    private static func snapshot(_ vm: DSPViewModel) -> OutputConfigSnapshot {
+        OutputConfigSnapshot(
+            outputPins: vm.outputPins,
+            outputSlotTypes: vm.outputSlotTypes,
+            i2sBckPin: vm.i2sBckPin,
+            mckEnabled: vm.mckEnabled,
+            mckPin: vm.mckPin,
+            mckMultiplier: vm.mckMultiplier,
+            spdifRxPin: vm.spdifRxPin
+        )
+    }
+
+    // MARK: Dirty state
+
+    var globalDirty: Bool { globalUserEdited && globalDraft != GlobalSettingsDraft.from(vm) }
+    var outputDirty: Bool {
+        outputConfigDirty && vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT
+    }
+    var hasPendingChanges: Bool { globalDirty || outputDirty }
+
+    // MARK: Global draft editing
+
+    /// Binding for a global-draft field that marks the draft user-edited on write.
+    func draftBinding<T>(_ keyPath: WritableKeyPath<GlobalSettingsDraft, T>) -> Binding<T> {
+        Binding(
+            get: { self.globalDraft[keyPath: keyPath] },
+            set: { self.globalDraft[keyPath: keyPath] = $0; self.globalUserEdited = true }
+        )
+    }
+
+    /// Re-sync the draft to the device's current values (for display) when the
+    /// user hasn't edited it - called when the Global page appears / reconnects.
+    func refreshGlobalDraftIfClean() {
+        if !globalUserEdited { globalDraft = GlobalSettingsDraft.from(vm) }
+    }
+
+    // MARK: Output-config editing
+
+    /// Call at the start of any output-config edit. On the first edit since the
+    /// last clean point (independent mode only), captures the pre-edit committed
+    /// config as the revert baseline.
+    func beginOutputEdit() {
+        guard vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT else { return }
+        if !outputConfigDirty {
+            outputBaseline = SettingsSaveCoordinator.snapshot(vm)
+            outputConfigDirty = true
+        }
+    }
+
+    // MARK: Save / Revert
+
+    func save() {
+        let doGlobal = globalDirty
+        let doOutput = outputDirty
+        guard doGlobal || doOutput else { return }
+        let pending = globalDraft
+        let deviceState = GlobalSettingsDraft.from(vm)
+        let vm = self.vm
+        DispatchQueue.global(qos: .userInitiated).async {
+            if doGlobal {
+                if pending.presetStartupMode != deviceState.presetStartupMode
+                    || pending.presetDefaultSlot != deviceState.presetDefaultSlot {
+                    vm.setPresetStartup(mode: pending.presetStartupMode, defaultSlot: pending.presetDefaultSlot)
+                }
+                if pending.presetMasterVolumeMode != deviceState.presetMasterVolumeMode {
+                    vm.setMasterVolumeMode(pending.presetMasterVolumeMode)
+                }
+                if pending.presetOutputConfigMode != deviceState.presetOutputConfigMode {
+                    vm.setOutputConfigMode(pending.presetOutputConfigMode)
+                }
+                if pending.dacHwMuteConfig != deviceState.dacHwMuteConfig {
+                    vm.setDacHwMuteConfig(pending.dacHwMuteConfig)
+                }
+            }
+            if doOutput {
+                _ = vm.saveOutputConfig()
+            }
+            DispatchQueue.main.async {
+                self.globalUserEdited = false
+                self.outputConfigDirty = false
+                self.globalDraft = GlobalSettingsDraft.from(vm)
+            }
+        }
+    }
+
+    func revert() {
+        if globalDirty {
+            globalUserEdited = false
+            globalDraft = GlobalSettingsDraft.from(vm)
+        }
+        if outputDirty {
+            let base = outputBaseline
+            let vm = self.vm
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Best-effort restore of the live config to the baseline.
+                for slot in 0..<min(vm.numOutputSlots, base.outputSlotTypes.count)
+                where vm.outputSlotTypes[slot] != base.outputSlotTypes[slot] {
+                    _ = vm.setOutputSlotType(slot: slot, type: base.outputSlotTypes[slot])
+                }
+                for i in 0..<min(vm.outputPins.count, base.outputPins.count)
+                where vm.outputPins[i] != base.outputPins[i] {
+                    _ = vm.setOutputPin(output: i, pin: base.outputPins[i])
+                }
+                if vm.i2sBckPin != base.i2sBckPin { _ = vm.setI2SBckPin(base.i2sBckPin) }
+                if vm.mckEnabled != base.mckEnabled { _ = vm.setMckEnable(base.mckEnabled) }
+                if vm.mckPin != base.mckPin { _ = vm.setMckPin(base.mckPin) }
+                if vm.mckMultiplier != base.mckMultiplier { _ = vm.setMckMultiplier(base.mckMultiplier) }
+                if vm.spdifRxPin != base.spdifRxPin { _ = vm.setSpdifRxPin(base.spdifRxPin) }
+                DispatchQueue.main.async { self.outputConfigDirty = false }
+            }
+        }
+    }
+}
+
+/// Shared save/revert bar shown at the bottom of any Settings page while there
+/// are pending changes (global draft and/or live output-config edits not yet
+/// flashed). One Save / one Revert acts on whatever is pending.
+private struct SettingsSaveBar: View {
+    @ObservedObject var coordinator = SettingsSaveCoordinator.shared
+    @ObservedObject var vm = AppState.shared.viewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Unsaved changes")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Saving writes these settings to the device's flash.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            Button("Revert") { coordinator.revert() }
+            Button("Save") { coordinator.save() }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!vm.isDeviceConnected)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
+        }
+    }
+}
+
 struct GlobalSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
-    @State private var draft: GlobalSettingsDraft = GlobalSettingsDraft(
-        presetStartupMode: 0,
-        presetDefaultSlot: 0,
-        presetMasterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT,
-        presetOutputConfigMode: OUTPUT_CONFIG_MODE_WITH_PRESET,
-        dacHwMuteConfig: DacHwMuteConfig()
-    )
+    @ObservedObject private var navigator = SettingsNavigator.shared
+    @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
 
-    private var hasChanges: Bool {
-        draft != GlobalSettingsDraft.from(vm)
-    }
+    /// Read access to the shared global-params draft. Edits go through
+    /// `coordinator.draftBinding(...)` so they're tracked centrally.
+    private var draft: GlobalSettingsDraft { coordinator.globalDraft }
 
     private func slotLabel(_ slot: Int) -> String {
         let display = slot + 1
@@ -259,16 +662,17 @@ struct GlobalSettingsTab: View {
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
         Form {
             // MARK: Startup Preset
             Section {
-                Picker("Mode", selection: $draft.presetStartupMode) {
+                Picker("Mode", selection: coordinator.draftBinding(\.presetStartupMode)) {
                     Text("Specified Default").tag(0)
                     Text("Last Used").tag(1)
                 }
 
                 if draft.presetStartupMode == 0 {
-                    Picker("Default Preset", selection: $draft.presetDefaultSlot) {
+                    Picker("Default Preset", selection: coordinator.draftBinding(\.presetDefaultSlot)) {
                         ForEach(0..<10, id: \.self) { slot in
                             Text(slotLabel(slot)).tag(slot)
                         }
@@ -282,64 +686,24 @@ struct GlobalSettingsTab: View {
                 Label("Startup Preset", systemImage: "power")
             }
 
-            // MARK: Master Volume Persistence
-            Section {
-                Picker("Mode", selection: $draft.presetMasterVolumeMode) {
-                    Text("Independent").tag(MASTER_VOLUME_MODE_INDEPENDENT)
-                    Text("With Preset").tag(MASTER_VOLUME_MODE_WITH_PRESET)
-                }
-
-                if draft.presetMasterVolumeMode == MASTER_VOLUME_MODE_INDEPENDENT {
-                    Text("Master volume is stored on the device independently of presets and applied at boot. Loading a preset never changes it.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Master volume is part of each preset. Saved with the preset, restored on preset load.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } header: {
-                Label("Master Volume", systemImage: "speaker.wave.2")
-            }
-
-            // MARK: Output Configuration Persistence
-            Section {
-                Picker("Mode", selection: $draft.presetOutputConfigMode) {
-                    Text("Independent").tag(OUTPUT_CONFIG_MODE_INDEPENDENT)
-                    Text("With Preset").tag(OUTPUT_CONFIG_MODE_WITH_PRESET)
-                }
-
-                if draft.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT {
-                    Text("Input and output configuration is stored on the device independently and applied at boot. Loading a preset never changes your wiring.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("Input and output configuration is part of each preset. Saved with the preset and restored on preset load.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            } header: {
-                Label("Output Configuration", systemImage: "cable.connector")
-            }
-
-            // MARK: DAC Hardware Mute (only when firmware supports it)
+            // MARK: External Mute Control (DAC Hardware Mute — firmware-gated)
             if vm.dacHwMuteSupported {
                 Section {
                     Toggle(isOn: Binding(
                         get: { draft.dacHwMuteConfig.enabled },
                         set: { newVal in
-                            draft.dacHwMuteConfig.enabled = newVal
-                            // Enabling with no pin is nonsensical — auto-
-                            // assign the first available GPIO so the user
-                            // doesn't see an empty picker the moment they
-                            // flip the switch on.
-                            if newVal && draft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE {
+                            coordinator.globalDraft.dacHwMuteConfig.enabled = newVal
+                            // Enabling with no pin is nonsensical - auto-assign
+                            // the first available GPIO so the user doesn't see an
+                            // empty picker the moment they flip the switch on.
+                            if newVal && coordinator.globalDraft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE {
                                 if let firstFree = HardwareSettingsTab.validPins.first(where: {
                                     vm.pinInUseBy($0, excluding: .dacMute) == nil
                                 }) {
-                                    draft.dacHwMuteConfig.pin = firstFree
+                                    coordinator.globalDraft.dacHwMuteConfig.pin = firstFree
                                 }
                             }
+                            coordinator.globalUserEdited = true
                         }
                     )) {
                         VStack(alignment: .leading, spacing: 1) {
@@ -360,7 +724,7 @@ struct GlobalSettingsTab: View {
                                 .frame(width: 16)
                             Text("Polarity")
                             Spacer()
-                            Picker("", selection: $draft.dacHwMuteConfig.activeLow) {
+                            Picker("", selection: coordinator.draftBinding(\.dacHwMuteConfig.activeLow)) {
                                 Text("Active Low").tag(true)
                                 Text("Active High").tag(false)
                             }
@@ -375,9 +739,9 @@ struct GlobalSettingsTab: View {
                                 .frame(width: 16)
                             Text("Mute Pin")
                             Spacer()
-                            Picker("", selection: $draft.dacHwMuteConfig.pin) {
-                                // No "None" entry — the enable toggle is
-                                // the master switch.  Filter pins through
+                            Picker("", selection: coordinator.draftBinding(\.dacHwMuteConfig.pin)) {
+                                // No "None" entry - the enable toggle is the
+                                // master switch.  Filter pins through
                                 // vm.pinInUseBy so claims in the Hardware
                                 // tab (output pins, I2S BCK/MCK, S/PDIF RX)
                                 // don't appear as free here.
@@ -391,18 +755,16 @@ struct GlobalSettingsTab: View {
                             .fixedSize()
                         }
 
-                        // Hold / release timing — same fixed-option pickers
-                        // as the per-tab embed used to use, but bound to
-                        // the local draft instead of immediately committing.
+                        // Hold / release timing, staged in the draft.
                         globalMsPicker(label: "Hold Time",
                                        tooltip: "Mute-attack wait before clock-stop",
                                        options: [5, 10, 20, 50, 100],
-                                       binding: $draft.dacHwMuteConfig.holdMs)
+                                       binding: coordinator.draftBinding(\.dacHwMuteConfig.holdMs))
 
                         globalMsPicker(label: "Release Time",
                                        tooltip: "Wait after un-mute before audio resumes",
                                        options: [0, 5, 10, 20, 50, 100],
-                                       binding: $draft.dacHwMuteConfig.releaseMs)
+                                       binding: coordinator.draftBinding(\.dacHwMuteConfig.releaseMs))
 
                         HStack {
                             Image(systemName: "play.circle")
@@ -423,8 +785,8 @@ struct GlobalSettingsTab: View {
                             }
                             .disabled(vm.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE
                                       || !vm.dacHwMuteConfig.enabled
-                                      || hasChanges)
-                            .help(hasChanges
+                                      || coordinator.globalDirty)
+                            .help(coordinator.globalDirty
                                   ? "Save your changes first to test the mute pin."
                                   : "Begins one-second test.")
                         }
@@ -434,70 +796,72 @@ struct GlobalSettingsTab: View {
                 }
             }
 
-        }
-        .formStyle(.grouped)
-        .padding()
-        // Permanent footer bar — the macOS / Primer convention for
-        // explicit save flows.  Every dynamic alternative (animated
-        // safeAreaInset, conditional Section, VStack with grow,
-        // contentMargins, overlay-only) either reflows the Form's
-        // ScrollView or fights the Settings scene's window-resize
-        // policy, and the user perceives that as a jump.  A fixed
-        // footer doesn't move, so nothing jumps.  The bar's STATE
-        // signals dirty/clean (status label + button enabled state)
-        // rather than its presence.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            saveBar
-        }
-        .onAppear { revert() }
-        .onChange(of: vm.isDeviceConnected) { connected in
-            // Re-sync from device on (re)connect so the draft reflects
-            // freshly-fetched firmware values rather than stale state
-            // from before the disconnect.
-            if connected { revert() }
-        }
-    }
+            // MARK: Master Volume Persistence
+            Section {
+                Picker("Mode", selection: coordinator.draftBinding(\.presetMasterVolumeMode)) {
+                    Text("Independent").tag(MASTER_VOLUME_MODE_INDEPENDENT)
+                    Text("With Preset").tag(MASTER_VOLUME_MODE_WITH_PRESET)
+                }
 
-    private var saveBar: some View {
-        HStack(spacing: 10) {
-            // Status indicator — visible only when there's pending state
-            // to save.  Uses opacity (not conditional rendering) so the
-            // bar's intrinsic width never changes between clean / dirty
-            // states.
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundColor(.orange)
-                    .font(.caption)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Unsaved changes")
+                if draft.presetMasterVolumeMode == MASTER_VOLUME_MODE_INDEPENDENT {
+                    Text("Master volume is stored on the device independently of presets and applied at boot. Loading a preset never changes it.")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text("Once saved, these settings are written directly to flash.")
-                        .font(.caption2)
+                } else {
+                    Text("Master volume is part of each preset. Saved with the preset, restored on preset load.")
+                        .font(.caption)
                         .foregroundColor(.secondary)
                 }
+            } header: {
+                Label("Master Volume", systemImage: "speaker.wave.2")
             }
-            .opacity(hasChanges ? 1 : 0)
-            .animation(.easeInOut(duration: 0.18), value: hasChanges)
 
-            Spacer()
+            // MARK: Output Configuration Persistence
+            Section {
+                Picker("Mode", selection: coordinator.draftBinding(\.presetOutputConfigMode)) {
+                    Text("Independent").tag(OUTPUT_CONFIG_MODE_INDEPENDENT)
+                    Text("With Preset").tag(OUTPUT_CONFIG_MODE_WITH_PRESET)
+                }
 
-            Button("Revert") { revert() }
-                .disabled(!hasChanges)
-            Button("Save") { save() }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(!hasChanges || !vm.isDeviceConnected)
+                if draft.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT {
+                    Text("Input and output configuration is stored on the device independently and applied at boot. Loading a preset never changes your wiring.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Input and output configuration is part of each preset. Saved with the preset and restored on preset load.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            } header: {
+                Label("Output Configuration", systemImage: "cable.connector")
+            }
+            .id("outputConfig")
+
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)        // Subtle bottom-bar material matching
-                                 // macOS toolbar conventions; sits flush
-                                 // against the form's bottom edge.
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 0.5)
+        .formStyle(.grouped)
+        .onAppear {
+            coordinator.refreshGlobalDraftIfClean()
+            scrollToOutputConfigIfNeeded(proxy)
+        }
+        .onChange(of: vm.isDeviceConnected) { connected in
+            // On (re)connect, refresh the draft from the device's freshly
+            // fetched values - but only when the user hasn't staged edits.
+            if connected { coordinator.refreshGlobalDraftIfClean() }
+        }
+        .onChange(of: navigator.scrollTarget) { _ in
+            scrollToOutputConfigIfNeeded(proxy)
+        }
+        }
+        // The save bar is shared across all Settings pages (see SettingsView).
+    }
+
+    /// Deep-link handler: when another page sets the scroll target to
+    /// "outputConfig", scroll the Output Configuration section into view.
+    private func scrollToOutputConfigIfNeeded(_ proxy: ScrollViewProxy) {
+        guard navigator.scrollTarget == "outputConfig" else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation { proxy.scrollTo("outputConfig", anchor: .top) }
+            navigator.scrollTarget = nil
         }
     }
 
@@ -526,37 +890,9 @@ struct GlobalSettingsTab: View {
         }
     }
 
-    /// Push every draft field whose value differs from the device's
-    /// current view-model state.  Each setter publishes optimistically
-    /// in addition to sending the USB transfer, so by the time the
-    /// background work returns, vm == draft.
-    private func save() {
-        let snapshot = GlobalSettingsDraft.from(vm)
-        let pendingDraft = draft
-        DispatchQueue.global(qos: .userInitiated).async {
-            if pendingDraft.presetStartupMode != snapshot.presetStartupMode
-                || pendingDraft.presetDefaultSlot != snapshot.presetDefaultSlot {
-                vm.setPresetStartup(mode: pendingDraft.presetStartupMode,
-                                    defaultSlot: pendingDraft.presetDefaultSlot)
-            }
-            if pendingDraft.presetMasterVolumeMode != snapshot.presetMasterVolumeMode {
-                vm.setMasterVolumeMode(pendingDraft.presetMasterVolumeMode)
-            }
-            if pendingDraft.presetOutputConfigMode != snapshot.presetOutputConfigMode {
-                vm.setOutputConfigMode(pendingDraft.presetOutputConfigMode)
-            }
-            if pendingDraft.dacHwMuteConfig != snapshot.dacHwMuteConfig {
-                vm.setDacHwMuteConfig(pendingDraft.dacHwMuteConfig)
-            }
-        }
-    }
-
-    private func revert() {
-        draft = GlobalSettingsDraft.from(vm)
-    }
 }
 
-struct AppearanceSettingsTab: View {
+struct GraphingSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
 
     var body: some View {
@@ -573,20 +909,35 @@ struct AppearanceSettingsTab: View {
                 }
                 .toggleStyle(.switch)
                 .padding(.vertical, 4)
+
+                Toggle(isOn: $settings.showPhase) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show Phase Response")
+                            .font(.body)
+                        Text("Overlay the selected channel's phase (degrees) as a dotted line")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+
+                Toggle(isOn: $settings.phaseUnwrapped) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Unwrap Phase")
+                            .font(.body)
+                        Text("Show continuous phase instead of wrapping at \u{00B1}180\u{00B0}")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .disabled(!settings.showPhase)
+                .padding(.vertical, 4)
             } header: {
                 Label("Graph Appearance", systemImage: "sparkles")
             }
-        }
-        .formStyle(.grouped)
-        .padding()
-    }
-}
 
-struct GraphingSettingsTab: View {
-    @ObservedObject private var settings = AppSettings.shared
-
-    var body: some View {
-        Form {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -680,15 +1031,34 @@ struct GraphingSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .padding()
     }
 }
 
 struct AdvancedSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var vm = AppState.shared.viewModel
 
     var body: some View {
         Form {
+            Section {
+                HStack {
+                    Text("Reset all channel names to factory defaults.")
+                        .font(.body)
+                    Spacer()
+                    Button("Reset") {
+                        let defaults = DSPViewModel.defaultChannelNames(for: vm.platformName)
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            for ch in 0..<vm.numChannels {
+                                vm.setChannelName(channel: ch, name: defaults[ch])
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Label("Channel Names", systemImage: "textformat")
+            }
+
             Section {
                 Toggle(isOn: $settings.showDebugInfo) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -706,16 +1076,37 @@ struct AdvancedSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .padding()
     }
 }
 
 // MARK: - Hardware Settings Tab
 
 struct HardwareSettingsTab: View {
+    /// Which hardware section this instance renders, so each can live on its
+    /// own sidebar page while sharing this struct's helpers and pin-conflict
+    /// bookkeeping.
+    enum Page { case outputs, i2s, spdif }
+    var section: Page = .outputs
+
     @ObservedObject private var vm = AppState.shared.viewModel
     @State private var statusMessage: String?
     @State private var statusIsError = false
+
+    /// Inline success/error feedback for pin changes, shown on whichever
+    /// hardware page is active.
+    @ViewBuilder
+    private var statusRow: some View {
+        if let message = statusMessage {
+            HStack(spacing: 6) {
+                Image(systemName: statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundColor(statusIsError ? .orange : .green)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(statusIsError ? .orange : .secondary)
+            }
+        }
+    }
 
     private struct PinOutput: Identifiable {
         let id: Int       // output index 0-4
@@ -894,114 +1285,38 @@ struct HardwareSettingsTab: View {
     }
 
     var body: some View {
-        Form {
-            // MARK: Outputs
-            Section {
-                ForEach(visiblePinOutputs) { output in
-                    HStack(spacing: 0) {
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(output.color)
-                                .frame(width: 6, height: 6)
-                            Text(output.id < vm.numOutputSlots ? "OUT \(output.id * 2 + 1)/\(output.id * 2 + 2)" : "Sub")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(width: 60, alignment: .leading)
-
-                        if output.id < vm.numOutputSlots {
-                            Picker("", selection: Binding(
-                                get: { vm.outputSlotTypes[output.id] },
-                                set: { newType in
-                                    let slotID = output.id
-                                    DispatchQueue.global(qos: .userInitiated).async {
-                                        let status = vm.setOutputSlotType(slot: slotID, type: newType)
-                                        // STM32 firmware silently coerces dependent
-                                        // I2S slots down to S/PDIF when their parent
-                                        // goes S/PDIF (per
-                                        // runtime_output_type_switch_spec.md §2).
-                                        // Refetch every slot so the UI reflects any
-                                        // cascade.
-                                        if status == PIN_CONFIG_SUCCESS && self.isSTM32 {
-                                            for s in 0..<vm.numOutputSlots {
-                                                vm.fetchOutputSlotType(slot: s)
-                                            }
-                                        }
-                                        DispatchQueue.main.async {
-                                            if status != PIN_CONFIG_SUCCESS {
-                                                statusMessage = "Failed to change \(output.name) type"
-                                                statusIsError = true
-                                            } else {
-                                                statusMessage = "\(output.name) set to \(newType == 1 ? "I2S" : "S/PDIF")"
-                                                statusIsError = false
-                                            }
-                                        }
-                                    }
-                                }
-                            )) {
-                                Text("S/PDIF").tag(UInt8(0))
-                                if i2sAllowedFor(slot: output.id) {
-                                    Text("I2S").tag(UInt8(1))
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 80, alignment: .trailing)
-                        } else {
-                            Picker("", selection: .constant(0)) {
-                                Text("PDM").tag(0)
-                            }
-                            .labelsHidden()
-                            .frame(width: 80, alignment: .trailing)
-                            .allowsHitTesting(false)
-                        }
-
-                        Spacer()
-
-                        // GPIO pin pickers are RP-only — on STM32 the SAI
-                        // peripherals drive fixed pins (PE6, PE3, PD11, PA0
-                        // for slot data; PE2/5/4 for I2S clocks) so there's
-                        // nothing to assign.
-                        if !isSTM32 {
-                            Picker("", selection: Binding(
-                                get: { vm.outputPins[output.id] },
-                                set: { setPinForOutput(output.id, pin: $0) }
-                            )) {
-                                ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .output(output.id)) == nil }, id: \.self) { pin in
-                                    Text("GPIO \(pin)").tag(pin)
-                                }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-                    }
-                    .padding(.vertical, 2)
+        Group {
+            if section == .outputs {
+                outputsView
+            } else {
+                formContent
+            }
+        }
+        .onAppear {
+            if vm.isDeviceConnected {
+                for output in visiblePinOutputs {
+                    vm.fetchOutputPin(output: output.id)
                 }
-
-                if let message = statusMessage {
-                    HStack(spacing: 6) {
-                        Image(systemName: statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                            .foregroundColor(statusIsError ? .orange : .green)
-                            .font(.caption)
-                        Text(message)
-                            .font(.caption)
-                            .foregroundColor(statusIsError ? .orange : .secondary)
-                    }
+                for slot in 0..<vm.numOutputSlots {
+                    vm.fetchOutputSlotType(slot: slot)
                 }
-            } header: {
-                HStack {
-                    Label(isSTM32 ? "Output Types" : "Output Assignment", systemImage: "cpu")
-                    Spacer()
-                    if !isSTM32 {
-                        Button("Reset Pins") {
-                            resetToDefaults()
-                        }
-                        .font(.caption)
-                        .buttonStyle(.plain)
-                        .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
-                        .disabled(!vm.isDeviceConnected)
-                    }
+                vm.fetchI2SBckPin()
+                vm.fetchMckEnable()
+                vm.fetchMckPin()
+                vm.fetchMckMultiplier()
+                vm.fetchSampleRate()
+                if vm.inputSourceSupported {
+                    vm.fetchSpdifRxPin()
+                    vm.fetchI2SInputConfig()
                 }
             }
+        }
+    }
+
+    // I2S Configuration / S/PDIF Input still use the standard grouped form.
+    @ViewBuilder
+    private var formContent: some View {
+        Form {
 
             // MARK: I2S Clock
             // BCK / MCK pin selection and MCK enable / multiplier are
@@ -1009,7 +1324,7 @@ struct HardwareSettingsTab: View {
             // peripheral drives fixed clock pins (PE2 MCLK, PE5 BCK, PE4
             // LRCLK) — there's nothing to assign — so we hide the whole
             // section there.
-            if !isSTM32 {
+            if section == .i2s && !isSTM32 {
             Section {
                 HStack {
                     Image(systemName: "waveform.path")
@@ -1027,6 +1342,7 @@ struct HardwareSettingsTab: View {
                     Picker("", selection: Binding(
                         get: { vm.i2sBckPin },
                         set: { newPin in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
                             DispatchQueue.global(qos: .userInitiated).async {
                                 let status = vm.setI2SBckPin(newPin)
                                 DispatchQueue.main.async {
@@ -1048,7 +1364,14 @@ struct HardwareSettingsTab: View {
                             }
                         }
                     )) {
-                        ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .i2sBck) == nil }, id: \.self) { pin in
+                        // BCK occupies the pin; LRCLK lands on pin+1 - so a
+                        // candidate is only valid when BOTH are free (otherwise,
+                        // e.g., BCK 15 would put LRCLK on a pin already used by
+                        // S/PDIF RX 16).
+                        ForEach(Self.validPins.filter { p in
+                            pinInUseBy(p, excluding: .i2sBck) == nil
+                                && pinInUseBy(p &+ 1, excluding: .i2sBck) == nil
+                        }, id: \.self) { pin in
                             Text("GPIO \(pin)").tag(pin)
                         }
                     }
@@ -1062,6 +1385,7 @@ struct HardwareSettingsTab: View {
                 Toggle(isOn: Binding(
                     get: { vm.mckEnabled },
                     set: { newVal in
+                        SettingsSaveCoordinator.shared.beginOutputEdit()
                         DispatchQueue.global(qos: .userInitiated).async {
                             let status = vm.setMckEnable(newVal)
                             DispatchQueue.main.async {
@@ -1095,6 +1419,7 @@ struct HardwareSettingsTab: View {
                     Picker("", selection: Binding(
                         get: { vm.mckPin },
                         set: { newPin in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
                             DispatchQueue.global(qos: .userInitiated).async {
                                 let status = vm.setMckPin(newPin)
                                 DispatchQueue.main.async {
@@ -1135,6 +1460,7 @@ struct HardwareSettingsTab: View {
                     Picker("", selection: Binding(
                         get: { vm.mckMultiplier },
                         set: { newVal in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
                             DispatchQueue.global(qos: .userInitiated).async {
                                 let status = vm.setMckMultiplier(newVal)
                                 DispatchQueue.main.async {
@@ -1165,13 +1491,13 @@ struct HardwareSettingsTab: View {
                             .foregroundColor(.secondary)
                     }
                 }
-            } header: {
-                Label("I2S Configuration", systemImage: "waveform.path")
+
+                statusRow
             }
             }
 
-            // MARK: S/PDIF Input
-            if vm.inputSourceSupported {
+            // MARK: Inputs
+            if section == .spdif && vm.inputSourceSupported {
                 Section {
                     HStack {
                         Image(systemName: "arrow.down.to.line")
@@ -1179,9 +1505,9 @@ struct HardwareSettingsTab: View {
                             .foregroundColor(.secondary)
                             .frame(width: 16)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("RX Pin")
+                            Text("SPDIF RX")
                                 .font(.body)
-                            Text("GPIO pin for incoming S/PDIF signal")
+                            Text("GPIO pin for incoming S/PDIF signal from a TOSLINK RX module or comparator.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -1189,6 +1515,7 @@ struct HardwareSettingsTab: View {
                         Picker("", selection: Binding(
                             get: { vm.spdifRxPin },
                             set: { newPin in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
                                 DispatchQueue.global(qos: .userInitiated).async {
                                     let status = vm.setSpdifRxPin(newPin)
                                     DispatchQueue.main.async {
@@ -1224,8 +1551,40 @@ struct HardwareSettingsTab: View {
                         .labelsHidden()
                         .fixedSize()
                     }
+
+                    statusRow
+                }
+
+                // LG Sound Sync decodes the LG TV's TOSLINK (S/PDIF) signaling.
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { vm.lgSoundSyncEnabled },
+                        set: { en in
+                            vm.lgSoundSyncEnabled = en
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                vm.setLgSoundSyncEnabled(en)
+                            }
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Enable")
+                                .font(.body)
+                            Text("Decode the LG TV's TOSLINK volume + mute signaling and apply it as the host volume — TV remote becomes the volume control. Per-preset; saved with the active preset.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .disabled(!vm.lgSoundSyncSupported)
+                    .padding(.vertical, 4)
+
+                    if !vm.lgSoundSyncSupported {
+                        Text("Connected device firmware doesn't support LG Sound Sync. Update to firmware V8 or later.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 } header: {
-                    Label("S/PDIF Input", systemImage: "arrow.down.to.line")
+                    Label("LG Sound Sync", systemImage: "tv")
                 }
             }
 
@@ -1325,26 +1684,230 @@ struct HardwareSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .padding()
-        .onAppear {
-            if vm.isDeviceConnected {
-                for output in visiblePinOutputs {
-                    vm.fetchOutputPin(output: output.id)
+    }
+
+    // MARK: - Outputs page (custom full-width cards)
+
+    private var outputsView: some View {
+        Form {
+            Section {
+                ForEach(visiblePinOutputs) { output in
+                    outputRow(output)
                 }
-                for slot in 0..<vm.numOutputSlots {
-                    vm.fetchOutputSlotType(slot: slot)
-                }
-                vm.fetchI2SBckPin()
-                vm.fetchMckEnable()
-                vm.fetchMckPin()
-                vm.fetchMckMultiplier()
-                vm.fetchSampleRate()
-                if vm.inputSourceSupported {
-                    vm.fetchSpdifRxPin()
-                    vm.fetchI2SInputConfig()
+            }
+
+            // Status feedback + reset, with the persistence notice below it.
+            Section {
+                if !isSTM32 || statusMessage != nil {
+                    HStack(spacing: 8) {
+                        statusRow
+                        Spacer(minLength: 0)
+                        if !isSTM32 {
+                            Button("Reset Pins") {
+                                resetToDefaults()
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(vm.isDeviceConnected ? .accentColor : .secondary.opacity(0.5))
+                            .disabled(!vm.isDeviceConnected)
+                        }
+                    }
                 }
             }
         }
+        .formStyle(.grouped)
+    }
+
+    /// Shared row layout used by both the Outputs and Inputs pages: a channel
+    /// color dot + label (+ optional "Default" capsule) on the left, and the
+    /// format + GPIO dropdowns on the right. The values (S/PDIF, GPIO 6, …) are
+    /// self-describing, so no "Type"/"Pin" labels are needed.
+    @ViewBuilder
+    private func assignmentRow<T: View, P: View>(
+        color: Color,
+        title: String,
+        isDefault: Bool,
+        @ViewBuilder type: () -> T,
+        @ViewBuilder pin: () -> P
+    ) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+
+            // Fixed width so the "Default" capsule lines up across rows
+            // regardless of label length ("Sub" vs "OUT 1/2").
+            Text(title)
+                .frame(width: 56, alignment: .leading)
+            if isDefault {
+                Text("Default")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
+
+            Spacer(minLength: 8)
+
+            type()
+            pin()
+        }
+    }
+
+    @ViewBuilder
+    private func outputRow(_ output: PinOutput) -> some View {
+        let isSlot = output.id < vm.numOutputSlots
+        let title = isSlot ? "OUT \(output.id * 2 + 1)/\(output.id * 2 + 2)" : "Sub"
+
+        // "Default" when both type and pin match factory defaults. The Sub has
+        // no type choice; STM32 has no assignable pins — those dimensions count
+        // as default automatically.
+        let typeIsDefault = !isSlot || vm.outputSlotTypes[output.id] == 0
+        let pinIsDefault = isSTM32 || vm.outputPins[output.id] == output.defaultPin
+        let isDefault = typeIsDefault && pinIsDefault
+
+        assignmentRow(color: output.color, title: title, isDefault: isDefault) {
+            typeControl(output)
+        } pin: {
+            if !isSTM32 {
+                pinControl(output)
+            }
+        }
+    }
+
+    /// The single S/PDIF input row — same style as an output row (color dot,
+    /// "IN 1/2", S/PDIF-only type, assignable RX GPIO).
+    ///
+    /// NOTE: Not currently wired into the Inputs page (which uses the simpler
+    /// "SPDIF RX" row for now) — kept here for later use.
+    @ViewBuilder
+    private func inputRow() -> some View {
+        assignmentRow(color: Channel.masterRight.color, title: "IN 1/2", isDefault: false) {
+            // Type — S/PDIF is the only option (enabled, but it's the sole choice).
+            Picker("", selection: .constant(UInt8(0))) {
+                Text("S/PDIF").tag(UInt8(0))
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+        } pin: {
+            Picker("", selection: Binding(
+                get: { vm.spdifRxPin },
+                set: { newPin in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let status = vm.setSpdifRxPin(newPin)
+                        DispatchQueue.main.async {
+                            switch status {
+                            case PIN_CONFIG_SUCCESS:
+                                statusMessage = "S/PDIF RX pin set to GPIO \(newPin)"
+                                statusIsError = false
+                            case PIN_CONFIG_PIN_IN_USE:
+                                if let owner = pinInUseBy(newPin, excluding: .spdifRx) {
+                                    statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
+                                } else {
+                                    statusMessage = "GPIO \(newPin) is already in use"
+                                }
+                                statusIsError = true
+                                vm.fetchSpdifRxPin()
+                            case PIN_CONFIG_INVALID_PIN:
+                                statusMessage = "GPIO \(newPin) is not available on this platform"
+                                statusIsError = true
+                                vm.fetchSpdifRxPin()
+                            default:
+                                statusMessage = "Failed to set S/PDIF RX pin"
+                                statusIsError = true
+                                vm.fetchSpdifRxPin()
+                            }
+                        }
+                    }
+                }
+            )) {
+                ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .spdifRx) == nil }, id: \.self) { pin in
+                    Text("GPIO \(pin)").tag(pin)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 92, alignment: .trailing)
+        }
+    }
+
+    @ViewBuilder
+    private func typeControl(_ output: PinOutput) -> some View {
+        if output.id < vm.numOutputSlots {
+            Picker("", selection: outputTypeBinding(output)) {
+                Text("S/PDIF").tag(UInt8(0))
+                if i2sAllowedFor(slot: output.id) {
+                    Text("I2S").tag(UInt8(1))
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+        } else {
+            // Sub is always PDM — same dropdown control as the others, but with
+            // PDM as the only option and disabled (grayed out).
+            Picker("", selection: .constant(UInt8(0))) {
+                Text("PDM").tag(UInt8(0))
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .disabled(true)
+        }
+    }
+
+    @ViewBuilder
+    private func pinControl(_ output: PinOutput) -> some View {
+        Picker("", selection: outputPinBinding(output)) {
+            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .output(output.id)) == nil }, id: \.self) { pin in
+                Text("GPIO \(pin)").tag(pin)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        // Fixed width sized for the longest label ("GPIO 28") so every pin
+        // selector is the same width, right-aligned to the row edge.
+        .frame(width: 92, alignment: .trailing)
+    }
+
+    private func outputTypeBinding(_ output: PinOutput) -> Binding<UInt8> {
+        Binding(
+            get: { vm.outputSlotTypes[output.id] },
+            set: { newType in
+                SettingsSaveCoordinator.shared.beginOutputEdit()
+                let slotID = output.id
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let status = vm.setOutputSlotType(slot: slotID, type: newType)
+                    // STM32 firmware coerces dependent I2S slots down to S/PDIF
+                    // when their parent goes S/PDIF; refetch so the UI reflects it.
+                    if status == PIN_CONFIG_SUCCESS && self.isSTM32 {
+                        for s in 0..<vm.numOutputSlots {
+                            vm.fetchOutputSlotType(slot: s)
+                        }
+                    }
+                    DispatchQueue.main.async {
+                        if status != PIN_CONFIG_SUCCESS {
+                            statusMessage = "Failed to change \(output.name) type"
+                            statusIsError = true
+                        } else {
+                            statusMessage = "\(output.name) set to \(newType == 1 ? "I2S" : "S/PDIF")"
+                            statusIsError = false
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    private func outputPinBinding(_ output: PinOutput) -> Binding<UInt8> {
+        Binding(
+            get: { vm.outputPins[output.id] },
+            set: {
+                SettingsSaveCoordinator.shared.beginOutputEdit()
+                setPinForOutput(output.id, pin: $0)
+            }
+        )
     }
 }
 
@@ -2597,5 +3160,10 @@ struct DSPi_ConsoleApp: App {
         Settings {
             SettingsView()
         }
+        // Without this the window keeps whatever (wider) frame macOS restored
+        // from a previous launch — content-size hints alone never shrink it.
+        // `.contentSize` clamps the window's max size to its fixed content
+        // (sidebar + 340pt detail), so it can't sit wider than it needs to.
+        .windowResizability(.contentSize)
     }
 }

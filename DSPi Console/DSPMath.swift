@@ -376,6 +376,64 @@ class DSPMath {
         return 1.0
     }
 
+    /// Phase contribution (radians) of a single biquad section at `freq`,
+    /// arg(num) - arg(den).  Cascade phases sum.
+    private static func phaseOf(coeffs: Coeffs, freq: Double) -> Double {
+        let w = 2.0 * Double.pi * freq / sampleRate
+        let cos_w = cos(w)
+        let cos_2w = cos(2.0 * w)
+        let sin_w = sin(w)
+        let sin_2w = sin(2.0 * w)
+        let num_r = coeffs.b0 + coeffs.b1 * cos_w + coeffs.b2 * cos_2w
+        let num_i = -(coeffs.b1 * sin_w + coeffs.b2 * sin_2w)
+        let den_r = 1.0 + coeffs.a1 * cos_w + coeffs.a2 * cos_2w
+        let den_i = -(coeffs.a1 * sin_w + coeffs.a2 * sin_2w)
+        return atan2(num_i, num_r) - atan2(den_i, den_r)
+    }
+
+    /// Total phase response in degrees, wrapped to [-180, 180], for the cascade
+    /// of filters. Each biquad contributes arg(num) - arg(den); phases sum.
+    /// Crossover types cascade multiple sections, matching `responseAt`.
+    static func phaseAt(freq: Float, filters: [FilterParams]) -> Float {
+        var phase: Double = 0.0
+        let freqD = Double(freq)
+
+        for f in filters where f.type != .flat && f.active && !f.bypass {
+            // Crossover types cascade multiple biquad sections.
+            let sections: [Coeffs]
+            if f.type.isCrossover {
+                sections = crossoverSections(p: f)
+            } else {
+                sections = [calculateCoefficients(p: f)]
+            }
+            for coeffs in sections {
+                phase += phaseOf(coeffs: coeffs, freq: freqD)
+            }
+        }
+
+        var deg = phase * 180.0 / Double.pi
+        deg = deg.truncatingRemainder(dividingBy: 360.0)
+        if deg > 180 { deg -= 360 }
+        if deg < -180 { deg += 360 }
+        return Float(deg)
+    }
+
+    /// Unwraps a sequence of wrapped phase values (degrees) into a continuous
+    /// curve by removing ±360° jumps between adjacent points.
+    static func unwrapPhase(_ wrapped: [Double]) -> [Double] {
+        guard let first = wrapped.first else { return wrapped }
+        var out = [Double]()
+        out.reserveCapacity(wrapped.count)
+        out.append(first)
+        for i in 1..<wrapped.count {
+            var d = wrapped[i] - wrapped[i - 1]
+            while d > 180 { d -= 360 }
+            while d <= -180 { d += 360 }
+            out.append(out[i - 1] + d)
+        }
+        return out
+    }
+
     // Coefficients in Double precision for accurate frequency response calculation
     struct Coeffs {
         let b0, b1, b2, a1, a2: Double

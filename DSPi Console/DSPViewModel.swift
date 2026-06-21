@@ -438,8 +438,10 @@ class DSPViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Magnitude Cache
+    // MARK: - Magnitude / Phase Cache
     @Published var cachedMagnitudes: [Int: [Double]] = [:]
+    @Published var cachedPhases: [Int: [Double]] = [:]
+    @Published var cachedPhasesUnwrapped: [Int: [Double]] = [:]
 
     func recomputeMagnitudes(for eqChannel: Int) {
         let peqFilters = channelData[eqChannel] ?? []
@@ -447,13 +449,18 @@ class DSPViewModel: ObservableObject {
         let allFilters = peqFilters + xoverFilters
         let isBypassed = bypass && (eqChannel <= 1)
         var results = [Double]()
+        var phases = [Double]()
         results.reserveCapacity(201)
+        phases.reserveCapacity(201)
         let logMin = log10(Float(10.0)), logMax = log10(Float(20000.0))
         for i in 0...200 {
             let freq = pow(10, logMin + Float(i) / 200.0 * (logMax - logMin))
             results.append(Double(isBypassed ? 0 : DSPMath.responseAt(freq: freq, filters: allFilters)))
+            phases.append(Double(isBypassed ? 0 : DSPMath.phaseAt(freq: freq, filters: allFilters)))
         }
         cachedMagnitudes[eqChannel] = results
+        cachedPhases[eqChannel] = phases
+        cachedPhasesUnwrapped[eqChannel] = DSPMath.unwrapPhase(phases)
     }
 
     func recomputeAllMagnitudes() {
@@ -468,6 +475,7 @@ class DSPViewModel: ObservableObject {
             masterVolumeDB: masterVolumeDB,
             masterVolumeMode: presetMasterVolumeMode,
             outputConfigMode: presetOutputConfigMode,
+            platformName: platformName,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
             loudnessRefSPL: loudnessRefSPL,

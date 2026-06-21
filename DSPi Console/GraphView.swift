@@ -122,6 +122,11 @@ struct BodePlotView: View {
     var dbTop: Float { Float(settings.graphDBCenter + settings.graphDBRange / 2.0) }
     var dbBottom: Float { Float(settings.graphDBCenter - settings.graphDBRange / 2.0) }
 
+    // Phase axis scales with the vertical (dB) zoom, centered at 0°:
+    // ±180° at the default 50 dB range, proportionally tighter/wider otherwise.
+    var phaseTop: Float { Float(180.0 * settings.graphDBRange / 50.0) }
+    var phaseBottom: Float { -phaseTop }
+
     // Grid Helper
     func xPos(_ freq: Float, width: CGFloat) -> CGFloat {
         let logMin = log10(minFreq)
@@ -300,6 +305,19 @@ struct BodePlotView: View {
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: mags)
                 }
             }
+
+            // Phase response of the selected channel - dotted, light-gray,
+            // mapped to a -180...+180 degree axis (labeled on the right).
+            if settings.showPhase,
+               let activeCh = vm.activeEqChannel,
+               let phases = (settings.phaseUnwrapped ? vm.cachedPhasesUnwrapped[activeCh] : vm.cachedPhases[activeCh]),
+               (useOverride ? (visibilityOverride[activeCh] ?? false) : (vm.channelVisibility[activeCh] == true)) {
+                let lw = settings.graphLineWidth
+                BodeLineShape(magnitudes: phases, dbTop: phaseTop, dbBottom: phaseBottom, minFreq: minFreq, maxFreq: maxFreq)
+                    .stroke(Color(white: 0.93),
+                            style: StrokeStyle(lineWidth: lw * 0.9, lineCap: .round, dash: [0.1, lw * 3]))
+                    .animation(.spring(response: 0.2, dampingFraction: 0.8), value: phases)
+            }
         }
         .background(Color(NSColor.windowBackgroundColor).opacity(0.5))
         .cornerRadius(8)
@@ -335,6 +353,20 @@ struct BodePlotView: View {
                         let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(.white.opacity(0.4))
                         context.draw(context.resolve(text), at: CGPoint(x: 4, y: y), anchor: .leading)
                         db += step
+                    }
+                }
+
+                // Phase axis labels (right side), in degrees - scaled with the
+                // vertical zoom to match the phase curve's axis.
+                if settings.showPhase {
+                    let pTop = phaseTop
+                    let phaseTicks: [Float] = [pTop, pTop / 2, 0, -pTop / 2, -pTop]
+                    for p in phaseTicks {
+                        let normalized = (p - phaseBottom) / (phaseTop - phaseBottom)
+                        let y = size.height - CGFloat(normalized) * size.height
+                        let label = p == 0 ? "0°" : String(format: "%+d°", Int(p.rounded()))
+                        let text = Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(Color(white: 0.93).opacity(0.55))
+                        context.draw(context.resolve(text), at: CGPoint(x: size.width - 4, y: y), anchor: .trailing)
                     }
                 }
             }
