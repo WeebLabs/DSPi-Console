@@ -455,6 +455,8 @@ struct OutputConfigSnapshot: Equatable {
     var mckPin: UInt8
     var mckMultiplier: Int
     var spdifRxPin: UInt8
+    var i2sRxPin: UInt8
+    var i2sInputRateHz: UInt32
 }
 
 /// App-lifetime owner of pending (unsaved) Settings changes, so the save bar
@@ -496,7 +498,9 @@ final class SettingsSaveCoordinator: ObservableObject {
             mckEnabled: vm.mckEnabled,
             mckPin: vm.mckPin,
             mckMultiplier: vm.mckMultiplier,
-            spdifRxPin: vm.spdifRxPin
+            spdifRxPin: vm.spdifRxPin,
+            i2sRxPin: vm.i2sRxPin,
+            i2sInputRateHz: vm.i2sInputRateHz
         )
     }
 
@@ -596,6 +600,8 @@ final class SettingsSaveCoordinator: ObservableObject {
                 if vm.mckPin != base.mckPin { _ = vm.setMckPin(base.mckPin) }
                 if vm.mckMultiplier != base.mckMultiplier { _ = vm.setMckMultiplier(base.mckMultiplier) }
                 if vm.spdifRxPin != base.spdifRxPin { _ = vm.setSpdifRxPin(base.spdifRxPin) }
+                if vm.i2sRxPin != base.i2sRxPin { _ = vm.setI2SRxPin(base.i2sRxPin) }
+                if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
                 DispatchQueue.main.async { self.outputConfigDirty = false }
             }
         }
@@ -833,7 +839,7 @@ struct GlobalSettingsTab: View {
                         .foregroundColor(.secondary)
                 }
             } header: {
-                Label("Output Configuration", systemImage: "cable.connector")
+                Label("Hardware Configuration", systemImage: "cable.connector")
             }
             .id("outputConfig")
 
@@ -1400,11 +1406,17 @@ struct HardwareSettingsTab: View {
                         }
                     }
                 )) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Master Clock (MCK)")
-                        Text("Clock reference for external DACs")
-                            .font(.caption2)
+                    HStack {
+                        Image(systemName: "clock")
+                            .font(.system(size: 12))
                             .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Master Clock (MCK)")
+                            Text("Clock reference for external DACs")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
                 .toggleStyle(.switch)
@@ -1552,11 +1564,8 @@ struct HardwareSettingsTab: View {
                         .fixedSize()
                     }
 
-                    statusRow
-                }
-
-                // LG Sound Sync decodes the LG TV's TOSLINK (S/PDIF) signaling.
-                Section {
+                    // LG Sound Sync decodes the LG TV's TOSLINK (S/PDIF)
+                    // signaling, so it lives within the S/PDIF Input section.
                     Toggle(isOn: Binding(
                         get: { vm.lgSoundSyncEnabled },
                         set: { en in
@@ -1566,12 +1575,18 @@ struct HardwareSettingsTab: View {
                             }
                         }
                     )) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Enable")
-                                .font(.body)
-                            Text("Decode the LG TV's TOSLINK volume + mute signaling and apply it as the host volume — TV remote becomes the volume control. Per-preset; saved with the active preset.")
-                                .font(.caption)
+                        HStack {
+                            Image(systemName: "av.remote")
+                                .font(.system(size: 12))
                                 .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("LG Sound Sync")
+                                    .font(.body)
+                                Text("Decode the LG TV's TOSLINK volume + mute signaling and apply it as the host volume - TV remote becomes the volume control. Per-preset; saved with the active preset.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                     .toggleStyle(.switch)
@@ -1583,13 +1598,15 @@ struct HardwareSettingsTab: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+
+                    statusRow
                 } header: {
-                    Label("LG Sound Sync", systemImage: "tv")
+                    Label("S/PDIF Input", systemImage: "arrow.down.to.line")
                 }
             }
 
             // MARK: I2S Input
-            if vm.i2sInputSupported {
+            if section == .spdif && vm.i2sInputSupported {
                 Section {
                     // Data pin
                     HStack {
@@ -1608,6 +1625,7 @@ struct HardwareSettingsTab: View {
                         Picker("", selection: Binding(
                             get: { vm.i2sRxPin },
                             set: { newPin in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
                                 DispatchQueue.global(qos: .userInitiated).async {
                                     let status = vm.setI2SRxPin(newPin)
                                     DispatchQueue.main.async {
@@ -1662,6 +1680,7 @@ struct HardwareSettingsTab: View {
                         Picker("", selection: Binding(
                             get: { vm.i2sInputRateHz },
                             set: { newRate in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
                                 DispatchQueue.global(qos: .userInitiated).async {
                                     vm.setInputRate(newRate)
                                 }

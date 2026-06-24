@@ -491,10 +491,19 @@ extension DSPViewModel {
     /// Optimistic local publish — the firmware emits a PARAM_CHANGED on the
     /// `dac_hw_mute` section in WireBulkParams which `applyNotifiedParamChange`
     /// will pick up for non-HOST sources, keeping multi-host clients in sync.
+    ///
+    /// The firmware applies/validates this deferred on its main loop and can
+    /// reject it silently (e.g. an invalid or already-claimed pin) without
+    /// emitting a change notification. Read it back after a short settle delay
+    /// so our published value reflects what the device actually accepted rather
+    /// than the optimistic guess. (Firmware contract: confirm via GET 0xEB.)
     func setDacHwMuteConfig(_ config: DacHwMuteConfig) {
         DispatchQueue.main.async { self.dacHwMuteConfig = config }
         usb.sendControlRequest(request: REQ_SET_DAC_HW_MUTE_CONFIG,
                                value: 0, index: 0, data: config.toData())
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15) {
+            self.fetchDacHwMuteConfig()
+        }
     }
 
     /// Read the current DAC hardware mute config.  STALLs on firmware older
@@ -1182,8 +1191,12 @@ extension DSPViewModel {
         DispatchQueue.main.async { self.i2sInputRateHz = selected }
     }
 
-    /// Selects the I2S input sample rate (44100 / 48000 / 96000 Hz).  Always
-    /// stored by the firmware; applied immediately if I2S is the active source.
+    /// Selects the I2S input sample rate (44100 / 48000 / 96000 Hz).  Applied
+    /// live immediately if I2S is the active source.  Part of the device's
+    /// output-config block (alongside the RX pins / MCK / BCK), so it only
+    /// persists to flash via saveOutputConfig() in independent mode, or with
+    /// the preset in with-preset mode - callers in Settings must mark the
+    /// output config dirty (beginOutputEdit) so the save flow picks it up.
     /// Invalid rates are silently ignored by the firmware (no SET response).
     func setInputRate(_ hz: UInt32) {
         guard I2S_INPUT_RATES_HZ.contains(hz) else { return }
