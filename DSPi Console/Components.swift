@@ -1217,8 +1217,8 @@ struct FilterListView: View {
                                 // is safe, so onEnableAll stays unprompted.
                                 if isCrossoverMode {
                                     let alert = NSAlert()
-                                    alert.messageText = "Bypass All Crossovers?"
-                                    alert.informativeText = "This sends full-range audio to every output, with no crossover protection. It can damage unprotected drivers such as tweeters. Continue only if you are sure."
+                                    alert.messageText = "Bypass this output's crossovers?"
+                                    alert.informativeText = "This sends full-range audio to this output with no crossover protection, which can damage unprotected drivers such as tweeters. Continue only if you are sure."
                                     alert.alertStyle = .critical
                                     alert.addButton(withTitle: "Bypass All")
                                     alert.addButton(withTitle: "Cancel")
