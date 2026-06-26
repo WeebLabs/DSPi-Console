@@ -106,11 +106,13 @@ extension PresetSnapshot {
     static func diff(from old: PresetSnapshot, to new: PresetSnapshot, channelNames: [String]) -> PresetDiff {
         var changes = [PresetDiff.Change]()
 
-        // Global — per-channel preamp
-        let preampLabels = ["L", "R"]
+        // Global — per-channel preamp (inputs 0/1 are USB L/R; 2-7 are the 7.1
+        // surround inputs in RP2350 8-channel mode).
+        let preampLabels = ["L", "R", "FC", "LFE", "BL", "BR", "SL", "SR"]
         for ch in 0..<min(old.preampDB.count, new.preampDB.count) {
             if old.preampDB[ch] != new.preampDB[ch] {
-                changes.append(.init(category: "Global", description: "Preamp \(preampLabels[ch]): \(formatDB(old.preampDB[ch])) → \(formatDB(new.preampDB[ch]))"))
+                let label = ch < preampLabels.count ? preampLabels[ch] : "In \(ch + 1)"
+                changes.append(.init(category: "Global", description: "Preamp \(label): \(formatDB(old.preampDB[ch])) → \(formatDB(new.preampDB[ch]))"))
             }
         }
         // Master volume — only relevant to preset persistence when the device is
@@ -207,9 +209,11 @@ extension PresetSnapshot {
             changes.append(.init(category: "Matrix", description: "\(matrixCount) crosspoint\(matrixCount == 1 ? "" : "s") changed"))
         }
 
-        // Per-output settings
+        // Per-output settings.  Output i's unified EQ/channel index is i + chOut1
+        // (chOut1 = device input count: 8 on RP2350, 2 on RP2040).
+        let chOut1 = new.platformName == "RP2040" ? BASE_MATRIX_INPUTS : MAX_MATRIX_INPUTS
         for i in 0..<min(old.outputEnabled.count, new.outputEnabled.count) {
-            let name = (i + 2) < channelNames.count ? channelNames[i + 2] : "Output \(i)"
+            let name = (i + chOut1) < channelNames.count ? channelNames[i + chOut1] : "Output \(i)"
             var outputChanges = [String]()
             if old.outputEnabled[i] != new.outputEnabled[i] { outputChanges.append(new.outputEnabled[i] ? "enabled" : "disabled") }
             if old.outputMuted[i] != new.outputMuted[i] { outputChanges.append(new.outputMuted[i] ? "muted" : "unmuted") }
@@ -238,9 +242,9 @@ extension PresetSnapshot {
             }
         }
 
-        // Crossover bands (per output channel)
+        // Crossover bands (per output channel; outputs are ch >= chOut1)
         let allXoverKeys = Set(old.crossoverFilters.keys).union(new.crossoverFilters.keys)
-        for ch in allXoverKeys.sorted() where ch >= 2 {
+        for ch in allXoverKeys.sorted() where ch >= chOut1 {
             let oldBands = old.crossoverFilters[ch] ?? []
             let newBands = new.crossoverFilters[ch] ?? []
             let maxBands = max(oldBands.count, newBands.count)

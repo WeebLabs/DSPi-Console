@@ -142,10 +142,11 @@ struct BodePlotView: View {
 
     // Color for a given EQ channel index
     func colorForEQChannel(_ eqCh: Int) -> Color {
-        if eqCh <= 1 {
-            return Channel(rawValue: eqCh)!.color
+        if eqCh < vm.chOut1 {
+            return MatrixInput.color(for: eqCh)   // input channel
         } else {
-            return MatrixOutput.all[eqCh - 2].color
+            let outIdx = eqCh - vm.chOut1
+            return MatrixOutput.all.indices.contains(outIdx) ? MatrixOutput.all[outIdx].color : .accentColor
         }
     }
 
@@ -165,7 +166,7 @@ struct BodePlotView: View {
         var groups: [[Double]: [ChannelEntry]] = [:]
         let activeEq = vm.activeEqChannel
         let followsSelection = !isPopOut || settings.popoutGraphFollowsSelection
-        for eqCh in 0...10 {
+        for eqCh in 0..<vm.numChannels {
             let visible: Bool
             if useOverride {
                 visible = visibilityOverride[eqCh] ?? false
@@ -174,9 +175,9 @@ struct BodePlotView: View {
             }
             if visible {
                 var mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
-                // Apply output gain as constant offset
-                if eqCh >= 2 {
-                    let gain = Double(vm.outputGainDB[eqCh - 2])
+                // Apply output gain as constant offset (output channels only)
+                if eqCh >= vm.chOut1 {
+                    let gain = Double(vm.outputGainDB[eqCh - vm.chOut1])
                     if gain != 0 { mags = mags.map { $0 + gain } }
                 }
                 let isActive = !followsSelection || activeEq == nil || eqCh == activeEq
@@ -578,13 +579,14 @@ struct GraphLegend: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // Master L/R (always shown)
-            legendPill(eqCh: Channel.masterLeft.rawValue, name: Channel.masterLeft.descriptor, color: Channel.masterLeft.color)
-            legendPill(eqCh: Channel.masterRight.rawValue, name: Channel.masterRight.descriptor, color: Channel.masterRight.color)
+            // Active input channels
+            ForEach(Array(0..<vm.numMatrixInputs), id: \.self) { ch in
+                legendPill(eqCh: ch, name: "IN\(ch + 1)", color: MatrixInput.color(for: ch))
+            }
 
             // Enabled outputs (dynamic)
             ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                legendPill(eqCh: out.index + 2, name: out.descriptor, color: out.color)
+                legendPill(eqCh: vm.eqChannel(forOutput: out.index), name: out.descriptor, color: out.color)
             }
         }
         .padding(.top, 6)

@@ -56,7 +56,9 @@ extension DSPViewModel {
 
     func fetchStatus() {
         let numChannels = self.numChannels
-        let responseSize = numChannels * 2 + 4  // peaks (2 bytes each) + cpu0 + cpu1 + clip_flags (2 bytes)
+        // V16 combined status (wValue=9): peaks[numCh] u16 + cpu0 + cpu1 +
+        // clip_flags (u32) + active_input_channels (u8).
+        let responseSize = numChannels * 2 + 2 + 4 + 1
 
         guard let data = usb.getControlRequest(
             request: REQ_GET_STATUS, value: 9, index: 0,
@@ -68,16 +70,22 @@ extension DSPViewModel {
             let raw = data.withUnsafeBytes { $0.load(fromByteOffset: i * 2, as: UInt16.self) }
             peaks[i] = Float(raw) / 32767.0
         }
-        let cpu0 = Int(data[numChannels * 2])
-        let cpu1 = Int(data[numChannels * 2 + 1])
+        let off = numChannels * 2
+        let cpu0 = Int(data[off])
+        let cpu1 = Int(data[off + 1])
         let clipFlags = data.withUnsafeBytes {
-            $0.load(fromByteOffset: numChannels * 2 + 2, as: UInt16.self)
+            $0.load(fromByteOffset: off + 2, as: UInt32.self)
         }
+        // Live active input count (2/4/6/8); follows the host's USB audio format.
+        let activeInputs = max(BASE_MATRIX_INPUTS, Int(data[off + 6]))
 
         DispatchQueue.main.async {
+            if self.activeInputChannels != activeInputs {
+                self.activeInputChannels = activeInputs
+            }
             var s = self.meters.status
-            var fullPeaks = Array(repeating: Float(0), count: 11)
-            for i in 0..<numChannels { fullPeaks[i] = peaks[i] }
+            var fullPeaks = Array(repeating: Float(0), count: WIRE_MAX_CHANNELS)
+            for i in 0..<min(numChannels, WIRE_MAX_CHANNELS) { fullPeaks[i] = peaks[i] }
             s.peaks = fullPeaks
             s.cpu0 = cpu0
             s.cpu1 = cpu1
@@ -140,11 +148,14 @@ extension DSPViewModel {
     func sendPreampChannelToDevice(channel: Int, db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
-        if preampLinked {
-            let data = Data(bytes: &val, count: 4)
-            usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+        let data = Data(bytes: &val, count: 4)
+        // Link couples only the stereo USB L/R pair (inputs 0/1) via two
+        // per-channel writes; never the legacy all-channel REQ_SET_PREAMP, which
+        // would clobber the 8-channel input trims (inputs 2-7).
+        if preampLinked && channel < BASE_MATRIX_INPUTS {
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: 0, index: 0, data: data)
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: 1, index: 0, data: data)
         } else {
-            let data = Data(bytes: &val, count: 4)
             usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
         }
     }
@@ -281,7 +292,7 @@ extension DSPViewModel {
     /// the wire band index is 20+localBand.  No-op for master channels (the
     /// firmware would reject them anyway) and for invalid band indices.
     func setCrossoverBand(ch: Int, localBand: Int, p: FilterParams) {
-        guard ch >= 2,
+        guard ch >= chOut1,
               localBand >= 0,
               localBand < DSPViewModel.crossoverBandsPerChannel else { return }
 
@@ -313,7 +324,7 @@ extension DSPViewModel {
     /// Toggle a single crossover band's bypass flag.  Uses REQ_SET_BAND_BYPASS
     /// (0xD8) — same opcode as PEQ.  No-op for master channels.
     func setCrossoverBandBypass(ch: Int, localBand: Int, bypass: Bool) {
-        guard ch >= 2,
+        guard ch >= chOut1,
               localBand >= 0,
               localBand < DSPViewModel.crossoverBandsPerChannel else { return }
         let wireBand = DSPViewModel.crossoverWireBand(localBand)
@@ -330,7 +341,7 @@ extension DSPViewModel {
     /// Clear all crossover bands on an output channel by writing the default
     /// (FLAT, 1000 Hz, Q=0.707, gain=0, bypass=0) recipe to each.
     func clearCrossoverBands(ch: Int) {
-        guard ch >= 2 else { return }
+        guard ch >= chOut1 else { return }
         for i in 0..<DSPViewModel.crossoverBandsPerChannel {
             let defaults = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
             setCrossoverBand(ch: ch, localBand: i, p: defaults)
@@ -401,12 +412,16 @@ extension DSPViewModel {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
         self.preampDB[channel] = val
-        if preampLinked {
-            self.preampDB[1 - channel] = val
-            let data = Data(bytes: &val, count: 4)
-            usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+        let data = Data(bytes: &val, count: 4)
+        // Link couples only the stereo USB L/R pair (inputs 0/1) via two
+        // per-channel writes; never the legacy all-channel REQ_SET_PREAMP, which
+        // would clobber the 8-channel input trims (inputs 2-7).
+        if preampLinked && channel < BASE_MATRIX_INPUTS {
+            let other = 1 - channel
+            self.preampDB[other] = val
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(other), index: 0, data: data)
         } else {
-            let data = Data(bytes: &val, count: 4)
             usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
         }
     }
@@ -477,7 +492,7 @@ extension DSPViewModel {
 
     /// Set the user-facing enable flag.  Per-preset; saved with REQ_SAVE_PRESET.
     /// Firmware emits a PARAM_CHANGED notification on the lg_sound_sync.enabled
-    /// field at bulk offset 2912 — applyNotifiedParamChange mirrors that back
+    /// field at the V16 bulk offset (4728) — applyNotifiedParamChange mirrors that back
     /// for non-HOST sources, so other hosts' edits flow through automatically.
     func setLgSoundSyncEnabled(_ enabled: Bool) {
         DispatchQueue.main.async { self.lgSoundSyncEnabled = enabled }
@@ -623,16 +638,18 @@ extension DSPViewModel {
     }
     
     func clearAllMaster() {
-        let masterChannels = [Channel.masterLeft.rawValue, Channel.masterRight.rawValue]
-        let defaultFilter = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
+        // Stereo input pair (channels 0/1).
+        clearChannelPEQ(0)
+        clearChannelPEQ(1)
+    }
 
-        for ch in masterChannels {
-            for b in 0..<10 {
-                setFilter(ch: ch, band: b, p: defaultFilter)
-            }
+    /// Reset all 10 PEQ bands of a single channel to flat.
+    func clearChannelPEQ(_ ch: Int) {
+        let defaultFilter = FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0)
+        for b in 0..<10 {
+            setFilter(ch: ch, band: b, p: defaultFilter)
         }
-        recomputeMagnitudes(for: 0)
-        recomputeMagnitudes(for: 1)
+        recomputeMagnitudes(for: ch)
     }
 
     // MARK: - Loudness Compensation
@@ -855,12 +872,51 @@ extension DSPViewModel {
         }
     }
 
+    /// Apply a direct 1:1 routing (recipe 11.1 of the 8-channel-usb-input spec):
+    /// input i → output i at 0 dB for i in 0..<numMatrixInputs, enabling those
+    /// outputs and disabling the PDM sub.  All other crosspoints are cleared so
+    /// the result is exactly the diagonal.  Only issues async (fire-and-forget)
+    /// control transfers and no blocking read-backs, so it is safe to call on
+    /// the main thread.
+    func applyDirectRouting() {
+        let n = min(numMatrixInputs, numOutputChannels)
+        // Free Core 1 first: disabling the PDM sub lets the per-output EQ workers
+        // (outputs 2-7) be enabled without a shared-resource conflict.
+        if outputEnabled[pdmOutputIndex] {
+            setOutputEnable(output: pdmOutputIndex, enabled: false)
+        }
+        // Reset every crosspoint to the i→i diagonal.
+        for i in 0..<numMatrixInputs {
+            for o in 0..<numOutputChannels {
+                let on = (i == o && i < n)
+                if matrixRouting[i][o] != on || matrixGain[i][o] != 0 || matrixInvert[i][o] {
+                    setMatrixRoute(input: i, output: o, enabled: on, gain: 0, invert: false)
+                }
+            }
+        }
+        // Enable the diagonal outputs (PDM stays off).
+        for o in 0..<n where o != pdmOutputIndex {
+            if !outputEnabled[o] { setOutputEnable(output: o, enabled: true) }
+        }
+    }
+
+    /// Disconnect every matrix crosspoint, leaving gains/phase untouched.  Run
+    /// off the main thread.
+    func clearAllRoutes() {
+        for i in 0..<numMatrixInputs {
+            for o in 0..<numOutputChannels where matrixRouting[i][o] {
+                setMatrixRoute(input: i, output: o, enabled: false,
+                               gain: matrixGain[i][o], invert: matrixInvert[i][o])
+            }
+        }
+    }
+
     // MARK: - Per-Output Enable
 
     func setOutputEnable(output: Int, enabled: Bool) {
         outputEnabled[output] = enabled
         if isOverviewMode {
-            channelVisibility[output + 2] = enabled
+            channelVisibility[eqChannel(forOutput: output)] = enabled
         }
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
@@ -1224,24 +1280,33 @@ extension DSPViewModel {
 
     // MARK: - Bulk Parameter Transfer
 
-    /// Fetches all DSP parameters in a single 2480-byte USB transfer.
-    /// Parses the WireBulkParams structure and updates all published properties.
-    /// Returns true if successful, false if the device is not connected.
+    /// Fetches all DSP parameters in a single V16 (5864-byte) USB transfer.
+    /// Parses the flat WireBulkParams structure (unified channel model: inputs
+    /// 0..N-1, outputs follow) and updates all published properties.  Returns
+    /// true on a valid V16 payload, false otherwise.
     @discardableResult
     func fetchAllParams(markDisconnectedOnFailure: Bool = true) -> Bool {
-        guard let data = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
-              data.count >= 2832 else {  // Accept V2 (2832) or later
+        guard let data = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE) else {
             if markDisconnectedOnFailure {
                 DispatchQueue.main.async { self.usb.isConnected = false }
             }
+            return false
+        }
+        // V16 is all-or-nothing: only the full, current layout is accepted.
+        // A short or wrong-version payload means incompatible firmware - the
+        // device is still connected, so don't disconnect (avoids a reconnect
+        // loop); just record the version so the UI can react.
+        guard data.count >= WIRE_BULK_PARAMS_V16_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
+            DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
         }
 
         // --- Header (offset 0, 16 bytes) ---
         let formatVersion = data[0]
         let platformId = data[1]
-        let numCh = Int(data[2])
-        let numOutCh = Int(data[3])
+        let numCh = min(Int(data[2]), WIRE_MAX_CHANNELS)          // total channels (7 / 17)
+        let numOutCh = min(Int(data[3]), 9)                       // output channels (5 / 9)
+        let numInCh = max(min(Int(data[4]), MAX_MATRIX_INPUTS), BASE_MATRIX_INPUTS)  // input channels (2 / 8)
         let platform: String
         switch platformId {
         case 1:  platform = "RP2350"
@@ -1249,60 +1314,62 @@ extension DSPViewModel {
         default: platform = "RP2040"
         }
 
-        // --- Global (offset 16, 16 bytes) ---
-        let preamp: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 16, as: Float.self) }
-        let bypassVal = data[20] != 0
-        let loudnessEn = data[21] != 0
-        let loudnessRef: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 24, as: Float.self) }
-        let loudnessInt: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 28, as: Float.self) }
+        // --- Global (offset 16) ---
+        let preamp: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_GLOBAL_OFFSET, as: Float.self) }
+        let bypassVal = data[BULK_GLOBAL_OFFSET + 4] != 0
+        let loudnessEn = data[BULK_GLOBAL_OFFSET + 5] != 0
+        let loudnessRef: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_GLOBAL_OFFSET + 8, as: Float.self) }
+        let loudnessInt: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_GLOBAL_OFFSET + 12, as: Float.self) }
 
-        // --- Crossfeed (offset 32, 16 bytes) ---
-        let cfEnabled = data[32] != 0
-        let cfPreset = Int(data[33])
-        let cfITD = data[34] != 0
-        let cfFreq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 36, as: Float.self) }
-        let cfFeed: Float = data.withUnsafeBytes { $0.load(fromByteOffset: 40, as: Float.self) }
+        // --- Crossfeed (offset 32) ---
+        let cfEnabled = data[BULK_CROSSFEED_OFFSET] != 0
+        let cfPreset = Int(data[BULK_CROSSFEED_OFFSET + 1])
+        let cfITD = data[BULK_CROSSFEED_OFFSET + 2] != 0
+        let cfFreq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_CROSSFEED_OFFSET + 4, as: Float.self) }
+        let cfFeed: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_CROSSFEED_OFFSET + 8, as: Float.self) }
 
-        // --- Delays (offset 64, 44 bytes) ---
+        // --- Delays (offset 64, float[17]) ---
         var delays = [Int: Float]()
         for i in 0..<numCh {
-            delays[i] = data.withUnsafeBytes { $0.load(fromByteOffset: 64 + i * 4, as: Float.self) }
+            delays[i] = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_DELAYS_OFFSET + i * 4, as: Float.self) }
         }
 
-        // --- Matrix crosspoints (offset 108, 144 bytes = 2 inputs × 9 outputs × 8 bytes) ---
-        var routing = Array(repeating: Array(repeating: false, count: 9), count: 2)
-        var mxGain = Array(repeating: Array(repeating: Float(0.0), count: 9), count: 2)
-        var mxInvert = Array(repeating: Array(repeating: false, count: 9), count: 2)
-        for input in 0..<2 {
+        // --- Matrix crosspoints (offset 132, crosspoints[8][9] inline) ---
+        // Backing arrays are always MAX_MATRIX_INPUTS rows; rows beyond numInCh
+        // stay disabled / 0 dB on stereo firmware.
+        var routing = Array(repeating: Array(repeating: false, count: 9), count: MAX_MATRIX_INPUTS)
+        var mxGain = Array(repeating: Array(repeating: Float(0.0), count: 9), count: MAX_MATRIX_INPUTS)
+        var mxInvert = Array(repeating: Array(repeating: false, count: 9), count: MAX_MATRIX_INPUTS)
+        for input in 0..<numInCh {
             for output in 0..<numOutCh {
-                let base = 108 + (input * 9 + output) * 8
+                let base = BULK_CROSSPOINT_OFFSET + (input * 9 + output) * WIRE_CROSSPOINT_SIZE
                 routing[input][output] = data[base] != 0
                 mxInvert[input][output] = data[base + 1] != 0
                 mxGain[input][output] = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
             }
         }
 
-        // --- Matrix outputs (offset 252, 108 bytes = 9 outputs × 12 bytes) ---
+        // --- Matrix outputs (offset 708, WireOutputChannel[9]) ---
         var outEnabled = Array(repeating: false, count: 9)
         var outMuted = Array(repeating: false, count: 9)
         var outGain = Array(repeating: Float(0.0), count: 9)
         var outDelay = Array(repeating: Float(0.0), count: 9)
         for output in 0..<numOutCh {
-            let base = 252 + output * 12
+            let base = BULK_OUTPUTS_OFFSET + output * 12
             outEnabled[output] = data[base] != 0
             outMuted[output] = data[base + 1] != 0
             outGain[output] = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
             outDelay[output] = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
         }
 
-        // --- Pin config (offset 360, 8 bytes) ---
-        let numPins = min(Int(data[360]), 5)
+        // --- Pin config (offset 816) ---
+        let numPins = min(Int(data[BULK_PINS_OFFSET]), 5)
         var pins: [UInt8] = [6, 7, 8, 9, 10]  // defaults
         for i in 0..<numPins {
-            pins[i] = data[361 + i]
+            pins[i] = data[BULK_PINS_OFFSET + 1 + i]
         }
 
-        // --- EQ bands (offset 368, 2112 bytes = 11 channels × 12 bands × 16 bytes) ---
+        // --- EQ bands (offset 824, eq[17][12]) ---
         // WireBandParams layout: type(1) bypass(1) reserved(2) freq(4) q(4) gain_db(4)
         let bandsInFirmware = 12
         let bandsInApp = 10
@@ -1311,7 +1378,7 @@ extension DSPViewModel {
             var bands = [FilterParams]()
             bands.reserveCapacity(bandsInApp)
             for band in 0..<bandsInApp {
-                let base = 368 + (ch * bandsInFirmware + band) * 16
+                let base = BULK_EQ_OFFSET + (ch * bandsInFirmware + band) * WIRE_BAND_PARAMS_SIZE
                 let typeByte = data[base]
                 let bypassByte = data[base + 1]
                 let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
@@ -1328,10 +1395,10 @@ extension DSPViewModel {
             channelFilters[ch] = bands
         }
 
-        // --- Channel names (offset 2480, 352 bytes = 11 channels × 32 bytes) ---
-        var names = [String](repeating: "", count: 11)
+        // --- Channel names (offset 4088, names[17][32]) ---
+        var names = [String](repeating: "", count: WIRE_MAX_CHANNELS)
         for ch in 0..<numCh {
-            let base = 2480 + ch * 32
+            let base = BULK_CHANNEL_NAMES_OFFSET + ch * 32
             let end = min(base + 32, data.count)
             let slice = data[base..<end]
             if let nulIdx = slice.firstIndex(of: 0) {
@@ -1341,134 +1408,77 @@ extension DSPViewModel {
             }
         }
 
-        // --- I2S Config (offset 2832, 16 bytes) --- V3 firmware only
+        // --- I2S Config (offset 4632) ---
         var slotTypes: [UInt8] = [0, 0, 0, 0]
-        var bckPin: UInt8 = 14
-        var mckPinVal: UInt8 = 13
-        var mckEn = false
-        var mckMult = 128
+        for i in 0..<4 { slotTypes[i] = data[BULK_I2S_OFFSET + i] }
+        let bckPin = data[BULK_I2S_OFFSET + 4]
+        let mckPinVal = data[BULK_I2S_OFFSET + 5]
+        let mckEn = data[BULK_I2S_OFFSET + 6] != 0
+        let mckMult = data[BULK_I2S_OFFSET + 7] == 1 ? 256 : 128
 
-        if data.count >= 2848 {
-            for i in 0..<4 { slotTypes[i] = data[2832 + i] }
-            bckPin = data[2836]
-            mckPinVal = data[2837]
-            mckEn = data[2838] != 0
-            let rawMult = data[2839]
-            mckMult = rawMult == 1 ? 256 : 128  // V5 encoding: 0 = 128x, 1 = 256x
+        // --- Volume Leveller (offset 4648) ---
+        let lvlEnabled = data[BULK_LEVELLER_OFFSET] != 0
+        let lvlSpeed = Int(data[BULK_LEVELLER_OFFSET + 1])
+        let lvlLookahead = data[BULK_LEVELLER_OFFSET + 2] != 0
+        let lvlAmount: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_LEVELLER_OFFSET + 4, as: Float.self) }
+        let lvlMaxGain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_LEVELLER_OFFSET + 8, as: Float.self) }
+        let lvlGateDB: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_LEVELLER_OFFSET + 12, as: Float.self) }
+
+        // --- Per-Input Preamp (offset 4664, preamp_db[8]) ---
+        var preampAll = Array(repeating: Float(0.0), count: MAX_MATRIX_INPUTS)
+        for ch in 0..<numInCh {
+            preampAll[ch] = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PREAMP_OFFSET + ch * 4, as: Float.self) }
         }
 
-        // --- Volume Leveller (offset 2848, 16 bytes) --- V4 firmware only
-        var lvlEnabled = false
-        var lvlSpeed = 0
-        var lvlLookahead = false
-        var lvlAmount: Float = 100.0
-        var lvlMaxGain: Float = 24.0
-        var lvlGateDB: Float = -70.0
+        // --- Master Volume (offset 4696) ---
+        let masterVol: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_MASTER_VOLUME_OFFSET, as: Float.self) }
 
-        if data.count >= 2864 {
-            lvlEnabled = data[2848] != 0
-            lvlSpeed = Int(data[2849])
-            lvlLookahead = data[2850] != 0
-            lvlAmount = data.withUnsafeBytes { $0.load(fromByteOffset: 2852, as: Float.self) }
-            lvlMaxGain = data.withUnsafeBytes { $0.load(fromByteOffset: 2856, as: Float.self) }
-            lvlGateDB = data.withUnsafeBytes { $0.load(fromByteOffset: 2860, as: Float.self) }
-        }
+        // --- Input Config (offset 4712) ---
+        let bulkInputSource = Int(data[BULK_INPUT_CONFIG_OFFSET])
+        let bulkSpdifRxPin = data[BULK_INPUT_CONFIG_OFFSET + 1]
+        let bulkI2SRxPin = data[BULK_INPUT_CONFIG_OFFSET + 2]
+        let bulkI2SInputRateHz = i2sRateEnumToHz(data[BULK_INPUT_CONFIG_OFFSET + 3])
 
-        // --- Per-Channel Preamp (offset 2864, 16 bytes) --- V6 firmware only
-        var preampCh0: Float = preamp  // fallback to global preamp
-        var preampCh1: Float = preamp
+        // --- LG Sound Sync (offset 4728) — only `enabled` honoured on SET ---
+        let bulkLgEnabled = data[BULK_LG_OFFSET] != 0
 
-        if formatVersion >= 6 && data.count >= 2872 {
-            preampCh0 = data.withUnsafeBytes { $0.load(fromByteOffset: 2864, as: Float.self) }
-            preampCh1 = data.withUnsafeBytes { $0.load(fromByteOffset: 2868, as: Float.self) }
-        }
+        // --- User Volume (offset 4744) ---
+        let bulkUserVolume: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_USER_VOLUME_OFFSET, as: Float.self) }
 
-        // --- Master Volume (offset 2880, 16 bytes) --- V6 firmware only
-        var masterVol: Float = 0.0
+        // --- DAC Hardware Mute (offset 4760, 16 bytes) ---
+        let bulkDacHwMute = DacHwMuteConfig.fromData(data.subdata(in: BULK_DAC_HW_MUTE_OFFSET..<(BULK_DAC_HW_MUTE_OFFSET + 16))) ?? DacHwMuteConfig()
 
-        if formatVersion >= 6 && data.count >= 2884 {
-            masterVol = data.withUnsafeBytes { $0.load(fromByteOffset: 2880, as: Float.self) }
-        }
-
-        // --- Input Config (offset 2896, 16 bytes) --- V7 firmware only
-        var bulkInputSource: Int? = nil
-        var bulkSpdifRxPin: UInt8? = nil
-
-        if formatVersion >= 7 && data.count >= 2912 {
-            bulkInputSource = Int(data[2896])
-            bulkSpdifRxPin = data[2897]
-        }
-
-        // I2S input fields claimed two previously-reserved bytes in V12.
-        // byte 2898 = i2s_rx_pin, byte 2899 = i2s_input_rate (enum 0/1/2).
-        var bulkI2SRxPin: UInt8? = nil
-        var bulkI2SInputRateHz: UInt32? = nil
-        if formatVersion >= 12 && data.count >= 2912 {
-            bulkI2SRxPin = data[2898]
-            bulkI2SInputRateHz = i2sRateEnumToHz(data[2899])
-        }
-
-        // --- LG Sound Sync (offset 2912, 16 bytes) --- V8 firmware only
-        // Only `enabled` is honoured on bulk SET; present/volume/muted are
-        // runtime telemetry, polled via REQ_GET_LG_SOUND_SYNC_STATUS by the
-        // Stats window for live monitoring.
-        var bulkLgEnabled: Bool? = nil
-        if formatVersion >= 8 && data.count >= 2928 {
-            bulkLgEnabled = data[2912] != 0
-        }
-
-        // --- User Volume (offset 2928, 16 bytes) --- V9 firmware only
-        // Mirrors audio_state.volume — same field UAC1 host slider drives,
-        // surfaced via REQ_SET_USER_VOLUME for non-USB modes.
-        var bulkUserVolume: Float? = nil
-        if formatVersion >= 9 && data.count >= 2944 {
-            bulkUserVolume = data.withUnsafeBytes { $0.load(fromByteOffset: 2928, as: Float.self) }
-        }
-
-        // --- DAC Hardware Mute (offset 2944, 16 bytes) --- V10 firmware only
-        // Board-level mute-pin config stored in the directory sector.
-        var bulkDacHwMute: DacHwMuteConfig? = nil
-        if formatVersion >= 10 && data.count >= 2960 {
-            bulkDacHwMute = DacHwMuteConfig.fromData(data.subdata(in: 2944..<2960))
-        }
-
-        // --- Crossover Config (offset 2960, 704 bytes) --- V11 firmware only
-        // WireCrossoverConfig: bands[11 channels][4 bands][16 bytes].  Master
-        // rows (channels 0..1) come back zeroed and we mirror that into the
-        // app's empty xoverData entries for those channels.  See
-        // crossover_filters_spec.md §4.
-        var bulkCrossovers: [Int: [FilterParams]]? = nil
-        if formatVersion >= 11 && data.count >= BULK_PARAMS_V11_SIZE {
-            var xovers = [Int: [FilterParams]]()
-            for ch in 0..<numCh {
-                var bands: [FilterParams] = []
-                bands.reserveCapacity(WIRE_MAX_XOVER_BANDS)
-                for band in 0..<WIRE_MAX_XOVER_BANDS {
-                    let base = BULK_CROSSOVER_OFFSET
-                            + (ch * WIRE_MAX_XOVER_BANDS + band) * WIRE_BAND_PARAMS_SIZE
-                    let typeByte = data[base]
-                    let bypassByte = data[base + 1]
-                    let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
-                    let q: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
-                    let gain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 12, as: Float.self) }
-                    bands.append(FilterParams(
-                        type: FilterType(rawValue: Int(typeByte)) ?? .flat,
-                        freq: max(freq, 10),
-                        q: q > 0 ? q : 0.707,
-                        gain: gain,
-                        bypass: bypassByte == 1
-                    ))
-                }
-                xovers[ch] = bands
+        // --- Crossover Config (offset 4776, crossovers[17][4]) ---
+        // Input rows (ch < chOut1) come back zeroed; stored as FLAT and hidden.
+        var bulkCrossovers = [Int: [FilterParams]]()
+        for ch in 0..<numCh {
+            var bands: [FilterParams] = []
+            bands.reserveCapacity(WIRE_MAX_XOVER_BANDS)
+            for band in 0..<WIRE_MAX_XOVER_BANDS {
+                let base = BULK_CROSSOVER_OFFSET + (ch * WIRE_MAX_XOVER_BANDS + band) * WIRE_BAND_PARAMS_SIZE
+                let typeByte = data[base]
+                let bypassByte = data[base + 1]
+                let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
+                let q: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
+                let gain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 12, as: Float.self) }
+                bands.append(FilterParams(
+                    type: FilterType(rawValue: Int(typeByte)) ?? .flat,
+                    freq: max(freq, 10),
+                    q: q > 0 ? q : 0.707,
+                    gain: gain,
+                    bypass: bypassByte == 1
+                ))
             }
-            bulkCrossovers = xovers
+            bulkCrossovers[ch] = bands
         }
 
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
+            self.numInputChannels = numInCh
+            _ = preamp  // legacy global preamp; per-input preamp is authoritative
 
-            self.preampDB = [preampCh0, preampCh1]
+            self.preampDB = preampAll
             self.masterVolumeDB = masterVol
             self.bypass = bypassVal
             self.loudnessEnabled = loudnessEn
@@ -1510,52 +1520,33 @@ extension DSPViewModel {
             self.channelData = channelFilters
             self.channelNames = names
 
-            if let src = bulkInputSource {
-                self.inputSource = src
-                self.inputSourceSupported = true
-            }
-            if let pin = bulkSpdifRxPin {
-                self.spdifRxPin = pin
-            }
-            if let pin = bulkI2SRxPin {
-                self.i2sInputSupported = true
-                self.i2sRxPin = pin
-            }
-            if let rate = bulkI2SInputRateHz {
-                self.i2sInputRateHz = rate
-            }
-            if let userVol = bulkUserVolume {
-                self.userVolumeDB = userVol
-            }
-            if let lgEn = bulkLgEnabled {
-                self.lgSoundSyncEnabled = lgEn
-                self.lgSoundSyncSupported = true
-            }
-            if let cfg = bulkDacHwMute {
-                self.dacHwMuteConfig = cfg
-                self.dacHwMuteSupported = true
-            }
+            self.inputSource = bulkInputSource
+            self.inputSourceSupported = true
+            self.spdifRxPin = bulkSpdifRxPin
+            self.i2sInputSupported = true
+            self.i2sRxPin = bulkI2SRxPin
+            self.i2sInputRateHz = bulkI2SInputRateHz
+            self.userVolumeDB = bulkUserVolume
+            self.lgSoundSyncEnabled = bulkLgEnabled
+            self.lgSoundSyncSupported = true
+            self.dacHwMuteConfig = bulkDacHwMute
+            self.dacHwMuteSupported = true
 
             self.firmwareWireFormatVersion = Int(formatVersion)
 
-            // Crossover types were renumbered to 32..63 in wire format V13.  A
-            // V11/V12 firmware still returns a crossover payload but with the
-            // old 8..39 numbering, which no longer matches FilterType - so only
-            // expose crossover (and send the new type bytes) on V13+.
-            if let xovers = bulkCrossovers, formatVersion >= 13 {
-                self.firmwareSupportsCrossover = true
-                // Replace the entire xoverData dictionary so deletions on the
-                // wire propagate.  Master rows are stored too (they'll be all
-                // zeros / FLAT) but the UI hides them.
-                self.xoverData = xovers
-            } else {
-                self.firmwareSupportsCrossover = false
-            }
+            // V16 always carries crossover state (input rows zeroed); types use
+            // the V13+ 32..63 numbering that matches FilterType.
+            self.firmwareSupportsCrossover = true
+            self.xoverData = bulkCrossovers
 
-            // Refresh channel visibility now that outputEnabled is populated
+            // Refresh channel visibility now that platform/outputs are populated.
+            // (chOut1 reflects the freshly-set platformName.)
             if self.isOverviewMode {
-                for outputIdx in 0..<9 {
-                    self.channelVisibility[outputIdx + 2] = outEnabled[outputIdx]
+                for i in 0..<self.chOut1 {
+                    self.channelVisibility[i] = (i < min(self.activeInputChannels, self.chOut1))
+                }
+                for outputIdx in 0..<numOutCh {
+                    self.channelVisibility[self.eqChannel(forOutput: outputIdx)] = outEnabled[outputIdx]
                 }
             }
 
@@ -1889,15 +1880,15 @@ extension DSPViewModel {
         let off = Int(offset)
         let sz = Int(size)
 
-        // EQ band updates: 11 channels × 12 bands × 16 bytes at offset 368.
-        // Firmware sends a full WireBandParams (16 bytes) on any band change,
-        // including REQ_SET_BAND_BYPASS — see band_bypass_spec §6.4.
+        // EQ band updates: 17 channels × 12 bands × 16 bytes at the V16 EQ
+        // offset (824).  Firmware sends a full WireBandParams (16 bytes) on any
+        // band change, including REQ_SET_BAND_BYPASS — see band_bypass_spec §6.4.
         // Decode and update channelData so other hosts' edits flow into our
         // UI without a re-poll.
-        let eqBase = 368
+        let eqBase = BULK_EQ_OFFSET
         let bandsInFirmware = 12
-        let bandSize = 16
-        let channelCount = 11
+        let bandSize = WIRE_BAND_PARAMS_SIZE
+        let channelCount = WIRE_MAX_CHANNELS
         if sz == bandSize,
            off >= eqBase,
            off < eqBase + channelCount * bandsInFirmware * bandSize,
@@ -1929,10 +1920,10 @@ extension DSPViewModel {
             return
         }
 
-        // Crossover band updates: 11 channels × 4 bands × 16 bytes at the
-        // V11 crossover offset (2960).  Layout mirrors PEQ but in its own
-        // WireCrossoverConfig section.  Master rows (channels 0..1) come
-        // through zeroed and we just store-but-don't-render them.
+        // Crossover band updates: 17 channels × 4 bands × 16 bytes at the V16
+        // crossover offset (BULK_CROSSOVER_OFFSET = 4776).  Layout mirrors PEQ
+        // but in its own WireCrossoverConfig section.  Input rows (ch < chOut1)
+        // come through zeroed and we just store-but-don't-render them.
         let xoverBase = BULK_CROSSOVER_OFFSET
         let xoverChannelStride = WIRE_MAX_XOVER_BANDS * WIRE_BAND_PARAMS_SIZE
         if sz == WIRE_BAND_PARAMS_SIZE,
@@ -1965,8 +1956,8 @@ extension DSPViewModel {
             return
         }
 
-        // Channel names: 11 channels × 32 bytes at offset 2480.
-        let channelNamesBase = 2480
+        // Channel names: 17 channels × 32 bytes at the V16 offset (4088).
+        let channelNamesBase = BULK_CHANNEL_NAMES_OFFSET
         let channelNameSize = 32
         if sz == channelNameSize,
            off >= channelNamesBase,
@@ -1983,18 +1974,18 @@ extension DSPViewModel {
             return
         }
 
-        // dac_hw_mute (offset 2944, full 16-byte struct).  Emitted by the
+        // dac_hw_mute (V16 offset 4760, full 16-byte struct).  Emitted by the
         // firmware on a successful REQ_SET_DAC_HW_MUTE_CONFIG or after a
         // factory-reset rewrite of the directory.  Mirror back so the UI
         // stays in sync with non-HOST writes.
-        if off == 2944 && sz == 16 && payload.count >= 16,
+        if off == BULK_DAC_HW_MUTE_OFFSET && sz == 16 && payload.count >= 16,
            let cfg = DacHwMuteConfig.fromData(payload) {
             self.dacHwMuteConfig = cfg
             self.dacHwMuteSupported = true
             return
         }
 
-        // user_volume.user_volume_db (offset 2928, 4 bytes float dB).
+        // user_volume.user_volume_db (BULK_USER_VOLUME_OFFSET = 4744, 4 bytes float dB).
         // Fired on REQ_SET_USER_VOLUME (PARAM_SRC_HOST_SET — ignored
         // upstream as our own echo), bulk apply, and — crucially — on
         // OS volume-slider moves via UAC1, which the firmware reports
@@ -2003,7 +1994,7 @@ extension DSPViewModel {
         // playback (UAC1 can't push the value the other direction, so
         // this notification is the only signal we get).  GPIO/INTERNAL
         // (hardware-knob / firmware) writes flow through here too.
-        if off == 2928 && sz == 4 && payload.count >= 4 {
+        if off == BULK_USER_VOLUME_OFFSET && sz == 4 && payload.count >= 4 {
             let db: Float = payload.withUnsafeBytes { $0.load(as: Float.self) }
             if abs(self.userVolumeDB - db) > 0.01 {
                 self.userVolumeDB = db
@@ -2011,11 +2002,11 @@ extension DSPViewModel {
             return
         }
 
-        // lg_sound_sync.enabled (offset 2912, 1 byte).  Fired by
+        // lg_sound_sync.enabled (BULK_LG_OFFSET = 4728, 1 byte).  Fired by
         // lg_sound_sync_set_enabled() on the firmware side, and on bulk
         // apply.  Mirrors the user-controlled gate so external hosts /
         // preset loads flow into our Settings toggle without a re-poll.
-        if off == 2912 && sz == 1 && payload.count >= 1 {
+        if off == BULK_LG_OFFSET && sz == 1 && payload.count >= 1 {
             let en = payload[0] != 0
             if self.lgSoundSyncEnabled != en {
                 self.lgSoundSyncEnabled = en
@@ -2024,14 +2015,14 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.input_source (offset 2896, 1 byte).  Fired at the
+        // input_config.input_source (BULK_INPUT_CONFIG_OFFSET = 4712, 1 byte).  Fired at the
         // tail of the firmware's deferred input-source switch handler —
         // i.e. after all per-source thaw/init work has run (including
         // the SPDIF→USB audio_set_volume() thaw).  Use this as the
         // "switch complete" trigger to refresh user volume so the
         // slider lands on the firmware's authoritative value, regardless
         // of which direction we switched.
-        if off == 2896 && sz == 1 && payload.count >= 1 {
+        if off == BULK_INPUT_CONFIG_OFFSET && sz == 1 && payload.count >= 1 {
             let src = Int(payload[0])
             if self.inputSource != src {
                 self.inputSource = src
@@ -2042,17 +2033,17 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.i2s_rx_pin (offset 2898, 1 byte) — fires when 0xF1
+        // input_config.i2s_rx_pin (V16 offset 4714, 1 byte) — fires when 0xF1
         // succeeds, bulk apply changes it, or a preset load changes it.
-        if off == 2898 && sz == 1 && payload.count >= 1 {
+        if off == BULK_INPUT_CONFIG_OFFSET + 2 && sz == 1 && payload.count >= 1 {
             self.i2sInputSupported = true
             self.i2sRxPin = payload[0]
             return
         }
 
-        // input_config.i2s_input_rate (offset 2899, 1 byte, enum 0/1/2) —
+        // input_config.i2s_input_rate (V16 offset 4715, 1 byte, enum 0/1/2) —
         // fires when 0xED accepts a rate.
-        if off == 2899 && sz == 1 && payload.count >= 1 {
+        if off == BULK_INPUT_CONFIG_OFFSET + 3 && sz == 1 && payload.count >= 1 {
             self.i2sInputSupported = true
             self.i2sInputRateHz = i2sRateEnumToHz(payload[0])
             return

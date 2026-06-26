@@ -190,15 +190,15 @@ struct StereoOutputDashboardCard: View {
 
     private var left: MatrixOutput { MatrixOutput.all[leftIndex] }
     private var right: MatrixOutput { MatrixOutput.all[rightIndex] }
-    private var leftEqCh: Int { leftIndex + 2 }
-    private var rightEqCh: Int { rightIndex + 2 }
+    private var leftEqCh: Int { vm.eqChannel(forOutput: leftIndex) }
+    private var rightEqCh: Int { vm.eqChannel(forOutput: rightIndex) }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 HStack {
                     Circle().fill(left.color).frame(width: 6, height: 6)
-                    Text(vm.channelNames[leftIndex + 2]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.channelNames[leftEqCh]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     Text("Delay: \(vm.outputDelayMS[leftIndex], specifier: "%.0f")ms")
                         .font(.system(size: 9, design: .monospaced))
@@ -212,7 +212,7 @@ struct StereoOutputDashboardCard: View {
 
                 HStack {
                     Circle().fill(right.color).frame(width: 6, height: 6)
-                    Text(vm.channelNames[rightIndex + 2]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                    Text(vm.channelNames[rightEqCh]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     Text("Delay: \(vm.outputDelayMS[rightIndex], specifier: "%.0f")ms")
                         .font(.system(size: 9, design: .monospaced))
@@ -278,13 +278,13 @@ struct OutputDashboardCard: View {
         MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).first(where: { $0.index == outputIndex })
             ?? MatrixOutput.all[outputIndex]
     }
-    private var eqChannel: Int { outputIndex + 2 }
+    private var eqChannel: Int { vm.eqChannel(forOutput: outputIndex) }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Circle().fill(output.color).frame(width: 6, height: 6)
-                Text(vm.channelNames[outputIndex + 2]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                Text(vm.channelNames[eqChannel]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
                 Text("Delay: \(vm.outputDelayMS[outputIndex], specifier: "%.0f")ms")
                     .font(.system(size: 9, design: .monospaced))

@@ -355,7 +355,9 @@ struct MuteableLabel: View {
 // MARK: - Sidebar Rows
 
 struct ChannelRow: View {
-    let channel: Channel
+    let channelIndex: Int   // unified input EQ channel index (0..chOut1-1)
+    let color: Color
+    let descriptor: String
     let isSelected: Bool
     let name: String
     @ObservedObject var meters: DSPMeterModel
@@ -389,20 +391,20 @@ struct ChannelRow: View {
             }
 
             HorizontalMeterBar(
-                level: meters.status.peaks[channel.rawValue],
-                color: channel.color,
-                isClipping: (meters.status.clipLatched & (1 << UInt16(channel.rawValue))) != 0
+                level: channelIndex < meters.status.peaks.count ? meters.status.peaks[channelIndex] : 0,
+                color: color,
+                isClipping: (meters.status.clipLatched & (UInt32(1) << UInt32(channelIndex))) != 0
             )
             .padding(.horizontal, 4)
 
-            Text(channel.descriptor)
+            Text(descriptor)
                 .font(.system(size: 8, weight: .bold))
-                .foregroundColor(channel.color)
+                .foregroundColor(color)
                 .frame(minWidth: 28)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Capsule().fill(channel.color.opacity(0.15)))
-                .overlay(Capsule().stroke(channel.color.opacity(0.4), lineWidth: 1))
+                .background(Capsule().fill(color.opacity(0.15)))
+                .overlay(Capsule().stroke(color.opacity(0.4), lineWidth: 1))
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.trailing, 8)
         }
@@ -431,9 +433,9 @@ struct OutputRow: View {
     let isRenaming: Bool
     @Binding var renameText: String
     let onCommitRename: () -> Void
+    /// Unified EQ/channel index for this output (output index + chOut1).
+    let chIdx: Int
     @FocusState private var isFocused: Bool
-
-    private var chIdx: Int { output.index + 2 }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -460,10 +462,10 @@ struct OutputRow: View {
             }
 
             HorizontalMeterBar(
-                level: meters.status.peaks[chIdx],
+                level: chIdx < meters.status.peaks.count ? meters.status.peaks[chIdx] : 0,
                 color: output.color,
                 isMuted: isMuted,
-                isClipping: (meters.status.clipLatched & (1 << UInt16(chIdx))) != 0
+                isClipping: (meters.status.clipLatched & (UInt32(1) << UInt32(chIdx))) != 0
             )
             .padding(.horizontal, 4)
 
@@ -626,7 +628,7 @@ private struct InputRoutingPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(0..<min(vm.matrixRouting.count, vm.channelNames.count), id: \.self) { input in
+            ForEach(0..<vm.numMatrixInputs, id: \.self) { input in
                 InputRoutingRow(vm: vm, input: input, output: outputIndex)
             }
         }
@@ -644,19 +646,17 @@ private struct InputRoutingRow: View {
     @State private var localGain: Float = 0
     @State private var isHoveringRow = false
 
-    private static let inputColors: [Color] = [
-        Color(red: 0.29, green: 0.56, blue: 0.89),  // L — blue
-        Color(red: 0.96, green: 0.45, blue: 0.45),  // R — red
-    ]
-
     private var connected: Bool { vm.matrixRouting[input][output] }
     private var inverted: Bool { vm.matrixInvert[input][output] }
     private var liveGain: Float { vm.matrixGain[input][output] }
-    private var inputColor: Color {
-        Self.inputColors.indices.contains(input) ? Self.inputColors[input] : .accentColor
-    }
+    private var inputColor: Color { MatrixInput.color(for: input) }
     private var name: String {
-        vm.channelNames.indices.contains(input) ? vm.channelNames[input] : "Input \(input + 1)"
+        // In 8-channel mode use the 7.1 role names; stereo keeps the device's
+        // USB L/R channel names.
+        if vm.numMatrixInputs > BASE_MATRIX_INPUTS {
+            return MatrixInput.shortName(for: input, count: vm.numMatrixInputs)
+        }
+        return vm.channelNames.indices.contains(input) ? vm.channelNames[input] : "Input \(input + 1)"
     }
 
     var body: some View {
@@ -717,7 +717,7 @@ private struct InputRoutingRow: View {
     }
 
     private func outputName() -> String {
-        let eqCh = output + 2  // matches the channelNames indexing for outputs
+        let eqCh = vm.eqChannel(forOutput: output)  // channelNames index for this output
         if vm.channelNames.indices.contains(eqCh) {
             let trimmed = vm.channelNames[eqCh].trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? "Out \(output + 1)" : trimmed
@@ -748,7 +748,7 @@ private struct InputRoutingRow: View {
 //   • Preamp slider with inline label and dB value field.
 //   • Clear Master PEQ button — resets all bands on both master channels.
 struct InputChannelHeader: View {
-    let channel: Int  // 0 = L, 1 = R
+    let channel: Int  // input channel index (0 = L, 1 = R, 2..7 = surround)
     @ObservedObject var vm: DSPViewModel
     let onClearMasterPEQ: () -> Void
 
@@ -756,6 +756,8 @@ struct InputChannelHeader: View {
     @State private var isDragging = false
 
     private var linked: Bool { vm.preampLinked }
+    /// Link L/R only applies to the stereo USB pair (inputs 0/1).
+    private var isStereoPair: Bool { channel < BASE_MATRIX_INPUTS }
 
     var body: some View {
         // Three sections separated by Dividers, mirroring the output channel
@@ -763,35 +765,37 @@ struct InputChannelHeader: View {
         // 12-pt horizontal / 8-pt vertical padding so dividers extend the
         // full card height.
         HStack(spacing: 0) {
-            // LINK L/R section
-            Button(action: toggleLink) {
-                HStack(spacing: 6) {
-                    Image(systemName: linked ? "link" : "link.badge.plus")
-                        .font(.caption).fontWeight(.medium)
-                    Text("Link L/R")
-                        .font(.caption).fontWeight(.medium)
+            // LINK L/R section (stereo pair only)
+            if isStereoPair {
+                Button(action: toggleLink) {
+                    HStack(spacing: 6) {
+                        Image(systemName: linked ? "link" : "link.badge.plus")
+                            .font(.caption).fontWeight(.medium)
+                        Text("Link L/R")
+                            .font(.caption).fontWeight(.medium)
+                    }
+                    .foregroundColor(linked ? .accentColor : .secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(linked ? Color.accentColor.opacity(0.18) : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(
+                                linked ? Color.accentColor.opacity(0.45) : Color.gray.opacity(0.3),
+                                lineWidth: 1
+                            )
+                    )
                 }
-                .foregroundColor(linked ? .accentColor : .secondary)
-                .padding(.horizontal, 10)
+                .buttonStyle(.plain)
+                .help(linked ? "Unlink L/R (preamp & PEQ stay independent)" : "Link L/R (preamp & PEQ edits mirrored)")
+                .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(linked ? Color.accentColor.opacity(0.18) : Color.clear)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(
-                            linked ? Color.accentColor.opacity(0.45) : Color.gray.opacity(0.3),
-                            lineWidth: 1
-                        )
-                )
-            }
-            .buttonStyle(.plain)
-            .help(linked ? "Unlink L/R (preamp & PEQ stay independent)" : "Link L/R (preamp & PEQ edits mirrored)")
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
 
-            Divider()
+                Divider()
+            }
 
             // PREAMP section — label, slider, value.  Inner HStack uses 6-pt
             // spacing to tighten the slider→value gap.  Spacers on either
@@ -814,7 +818,7 @@ struct InputChannelHeader: View {
                     .onChange(of: localPreamp) { val in
                         if isDragging {
                             vm.sendPreampChannelToDevice(channel: channel, db: val)
-                            if vm.preampLinked {
+                            if vm.preampLinked && isStereoPair {
                                 // Update the other channel's @Published value so its
                                 // sidebar peak meter / cards reflect the mirrored value
                                 // immediately during drag.
@@ -849,9 +853,9 @@ struct InputChannelHeader: View {
 
             Divider()
 
-            // CLEAR MASTER PEQ section
+            // CLEAR PEQ section
             Button(action: onClearMasterPEQ) {
-                Text("Clear Master PEQ")
+                Text(isStereoPair ? "Clear Master PEQ" : "Clear PEQ")
                     .font(.caption).fontWeight(.medium)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 10)
@@ -866,7 +870,7 @@ struct InputChannelHeader: View {
                     )
             }
             .buttonStyle(.plain)
-            .help("Reset all PEQ bands on both master channels")
+            .help(isStereoPair ? "Reset all PEQ bands on both master channels" : "Reset all PEQ bands on this input")
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
@@ -877,6 +881,7 @@ struct InputChannelHeader: View {
     }
 
     private func toggleLink() {
+        guard isStereoPair else { return }
         vm.preampLinked.toggle()
         if vm.preampLinked {
             // Sync the other channel to this channel's value on link-on, matching

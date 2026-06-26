@@ -3,11 +3,11 @@ import SwiftUI
 // MARK: - Data Structures
 
 struct SystemStatus {
-    var peaks: [Float] = Array(repeating: 0, count: 11)  // Max 11 channels (RP2350)
+    var peaks: [Float] = Array(repeating: 0, count: WIRE_MAX_CHANNELS)  // up to 17 channels (RP2350)
     var cpu0: Int = 0
     var cpu1: Int = 0
-    var clipFlags: UInt16 = 0      // Sticky bitmask from firmware
-    var clipLatched: UInt16 = 0    // App-side latch (OR'd from firmware flags)
+    var clipFlags: UInt32 = 0      // Sticky bitmask from firmware (one bit per channel, up to 17)
+    var clipLatched: UInt32 = 0    // App-side latch (OR'd from firmware flags)
     var clipTimestamp: Date? = nil  // When last clip was detected (for auto-clear)
 }
 

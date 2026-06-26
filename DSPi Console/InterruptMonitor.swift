@@ -38,6 +38,7 @@ private let NOTIFY_V2_VERSION: UInt8 = 0x02
 private let NOTIFY_EVT_PARAM_CHANGED: UInt8 = 0x02
 private let NOTIFY_EVT_BULK_INVALIDATED: UInt8 = 0x03
 private let NOTIFY_EVT_PRESET_LOADED: UInt8 = 0x04
+private let NOTIFY_EVT_INPUT_FORMAT: UInt8 = 0x05
 
 // Source tags (from ParamSource enum in firmware notify.h)
 private func sourceLabel(_ src: UInt8) -> String {
@@ -207,14 +208,16 @@ private enum ParamOffsetDecoder {
             return ("legacy.mute[\(off - 60)]", fmtBool(payload))
         }
 
-        // Delays (64..107) — 11 × 4 bytes
-        if off >= 64 && off < 64 + 11 * 4 && (off - 64) % 4 == 0 && sz == 4 {
-            return ("delays.delay_ms[\((off - 64) / 4)]", fmtFloat(payload, suffix: " ms"))
+        // --- V16 flat layout offsets (unified channel model) ---
+
+        // Delays (64..) — 17 × 4 bytes
+        if off >= BULK_DELAYS_OFFSET && off < BULK_DELAYS_OFFSET + 17 * 4 && (off - BULK_DELAYS_OFFSET) % 4 == 0 && sz == 4 {
+            return ("delays.delay_ms[\((off - BULK_DELAYS_OFFSET) / 4)]", fmtFloat(payload, suffix: " ms"))
         }
 
-        // Matrix crosspoints (108..251) — 2 inputs × 9 outputs × 8 bytes
-        if off >= 108 && off < 108 + 2 * 9 * 8 {
-            let rel = off - 108
+        // Matrix crosspoints (132..) — 8 inputs × 9 outputs × 8 bytes
+        if off >= BULK_CROSSPOINT_OFFSET && off < BULK_CROSSPOINT_OFFSET + 8 * 9 * 8 {
+            let rel = off - BULK_CROSSPOINT_OFFSET
             let idx = rel / 8
             let sub = rel % 8
             let input = idx / 9
@@ -229,9 +232,9 @@ private enum ParamOffsetDecoder {
             return ("crosspoints[\(input)][\(output)]+0x\(String(format: "%X", sub))", fmtHex(payload))
         }
 
-        // Matrix outputs (252..359) — 9 outputs × 12 bytes
-        if off >= 252 && off < 252 + 9 * 12 {
-            let rel = off - 252
+        // Matrix outputs (708..) — 9 outputs × 12 bytes
+        if off >= BULK_OUTPUTS_OFFSET && off < BULK_OUTPUTS_OFFSET + 9 * 12 {
+            let rel = off - BULK_OUTPUTS_OFFSET
             let idx = rel / 12
             let sub = rel % 12
             let name: String
@@ -256,15 +259,15 @@ private enum ParamOffsetDecoder {
             return (name, value)
         }
 
-        // Pin config (360..367)
-        if off == 360 && sz == 1 { return ("pins.num_pin_outputs", fmtUInt8(payload)) }
-        if off >= 361 && off <= 365 && sz == 1 {
-            return ("pins.pins[\(off - 361)]", fmtUInt8(payload))
+        // Pin config (816..)
+        if off == BULK_PINS_OFFSET && sz == 1 { return ("pins.num_pin_outputs", fmtUInt8(payload)) }
+        if off >= BULK_PINS_OFFSET + 1 && off <= BULK_PINS_OFFSET + 5 && sz == 1 {
+            return ("pins.pins[\(off - BULK_PINS_OFFSET - 1)]", fmtUInt8(payload))
         }
 
-        // EQ bands (368..2479) — 11 × 12 × 16 bytes
-        if off >= 368 && off < 368 + 11 * 12 * 16 {
-            let rel = off - 368
+        // EQ bands (824..) — 17 × 12 × 16 bytes
+        if off >= BULK_EQ_OFFSET && off < BULK_EQ_OFFSET + 17 * 12 * 16 {
+            let rel = off - BULK_EQ_OFFSET
             let idx = rel / 16
             let sub = rel % 16
             let ch = idx / 12
@@ -282,84 +285,85 @@ private enum ParamOffsetDecoder {
             return ("eq[\(ch)][\(band)]+0x\(String(format: "%X", sub))", fmtHex(payload))
         }
 
-        // Channel names (2480..2831) — 11 × 32 bytes
-        if off >= 2480 && off < 2480 + 11 * 32 && (off - 2480) % 32 == 0 && sz == 32 {
-            let ch = (off - 2480) / 32
+        // Channel names (4088..) — 17 × 32 bytes
+        if off >= BULK_CHANNEL_NAMES_OFFSET && off < BULK_CHANNEL_NAMES_OFFSET + 17 * 32 && (off - BULK_CHANNEL_NAMES_OFFSET) % 32 == 0 && sz == 32 {
+            let ch = (off - BULK_CHANNEL_NAMES_OFFSET) / 32
             return ("channel_names[\(ch)]", fmtString(payload))
         }
 
-        // I2S config (2832..2847)
-        if off >= 2832 && off <= 2835 && sz == 1 {
-            let idx = off - 2832
+        // I2S config (4632..)
+        if off >= BULK_I2S_OFFSET && off <= BULK_I2S_OFFSET + 3 && sz == 1 {
+            let idx = off - BULK_I2S_OFFSET
             let label = payload.first == 1 ? "I2S" : "SPDIF"
             return ("i2s_config.output_types[\(idx)]", "\(payload.first ?? 0) (\(label))")
         }
         switch off {
-        case 2836: return ("i2s_config.bck_pin", fmtUInt8(payload))
-        case 2837: return ("i2s_config.mck_pin", fmtUInt8(payload))
-        case 2838: return ("i2s_config.mck_enabled", fmtBool(payload))
-        case 2839:
+        case BULK_I2S_OFFSET + 4: return ("i2s_config.bck_pin", fmtUInt8(payload))
+        case BULK_I2S_OFFSET + 5: return ("i2s_config.mck_pin", fmtUInt8(payload))
+        case BULK_I2S_OFFSET + 6: return ("i2s_config.mck_enabled", fmtBool(payload))
+        case BULK_I2S_OFFSET + 7:
             let raw = payload.first ?? 0
             return ("i2s_config.mck_multiplier", "\(raw) (\(raw == 1 ? "256x" : "128x"))")
         default: break
         }
 
-        // Volume leveller (2848..2863)
+        // Volume leveller (4648..)
         switch off {
-        case 2848: return ("leveller.enabled", fmtBool(payload))
-        case 2849: return ("leveller.speed", fmtUInt8(payload))
-        case 2850: return ("leveller.lookahead", fmtBool(payload))
-        case 2852: return ("leveller.amount", fmtFloat(payload, suffix: "%"))
-        case 2856: return ("leveller.max_gain_db", fmtFloat(payload, suffix: " dB"))
-        case 2860: return ("leveller.gate_threshold_db", fmtFloat(payload, suffix: " dB"))
+        case BULK_LEVELLER_OFFSET:     return ("leveller.enabled", fmtBool(payload))
+        case BULK_LEVELLER_OFFSET + 1: return ("leveller.speed", fmtUInt8(payload))
+        case BULK_LEVELLER_OFFSET + 2: return ("leveller.lookahead", fmtBool(payload))
+        case BULK_LEVELLER_OFFSET + 4: return ("leveller.amount", fmtFloat(payload, suffix: "%"))
+        case BULK_LEVELLER_OFFSET + 8: return ("leveller.max_gain_db", fmtFloat(payload, suffix: " dB"))
+        case BULK_LEVELLER_OFFSET + 12: return ("leveller.gate_threshold_db", fmtFloat(payload, suffix: " dB"))
         default: break
         }
 
-        // Per-channel preamp (2864..2879)
-        if off == 2864 && sz == 4 { return ("preamp.preamp_db[0]", fmtFloat(payload, suffix: " dB")) }
-        if off == 2868 && sz == 4 { return ("preamp.preamp_db[1]", fmtFloat(payload, suffix: " dB")) }
+        // Per-input preamp (4664..) — preamp_db[8]
+        if off >= BULK_PREAMP_OFFSET && off < BULK_PREAMP_OFFSET + 8 * 4 && (off - BULK_PREAMP_OFFSET) % 4 == 0 && sz == 4 {
+            return ("preamp.preamp_db[\((off - BULK_PREAMP_OFFSET) / 4)]", fmtFloat(payload, suffix: " dB"))
+        }
 
-        // Master volume (2880..2895)
-        if off == 2880 && sz == 4 {
+        // Master volume (4696..)
+        if off == BULK_MASTER_VOLUME_OFFSET && sz == 4 {
             let db: Float = payload.withUnsafeBytes { $0.load(as: Float.self) }
             let v = db <= -128 ? "MUTE" : String(format: "%+7.2f dB", db)
             return ("master_volume.master_volume_db", v)
         }
 
-        // Input config (2896..2911)
-        if off == 2896 && sz == 1 {
+        // Input config (4712..)
+        if off == BULK_INPUT_CONFIG_OFFSET && sz == 1 {
             let src = payload.first ?? 0
             let label = src == 0 ? "USB" : (src == 1 ? "SPDIF" : (src == 2 ? "I2S" : "?"))
             return ("input_config.input_source", "\(src) (\(label))")
         }
-        if off == 2897 && sz == 1 {
+        if off == BULK_INPUT_CONFIG_OFFSET + 1 && sz == 1 {
             return ("input_config.spdif_rx_pin", fmtUInt8(payload))
         }
-        if off == 2898 && sz == 1 {
+        if off == BULK_INPUT_CONFIG_OFFSET + 2 && sz == 1 {
             return ("input_config.i2s_rx_pin", fmtUInt8(payload))
         }
-        if off == 2899 && sz == 1 {
+        if off == BULK_INPUT_CONFIG_OFFSET + 3 && sz == 1 {
             let raw = payload.first ?? 0
             let hz = raw < 3 ? ["44100", "48000", "96000"][Int(raw)] : "?"
             return ("input_config.i2s_input_rate", "\(raw) (\(hz) Hz)")
         }
 
-        // LG Sound Sync (2912..2927) — first 4 bytes are meaningful; rest reserved.
-        if off == 2912 && sz == 1 { return ("lg_sound_sync.enabled", fmtBool(payload)) }
-        if off == 2913 && sz == 1 { return ("lg_sound_sync.present", fmtBool(payload)) }
-        if off == 2914 && sz == 1 {
+        // LG Sound Sync (4728..) — first 4 bytes are meaningful; rest reserved.
+        if off == BULK_LG_OFFSET && sz == 1 { return ("lg_sound_sync.enabled", fmtBool(payload)) }
+        if off == BULK_LG_OFFSET + 1 && sz == 1 { return ("lg_sound_sync.present", fmtBool(payload)) }
+        if off == BULK_LG_OFFSET + 2 && sz == 1 {
             let v = payload.first ?? 0xFF
             return ("lg_sound_sync.volume", v == 0xFF ? "—" : "\(v) / 100")
         }
-        if off == 2915 && sz == 1 { return ("lg_sound_sync.muted", fmtBool(payload)) }
+        if off == BULK_LG_OFFSET + 3 && sz == 1 { return ("lg_sound_sync.muted", fmtBool(payload)) }
 
-        // User volume (2928..2943) — float dB at +0, mute byte at +4.
-        if off == 2928 && sz == 4 {
+        // User volume (4744..) — float dB at +0, mute byte at +4.
+        if off == BULK_USER_VOLUME_OFFSET && sz == 4 {
             let db: Float = payload.withUnsafeBytes { $0.load(as: Float.self) }
             let v = db <= -128 ? "MUTE" : String(format: "%+7.2f dB", db)
             return ("user_volume.user_volume_db", v)
         }
-        if off == 2932 && sz == 1 {
+        if off == BULK_USER_VOLUME_OFFSET + 4 && sz == 1 {
             return ("user_volume.user_mute", fmtBool(payload))
         }
 
@@ -416,6 +420,11 @@ class InterruptMonitor: ObservableObject {
     /// non-host parameter changes back into the UI without waiting for the
     /// next bulk fetch.  Pause only affects the display log.
     var onParamChanged: ((_ offset: UInt16, _ size: UInt16, _ source: UInt8, _ payload: Data) -> Void)?
+
+    /// Fires on the main thread when the host switches the USB input format
+    /// (NOTIFY_EVT_INPUT_FORMAT).  Carries the new active input channel count
+    /// (2/4/6/8) so the UI can relayout immediately.
+    var onInputFormatChanged: ((_ channels: Int) -> Void)?
 
     private let usb: USBDevice
     private var interfacePtr: USBDevice.InterfaceInterfacePtr?
@@ -554,6 +563,18 @@ class InterruptMonitor: ObservableObject {
             let payload = Data(bytes[12..<payloadEnd])
             DispatchQueue.main.async {
                 handler(offset, size, source, payload)
+            }
+        }
+
+        // Dispatch the input-format event (host switched USB alt → new active
+        // channel count) so the UI relayouts without waiting for the 60ms poll.
+        if let handler = onInputFormatChanged,
+           bytes.count >= 8,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_INPUT_FORMAT {
+            let channels = Int(bytes[4])
+            DispatchQueue.main.async {
+                handler(channels)
             }
         }
 

@@ -114,21 +114,44 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// V11 bulk transfer size (3664 bytes) — adds 704 bytes of crossover state on
-/// top of V10 (2960).  Firmware accepts any size between V2 (2832) and the
-/// current max, so requesting V11 size is safe across versions: older
-/// firmware returns its smaller payload and we parse what we receive.
-let BULK_PARAMS_SIZE: UInt16            = 3664
-let BULK_PARAMS_V10_SIZE: Int           = 2960
-let BULK_PARAMS_V11_SIZE: Int           = 3664
-/// Offset of the WireCrossoverConfig section inside the V11 wire format.
-let BULK_CROSSOVER_OFFSET: Int          = 2960
+/// Wire format V16 (unified channel model): inputs are first-class channels
+/// (PEQ + metering), outputs follow them.  Flat 5864-byte layout (RP2350).
+/// Compatibility is intentionally broken at V16 - only this layout is accepted.
+let WIRE_FORMAT_VERSION: Int            = 16
+/// Full V16 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+let BULK_PARAMS_SIZE: UInt16            = 5864
+let WIRE_BULK_PARAMS_V16_SIZE: Int      = 5864
+
+// --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
+let BULK_GLOBAL_OFFSET: Int             = 16
+let BULK_CROSSFEED_OFFSET: Int          = 32
+let BULK_DELAYS_OFFSET: Int             = 64    // float delay_ms[17]
+let BULK_CROSSPOINT_OFFSET: Int         = 132   // crosspoints[8][9]
+let BULK_OUTPUTS_OFFSET: Int            = 708   // WireOutputChannel[9]
+let BULK_PINS_OFFSET: Int               = 816
+let BULK_EQ_OFFSET: Int                 = 824   // eq[17][12]
+let BULK_CHANNEL_NAMES_OFFSET: Int      = 4088  // names[17][32]
+let BULK_I2S_OFFSET: Int                = 4632
+let BULK_LEVELLER_OFFSET: Int           = 4648
+let BULK_PREAMP_OFFSET: Int             = 4664  // preamp_db[8]
+let BULK_MASTER_VOLUME_OFFSET: Int      = 4696
+let BULK_INPUT_CONFIG_OFFSET: Int       = 4712  // input_source, spdif_rx_pin, i2s_rx_pin, i2s_rate
+let BULK_LG_OFFSET: Int                 = 4728
+let BULK_USER_VOLUME_OFFSET: Int        = 4744  // user_volume_db, user_mute
+let BULK_DAC_HW_MUTE_OFFSET: Int        = 4760
+let BULK_CROSSOVER_OFFSET: Int          = 4776  // crossovers[17][4]
+
+/// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
+let WIRE_CROSSPOINT_SIZE: Int           = 8
 /// Bytes per WireBandParams (matches firmware EqParamPacket layout).
 let WIRE_BAND_PARAMS_SIZE: Int          = 16
-/// Crossover bands per channel in the V11 wire layout.
+/// Crossover bands per channel in the wire layout.
 let WIRE_MAX_XOVER_BANDS: Int           = 4
-/// Channels in the V11 wire layout (11 even on RP2040 — wire layout is fixed).
-let WIRE_MAX_CHANNELS: Int              = 11
+/// Total channels in the V16 wire layout (inputs + outputs, RP2350 max).
+let WIRE_MAX_CHANNELS: Int              = 17
+/// Max matrix inputs (RP2350) and the stereo base count.
+let MAX_MATRIX_INPUTS: Int              = 8
+let BASE_MATRIX_INPUTS: Int             = 2
 
 // Buffer statistics request codes
 let REQ_GET_BUFFER_STATS: UInt8         = 0xB0

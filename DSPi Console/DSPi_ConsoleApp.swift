@@ -1946,7 +1946,6 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
     func show() {
         if window == nil {
             let mixerView = MatrixMixerView(vm: AppState.shared.viewModel)
-
             let hostingView = NSHostingView(rootView: mixerView)
             hostingView.setFrameSize(hostingView.fittingSize)
 
@@ -1962,9 +1961,32 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
             window?.delegate = self
         }
 
+        // Re-evaluate sizing/resizability each time: the 8-channel matrix (8×9)
+        // can exceed the screen, so it is resizable and clamped to the visible
+        // frame (the view scrolls); the stereo matrix stays fixed-size.  Doing
+        // this on every show() keeps it correct across RP2040 ↔ RP2350 swaps.
+        if let window = window, let hostingView = window.contentView {
+            let eightCh = AppState.shared.viewModel.supports8chInput
+            if eightCh {
+                window.styleMask.insert(.resizable)
+            } else {
+                window.styleMask.remove(.resizable)
+            }
+            let fitting = hostingView.fittingSize
+            window.setContentSize(eightCh ? Self.clampToScreen(fitting) : fitting)
+        }
+
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         isVisible = true
+    }
+
+    /// Clamp a desired content size to ~90% of the active screen's visible frame
+    /// so a tall 8-channel matrix never opens larger than the display.
+    private static func clampToScreen(_ size: NSSize) -> NSSize {
+        let screen = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1280, height: 800)
+        return NSSize(width: min(size.width, screen.width * 0.95),
+                      height: min(size.height, screen.height * 0.90))
     }
 
     func hide() {
@@ -2081,10 +2103,11 @@ struct GraphPopOutView: View {
 
     private func initVisibility() {
         guard popoutVisibility.isEmpty else { return }
-        // Start with all master + enabled outputs visible
-        var vis: [Int: Bool] = [0: true, 1: true]
-        for i in 0..<9 {
-            vis[i + 2] = vm.outputEnabled[i]
+        // Start with active inputs + enabled outputs visible
+        var vis: [Int: Bool] = [:]
+        for ch in 0..<vm.numMatrixInputs { vis[ch] = true }
+        for i in 0..<vm.numOutputChannels {
+            vis[vm.eqChannel(forOutput: i)] = vm.outputEnabled[i]
         }
         popoutVisibility = vis
     }
@@ -2291,6 +2314,7 @@ struct FileMenuActions {
     }
 
     private static func parseDSPiFile(_ contents: String) -> [Int: ParsedChannelData]? {
+        let vm = AppState.shared.viewModel
         var result: [Int: ParsedChannelData] = [:]
         var currentChannel: Int? = nil
 
@@ -2316,21 +2340,21 @@ struct FileMenuActions {
                         let stateRange = Range(match.range(at: 2), in: headerContent),
                         let outputIdx = Int(headerContent[idxRange]),
                         outputIdx >= 0 && outputIdx <= 8 {
-                    let eqCh = outputIdx + 2
+                    let eqCh = vm.eqChannel(forOutput: outputIdx)
                     let enabled = headerContent[stateRange] == "Enabled"
                     currentChannel = eqCh
                     result[eqCh] = ParsedChannelData(filters: [], enableState: enabled)
                 }
-                // Backward compat: old channel names
+                // Backward compat: old channel names (map to V16 output channels)
                 else if headerContent == "Out L" {
-                    currentChannel = 2
-                    result[2] = ParsedChannelData(filters: [], enableState: nil)
+                    currentChannel = vm.eqChannel(forOutput: 0)
+                    result[vm.eqChannel(forOutput: 0)] = ParsedChannelData(filters: [], enableState: nil)
                 } else if headerContent == "Out R" {
-                    currentChannel = 3
-                    result[3] = ParsedChannelData(filters: [], enableState: nil)
+                    currentChannel = vm.eqChannel(forOutput: 1)
+                    result[vm.eqChannel(forOutput: 1)] = ParsedChannelData(filters: [], enableState: nil)
                 } else if headerContent == "Sub" {
-                    currentChannel = 4
-                    result[4] = ParsedChannelData(filters: [], enableState: nil)
+                    currentChannel = vm.eqChannel(forOutput: vm.pdmOutputIndex)
+                    result[vm.eqChannel(forOutput: vm.pdmOutputIndex)] = ParsedChannelData(filters: [], enableState: nil)
                 }
                 continue
             }
@@ -2423,8 +2447,8 @@ struct FileMenuActions {
 
         // Output channels (platform-aware)
         for outputIdx in 0..<vm.numOutputChannels {
-            let eqCh = outputIdx + 2
-            let name = vm.channelNames[outputIdx + 2]
+            let eqCh = vm.eqChannel(forOutput: outputIdx)
+            let name = vm.channelNames[eqCh]
             let state = vm.outputEnabled[outputIdx] ? "Enabled" : "Disabled"
             output += "[Output \(outputIdx): \(name) (\(state))]\n"
             let filters = vm.channelData[eqCh] ?? []
@@ -2501,8 +2525,9 @@ struct FileMenuActions {
 
         // Enabled output channels (unchecked by default)
         for outputIdx in 0..<vm.numOutputChannels where vm.outputEnabled[outputIdx] {
-            let checkbox = NSButton(checkboxWithTitle: vm.channelNames[outputIdx + 2], target: nil, action: nil)
-            checkbox.tag = outputIdx + 2
+            let eqCh = vm.eqChannel(forOutput: outputIdx)
+            let checkbox = NSButton(checkboxWithTitle: vm.channelNames[eqCh], target: nil, action: nil)
+            checkbox.tag = eqCh
             checkbox.state = .off
             checkboxes.append(checkbox)
             accessory.addArrangedSubview(checkbox)
@@ -2540,11 +2565,10 @@ struct FileMenuActions {
         let vm = AppState.shared.viewModel
         var checkboxes: [NSButton] = []
 
-        // Show channels in order: master 0,1 then outputs
-        let maxEqCh = vm.numOutputChannels + 1  // output indices 0..<N map to EQ channels 2..<N+2
-        for eqCh in 0...maxEqCh {
+        // Show channels in order: inputs then outputs (full unified range).
+        for eqCh in 0..<vm.numChannels {
             guard channelFilters[eqCh] != nil else { continue }
-            let name = vm.channelNames[eqCh]
+            let name = eqCh < vm.channelNames.count ? vm.channelNames[eqCh] : "Ch \(eqCh)"
 
             let checkbox = NSButton(checkboxWithTitle: name, target: nil, action: nil)
             checkbox.tag = eqCh
@@ -2565,8 +2589,8 @@ struct FileMenuActions {
                 if let data = channelFilters[eqCh] {
                     applyFilters(data.filters, to: eqCh)
                     // Restore enable/disable state for output channels
-                    if eqCh >= 2, let enabled = data.enableState {
-                        vm.setOutputEnable(output: eqCh - 2, enabled: enabled)
+                    if eqCh >= vm.chOut1, let enabled = data.enableState {
+                        vm.setOutputEnable(output: eqCh - vm.chOut1, enabled: enabled)
                     }
                 }
             }

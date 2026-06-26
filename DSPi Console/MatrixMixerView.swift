@@ -66,10 +66,54 @@ struct MatrixInput {
     let name: String
     let color: Color
 
-    static let all: [MatrixInput] = [
-        MatrixInput(index: 0, name: "Input L", color: Color(red: 0.29, green: 0.56, blue: 0.89)),
-        MatrixInput(index: 1, name: "Input R", color: Color(red: 0.96, green: 0.45, blue: 0.45)),
+    /// Distinct row colors for up to 8 matrix inputs.  Indices 0/1 keep the
+    /// existing stereo blue/red so the 2-input view is unchanged.
+    static let palette: [Color] = [
+        Color(red: 0.29, green: 0.56, blue: 0.89),  // 0 FL - blue
+        Color(red: 0.96, green: 0.45, blue: 0.45),  // 1 FR - red
+        Color(red: 0.45, green: 0.78, blue: 0.55),  // 2 FC - green
+        Color(red: 0.93, green: 0.70, blue: 0.30),  // 3 LFE - amber
+        Color(red: 0.60, green: 0.55, blue: 0.92),  // 4 BL - violet
+        Color(red: 0.90, green: 0.55, blue: 0.78),  // 5 BR - pink
+        Color(red: 0.40, green: 0.78, blue: 0.82),  // 6 SL - teal
+        Color(red: 0.80, green: 0.72, blue: 0.42),  // 7 SR - olive
     ]
+
+    /// 7.1 USB input order used in 8-channel mode (spec §5).
+    static let surroundShortNames = ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]
+    static let surroundFullNames  = ["Front Left", "Front Right", "Center", "LFE",
+                                     "Back Left", "Back Right", "Side Left", "Side Right"]
+
+    /// Stereo (2-input) labels.
+    static let stereo: [MatrixInput] = [
+        MatrixInput(index: 0, name: "Input L", color: palette[0]),
+        MatrixInput(index: 1, name: "Input R", color: palette[1]),
+    ]
+
+    /// Backward-compatible alias for the stereo input pair.
+    static let all: [MatrixInput] = stereo
+
+    static func color(for input: Int) -> Color {
+        palette.indices.contains(input) ? palette[input] : .accentColor
+    }
+
+    /// Short row label for the given input index and total input count.
+    static func shortName(for input: Int, count: Int) -> String {
+        if count <= 2 { return input == 0 ? "Input L" : "Input R" }
+        return surroundShortNames.indices.contains(input) ? surroundShortNames[input] : "In \(input + 1)"
+    }
+
+    static func fullName(for input: Int, count: Int) -> String {
+        if count <= 2 { return input == 0 ? "USB Left" : "USB Right" }
+        return surroundFullNames.indices.contains(input) ? surroundFullNames[input] : "Input \(input + 1)"
+    }
+
+    /// The inputs to render for a given count (2 = stereo, 8 = 7.1 surround).
+    static func inputs(count: Int) -> [MatrixInput] {
+        (0..<max(count, 1)).map { i in
+            MatrixInput(index: i, name: shortName(for: i, count: count), color: color(for: i))
+        }
+    }
 }
 
 // MARK: - Matrix Mixer View
@@ -88,10 +132,16 @@ struct MatrixMixerView: View {
     @FocusState private var renameFocused: Bool
 
     private let columnWidth: CGFloat = 72
-    private let labelWidth: CGFloat = 75
+    private let labelWidth: CGFloat = 80
 
     private var visibleOutputs: [MatrixOutput] {
         MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes)
+    }
+
+    private var is8ch: Bool { vm.supports8chInput }
+
+    private var matrixInputs: [MatrixInput] {
+        MatrixInput.inputs(count: vm.numMatrixInputs)
     }
 
     private func commitRename() {
@@ -99,7 +149,7 @@ struct MatrixMixerView: View {
         let trimmed = renameText.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty {
             DispatchQueue.global(qos: .userInitiated).async {
-                vm.setChannelName(channel: idx + 2, name: trimmed)
+                vm.setChannelName(channel: vm.eqChannel(forOutput: idx), name: trimmed)
             }
         }
         renamingOutput = nil
@@ -107,16 +157,25 @@ struct MatrixMixerView: View {
 
     private func startRename(_ index: Int) {
         if renamingOutput != nil { commitRename() }
-        renameText = vm.channelNames[index + 2]
+        renameText = vm.channelNames[vm.eqChannel(forOutput: index)]
         renamingOutput = index
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            unifiedSection
+        Group {
+            if is8ch {
+                // 8 input rows make a tall/wide table; let the (resizable) window
+                // scroll it rather than forcing an oversized fixed size.
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(spacing: 0) { unifiedSection }
+                        .padding()
+                }
+            } else {
+                VStack(spacing: 0) { unifiedSection }
+                    .padding()
+                    .fixedSize()
+            }
         }
-        .padding()
-        .fixedSize()
         .onTapGesture {
             if renamingOutput != nil { commitRename() }
         }
@@ -197,87 +256,110 @@ struct MatrixMixerView: View {
 
     private var unifiedSection: some View {
         VStack(spacing: 0) {
-            // ── Column headers ──
-            HStack(spacing: 0) {
-                Color.clear.frame(width: labelWidth, height: 48)
-
-                ForEach(visibleOutputs, id: \.index) { out in
-                    VStack(spacing: 3) {
-                        if renamingOutput == out.index {
-                            TextField("", text: $renameText)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                                .focused($renameFocused)
-                                .onSubmit { commitRename() }
-                        } else {
-                            Text(vm.channelNames[out.index + 2])
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                        Text(out.descriptor)
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(out.color.opacity(0.8))
-                    }
-                    .frame(width: columnWidth, height: 48)
-                    .contentShape(Rectangle())
-                    .contextMenu {
-                        Button("Rename") { startRename(out.index) }
-                        Divider()
-                        Button("Copy Parameters") {
-                            vm.copyChannelParams(eqChannel: out.index + 2, name: vm.channelNames[out.index + 2])
-                        }
-                        Button("Paste Parameters") {
-                            vm.pasteChannelParams(eqChannel: out.index + 2)
-                        }
-                        .disabled(vm.channelClipboard == nil)
-                    }
-                }
-            }
+            columnHeaders
 
             sectionDivider
 
             // ── ROUTING ──
-            sectionLabel("ROUTING")
-
-            // Input rows
-            ForEach(MatrixInput.all, id: \.index) { input in
-                HStack(spacing: 0) {
-                    Text(input.name)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(input.color)
-                        .frame(width: labelWidth, alignment: .center)
-
-                    ForEach(visibleOutputs, id: \.index) { out in
-                        let enabled = vm.outputEnabled[out.index]
-                        MatrixPoint(
-                            isConnected: matrixRoutingBinding(row: input.index, col: out.index),
-                            gain: matrixGainBinding(row: input.index, col: out.index),
-                            isInverted: matrixInvertBinding(row: input.index, col: out.index),
-                            inputColor: input.color,
-                            outputColor: out.color,
-                            outlineColor: (out.index == vm.pdmOutputIndex && wouldConflict(vm.pdmOutputIndex)) ? .orange : nil
-                        )
-                        .frame(width: columnWidth)
-                        .saturation(enabled ? 1.0 : 0.0)
-                        .opacity(enabled ? 1.0 : 0.3)
-                    }
-                }
-                .frame(height: 78)
-
-                if input.index == 0 {
-                    Divider().padding(.leading, labelWidth).opacity(0.4)
-                }
-            }
+            routingHeader
+            inputRowsSection
 
             sectionDivider
 
             // ── OUTPUT CONTROLS ──
             sectionLabel("OUTPUT")
+            outputControlsSection
 
-            // Enable row
+            Spacer().frame(height: 4)
+        }
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        )
+    }
+
+    // ── Column headers ──
+    private var columnHeaders: some View {
+        HStack(spacing: 0) {
+            Color.clear.frame(width: labelWidth, height: 48)
+
+            ForEach(visibleOutputs, id: \.index) { out in
+                VStack(spacing: 3) {
+                    if renamingOutput == out.index {
+                        TextField("", text: $renameText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .focused($renameFocused)
+                            .onSubmit { commitRename() }
+                    } else {
+                        Text(vm.channelNames[vm.eqChannel(forOutput: out.index)])
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Text(out.descriptor)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(out.color.opacity(0.8))
+                }
+                .frame(width: columnWidth, height: 48)
+                .contentShape(Rectangle())
+                .contextMenu {
+                    Button("Rename") { startRename(out.index) }
+                    Divider()
+                    Button("Copy Parameters") {
+                        vm.copyChannelParams(eqChannel: vm.eqChannel(forOutput: out.index), name: vm.channelNames[vm.eqChannel(forOutput: out.index)])
+                    }
+                    Button("Paste Parameters") {
+                        vm.pasteChannelParams(eqChannel: vm.eqChannel(forOutput: out.index))
+                    }
+                    .disabled(vm.channelClipboard == nil)
+                }
+            }
+        }
+    }
+
+    // ── Routing input rows ──
+    private var inputRowsSection: some View {
+        ForEach(matrixInputs, id: \.index) { input in
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    inputLabel(input)
+                    ForEach(visibleOutputs, id: \.index) { out in
+                        crosspointCell(input: input, out: out)
+                    }
+                }
+                .frame(height: 78)
+
+                if rowNeedsDivider(after: input.index) {
+                    Divider().padding(.leading, labelWidth).opacity(0.4)
+                }
+            }
+        }
+    }
+
+    private func crosspointCell(input: MatrixInput, out: MatrixOutput) -> some View {
+        let enabled = vm.outputEnabled[out.index]
+        let conflictOutline: Color? = (out.index == vm.pdmOutputIndex && wouldConflict(vm.pdmOutputIndex)) ? .orange : nil
+        return MatrixPoint(
+            isConnected: matrixRoutingBinding(row: input.index, col: out.index),
+            gain: matrixGainBinding(row: input.index, col: out.index),
+            isInverted: matrixInvertBinding(row: input.index, col: out.index),
+            inputColor: input.color,
+            outputColor: out.color,
+            outlineColor: conflictOutline
+        )
+        .frame(width: columnWidth)
+        .saturation(enabled ? 1.0 : 0.0)
+        .opacity(enabled ? 1.0 : 0.3)
+    }
+
+    // ── Per-output controls (enable / gain / delay / mute) ──
+    private var outputControlsSection: some View {
+        VStack(spacing: 0) {
             controlRow("ENABLE") {
                 ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
@@ -300,7 +382,6 @@ struct MatrixMixerView: View {
 
             subtleDivider
 
-            // Gain row
             controlRow("GAIN") {
                 ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
@@ -315,7 +396,6 @@ struct MatrixMixerView: View {
 
             subtleDivider
 
-            // Delay row
             controlRow("DELAY") {
                 ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
@@ -330,7 +410,6 @@ struct MatrixMixerView: View {
 
             subtleDivider
 
-            // Mute row
             controlRow("MUTE") {
                 ForEach(visibleOutputs, id: \.index) { out in
                     let idx = out.index
@@ -347,14 +426,71 @@ struct MatrixMixerView: View {
                     .help(vm.outputMuted[idx] ? "Unmute" : "Mute")
                 }
             }
-
-            Spacer().frame(height: 4)
         }
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+    }
+
+    // MARK: - Routing Header & Input Labels
+
+    /// The "ROUTING" band.  In 8-channel mode it also carries quick-route
+    /// buttons (Direct 1:1 / Clear) since out-of-the-box an 8-channel stream is
+    /// silent until routes are set (spec §10.D).
+    @ViewBuilder private var routingHeader: some View {
+        if is8ch {
+            HStack(spacing: 8) {
+                Text("ROUTING")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundColor(.secondary.opacity(0.5))
+                    .padding(.leading, 12)
+                Spacer(minLength: 12)
+                Button("Direct 1:1") { vm.applyDirectRouting() }
+                .help("Route each input to the matching output (FL→OUT1, FR→OUT2, …) and disable the PDM sub")
+                Button("Clear") { vm.clearAllRoutes() }
+                .help("Disconnect every crosspoint")
+                .padding(.trailing, 10)
+            }
+            .controlSize(.small)
+            .frame(height: 26)
+            .background(Color.white.opacity(0.015))
+        } else {
+            sectionLabel("ROUTING")
+        }
+    }
+
+    /// Left-column label for an input row.  In 8-channel mode it shows the 7.1
+    /// role plus a per-input trim (preamp) field so users can correct level /
+    /// host channel-mapping differences (spec §14).
+    @ViewBuilder private func inputLabel(_ input: MatrixInput) -> some View {
+        if is8ch {
+            VStack(spacing: 3) {
+                Text(input.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(input.color)
+                    .help(MatrixInput.fullName(for: input.index, count: vm.numMatrixInputs))
+                CompactGainField(gain: matrixInputTrimBinding(input.index))
+                    .help("Input trim (preamp) for \(MatrixInput.fullName(for: input.index, count: vm.numMatrixInputs))")
+            }
+            .frame(width: labelWidth)
+        } else {
+            Text(input.name)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(input.color)
+                .frame(width: labelWidth, alignment: .center)
+        }
+    }
+
+    /// Whether to draw a divider beneath the row for `index`.  Stereo keeps a
+    /// single L/R separator; 8-channel groups the 7.1 channels into stereo pairs.
+    private func rowNeedsDivider(after index: Int) -> Bool {
+        if is8ch {
+            return index % 2 == 1 && index < vm.numMatrixInputs - 1
+        }
+        return index == 0
+    }
+
+    private func matrixInputTrimBinding(_ input: Int) -> Binding<Float> {
+        Binding(
+            get: { vm.preampDB.indices.contains(input) ? vm.preampDB[input] : 0 },
+            set: { newVal in vm.setPreampChannel(channel: input, db: newVal) }
         )
     }
 

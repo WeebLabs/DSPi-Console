@@ -55,7 +55,8 @@ final class SaveCoordinationTests: XCTestCase {
         let vm = makeIsolatedVM()
         vm.updateSavedSnapshot()
 
-        vm.xoverData[2]?[0] = FilterParams(type: .lr4_lp, freq: 1200, q: 0.707, gain: 0)
+        // Crossover is an output-only feature; channel chOut1 is the first output.
+        vm.xoverData[vm.chOut1]?[0] = FilterParams(type: .lr4_lp, freq: 1200, q: 0.707, gain: 0)
 
         XCTAssertTrue(vm.hasUnsavedChanges, "editing a crossover band must mark the preset dirty")
         XCTAssertTrue(vm.computeDiff().changes.contains { $0.category.contains("Crossover") },

@@ -71,7 +71,11 @@ struct DacHwMuteConfig: Equatable {
 // MARK: - View Model
 
 class DSPViewModel: ObservableObject {
-    @Published var preampDB: [Float] = [0.0, 0.0]
+    /// Per-input preamp (dB).  Always `MAX_MATRIX_INPUTS` (8) wide: indices 0/1
+    /// are the stereo USB L/R bus (also the master chain), 2-7 are the extra
+    /// USB channels in RP2350 8-channel input mode.  Indices 2-7 stay 0 on
+    /// stereo-only firmware.
+    @Published var preampDB: [Float] = Array(repeating: 0.0, count: MAX_MATRIX_INPUTS)
     @Published var preampLinked: Bool = true
     @Published var masterVolumeDB: Float = 0.0
     /// Vendor-channel "user volume" — same field as the UAC1 host slider
@@ -81,7 +85,7 @@ class DSPViewModel: ObservableObject {
     @Published var userVolumeDB: Float = 0.0
     @Published var bypass: Bool = false
     @Published var channelData: [Int: [FilterParams]] = [:]
-    /// Crossover bands per EQ channel.  Only output channels (eqCh >= 2) carry
+    /// Crossover bands per EQ channel.  Only output channels (eqCh >= chOut1) carry
     /// real entries; master channels are kept empty since crossover is
     /// rejected pre-matrix-mixer per spec §1.  Always 4 bands per channel
     /// (the 16-byte WireBandParams entries mapped to wire band indices 20..23).
@@ -97,10 +101,13 @@ class DSPViewModel: ObservableObject {
     @Published var crossfeedFeed: Float = 4.5
     @Published var crossfeedITD: Bool = true
 
-    // Matrix mixer state (2 inputs x 9 outputs)
-    @Published var matrixRouting = Array(repeating: Array(repeating: false, count: 9), count: 2)
-    @Published var matrixGain = Array(repeating: Array(repeating: Float(0.0), count: 9), count: 2)
-    @Published var matrixInvert = Array(repeating: Array(repeating: false, count: 9), count: 2)
+    // Matrix mixer state (up to 8 inputs x 9 outputs).  Backing arrays are
+    // always MAX_MATRIX_INPUTS rows so crosspoint bindings for inputs 2-7 are
+    // always valid; the UI renders only `numMatrixInputs` of them.  Rows 2-7
+    // stay all-false / 0 dB on stereo-only firmware.
+    @Published var matrixRouting = Array(repeating: Array(repeating: false, count: 9), count: MAX_MATRIX_INPUTS)
+    @Published var matrixGain = Array(repeating: Array(repeating: Float(0.0), count: 9), count: MAX_MATRIX_INPUTS)
+    @Published var matrixInvert = Array(repeating: Array(repeating: false, count: 9), count: MAX_MATRIX_INPUTS)
     @Published var outputEnabled = Array(repeating: false, count: 9)
     @Published var outputGainDB = Array(repeating: Float(0.0), count: 9)
     @Published var outputMuted = Array(repeating: false, count: 9)
@@ -162,6 +169,35 @@ class DSPViewModel: ObservableObject {
     @Published var presetMasterVolumeMode: Int = MASTER_VOLUME_MODE_INDEPENDENT
 
     @Published var platformName: String = ""
+
+    /// Device MAX input channels, read from the bulk header (byte 4): 2 for
+    /// RP2040, 8 for RP2350.  This is the capability flag and also defines the
+    /// channel-index base for outputs (CH_OUT_1 = num_input_channels).  Defaults
+    /// to the stereo base until the first bulk fetch.
+    @Published var numInputChannels: Int = BASE_MATRIX_INPUTS
+
+    /// Live ACTIVE input count (2/4/6/8), driven by the host's USB audio format.
+    /// Read from the status packet and the NOTIFY_EVT_INPUT_FORMAT push; used to
+    /// lay out exactly that many input strips (sidebar + matrix).  Always >= 2.
+    @Published var activeInputChannels: Int = BASE_MATRIX_INPUTS
+
+    /// True when the device supports multichannel (>2) USB input: an RP2350 on
+    /// V16 firmware reporting 8 inputs.  Gates all multichannel UI (spec §4).
+    var supports8chInput: Bool {
+        platformName == "RP2350"
+            && firmwareWireFormatVersion == WIRE_FORMAT_VERSION
+            && numInputChannels == MAX_MATRIX_INPUTS
+    }
+
+    /// First output's unified channel index (CH_OUT_1 = device max inputs).
+    /// 8 on RP2350, 2 on RP2040.  Output EQ channel = output index + chOut1.
+    var chOut1: Int { platformName == "RP2040" ? BASE_MATRIX_INPUTS : MAX_MATRIX_INPUTS }
+
+    /// Unified EQ/channel index for a matrix output index (0-8).
+    func eqChannel(forOutput output: Int) -> Int { output + chOut1 }
+
+    /// Number of input strips to render: the live active count (>= 2).
+    var numMatrixInputs: Int { max(BASE_MATRIX_INPUTS, min(activeInputChannels, chOut1)) }
 
     // Firmware version tuple parsed from REQ_GET_PLATFORM (data[1] = major,
     // data[2] high nibble = minor, data[2] low nibble = patch).  nil before
@@ -236,10 +272,12 @@ class DSPViewModel: ObservableObject {
     /// Snapshot of state at last save/load point for unsaved changes detection
     var savedSnapshot: PresetSnapshot?
 
-    // Platform-aware output layout (platformName is set once at connection, safe to read from poll queue)
-    var numChannels: Int { platformName == "RP2040" ? 7 : 11 }
+    // Platform-aware layout (platformName is set once at connection, safe to read from poll queue).
+    // V16 unified channel model: inputs 0..chOut1-1, outputs chOut1..numChannels-1.
+    var numChannels: Int { chOut1 + numOutputChannels }   // 7 (RP2040) / 17 (RP2350)
     var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
-    var pdmOutputIndex: Int { platformName == "RP2040" ? 4 : 8 }
+    var pdmOutputIndex: Int { numOutputChannels - 1 }     // matrix output index (4 / 8)
+    // EQ-worker outputs that share Core 1 with the PDM sub (matrix output indices).
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
     var numOutputSlots: Int { platformName == "RP2040" ? 2 : 4 }
     var anySlotIsI2S: Bool { outputSlotTypes.prefix(numOutputSlots).contains(1) }
@@ -302,15 +340,16 @@ class DSPViewModel: ObservableObject {
     init(usb: USBDevice = AppState.shared.usb) {
         self.usb = usb
 
-        // Initialize Default Data
-        // Master channels 0, 1
-        for ch in [Channel.masterLeft, Channel.masterRight] {
-            channelData[ch.rawValue] = Array(repeating: FilterParams(), count: 10)
-            channelVisibility[ch.rawValue] = true
+        // Initialize Default Data (V16 unified model: inputs 0..chOut1-1 are
+        // first-class EQ channels; outputs chOut1..numChannels-1 add crossover).
+        // platformName is empty at init, so chOut1 defaults to the RP2350 base
+        // (8); fetchAllParams repopulates once the device platform is known.
+        for ch in 0..<chOut1 {
+            channelData[ch] = Array(repeating: FilterParams(), count: 10)
+            channelVisibility[ch] = true
         }
-        // Output EQ channels 2-10 (output index + 2)
         for outputIdx in 0..<9 {
-            let eqCh = outputIdx + 2
+            let eqCh = eqChannel(forOutput: outputIdx)
             channelData[eqCh] = Array(repeating: FilterParams(), count: 10)
             // Crossover bands default to FLAT (= bypassed) per spec §7.
             xoverData[eqCh] = Array(repeating:
@@ -335,6 +374,17 @@ class DSPViewModel: ObservableObject {
         AppState.shared.interruptMonitor.onParamChanged = { [weak self] offset, size, source, payload in
             guard source != 1 /* PARAM_SRC_HOST_SET */ else { return }
             self?.applyNotifiedParamChange(offset: offset, size: size, payload: payload)
+        }
+
+        // The host switched USB input format — update the live active input
+        // count so the sidebar / matrix relayout to the new channel count.
+        AppState.shared.interruptMonitor.onInputFormatChanged = { [weak self] channels in
+            guard let self = self else { return }
+            let clamped = max(BASE_MATRIX_INPUTS, min(channels, self.chOut1))
+            if self.activeInputChannels != clamped {
+                self.activeInputChannels = clamped
+                if self.isOverviewMode { self.updateSelection(to: nil) }
+            }
         }
 
         // 1. Subscribe to USB connection changes AND Trigger Fetch
@@ -384,56 +434,51 @@ class DSPViewModel: ObservableObject {
         usb.reconnect()
     }
 
-    func updateSelection(to channel: Channel?) {
+    /// Select an input channel for editing (unified EQ channel index 0..chOut1-1),
+    /// or pass nil for the overview.  Drives graph curve visibility.
+    func updateSelection(to inputChannel: Int?) {
         withAnimation(.easeInOut(duration: 0.2)) {
-            if let ch = channel {
+            if let ch = inputChannel {
                 isOverviewMode = false
-                activeEqChannel = ch.rawValue
-                let isMaster = (ch == .masterLeft || ch == .masterRight)
-                // When Link L/R is on and the user selects a master channel,
-                // show both master curves on the graph (in addition to keeping
-                // the right pane focused on the clicked channel).
-                let showBothMasters = isMaster && preampLinked
-                for eqCh in 0...10 {
-                    if showBothMasters && (eqCh == Channel.masterLeft.rawValue || eqCh == Channel.masterRight.rawValue) {
+                activeEqChannel = ch
+                // Link L/R: selecting a stereo input (0/1) with link on shows
+                // both curves together (and the right pane stays on the click).
+                let showBothMasters = ch < BASE_MATRIX_INPUTS && preampLinked
+                for eqCh in 0..<numChannels {
+                    if showBothMasters && eqCh < BASE_MATRIX_INPUTS {
                         channelVisibility[eqCh] = true
                     } else {
-                        channelVisibility[eqCh] = (eqCh == ch.rawValue)
+                        channelVisibility[eqCh] = (eqCh == ch)
                     }
                 }
             } else {
                 isOverviewMode = true
                 activeEqChannel = nil
-                // Overview: show master L/R + all enabled output channels
-                channelVisibility[Channel.masterLeft.rawValue] = true
-                channelVisibility[Channel.masterRight.rawValue] = true
-                for outputIdx in 0..<9 {
-                    channelVisibility[outputIdx + 2] = outputEnabled[outputIdx]
+                // Overview: show active input channels + all enabled outputs.
+                for eqCh in 0..<numChannels { channelVisibility[eqCh] = false }
+                for i in 0..<min(activeInputChannels, chOut1) { channelVisibility[i] = true }
+                for outputIdx in 0..<numOutputChannels {
+                    channelVisibility[eqChannel(forOutput: outputIdx)] = outputEnabled[outputIdx]
                 }
             }
         }
     }
 
-    /// Re-runs the current sidebar selection's graph-visibility logic.  Called
-    /// after `preampLinked` changes so the graph immediately reflects whether
-    /// both master curves should be drawn together.  No-op outside master
-    /// selection (e.g. on output channel pages or overview) — those modes
-    /// aren't affected by Link L/R.
+    /// Re-runs the current selection's graph-visibility logic.  Called after
+    /// `preampLinked` changes so the graph reflects whether both stereo input
+    /// curves should be drawn together.  No-op outside a stereo-input selection.
     func refreshLinkedVisibility() {
-        guard let raw = activeEqChannel,
-              let ch = Channel(rawValue: raw),
-              ch == .masterLeft || ch == .masterRight else {
-            return
-        }
+        guard let ch = activeEqChannel, ch < BASE_MATRIX_INPUTS else { return }
         updateSelection(to: ch)
     }
 
     func updateSelectionToOutput(_ outputIdx: Int) {
         isOverviewMode = false
-        activeEqChannel = outputIdx + 2
+        let eqCh = eqChannel(forOutput: outputIdx)
+        activeEqChannel = eqCh
         withAnimation(.easeInOut(duration: 0.2)) {
-            for eqCh in 0...10 {
-                channelVisibility[eqCh] = (eqCh == outputIdx + 2)
+            for c in 0..<numChannels {
+                channelVisibility[c] = (c == eqCh)
             }
         }
     }
@@ -445,9 +490,10 @@ class DSPViewModel: ObservableObject {
 
     func recomputeMagnitudes(for eqChannel: Int) {
         let peqFilters = channelData[eqChannel] ?? []
-        let xoverFilters = (eqChannel >= 2) ? (xoverData[eqChannel] ?? []) : []
+        // Crossover is an output-only feature (channels >= chOut1).
+        let xoverFilters = (eqChannel >= chOut1) ? (xoverData[eqChannel] ?? []) : []
         let allFilters = peqFilters + xoverFilters
-        let isBypassed = bypass && (eqChannel <= 1)
+        let isBypassed = bypass && (eqChannel < BASE_MATRIX_INPUTS)
         var results = [Double]()
         var phases = [Double]()
         results.reserveCapacity(201)
@@ -464,7 +510,7 @@ class DSPViewModel: ObservableObject {
     }
 
     func recomputeAllMagnitudes() {
-        for eqCh in 0...10 { recomputeMagnitudes(for: eqCh) }
+        for eqCh in 0..<numChannels { recomputeMagnitudes(for: eqCh) }
     }
 
     // MARK: - Unsaved Changes Detection
@@ -592,8 +638,8 @@ class DSPViewModel: ObservableObject {
 
     func copyChannelParams(eqChannel: Int, name: String) {
         let filters = channelData[eqChannel] ?? []
-        if eqChannel >= 2 {
-            let outIdx = eqChannel - 2
+        if eqChannel >= chOut1 {
+            let outIdx = eqChannel - chOut1
             channelClipboard = ChannelClipboard(
                 filters: filters,
                 outputGainDB: outputGainDB[outIdx],
@@ -618,8 +664,8 @@ class DSPViewModel: ObservableObject {
         for i in cb.filters.count..<10 {
             setFilter(ch: eqChannel, band: i, p: FilterParams())
         }
-        if eqChannel >= 2 {
-            let outIdx = eqChannel - 2
+        if eqChannel >= chOut1 {
+            let outIdx = eqChannel - chOut1
             if let gain = cb.outputGainDB { setOutputGain(output: outIdx, db: gain) }
             if let delay = cb.outputDelayMS { setOutputDelay(output: outIdx, ms: delay) }
             if let muted = cb.outputMuted { setOutputMute(output: outIdx, muted: muted) }
@@ -630,17 +676,35 @@ class DSPViewModel: ObservableObject {
         return defaultChannelNames(for: platform, slotTypes: [0, 0, 0, 0])
     }
 
+    /// Default channel names for the V16 unified model: inputs first, then
+    /// outputs.  Matches firmware get_default_channel_name(): inputs are
+    /// "USB L"/"USB R" then "USB 3".."USB 8"; outputs are "<type> N L/R" with
+    /// the PDM sub last.  Returns one entry per channel for the platform.
     static func defaultChannelNames(for platform: String, slotTypes: [UInt8]) -> [String] {
         func slotName(_ slot: Int) -> String {
             slot < slotTypes.count && slotTypes[slot] == 1 ? "I2S" : "SPDIF"
         }
-        if platform == "RP2040" {
-            return ["USB L", "USB R", "\(slotName(0)) 1 L", "\(slotName(0)) 1 R",
-                    "\(slotName(1)) 2 L", "\(slotName(1)) 2 R", "PDM", "", "", "", ""]
-        } else {
-            return ["USB L", "USB R", "\(slotName(0)) 1 L", "\(slotName(0)) 1 R",
-                    "\(slotName(1)) 2 L", "\(slotName(1)) 2 R", "\(slotName(2)) 3 L", "\(slotName(2)) 3 R",
-                    "\(slotName(3)) 4 L", "\(slotName(3)) 4 R", "PDM"]
+        let inputCount = platform == "RP2040" ? BASE_MATRIX_INPUTS : MAX_MATRIX_INPUTS
+        let outputCount = platform == "RP2040" ? 5 : 9
+        var names: [String] = []
+        // Inputs 0..inputCount-1
+        for ch in 0..<inputCount {
+            switch ch {
+            case 0:  names.append("USB L")
+            case 1:  names.append("USB R")
+            default: names.append("USB \(ch + 1)")
+            }
         }
+        // Outputs: stereo S/PDIF (or I2S) pairs, PDM sub last.
+        for out in 0..<outputCount {
+            if out == outputCount - 1 {
+                names.append("PDM")
+            } else {
+                let slot = out / 2
+                let side = out % 2 == 0 ? "L" : "R"
+                names.append("\(slotName(slot)) \(slot + 1) \(side)")
+            }
+        }
+        return names
     }
 }

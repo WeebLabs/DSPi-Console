@@ -91,8 +91,9 @@ final class PresetSnapshotTests: XCTestCase {
     }
 
     func testCrossoverBandChangeIsDetected() {
-        let old = makeSnapshot(crossoverFilters: [2: [band(.lr4_lp, 1000)]])
-        let new = makeSnapshot(crossoverFilters: [2: [band(.lr4_lp, 1200)]])
+        // V16/RP2350: crossover is output-only; outputs start at channel 8 (chOut1).
+        let old = makeSnapshot(crossoverFilters: [8: [band(.lr4_lp, 1000)]])
+        let new = makeSnapshot(crossoverFilters: [8: [band(.lr4_lp, 1200)]])
         let diff = PresetSnapshot.diff(from: old, to: new, channelNames: names)
         XCTAssertTrue(diff.hasChanges, "a changed crossover frequency must be detected")
         XCTAssertTrue(diff.changes.contains { $0.category.contains("Crossover") },

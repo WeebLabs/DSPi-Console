@@ -4,7 +4,7 @@ import SwiftUI
 
 enum SidebarSelection: Hashable {
     case overview
-    case channel(Channel)
+    case input(Int)   // Input EQ channel index 0..chOut1-1
     case output(Int)  // Matrix output index 0-8
 }
 
@@ -251,43 +251,47 @@ struct ContentView: View {
             // SIDEBAR
             List {
                 Section(header: Text("INPUTS")) {
-                    ForEach(Channel.allCases.filter { !$0.isOutput }, id: \.self) { ch in
-                        // When Link L/R is on, both master rows show as
-                        // selected if either master is currently selected.
-                        // The right-pane still tracks the actually-clicked
-                        // channel (via `selection`) — only the visual
-                        // highlight is shared.
+                    // Show exactly the live active input count (2/4/6/8).  Each
+                    // input is a first-class EQ channel (index == channel index).
+                    ForEach(0..<vm.numMatrixInputs, id: \.self) { ch in
+                        // When Link L/R is on, both stereo input rows highlight
+                        // together if either is selected.  The right pane still
+                        // tracks the actually-clicked channel.
                         let rowSelected: Bool = {
-                            if selection == .channel(ch) { return true }
-                            if vm.preampLinked && (ch == .masterLeft || ch == .masterRight) {
-                                return selection == .channel(.masterLeft) || selection == .channel(.masterRight)
+                            if selection == .input(ch) { return true }
+                            if vm.preampLinked && ch < BASE_MATRIX_INPUTS {
+                                return selection == .input(0) || selection == .input(1)
                             }
                             return false
                         }()
-                        ChannelRow(channel: ch, isSelected: rowSelected,
-                                  name: vm.channelNames[ch.rawValue], meters: vm.meters,
-                                  isRenaming: renamingChannel == ch.rawValue,
+                        ChannelRow(channelIndex: ch,
+                                  color: MatrixInput.color(for: ch),
+                                  descriptor: "IN\(ch + 1)",
+                                  isSelected: rowSelected,
+                                  name: ch < vm.channelNames.count ? vm.channelNames[ch] : "USB \(ch + 1)",
+                                  meters: vm.meters,
+                                  isRenaming: renamingChannel == ch,
                                   renameText: $renameText,
                                   onCommitRename: { commitRename() })
-                            .onOptionClick { startRename(ch.rawValue) }
+                            .onOptionClick { startRename(ch) }
                             .onTapGesture {
                                 if renamingChannel != nil { commitRename() }
-                                if selection == .channel(ch) {
+                                if selection == .input(ch) {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
                                 } else {
-                                    selection = .channel(ch)
+                                    selection = .input(ch)
                                     vm.updateSelection(to: ch)
                                 }
                             }
                             .contextMenu {
-                                Button("Rename") { startRename(ch.rawValue) }
+                                Button("Rename") { startRename(ch) }
                                 Divider()
                                 Button("Copy Parameters") {
-                                    vm.copyChannelParams(eqChannel: ch.rawValue, name: vm.channelNames[ch.rawValue])
+                                    vm.copyChannelParams(eqChannel: ch, name: vm.channelNames[ch])
                                 }
                                 Button("Paste Parameters") {
-                                    vm.pasteChannelParams(eqChannel: ch.rawValue)
+                                    vm.pasteChannelParams(eqChannel: ch)
                                 }
                                 .disabled(vm.channelClipboard == nil)
                             }
@@ -296,14 +300,16 @@ struct ContentView: View {
 
                 Section(header: Text("OUTPUTS")) {
                     ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                        let eqCh = vm.eqChannel(forOutput: out.index)
                         OutputRow(output: out, isSelected: selection == .output(out.index),
-                                  name: vm.channelNames[out.index + 2],
+                                  name: vm.channelNames[eqCh],
                                   isMuted: vm.isOutputInactive(out.index),
                                   meters: vm.meters,
-                                  isRenaming: renamingChannel == out.index + 2,
+                                  isRenaming: renamingChannel == eqCh,
                                   renameText: $renameText,
-                                  onCommitRename: { commitRename() })
-                            .onOptionClick { startRename(out.index + 2) }
+                                  onCommitRename: { commitRename() },
+                                  chIdx: eqCh)
+                            .onOptionClick { startRename(eqCh) }
                             .onTapGesture {
                                 if renamingChannel != nil { commitRename() }
                                 if selection == .output(out.index) {
@@ -315,13 +321,13 @@ struct ContentView: View {
                                 }
                             }
                             .contextMenu {
-                                Button("Rename") { startRename(out.index + 2) }
+                                Button("Rename") { startRename(eqCh) }
                                 Divider()
                                 Button("Copy Parameters") {
-                                    vm.copyChannelParams(eqChannel: out.index + 2, name: vm.channelNames[out.index + 2])
+                                    vm.copyChannelParams(eqChannel: eqCh, name: vm.channelNames[eqCh])
                                 }
                                 Button("Paste Parameters") {
-                                    vm.pasteChannelParams(eqChannel: out.index + 2)
+                                    vm.pasteChannelParams(eqChannel: eqCh)
                                 }
                                 .disabled(vm.channelClipboard == nil)
                             }
@@ -695,38 +701,38 @@ struct ContentView: View {
                 // Right Panel Content (Dynamic)
                 VStack {
                     switch selection {
-                    case .channel(let channel):
-                        let masterCh = channel == .masterLeft ? 0 : 1
+                    case .input(let ch):
+                        // Link L/R mirrors edits only across the stereo pair (0/1).
+                        let mirrorLink = vm.preampLinked && ch < BASE_MATRIX_INPUTS
                         VStack(spacing: 16) {
                             InputChannelHeader(
-                                channel: masterCh,
+                                channel: ch,
                                 vm: vm,
-                                onClearMasterPEQ: { vm.clearAllMaster() }
+                                onClearMasterPEQ: {
+                                    if ch < BASE_MATRIX_INPUTS { vm.clearAllMaster() }
+                                    else { vm.clearChannelPEQ(ch) }
+                                }
                             )
                             .padding(.horizontal)
 
                             FilterListView(
-                                bands: vm.channelData[channel.rawValue] ?? [],
-                                channelId: channel.rawValue,
+                                bands: vm.channelData[ch] ?? [],
+                                channelId: ch,
                                 availableTypes: availableFilterTypes(vm: vm),
                                 bypassSupported: vm.firmwareSupportsBandBypass,
                                 onUpdate: { band, params in
-                                    vm.setFilter(ch: channel.rawValue, band: band, p: params)
-                                    // Link L/R mirrors PEQ edits across master channels.
-                                    // Only fan out for master L/R (channels 0/1); other
-                                    // channels never enter this branch since this case
-                                    // only handles .masterLeft/.masterRight.
-                                    if vm.preampLinked {
-                                        vm.setFilter(ch: 1 - masterCh, band: band, p: params)
+                                    vm.setFilter(ch: ch, band: band, p: params)
+                                    if mirrorLink {
+                                        vm.setFilter(ch: 1 - ch, band: band, p: params)
                                     }
                                 },
                                 onBypassToggle: { band, bypass in
-                                    vm.setBandBypass(ch: channel.rawValue, band: band, bypass: bypass)
-                                    if vm.preampLinked {
-                                        vm.setBandBypass(ch: 1 - masterCh, band: band, bypass: bypass)
+                                    vm.setBandBypass(ch: ch, band: band, bypass: bypass)
+                                    if mirrorLink {
+                                        vm.setBandBypass(ch: 1 - ch, band: band, bypass: bypass)
                                     }
                                 },
-                                onClear: nil  // moved to InputChannelHeader's "Clear Master PEQ"
+                                onClear: nil  // handled by InputChannelHeader's Clear button
                             )
                         }
 
@@ -857,7 +863,7 @@ struct OutputChannelDetail: View {
     let availableTypes: [FilterType]
     @State private var tab: OutputChannelTab = .peq
 
-    private var eqChannel: Int { outputIndex + 2 }
+    private var eqChannel: Int { vm.eqChannel(forOutput: outputIndex) }
     private var crossoverSupported: Bool { vm.firmwareSupportsCrossover }
 
     private var filterListTabs: [FilterListTab] {
