@@ -74,7 +74,8 @@ struct PresetSnapshot: Equatable {
     let mckMultiplier: Int
     let spdifRxPin: UInt8
     let inputSource: Int?  // nil when firmware doesn't support input switching
-    let i2sRxPin: UInt8?   // nil when firmware doesn't support I2S input (pre-V12)
+    let i2sRxPins: [UInt8]?    // per-pair I2S RX data pins; nil when unsupported (pre-V12)
+    let i2sInputChannels: Int? // active I2S input channel count (2/4/6/8); nil when unsupported
     let i2sInputRate: UInt32?  // selected I2S rate in Hz; nil when unsupported
     let lgSoundSyncEnabled: Bool?  // nil when firmware doesn't support LG Sound Sync
 }
@@ -317,8 +318,13 @@ extension PresetSnapshot {
             if old.spdifRxPin != new.spdifRxPin {
                 changes.append(.init(category: "S/PDIF", description: "S/PDIF RX pin: GPIO \(old.spdifRxPin) → GPIO \(new.spdifRxPin)"))
             }
-            if let oldPin = old.i2sRxPin, let newPin = new.i2sRxPin, oldPin != newPin {
-                changes.append(.init(category: "I2S Input", description: "I2S RX pin: GPIO \(oldPin) → GPIO \(newPin)"))
+            if let oldCount = old.i2sInputChannels, let newCount = new.i2sInputChannels, oldCount != newCount {
+                changes.append(.init(category: "I2S Input", description: "I2S input channels: \(oldCount) → \(newCount)"))
+            }
+            if let oldPins = old.i2sRxPins, let newPins = new.i2sRxPins {
+                for pair in 0..<min(oldPins.count, newPins.count) where oldPins[pair] != newPins[pair] {
+                    changes.append(.init(category: "I2S Input", description: "I2S RX pin (pair \(pair + 1)): GPIO \(oldPins[pair]) → GPIO \(newPins[pair])"))
+                }
             }
             if let oldRate = old.i2sInputRate, let newRate = new.i2sInputRate, oldRate != newRate {
                 changes.append(.init(category: "I2S Input", description: "I2S rate: \(oldRate) Hz → \(newRate) Hz"))

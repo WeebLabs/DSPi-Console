@@ -455,7 +455,8 @@ struct OutputConfigSnapshot: Equatable {
     var mckPin: UInt8
     var mckMultiplier: Int
     var spdifRxPin: UInt8
-    var i2sRxPin: UInt8
+    var i2sRxPins: [UInt8]
+    var i2sInputChannels: Int
     var i2sInputRateHz: UInt32
 }
 
@@ -499,7 +500,8 @@ final class SettingsSaveCoordinator: ObservableObject {
             mckPin: vm.mckPin,
             mckMultiplier: vm.mckMultiplier,
             spdifRxPin: vm.spdifRxPin,
-            i2sRxPin: vm.i2sRxPin,
+            i2sRxPins: vm.i2sRxPins,
+            i2sInputChannels: vm.i2sInputChannels,
             i2sInputRateHz: vm.i2sInputRateHz
         )
     }
@@ -600,7 +602,13 @@ final class SettingsSaveCoordinator: ObservableObject {
                 if vm.mckPin != base.mckPin { _ = vm.setMckPin(base.mckPin) }
                 if vm.mckMultiplier != base.mckMultiplier { _ = vm.setMckMultiplier(base.mckMultiplier) }
                 if vm.spdifRxPin != base.spdifRxPin { _ = vm.setSpdifRxPin(base.spdifRxPin) }
-                if vm.i2sRxPin != base.i2sRxPin { _ = vm.setI2SRxPin(base.i2sRxPin) }
+                // I2S input: restore the channel count first (lowering frees pairs
+                // and never fails), then each pair's data pin.
+                if vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
+                for pair in 0..<min(vm.i2sRxPins.count, base.i2sRxPins.count)
+                where vm.i2sRxPins[pair] != base.i2sRxPins[pair] {
+                    _ = vm.setI2SRxPin(pair: pair, base.i2sRxPins[pair])
+                }
                 if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
                 DispatchQueue.main.async { self.outputConfigDirty = false }
             }
@@ -1217,6 +1225,93 @@ struct HardwareSettingsTab: View {
         vm.pinInUseBy(pin, excluding: consumer)
     }
 
+    /// Apply an I2S input channel-count change (already on the main actor; the
+    /// SET itself runs off-thread).  A raise can be rejected if a newly-active
+    /// pair's pin clashes, or on a stereo-only part — surface the reason.
+    private func setI2SChannelCount(_ count: Int) {
+        // Captured before the SET so we know which pairs the raise newly
+        // activates (the firmware validates exactly those pins).
+        let oldCount = vm.i2sInputChannels
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setI2SInputChannels(count)
+            DispatchQueue.main.async {
+                switch status {
+                case PIN_CONFIG_SUCCESS:
+                    statusMessage = "I2S input set to \(count) channels (\(count / 2) pair\(count / 2 == 1 ? "" : "s"))"
+                    statusIsError = false
+                case PIN_CONFIG_PIN_IN_USE where count > oldCount:
+                    // The firmware only returns a status byte, so name the
+                    // offending pin(s)/owner(s) ourselves: pinInUseBy mirrors the
+                    // firmware's per-pair activation check.
+                    let conflicts = i2sRaiseConflicts(from: oldCount, to: count)
+                    if conflicts.isEmpty {
+                        statusMessage = "Can't switch to \(count) channels: a required data pin is already in use. Reassign the new pairs' pins, then try again."
+                    } else {
+                        statusMessage = "Can't switch to \(count) channels - "
+                            + conflicts.joined(separator: "; ")
+                            + ". Reassign \(conflicts.count == 1 ? "it" : "them"), then try again."
+                    }
+                    statusIsError = true
+                    vm.fetchI2SInputConfig()
+                default:
+                    handleI2SInputStatus(status, label: "channel count", gpio: nil)
+                }
+            }
+        }
+    }
+
+    /// For a raise from `oldCount` to `newCount` channels, return human-readable
+    /// "GPIO N (pair P) is used by <owner>" strings for each newly-activated pair
+    /// whose data pin clashes.  Mirrors the firmware's check_i2s_rx_pin so the
+    /// message matches what the device rejected.
+    private func i2sRaiseConflicts(from oldCount: Int, to newCount: Int) -> [String] {
+        let oldPairs = max(1, oldCount / 2)
+        let newPairs = newCount / 2
+        var out: [String] = []
+        for pair in oldPairs..<newPairs where vm.i2sRxPins.indices.contains(pair) {
+            let pin = vm.i2sRxPins[pair]
+            if let owner = vm.pinInUseBy(pin, excluding: .i2sRx(pair)) {
+                out.append("GPIO \(pin) (pair \(pair + 1)) is used by \(owner)")
+            }
+        }
+        return out
+    }
+
+    /// Map a PIN_CONFIG_* status from an I2S input SET into the shared status row,
+    /// and resync the UI from the device on any rejection (the device kept its
+    /// previous state, so a GET realigns our pickers).  Main-actor only.
+    private func handleI2SInputStatus(_ status: UInt8, label: String, gpio: UInt8?) {
+        switch status {
+        case PIN_CONFIG_SUCCESS:
+            statusMessage = gpio.map { "\(label) set to GPIO \($0)" } ?? "\(label) updated"
+            statusIsError = false
+        case PIN_CONFIG_PIN_IN_USE:
+            if let g = gpio, let owner = pinInUseBy(g, excluding: nil) {
+                statusMessage = "GPIO \(g) is already assigned to \(owner)"
+            } else {
+                statusMessage = "That pin is already in use"
+            }
+            statusIsError = true
+            vm.fetchI2SInputConfig()
+        case PIN_CONFIG_INVALID_PIN:
+            statusMessage = gpio.map { "GPIO \($0) isn't available on this device" } ?? "Invalid \(label)"
+            statusIsError = true
+            vm.fetchI2SInputConfig()
+        case PIN_CONFIG_INVALID_OUTPUT:
+            statusMessage = "Multichannel I2S isn't supported on this device"
+            statusIsError = true
+            vm.fetchI2SInputConfig()
+        case PIN_CONFIG_OUTPUT_ACTIVE:
+            statusMessage = "Can't change the bit clock while an I2S output is active"
+            statusIsError = true
+            vm.fetchI2SInputConfig()
+        default:
+            statusMessage = "Failed to set \(label)"
+            statusIsError = true
+            vm.fetchI2SInputConfig()
+        }
+    }
 
     private func setPinForOutput(_ outputIndex: Int, pin: UInt8) {
         guard vm.isDeviceConnected else {
@@ -1504,6 +1599,41 @@ struct HardwareSettingsTab: View {
                     }
                 }
 
+                // I2S input sample rate — DSPi is the rate authority in I2S
+                // input mode, so the source (ADC) follows.  Lives here with the
+                // other I2S clocking controls rather than on the input page.
+                if vm.i2sInputSupported {
+                    HStack {
+                        Image(systemName: "metronome")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Input Sample Rate")
+                                .font(.body)
+                            Text("Rate for I2S input; DSPi drives the clocks, so the source must follow.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.i2sInputRateHz },
+                            set: { newRate in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    vm.setInputRate(newRate)
+                                }
+                            }
+                        )) {
+                            ForEach(I2S_INPUT_RATES_HZ, id: \.self) { hz in
+                                Text("\(hz % 1000 == 0 ? "\(hz / 1000)" : String(format: "%.1f", Double(hz) / 1000)) kHz").tag(hz)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+
                 statusRow
             }
             }
@@ -1608,95 +1738,83 @@ struct HardwareSettingsTab: View {
             // MARK: I2S Input
             if section == .spdif && vm.i2sInputSupported {
                 Section {
-                    // Data pin
+                    // Channel count — 1..4 stereo pairs.  Multichannel (>2) is
+                    // RP2350-only; on a stereo-only part this shows a static "2".
                     HStack {
-                        Image(systemName: "arrow.down.to.line")
+                        Image(systemName: "rectangle.split.3x1")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
                             .frame(width: 16)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("RX Pin")
+                            Text("Input Channels")
                                 .font(.body)
-                            Text("GPIO data pin for incoming I2S signal")
+                            Text("\(vm.i2sActivePairs) stereo pair\(vm.i2sActivePairs == 1 ? "" : "s") of 24-bit audio, sample-aligned")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Picker("", selection: Binding(
-                            get: { vm.i2sRxPin },
-                            set: { newPin in
-                                SettingsSaveCoordinator.shared.beginOutputEdit()
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    let status = vm.setI2SRxPin(newPin)
-                                    DispatchQueue.main.async {
-                                        switch status {
-                                        case PIN_CONFIG_SUCCESS:
-                                            statusMessage = "I2S RX pin set to GPIO \(newPin)"
-                                            statusIsError = false
-                                        case PIN_CONFIG_PIN_IN_USE:
-                                            if let owner = pinInUseBy(newPin, excluding: .i2sRx) {
-                                                statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
-                                            } else {
-                                                statusMessage = "GPIO \(newPin) is already in use"
-                                            }
-                                            statusIsError = true
-                                            vm.fetchI2SInputConfig()
-                                        case PIN_CONFIG_INVALID_PIN:
-                                            statusMessage = "GPIO \(newPin) is not available on this platform"
-                                            statusIsError = true
-                                            vm.fetchI2SInputConfig()
-                                        default:
-                                            statusMessage = "Failed to set I2S RX pin"
-                                            statusIsError = true
-                                            vm.fetchI2SInputConfig()
+                        if vm.i2sMaxInputChannels <= 2 {
+                            Text("2")
+                                .font(.body.monospacedDigit())
+                                .foregroundColor(.secondary)
+                        } else {
+                            Picker("", selection: Binding(
+                                get: { vm.i2sInputChannels },
+                                set: { setI2SChannelCount($0) }
+                            )) {
+                                ForEach(Array(stride(from: 2, through: vm.i2sMaxInputChannels, by: 2)), id: \.self) { count in
+                                    Text("\(count)").tag(count)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .fixedSize()
+                        }
+                    }
+
+                    // One data-pin picker per active stereo pair.  Pair p carries
+                    // input channels 2p, 2p+1.
+                    ForEach(Array(0..<vm.i2sActivePairs), id: \.self) { pair in
+                        HStack {
+                            Image(systemName: "cable.connector")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Serial Data \(pair + 1)")
+                                    .font(.body)
+                                Text("GPIO data pin for input channels \(pair * 2 + 1)-\(pair * 2 + 2)")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : 0 },
+                                set: { newPin in
+                                    SettingsSaveCoordinator.shared.beginOutputEdit()
+                                    DispatchQueue.global(qos: .userInitiated).async {
+                                        let status = vm.setI2SRxPin(pair: pair, newPin)
+                                        DispatchQueue.main.async {
+                                            handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin)
                                         }
                                     }
                                 }
-                            }
-                        )) {
-                            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .i2sRx) == nil }, id: \.self) { pin in
-                                Text("GPIO \(pin)").tag(pin)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-
-                    // Sample rate (I2S only — the device is the clock master,
-                    // so it picks the rate and the source follows).
-                    HStack {
-                        Image(systemName: "metronome")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                            .frame(width: 16)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Sample Rate")
-                                .font(.body)
-                            Text("DSPi drives the clocks; the source must follow")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Picker("", selection: Binding(
-                            get: { vm.i2sInputRateHz },
-                            set: { newRate in
-                                SettingsSaveCoordinator.shared.beginOutputEdit()
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    vm.setInputRate(newRate)
+                            )) {
+                                let current = vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : UInt8(255)
+                                ForEach(Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .i2sRx(pair)) == nil }, id: \.self) { pin in
+                                    Text("GPIO \(pin)").tag(pin)
                                 }
                             }
-                        )) {
-                            ForEach(I2S_INPUT_RATES_HZ, id: \.self) { hz in
-                                Text("\(hz % 1000 == 0 ? "\(hz / 1000)" : String(format: "%.1f", Double(hz) / 1000)) kHz").tag(hz)
-                            }
+                            .labelsHidden()
+                            .fixedSize()
                         }
-                        .labelsHidden()
-                        .fixedSize()
                     }
                 } header: {
                     Label("I2S Input", systemImage: "waveform.path")
                 } footer: {
-                    Text("DSPi is the I2S clock master and drives BCK/LRCLK, so the connected I2S input device must be configured as a slave.")
+                    Text(vm.i2sMaxPairs > 1
+                         ? "Wire one ADC serial-data line per stereo pair to the GPIOs above; the shared bit clock and sample rate live in I2S Configuration. DSPi is the clock master and the pairs are sample-aligned. Save a preset to keep this wiring."
+                         : "Wire the ADC's serial-data line to the GPIO above. The bit clock and sample rate live in I2S Configuration; DSPi is the clock master, so the source must follow.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }

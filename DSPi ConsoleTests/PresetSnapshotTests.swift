@@ -65,7 +65,8 @@ final class PresetSnapshotTests: XCTestCase {
             mckMultiplier: 128,
             spdifRxPin: spdifRxPin,
             inputSource: nil,
-            i2sRxPin: nil,
+            i2sRxPins: nil,
+            i2sInputChannels: nil,
             i2sInputRate: nil,
             lgSoundSyncEnabled: nil
         )

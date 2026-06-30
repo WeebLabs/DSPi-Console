@@ -1222,19 +1222,57 @@ extension DSPViewModel {
     // MARK: - I2S Input Commands
 
     /// Probes I2S input support (firmware V12+).  REQ_GET_I2S_RX_PIN STALLs on
-    /// older firmware; on success we also read the selected input rate.
+    /// older firmware; on success we read every stereo pair's data pin, the
+    /// active channel count, the shared BCK pin, and the selected input rate.
     func fetchI2SInputConfig() {
         guard let data = usb.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: 0, index: 2, length: 1),
               data.count >= 1 else {
             DispatchQueue.main.async { self.i2sInputSupported = false }
             return
         }
-        let pin = data[0]
         DispatchQueue.main.async {
             self.i2sInputSupported = true
-            self.i2sRxPin = pin
+            self.i2sRxPins[0] = data[0]
         }
+        // Extra stereo pairs (RP2350).  Older/stereo firmware returns 0 for
+        // pairs it doesn't have; keep the default in that case.
+        for pair in 1..<I2S_RX_MAX_PAIRS_RP2350 {
+            if let d = usb.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: UInt16(pair), index: 2, length: 1),
+               d.count >= 1, d[0] != 0 {
+                let p = d[0]
+                DispatchQueue.main.async { self.i2sRxPins[pair] = p }
+            }
+        }
+        fetchI2SInputChannels()
         fetchInputRate()
+    }
+
+    /// Reads the active I2S input channel count (2/4/6/8).  STALLs on firmware
+    /// that predates multichannel I2S; leaves the default (2) in that case.
+    func fetchI2SInputChannels() {
+        guard let d = usb.getControlRequest(request: REQ_GET_I2S_INPUT_CHANNELS, value: 0, index: 2, length: 1),
+              d.count >= 1, d[0] != 0 else { return }
+        let count = Int(d[0])
+        DispatchQueue.main.async { self.i2sInputChannels = count }
+    }
+
+    /// Selects the active I2S input channel count (2/4/6/8 → 1..4 stereo pairs).
+    /// IN transfer returning a PIN_CONFIG_* status: a raise validates each newly
+    /// activated pair's data pin and is rejected (without changing state) on a
+    /// clash; RP2040 rejects anything but 2.  Part of the output-config block,
+    /// so callers should mark it dirty (beginOutputEdit).  On success the device
+    /// pushes NOTIFY_EVT_INPUT_FORMAT so the channel strips relayout.
+    @discardableResult
+    func setI2SInputChannels(_ count: Int) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_I2S_INPUT_CHANNELS, value: UInt16(count), index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.i2sInputChannels = count }
+            }
+            return status
+        }
+        return 0xFF
     }
 
     /// Reads {current pipeline Hz, selected I2S Hz} via REQ_GET_INPUT_RATE.
@@ -1262,21 +1300,27 @@ extension DSPViewModel {
         usb.sendControlRequest(request: REQ_SET_INPUT_RATE, value: 0, index: 2, data: payload)
     }
 
-    /// Sets the GPIO data pin used for the I2S receiver.  Single IN transfer:
-    /// wValue = pin.  Returns the firmware PIN_CONFIG_* status code.  Hot-swap
-    /// is supported (input restarts on the new pin if I2S is active).
+    /// Sets the GPIO data pin for an I2S RX stereo pair (0..3).  Single IN
+    /// transfer: wValue = (pair << 8) | gpio.  Returns the firmware PIN_CONFIG_*
+    /// status code.  Pair 0 hot-swaps when stereo; any higher pair (or a
+    /// multichannel config) restarts the input so every pair re-syncs.
     @discardableResult
-    func setI2SRxPin(_ pin: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_I2S_RX_PIN, value: UInt16(pin), index: 2, length: 1),
+    func setI2SRxPin(pair: Int = 0, _ pin: UInt8) -> UInt8 {
+        let wValue = UInt16((pair << 8) | Int(pin))
+        if let d = usb.getControlRequest(request: REQ_SET_I2S_RX_PIN, value: wValue, index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
-                DispatchQueue.main.async { self.i2sRxPin = pin }
+                DispatchQueue.main.async {
+                    if self.i2sRxPins.indices.contains(pair) { self.i2sRxPins[pair] = pin }
+                }
             }
             return status
         }
         return 0xFF
     }
+    // (The shared I2S BCK pin is set/read via setI2SBckPin/fetchI2SBckPin in the
+    // I2S output section above — BCK is shared between I2S input and output.)
 
     // MARK: - Bulk Parameter Transfer
 
@@ -1436,8 +1480,14 @@ extension DSPViewModel {
         // --- Input Config (offset 4712) ---
         let bulkInputSource = Int(data[BULK_INPUT_CONFIG_OFFSET])
         let bulkSpdifRxPin = data[BULK_INPUT_CONFIG_OFFSET + 1]
-        let bulkI2SRxPin = data[BULK_INPUT_CONFIG_OFFSET + 2]
+        let bulkI2SRxPin = data[BULK_INPUT_CONFIG_OFFSET + 2]   // pair 0
         let bulkI2SInputRateHz = i2sRateEnumToHz(data[BULK_INPUT_CONFIG_OFFSET + 3])
+        // V16+ multichannel I2S: count at +4 (0 = absent), pairs 1..3 at +5..+7
+        // (0 = unset → keep the live default).
+        let bulkI2SInputChannels = Int(data[BULK_INPUT_CONFIG_OFFSET + 4])
+        let bulkI2SRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 5],
+                                         data[BULK_INPUT_CONFIG_OFFSET + 6],
+                                         data[BULK_INPUT_CONFIG_OFFSET + 7]]
 
         // --- LG Sound Sync (offset 4728) — only `enabled` honoured on SET ---
         let bulkLgEnabled = data[BULK_LG_OFFSET] != 0
@@ -1524,7 +1574,11 @@ extension DSPViewModel {
             self.inputSourceSupported = true
             self.spdifRxPin = bulkSpdifRxPin
             self.i2sInputSupported = true
-            self.i2sRxPin = bulkI2SRxPin
+            self.i2sRxPins[0] = bulkI2SRxPin
+            for pair in 1..<min(4, self.i2sRxPins.count) where bulkI2SRxPinsExt[pair - 1] != 0 {
+                self.i2sRxPins[pair] = bulkI2SRxPinsExt[pair - 1]
+            }
+            if bulkI2SInputChannels != 0 { self.i2sInputChannels = bulkI2SInputChannels }
             self.i2sInputRateHz = bulkI2SInputRateHz
             self.userVolumeDB = bulkUserVolume
             self.lgSoundSyncEnabled = bulkLgEnabled
@@ -2033,19 +2087,36 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.i2s_rx_pin (V16 offset 4714, 1 byte) — fires when 0xF1
-        // succeeds, bulk apply changes it, or a preset load changes it.
+        // input_config.i2s_rx_pin (offset 4714, 1 byte) — pair 0 data pin.
+        // Fires when 0xF1 (pair 0) succeeds, bulk apply, or a preset load.
         if off == BULK_INPUT_CONFIG_OFFSET + 2 && sz == 1 && payload.count >= 1 {
             self.i2sInputSupported = true
-            self.i2sRxPin = payload[0]
+            self.i2sRxPins[0] = payload[0]
             return
         }
 
-        // input_config.i2s_input_rate (V16 offset 4715, 1 byte, enum 0/1/2) —
+        // input_config.i2s_input_rate (offset 4715, 1 byte, enum 0/1/2) —
         // fires when 0xED accepts a rate.
         if off == BULK_INPUT_CONFIG_OFFSET + 3 && sz == 1 && payload.count >= 1 {
             self.i2sInputSupported = true
             self.i2sInputRateHz = i2sRateEnumToHz(payload[0])
+            return
+        }
+
+        // input_config.i2s_input_channels (offset 4716, 1 byte: 2/4/6/8) —
+        // fires when 0xF3 changes the active I2S channel count.
+        if off == BULK_INPUT_CONFIG_OFFSET + 4 && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            self.i2sInputSupported = true
+            self.i2sInputChannels = Int(payload[0])
+            return
+        }
+
+        // input_config.i2s_rx_pin_ext[0..2] (offsets 4717..4719) — data pins for
+        // stereo pairs 1..3.  Fires when 0xF1 (pair >= 1) succeeds, bulk, preset.
+        if off >= BULK_INPUT_CONFIG_OFFSET + 5 && off <= BULK_INPUT_CONFIG_OFFSET + 7 && sz == 1 && payload.count >= 1 {
+            let pair = off - (BULK_INPUT_CONFIG_OFFSET + 5) + 1   // 1..3
+            self.i2sInputSupported = true
+            if self.i2sRxPins.indices.contains(pair) { self.i2sRxPins[pair] = payload[0] }
             return
         }
     }

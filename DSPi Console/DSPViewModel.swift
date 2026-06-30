@@ -12,7 +12,7 @@ enum PinConsumer: Equatable {
     case i2sBck         // also covers LRCLK (BCK + 1)
     case mck
     case spdifRx
-    case i2sRx          // I2S input data pin
+    case i2sRx(Int)     // I2S input data pin, per stereo pair (0..3)
     case dacMute
 }
 
@@ -139,10 +139,24 @@ class DSPViewModel: ObservableObject {
 
     // I2S input state (firmware wire format V12+).  `i2sInputSupported` is
     // false on older firmware that STALLs REQ_GET_I2S_RX_PIN (0xF2) or returns
-    // a pre-V12 bulk payload.  See i2s_input_spec.md.
+    // a pre-V12 bulk payload.  See i2s_multi_input.md.
     @Published var i2sInputSupported: Bool = false
-    @Published var i2sRxPin: UInt8 = I2S_RX_PIN_DEFAULT          // GPIO data pin for I2S RX
+    /// Active I2S input channel count: 2 / 4 / 6 / 8 (1..4 stereo pairs).
+    /// Multichannel (>2) is RP2350-only; RP2040 is stereo (always 2).
+    @Published var i2sInputChannels: Int = 2
+    /// Per-stereo-pair I2S RX data GPIO (pair 0..3).  Pair p carries input
+    /// channels 2p, 2p+1.  Pairs 1..3 are RP2350-only.
+    @Published var i2sRxPins: [UInt8] = I2S_RX_PIN_DEFAULTS
     @Published var i2sInputRateHz: UInt32 = 48000               // selected I2S input rate
+
+    /// Max I2S stereo pairs / channels for this platform (RP2350 = 4 pairs / 8 ch,
+    /// RP2040 = 1 pair / 2 ch).  Used to gate the multichannel I2S UI.
+    var i2sMaxPairs: Int { platformName == "RP2040" ? 1 : I2S_RX_MAX_PAIRS_RP2350 }
+    var i2sMaxInputChannels: Int { i2sMaxPairs * 2 }
+    /// True when the device can do multichannel (>2) I2S input.
+    var supportsMultichannelI2S: Bool { i2sInputSupported && platformName == "RP2350" }
+    /// Number of currently-active I2S stereo pairs (count / 2).
+    var i2sActivePairs: Int { max(1, i2sInputChannels / 2) }
 
     // LG Sound Sync — per-preset enable for LG TV optical-out volume decode.
     // `lgSoundSyncSupported` is set when V8+ bulk data is parsed or when an
@@ -322,7 +336,22 @@ class DSPViewModel: ObservableObject {
         }
         if consumer != .mck && pin == mckPin { return "I2S MCK" }
         if consumer != .spdifRx && inputSourceSupported && pin == spdifRxPin { return "S/PDIF RX" }
-        if consumer != .i2sRx && i2sInputSupported && pin == i2sRxPin { return "I2S RX" }
+        // I2S RX data pins.  Mirrors the firmware's two-tier rule:
+        //   - Assigning an I2S RX pin itself keeps ALL configured pair pins
+        //     mutually distinct (firmware i2s_rx_pair_pin_taken), so a pair can't
+        //     land on another pair's pin even if that pair is currently inactive.
+        //   - Every OTHER consumer (outputs, MCK, BCK, S/PDIF RX, DAC mute) only
+        //     sees the *active* pairs as reserved (firmware is_pin_in_use), so
+        //     inactive placeholder pins never lock GPIOs out of other functions
+        //     while in a lower channel mode.
+        if i2sInputSupported {
+            let assigningI2SRx: Bool
+            if case .some(.i2sRx) = consumer { assigningI2SRx = true } else { assigningI2SRx = false }
+            let pairsReserved = assigningI2SRx ? i2sMaxPairs : i2sActivePairs
+            for pair in 0..<min(pairsReserved, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
+                return i2sMaxPairs > 1 ? "I2S RX \(pair + 1)" : "I2S RX"
+            }
+        }
         if consumer != .dacMute,
            dacHwMuteConfig.enabled,
            dacHwMuteConfig.pin != DAC_HW_MUTE_PIN_NONE,
@@ -559,7 +588,8 @@ class DSPViewModel: ObservableObject {
             mckMultiplier: mckMultiplier,
             spdifRxPin: spdifRxPin,
             inputSource: inputSourceSupported ? inputSource : nil,
-            i2sRxPin: i2sInputSupported ? i2sRxPin : nil,
+            i2sRxPins: i2sInputSupported ? Array(i2sRxPins.prefix(i2sMaxPairs)) : nil,
+            i2sInputChannels: i2sInputSupported ? i2sInputChannels : nil,
             i2sInputRate: i2sInputSupported ? i2sInputRateHz : nil,
             lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil
         )
