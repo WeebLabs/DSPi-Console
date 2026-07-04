@@ -578,18 +578,23 @@ struct GraphLegend: View {
     }
 
     var body: some View {
-        // Wrap pills onto additional rows instead of stretching horizontally,
-        // so a high channel count never forces the graph pane (and window)
-        // wider.  FlowLayout reports a minimum width of only its widest pill.
-        FlowLayout(spacing: 8, lineSpacing: 6) {
+        // Inputs and outputs each get their own wrapping row group, so the two
+        // families read as distinct.  FlowLayout still wraps within a group and
+        // reports a minimum width of only its widest pill, so a high channel
+        // count never forces the graph pane (and window) wider.
+        VStack(alignment: .leading, spacing: 6) {
             // Active input channels
-            ForEach(Array(0..<vm.numMatrixInputs), id: \.self) { ch in
-                legendPill(eqCh: ch, name: "IN\(ch + 1)", color: MatrixInput.color(for: ch))
+            FlowLayout(spacing: 8, lineSpacing: 6) {
+                ForEach(Array(0..<vm.numMatrixInputs), id: \.self) { ch in
+                    legendPill(eqCh: ch, name: "IN\(ch + 1)", color: MatrixInput.color(for: ch))
+                }
             }
 
             // Enabled outputs (dynamic)
-            ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                legendPill(eqCh: vm.eqChannel(forOutput: out.index), name: out.descriptor, color: out.color)
+            FlowLayout(spacing: 8, lineSpacing: 6) {
+                ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                    legendPill(eqCh: vm.eqChannel(forOutput: out.index), name: out.descriptor, color: out.color)
+                }
             }
         }
         .padding(.top, 6)

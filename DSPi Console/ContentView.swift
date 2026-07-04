@@ -759,8 +759,17 @@ struct ContentView: View {
                         }
                     }
                 }
+                // Greedy: the detail area soaks up all vertical slack, so
+                // enlarging the graph above it shrinks this (scrollable) region
+                // rather than growing the column.
+                .frame(maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            // `idealHeight` pins the column's *reported* height to a constant,
+            // so dragging the graph resize handle (which changes graphHeight)
+            // no longer inflates the window - the extra graph height is taken
+            // from the detail area above.  The sidebar (the other split pane)
+            // is unaffected.  Still resizable between minHeight and maxHeight.
+            .frame(maxWidth: .infinity, minHeight: 500, idealHeight: 620, maxHeight: .infinity, alignment: .top)
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
             .onTapGesture {
                 if renamingChannel != nil { commitRename() }
