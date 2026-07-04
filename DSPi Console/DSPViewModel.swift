@@ -14,6 +14,8 @@ enum PinConsumer: Equatable {
     case spdifRx
     case i2sRx(Int)     // I2S input data pin, per stereo pair (0..3)
     case dacMute
+    case uartCtrl       // UART control interface (covers both TX and RX pins)
+    case i2cCtrl        // I2C control interface (covers both SDA and SCL pins)
 }
 
 // MARK: - DAC Hardware Mute Config
@@ -64,6 +66,111 @@ struct DacHwMuteConfig: Equatable {
             pin:       data[base + 2],
             holdMs:    UInt16(data[base + 4]) | (UInt16(data[base + 5]) << 8),
             releaseMs: UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
+        )
+    }
+}
+
+// MARK: - External Control Interface Configs
+//
+// 8-byte wire-format structs mirroring firmware `UartCtrlConfig` /
+// `I2cCtrlConfig` / `CtrlIfaceStatus` in control_interfaces_spec.md §2.1.
+// These configure the UART and I2C-target control transports that expose the
+// full vendor-command surface to an external microcontroller.  They are
+// device-level (stored in the preset directory, survive factory reset) and are
+// configured over USB only - the very transport being reconfigured can never
+// lock itself out.  All fields little-endian, packed, no padding.
+
+/// UART control interface configuration (8 bytes).  Framing is fixed 8N1;
+/// only the baud rate and the notify-enable flag are configurable.
+struct UartCtrlConfig: Equatable {
+    var enabled: Bool = false
+    var txPin: UInt8 = UART_CTRL_TX_PIN_DEFAULT   // pin % 4 == 0 (UARTx TX mux)
+    var rxPin: UInt8 = UART_CTRL_RX_PIN_DEFAULT   // pin % 4 == 1 (same instance RX)
+    var notifyEnable: Bool = false                // push type-0x40 notification frames
+    var baud: UInt32 = UART_CTRL_BAUD_DEFAULT     // 9600 .. 1000000
+
+    /// Serialize to the 8-byte wire layout.
+    func toData() -> Data {
+        var d = Data(count: 8)
+        d[0] = enabled ? 1 : 0
+        d[1] = txPin
+        d[2] = rxPin
+        d[3] = notifyEnable ? 1 : 0
+        d[4] = UInt8(baud & 0xFF)
+        d[5] = UInt8((baud >> 8) & 0xFF)
+        d[6] = UInt8((baud >> 16) & 0xFF)
+        d[7] = UInt8((baud >> 24) & 0xFF)
+        return d
+    }
+
+    /// Parse the 8-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> UartCtrlConfig? {
+        guard data.count >= 8 else { return nil }
+        let base = data.startIndex
+        return UartCtrlConfig(
+            enabled:      data[base + 0] != 0,
+            txPin:        data[base + 1],
+            rxPin:        data[base + 2],
+            notifyEnable: data[base + 3] != 0,
+            baud:         UInt32(data[base + 4])
+                        | (UInt32(data[base + 5]) << 8)
+                        | (UInt32(data[base + 6]) << 16)
+                        | (UInt32(data[base + 7]) << 24)
+        )
+    }
+}
+
+/// I2C-target control interface configuration (8 bytes).  Bus speed and
+/// clock-stretch behavior are controller-side properties and are not stored.
+struct I2cCtrlConfig: Equatable {
+    var enabled: Bool = false
+    var sdaPin: UInt8 = I2C_CTRL_SDA_PIN_DEFAULT   // even (I2Cx SDA mux)
+    var sclPin: UInt8 = I2C_CTRL_SCL_PIN_DEFAULT   // next odd GPIO (same instance SCL)
+    var address: UInt8 = I2C_CTRL_ADDR_DEFAULT     // 7-bit, 0x08 .. 0x77
+
+    /// Serialize to the 8-byte wire layout.  Reserved bytes are zero-filled.
+    func toData() -> Data {
+        var d = Data(count: 8)
+        d[0] = enabled ? 1 : 0
+        d[1] = sdaPin
+        d[2] = sclPin
+        d[3] = address
+        return d  // bytes 4-7 reserved (0)
+    }
+
+    /// Parse the 8-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> I2cCtrlConfig? {
+        guard data.count >= 8 else { return nil }
+        let base = data.startIndex
+        return I2cCtrlConfig(
+            enabled: data[base + 0] != 0,
+            sdaPin:  data[base + 1],
+            sclPin:  data[base + 2],
+            address: data[base + 3]
+        )
+    }
+}
+
+/// REQ_GET_CTRL_IFACE_STATUS response (8 bytes).  `*_lastStatus` is the
+/// PIN_CONFIG_* outcome of the most recent SET; `*_live` is 1 when the
+/// peripheral is actually up and listening (0 if a stored-but-enabled config's
+/// pins collide with the current output wiring at boot).
+struct CtrlIfaceStatus: Equatable {
+    var uartLastStatus: UInt8 = 0
+    var uartLive: Bool = false
+    var i2cLastStatus: UInt8 = 0
+    var i2cLive: Bool = false
+    var protoVersion: UInt8 = 0
+
+    static func fromData(_ data: Data) -> CtrlIfaceStatus? {
+        guard data.count >= 8 else { return nil }
+        let base = data.startIndex
+        return CtrlIfaceStatus(
+            uartLastStatus: data[base + 0],
+            uartLive:       data[base + 1] != 0,
+            i2cLastStatus:  data[base + 2],
+            i2cLive:        data[base + 3] != 0,
+            protoVersion:   data[base + 4]
         )
     }
 }
@@ -172,6 +279,16 @@ class DSPViewModel: ObservableObject {
     // to REQ_GET_DAC_HW_MUTE_CONFIG (V10+ wire format).
     @Published var dacHwMuteConfig: DacHwMuteConfig = DacHwMuteConfig()
     @Published var dacHwMuteSupported: Bool = false
+
+    // External control interfaces (UART / I2C target) - device-level config
+    // exposing the vendor-command surface to an external microcontroller.
+    // `controlInterfacesSupported` flips true when the firmware answers
+    // REQ_GET_CTRL_IFACE_STATUS (0xF9); older firmware STALLs and the Settings
+    // page hides itself.  See control_interfaces_spec.md.
+    @Published var uartCtrlConfig: UartCtrlConfig = UartCtrlConfig()
+    @Published var i2cCtrlConfig: I2cCtrlConfig = I2cCtrlConfig()
+    @Published var ctrlIfaceStatus: CtrlIfaceStatus = CtrlIfaceStatus()
+    @Published var controlInterfacesSupported: Bool = false
 
     // Preset state
     @Published var presetOccupied: UInt16 = 0
@@ -357,6 +474,17 @@ class DSPViewModel: ObservableObject {
            dacHwMuteConfig.pin != DAC_HW_MUTE_PIN_NONE,
            pin == dacHwMuteConfig.pin {
             return "DAC Mute"
+        }
+        // External control interfaces reserve their pins only while LIVE (a
+        // disabled interface, or one kept down by a boot pin-collision, holds
+        // no GPIOs) - mirrors the firmware's is_pin_in_use rule (spec §5.3).
+        if consumer != .uartCtrl, ctrlIfaceStatus.uartLive,
+           pin == uartCtrlConfig.txPin || pin == uartCtrlConfig.rxPin {
+            return "UART Control"
+        }
+        if consumer != .i2cCtrl, ctrlIfaceStatus.i2cLive,
+           pin == i2cCtrlConfig.sdaPin || pin == i2cCtrlConfig.sclPin {
+            return "I2C Control"
         }
         return nil
     }

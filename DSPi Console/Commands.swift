@@ -19,6 +19,7 @@ extension DSPViewModel {
         fetchUserVolume()
         fetchLgSoundSyncEnabled()
         fetchDacHwMuteConfig()
+        fetchControlInterfaces()
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -1321,6 +1322,85 @@ extension DSPViewModel {
     }
     // (The shared I2S BCK pin is set/read via setI2SBckPin/fetchI2SBckPin in the
     // I2S output section above — BCK is shared between I2S input and output.)
+
+    // MARK: - External Control Interfaces (UART / I2C target)
+
+    /// Probe the firmware for control-interface support and read the live UART/I2C
+    /// configs plus the interface status.  REQ_GET_CTRL_IFACE_STATUS (0xF9) STALLs
+    /// on firmware that predates this feature; if it returns nil,
+    /// `controlInterfacesSupported` stays false and the Settings page hides itself.
+    func fetchControlInterfaces() {
+        guard let s = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+              let status = CtrlIfaceStatus.fromData(s) else {
+            DispatchQueue.main.async { self.controlInterfacesSupported = false }
+            return
+        }
+        DispatchQueue.main.async {
+            self.controlInterfacesSupported = true
+            self.ctrlIfaceStatus = status
+        }
+        fetchUartCtrlConfig()
+        fetchI2cCtrlConfig()
+    }
+
+    /// Read the live 8-byte UART control-interface config.
+    func fetchUartCtrlConfig() {
+        guard let d = usb.getControlRequest(request: REQ_GET_UART_CONFIG, value: 0, index: 2, length: 8),
+              let cfg = UartCtrlConfig.fromData(d) else { return }
+        DispatchQueue.main.async { self.uartCtrlConfig = cfg }
+    }
+
+    /// Read the live 8-byte I2C control-interface config.
+    func fetchI2cCtrlConfig() {
+        guard let d = usb.getControlRequest(request: REQ_GET_I2C_CONFIG, value: 0, index: 2, length: 8),
+              let cfg = I2cCtrlConfig.fromData(d) else { return }
+        DispatchQueue.main.async { self.i2cCtrlConfig = cfg }
+    }
+
+    /// Read just the interface status (last-apply outcome + live flags).  Cheap
+    /// enough to poll after a SET to learn whether the peripheral came up.
+    func fetchCtrlIfaceStatus() {
+        guard let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+              let status = CtrlIfaceStatus.fromData(d) else { return }
+        DispatchQueue.main.async { self.ctrlIfaceStatus = status }
+    }
+
+    /// Apply and persist the UART control-interface config.  This is an OUT
+    /// transfer carrying the full 8-byte struct; the firmware validates + applies
+    /// it deferred on its main loop and (on success) writes flash, so the outcome
+    /// is not available synchronously.  We give the device time to run the deferred
+    /// apply, then read back the config and the PIN_CONFIG_* outcome from
+    /// REQ_GET_CTRL_IFACE_STATUS (0xF9) and return the UART last-status byte.
+    /// USB-only command; must be called off the main thread (it blocks).
+    @discardableResult
+    func setUartCtrlConfig(_ config: UartCtrlConfig) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_UART_CONFIG, value: 0, index: 2, data: config.toData())
+        // Deferred apply + ~45 ms flash blackout on the device; wait before reading.
+        Thread.sleep(forTimeInterval: 0.25)
+        fetchCtrlIfaceStatus()
+        fetchUartCtrlConfig()
+        if let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+           let status = CtrlIfaceStatus.fromData(d) {
+            return status.uartLastStatus
+        }
+        return 0xFF
+    }
+
+    /// Apply and persist the I2C target control-interface config.  Same deferred
+    /// OUT-then-readback flow as `setUartCtrlConfig`; returns the I2C last-status
+    /// byte from REQ_GET_CTRL_IFACE_STATUS.  USB-only; call off the main thread.
+    @discardableResult
+    func setI2cCtrlConfig(_ config: I2cCtrlConfig) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_I2C_CONFIG, value: 0, index: 2, data: config.toData())
+        Thread.sleep(forTimeInterval: 0.25)
+        fetchCtrlIfaceStatus()
+        fetchI2cCtrlConfig()
+        if let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+           let status = CtrlIfaceStatus.fromData(d) {
+            return status.i2cLastStatus
+        }
+        return 0xFF
+    }
 
     // MARK: - Bulk Parameter Transfer
 

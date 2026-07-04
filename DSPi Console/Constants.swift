@@ -83,6 +83,9 @@ let PIN_CONFIG_INVALID_PIN: UInt8    = 0x01
 let PIN_CONFIG_PIN_IN_USE: UInt8     = 0x02
 let PIN_CONFIG_INVALID_OUTPUT: UInt8 = 0x03
 let PIN_CONFIG_OUTPUT_ACTIVE: UInt8  = 0x04
+// A non-pin field is out of range (UART baud, I2C address).  Shared with the
+// control-interface SET commands (0xF5 / 0xF7); see control_interfaces_spec.md §2.3.
+let PIN_CONFIG_INVALID_PARAM: UInt8  = 0x05
 
 // Preset request codes (0x90-0x9A)
 let REQ_PRESET_SAVE: UInt8              = 0x90
@@ -270,6 +273,42 @@ let REQ_GET_LG_SOUND_SYNC_ENABLE: UInt8 = 0xE7
 let REQ_GET_LG_SOUND_SYNC_STATUS: UInt8 = 0xE8
 
 // Note: REQ_SET_SPDIF_RX_PIN (0xE4) reuses PIN_CONFIG_* status codes (0x00-0x04)
+
+// External control interface request codes (UART / I2C target).  See
+// Documentation/Features/control_interfaces_spec.md.  The two SET-config
+// commands are USB-only (rejected over UART/I2C); the GET-config and status
+// readbacks are available on every transport.  SET is an OUT transfer carrying
+// the 8-byte config; its PIN_CONFIG_* outcome is read back via the last-status
+// bytes of REQ_GET_CTRL_IFACE_STATUS (0xF9).
+let REQ_SET_UART_CONFIG: UInt8         = 0xF5   // OUT 8 bytes: UartCtrlConfig (USB only)
+let REQ_GET_UART_CONFIG: UInt8         = 0xF6   // IN 8 bytes: live UartCtrlConfig
+let REQ_SET_I2C_CONFIG: UInt8          = 0xF7   // OUT 8 bytes: I2cCtrlConfig (USB only)
+let REQ_GET_I2C_CONFIG: UInt8          = 0xF8   // IN 8 bytes: live I2cCtrlConfig
+let REQ_GET_CTRL_IFACE_STATUS: UInt8   = 0xF9   // IN 8 bytes: CtrlIfaceStatus
+
+// Control-interface defaults (control_interfaces_spec.md §2.2).  Both ship
+// disabled; these are the pin/baud/address values a fresh flash populates.
+let UART_CTRL_TX_PIN_DEFAULT: UInt8    = 16
+let UART_CTRL_RX_PIN_DEFAULT: UInt8    = 17
+let UART_CTRL_BAUD_DEFAULT: UInt32     = 115200
+let UART_CTRL_BAUD_MIN: UInt32         = 9600
+let UART_CTRL_BAUD_MAX: UInt32         = 1000000
+let I2C_CTRL_SDA_PIN_DEFAULT: UInt8    = 18
+let I2C_CTRL_SCL_PIN_DEFAULT: UInt8    = 19
+let I2C_CTRL_ADDR_DEFAULT: UInt8       = 0x42
+let I2C_CTRL_ADDR_MIN: UInt8           = 0x08
+let I2C_CTRL_ADDR_MAX: UInt8           = 0x77
+/// Current external wire-protocol version (CtrlIfaceStatus.proto_version).
+let CTRL_IFACE_PROTO_VERSION: UInt8    = 1
+/// A curated set of common UART baud rates to offer in the picker (all within
+/// the 9600..1000000 range the firmware accepts).
+let UART_CTRL_BAUD_CHOICES: [UInt32]   = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000]
+
+// Change-notification source tags for control commands arriving over the
+// external transports (control_interfaces_spec.md §2.5).  Mirrors PARAM_SRC_*
+// used by the notification endpoint.
+let PARAM_SRC_UART: UInt8              = 8
+let PARAM_SRC_I2C: UInt8               = 9
 
 // Firmware update request codes
 let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0

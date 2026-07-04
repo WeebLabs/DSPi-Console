@@ -66,7 +66,7 @@ class AppSettings: ObservableObject {
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case general, graphing, advanced
-    case globalParams, outputAssignment, i2sConfig, spdifInput
+    case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces
 
     var id: Self { self }
 
@@ -79,6 +79,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .outputAssignment: return "Outputs"
         case .i2sConfig:        return "I2S Configuration"
         case .spdifInput:       return "Inputs"
+        case .controlInterfaces: return "Control Interfaces"
         }
     }
 
@@ -91,6 +92,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .outputAssignment: return "cable.connector"
         case .i2sConfig:        return "waveform.path"
         case .spdifInput:       return "arrow.down.to.line"
+        case .controlInterfaces: return "cpu"
         }
     }
 
@@ -106,6 +108,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .outputAssignment: return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
         case .i2sConfig:        return Color(red: 0.16, green: 0.41, blue: 0.74)  // ocean blue
         case .spdifInput:       return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
+        case .controlInterfaces: return Color(red: 0.30, green: 0.44, blue: 0.66) // dusk blue
         }
     }
 
@@ -113,9 +116,10 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     /// that isn't applicable is hidden from the sidebar entirely.
     func isAvailable(_ vm: DSPViewModel) -> Bool {
         switch self {
-        case .i2sConfig:    return vm.platformName != "STM32H723"
-        case .spdifInput:   return vm.inputSourceSupported
-        default:            return true
+        case .i2sConfig:         return vm.platformName != "STM32H723"
+        case .spdifInput:        return vm.inputSourceSupported
+        case .controlInterfaces: return vm.controlInterfacesSupported
+        default:                 return true
         }
     }
 
@@ -123,7 +127,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     static let groups: [(title: String, items: [SettingsCategory])] = [
         ("Application", [.general, .advanced]),
         ("Display",     [.graphing]),
-        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .globalParams]),
+        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .controlInterfaces, .globalParams]),
     ]
 }
 
@@ -334,6 +338,7 @@ struct SettingsView: View {
         case .outputAssignment: HardwareSettingsTab(section: .outputs)
         case .i2sConfig:        HardwareSettingsTab(section: .i2s)
         case .spdifInput:       HardwareSettingsTab(section: .spdif)
+        case .controlInterfaces: ControlInterfacesSettingsTab()
         }
     }
 }
@@ -1090,6 +1095,382 @@ struct AdvancedSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Control Interfaces Settings Tab
+//
+// Configures the two external control transports (UART and I2C target) that
+// expose the full vendor-command surface to an external microcontroller
+// (ESP32/STM32/Arduino/SBC).  See control_interfaces_spec.md.
+//
+// Model notes:
+//   • Both interfaces ship disabled and are configured over USB ONLY - an
+//     external controller can read but never reconfigure the transport it is
+//     talking on, so this page is the one place these get set up.
+//   • A SET writes the full 8-byte config and (on success) persists to flash,
+//     applying deferred on the device's main loop.  We stage edits in a local
+//     draft and commit them with an explicit Apply, so a single flash write
+//     covers a whole enable+pins+baud change rather than one per control.
+//   • The firmware validates pins/baud/address at apply time and reports the
+//     outcome via REQ_GET_CTRL_IFACE_STATUS; we surface that inline.
+struct ControlInterfacesSettingsTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+
+    // Local, editable drafts seeded from the device's live configs.  "Dirty"
+    // (Apply enabled) means the draft differs from what the device holds.
+    @State private var uartDraft = UartCtrlConfig()
+    @State private var i2cDraft = I2cCtrlConfig()
+
+    @State private var uartStatus: (message: String, isError: Bool)?
+    @State private var i2cStatus: (message: String, isError: Bool)?
+    @State private var uartApplying = false
+    @State private var i2cApplying = false
+
+    private var uartDirty: Bool { uartDraft != vm.uartCtrlConfig }
+    private var i2cDirty: Bool { i2cDraft != vm.i2cCtrlConfig }
+
+    var body: some View {
+        Form {
+            uartSection
+            i2cSection
+
+            Section {
+                Text("Both control interfaces are configured over USB only - an external controller can read the configuration but can never reconfigure or disable the transport it is talking on, so it cannot lock itself out. Settings persist across reboots and survive a factory reset.\n\nUART TX/RX and I2C SDA/SCL must land on GPIOs that carry the matching peripheral mux function; the device validates this when you apply. Fit external pull-ups (2.2k - 4.7k) on the I2C bus.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } footer: {
+                if vm.ctrlIfaceStatus.protoVersion != 0 {
+                    Text("External control protocol version \(vm.ctrlIfaceStatus.protoVersion).")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            uartDraft = vm.uartCtrlConfig
+            i2cDraft = vm.i2cCtrlConfig
+            // Refresh live status/config in case another host changed it.
+            DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlInterfaces() }
+        }
+        // Re-seed when the device's live config changes and the user has no
+        // pending edits, so an external change doesn't get stranded off-screen.
+        .onReceive(vm.$uartCtrlConfig) { newCfg in
+            if !uartApplying && uartDraft == vm.uartCtrlConfig { uartDraft = newCfg }
+        }
+        .onReceive(vm.$i2cCtrlConfig) { newCfg in
+            if !i2cApplying && i2cDraft == vm.i2cCtrlConfig { i2cDraft = newCfg }
+        }
+    }
+
+    // MARK: UART section
+
+    @ViewBuilder
+    private var uartSection: some View {
+        Section {
+            Toggle(isOn: $uartDraft.enabled) {
+                interfaceHeaderLabel(
+                    title: "Enable UART",
+                    detail: "Asynchronous 3.3V serial link, fixed 8N1 framing.",
+                    live: vm.ctrlIfaceStatus.uartLive,
+                    configEnabled: vm.uartCtrlConfig.enabled)
+            }
+            .toggleStyle(.switch)
+
+            if uartDraft.enabled {
+                pinRow(title: "TX Pin",
+                       detail: "GPIO transmitting to the controller's RX.",
+                       icon: "arrow.up.right",
+                       selection: $uartDraft.txPin,
+                       candidates: uartTxPins())
+
+                pinRow(title: "RX Pin",
+                       detail: "GPIO receiving from the controller's TX.",
+                       icon: "arrow.down.left",
+                       selection: $uartDraft.rxPin,
+                       candidates: uartRxPins())
+
+                settingRow(title: "Baud Rate",
+                           detail: "9600 - 1000000. Must match the controller.",
+                           icon: "speedometer") {
+                    Picker("", selection: $uartDraft.baud) {
+                        ForEach(UART_CTRL_BAUD_CHOICES, id: \.self) { b in
+                            Text(baudLabel(b)).tag(b)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                Toggle(isOn: $uartDraft.notifyEnable) {
+                    settingLabel(title: "Push Notifications",
+                                 detail: "Stream live parameter/preset/format changes to the controller (type-0x40 frames) instead of polling.",
+                                 icon: "dot.radiowaves.left.and.right")
+                }
+                .toggleStyle(.switch)
+            }
+
+            applyRow(applying: uartApplying,
+                     dirty: uartDirty,
+                     status: uartStatus,
+                     apply: applyUart,
+                     revert: { uartDraft = vm.uartCtrlConfig; uartStatus = nil })
+        } header: {
+            Label("UART", systemImage: "cable.connector")
+        }
+    }
+
+    // MARK: I2C section
+
+    @ViewBuilder
+    private var i2cSection: some View {
+        Section {
+            Toggle(isOn: $i2cDraft.enabled) {
+                interfaceHeaderLabel(
+                    title: "Enable I2C Target",
+                    detail: "Device acts as an I2C slave; the controller is bus master. Poll-only (no async notifications).",
+                    live: vm.ctrlIfaceStatus.i2cLive,
+                    configEnabled: vm.i2cCtrlConfig.enabled)
+            }
+            .toggleStyle(.switch)
+
+            if i2cDraft.enabled {
+                pinRow(title: "SDA Pin",
+                       detail: "Serial data line (even GPIO).",
+                       icon: "arrow.left.arrow.right",
+                       selection: $i2cDraft.sdaPin,
+                       candidates: i2cSdaPins())
+
+                pinRow(title: "SCL Pin",
+                       detail: "Serial clock line (next odd GPIO, same instance).",
+                       icon: "clock",
+                       selection: $i2cDraft.sclPin,
+                       candidates: i2cSclPins())
+
+                settingRow(title: "Target Address",
+                           detail: "7-bit address, 0x08 - 0x77.",
+                           icon: "number") {
+                    HStack(spacing: 8) {
+                        Text(String(format: "0x%02X", i2cDraft.address))
+                            .font(.body.monospacedDigit())
+                            .frame(width: 44, alignment: .trailing)
+                        Stepper("", value: Binding(
+                            get: { Int(i2cDraft.address) },
+                            set: { i2cDraft.address = UInt8(clamping: $0) }
+                        ), in: Int(I2C_CTRL_ADDR_MIN)...Int(I2C_CTRL_ADDR_MAX))
+                        .labelsHidden()
+                    }
+                    .fixedSize()
+                }
+            }
+
+            applyRow(applying: i2cApplying,
+                     dirty: i2cDirty,
+                     status: i2cStatus,
+                     apply: applyI2c,
+                     revert: { i2cDraft = vm.i2cCtrlConfig; i2cStatus = nil })
+        } header: {
+            Label("I2C", systemImage: "cable.connector")
+        }
+    }
+
+    // MARK: Row helpers
+
+    /// The header row of an interface section: title, description, and a live
+    /// status pill (Active / Inactive / Disabled).  "Inactive" flags the
+    /// spec's boot-collision case - the stored config is enabled but the pins
+    /// clash with the current output wiring, so the peripheral never came up.
+    @ViewBuilder
+    private func interfaceHeaderLabel(title: String, detail: String, live: Bool, configEnabled: Bool) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.body)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if configEnabled && !live {
+                    Text("Enabled in flash but not running - its pins likely collide with the current output wiring. Reassign the conflicting pin or move this interface, then apply.")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+            Spacer()
+            statusPill(live: live, configEnabled: configEnabled)
+        }
+    }
+
+    @ViewBuilder
+    private func statusPill(live: Bool, configEnabled: Bool) -> some View {
+        let (text, color): (String, Color) =
+            live ? ("Active", .green)
+                 : (configEnabled ? ("Inactive", .orange) : ("Disabled", .secondary))
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.15)))
+    }
+
+    /// A left-aligned icon + title + caption label, matching the other
+    /// hardware pages.
+    @ViewBuilder
+    private func settingLabel(title: String, detail: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.body)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func settingRow<Control: View>(title: String, detail: String, icon: String,
+                                           @ViewBuilder control: () -> Control) -> some View {
+        HStack {
+            settingLabel(title: title, detail: detail, icon: icon)
+            Spacer()
+            control()
+        }
+    }
+
+    @ViewBuilder
+    private func pinRow(title: String, detail: String, icon: String,
+                        selection: Binding<UInt8>, candidates: [UInt8]) -> some View {
+        settingRow(title: title, detail: detail, icon: icon) {
+            Picker("", selection: selection) {
+                // Keep the current pin visible even if it's not in the free set.
+                if !candidates.contains(selection.wrappedValue) {
+                    Text("GPIO \(selection.wrappedValue)").tag(selection.wrappedValue)
+                }
+                ForEach(candidates, id: \.self) { pin in
+                    Text("GPIO \(pin)").tag(pin)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    /// The shared Apply / Revert control row plus inline status feedback.
+    @ViewBuilder
+    private func applyRow(applying: Bool, dirty: Bool,
+                          status: (message: String, isError: Bool)?,
+                          apply: @escaping () -> Void, revert: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            if let status = status, !dirty {
+                Image(systemName: status.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundColor(status.isError ? .orange : .green)
+                    .font(.caption)
+                Text(status.message)
+                    .font(.caption)
+                    .foregroundColor(status.isError ? .orange : .secondary)
+            } else if dirty {
+                Text("Unapplied changes")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            if applying {
+                ProgressView().controlSize(.small)
+            }
+            Button("Revert", action: revert)
+                .buttonStyle(.plain)
+                .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+                .disabled(!dirty || applying)
+            Button("Apply", action: apply)
+                .disabled(!dirty || applying || !vm.isDeviceConnected)
+        }
+    }
+
+    // MARK: Pin candidate sets
+    //
+    // Filter the platform's valid GPIOs to those carrying the required
+    // peripheral mux function (UART TX = pin % 4 == 0, RX = pin % 4 == 1;
+    // I2C SDA even, SCL odd) and not already claimed by another consumer.
+    // The device does the authoritative same-instance mux validation on apply.
+
+    private func uartTxPins() -> [UInt8] {
+        HardwareSettingsTab.validPins.filter { p in
+            p % 4 == 0 && p != uartDraft.rxPin &&
+            (p == uartDraft.txPin || vm.pinInUseBy(p, excluding: .uartCtrl) == nil)
+        }
+    }
+
+    private func uartRxPins() -> [UInt8] {
+        HardwareSettingsTab.validPins.filter { p in
+            p % 4 == 1 && p != uartDraft.txPin &&
+            (p == uartDraft.rxPin || vm.pinInUseBy(p, excluding: .uartCtrl) == nil)
+        }
+    }
+
+    private func i2cSdaPins() -> [UInt8] {
+        HardwareSettingsTab.validPins.filter { p in
+            p % 2 == 0 && p != i2cDraft.sclPin &&
+            (p == i2cDraft.sdaPin || vm.pinInUseBy(p, excluding: .i2cCtrl) == nil)
+        }
+    }
+
+    private func i2cSclPins() -> [UInt8] {
+        HardwareSettingsTab.validPins.filter { p in
+            p % 2 == 1 && p != i2cDraft.sdaPin &&
+            (p == i2cDraft.sclPin || vm.pinInUseBy(p, excluding: .i2cCtrl) == nil)
+        }
+    }
+
+    private func baudLabel(_ b: UInt32) -> String {
+        b >= 1000 && b % 1000 == 0 ? "\(b / 1000)k" : "\(b)"
+    }
+
+    // MARK: Apply
+
+    private func applyUart() {
+        let cfg = uartDraft
+        uartApplying = true
+        uartStatus = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setUartCtrlConfig(cfg)
+            DispatchQueue.main.async {
+                uartApplying = false
+                uartDraft = vm.uartCtrlConfig
+                uartStatus = statusMessage(status, iface: "UART")
+            }
+        }
+    }
+
+    private func applyI2c() {
+        let cfg = i2cDraft
+        i2cApplying = true
+        i2cStatus = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setI2cCtrlConfig(cfg)
+            DispatchQueue.main.async {
+                i2cApplying = false
+                i2cDraft = vm.i2cCtrlConfig
+                i2cStatus = statusMessage(status, iface: "I2C")
+            }
+        }
+    }
+
+    /// Map a PIN_CONFIG_* apply outcome into inline feedback.
+    private func statusMessage(_ status: UInt8, iface: String) -> (String, Bool) {
+        switch status {
+        case PIN_CONFIG_SUCCESS:        return ("\(iface) configuration applied and saved", false)
+        case PIN_CONFIG_INVALID_PIN:    return ("A pin is out of range or lacks the required \(iface) mux function", true)
+        case PIN_CONFIG_PIN_IN_USE:     return ("A pin is already claimed by another output or interface", true)
+        case PIN_CONFIG_INVALID_PARAM:
+            return (iface == "UART"
+                    ? "Baud rate is out of range (9600 - 1000000)"
+                    : "Address is out of range (0x08 - 0x77)", true)
+        default:                        return ("Failed to apply \(iface) configuration", true)
+        }
     }
 }
 
