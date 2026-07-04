@@ -578,7 +578,10 @@ struct GraphLegend: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        // Wrap pills onto additional rows instead of stretching horizontally,
+        // so a high channel count never forces the graph pane (and window)
+        // wider.  FlowLayout reports a minimum width of only its widest pill.
+        FlowLayout(spacing: 8, lineSpacing: 6) {
             // Active input channels
             ForEach(Array(0..<vm.numMatrixInputs), id: \.self) { ch in
                 legendPill(eqCh: ch, name: "IN\(ch + 1)", color: MatrixInput.color(for: ch))
@@ -591,5 +594,66 @@ struct GraphLegend: View {
         }
         .padding(.top, 6)
         .padding(.bottom, 2)
+    }
+}
+
+/// Simple wrapping flow layout: lays subviews left-to-right, wrapping to a new
+/// row when the proposed width is exceeded.  Reports a minimum width equal to
+/// its widest subview, so it never inflates the enclosing view's minimum size.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+
+        var rowWidth: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var totalHeight: CGFloat = 0
+        var maxRowWidth: CGFloat = 0
+
+        for size in sizes {
+            // Start a new row when this subview would overflow the current one.
+            if rowWidth > 0 && rowWidth + spacing + size.width > maxWidth {
+                totalHeight += rowHeight + lineSpacing
+                maxRowWidth = max(maxRowWidth, rowWidth)
+                rowWidth = size.width
+                rowHeight = size.height
+            } else {
+                rowWidth += (rowWidth > 0 ? spacing : 0) + size.width
+                rowHeight = max(rowHeight, size.height)
+            }
+        }
+        totalHeight += rowHeight
+        maxRowWidth = max(maxRowWidth, rowWidth)
+
+        // Report the actual used width (bounded by the proposal) so alignment
+        // in the parent stays tight rather than claiming the full proposal.
+        let width = maxWidth.isFinite ? min(maxRowWidth, maxWidth) : maxRowWidth
+        return CGSize(width: width, height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        let maxWidth = bounds.width
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for (index, subview) in subviews.enumerated() {
+            let size = sizes[index]
+            // Wrap to the next row on overflow.
+            if x > bounds.minX && x + size.width > bounds.minX + maxWidth {
+                x = bounds.minX
+                y += rowHeight + lineSpacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                          proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
     }
 }

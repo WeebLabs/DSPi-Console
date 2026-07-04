@@ -363,6 +363,8 @@ struct ChannelRow: View {
     @ObservedObject var meters: DSPMeterModel
     let isRenaming: Bool
     @Binding var renameText: String
+    /// Row height, tightened by the sidebar when input channels are crowded.
+    var rowHeight: CGFloat = 28
     let onCommitRename: () -> Void
     @FocusState private var isFocused: Bool
 
@@ -408,7 +410,7 @@ struct ChannelRow: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.trailing, 8)
         }
-        .frame(height: 28)
+        .frame(height: rowHeight)
         .contentShape(Rectangle())
         .background(isSelected ? Color.primary.opacity(0.05) : Color.clear)
         .onChange(of: isRenaming) { renaming in
@@ -432,6 +434,8 @@ struct OutputRow: View {
     @ObservedObject var meters: DSPMeterModel
     let isRenaming: Bool
     @Binding var renameText: String
+    /// Row height, tightened by the sidebar when input channels are crowded.
+    var rowHeight: CGFloat = 28
     let onCommitRename: () -> Void
     /// Unified EQ/channel index for this output (output index + chOut1).
     let chIdx: Int
@@ -480,7 +484,7 @@ struct OutputRow: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .padding(.trailing, 8)
         }
-        .frame(height: 28)
+        .frame(height: rowHeight)
         .contentShape(Rectangle())
         .background(isSelected ? Color.primary.opacity(0.05) : Color.clear)
         .onChange(of: isRenaming) { renaming in

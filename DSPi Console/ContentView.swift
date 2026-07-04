@@ -49,6 +49,17 @@ struct ContentView: View {
     @EnvironmentObject var levellerController: VolumeLevellerWindowController
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
+
+    /// At higher input-channel counts the sidebar gets crowded, so tighten
+    /// each row's height to keep all inputs plus outputs comfortably visible.
+    /// Graduated: a little tighter at 6-ch, tighter still at 8-ch.
+    private var sidebarRowHeight: CGFloat {
+        switch vm.numMatrixInputs {
+        case 8...: return 23
+        case 6...: return 27
+        default:   return 28
+        }
+    }
     @State private var renameText = ""
     @State private var showPresetRename = false
     @State private var presetRenameSlot = 0
@@ -272,6 +283,7 @@ struct ContentView: View {
                                   meters: vm.meters,
                                   isRenaming: renamingChannel == ch,
                                   renameText: $renameText,
+                                  rowHeight: sidebarRowHeight,
                                   onCommitRename: { commitRename() })
                             .onOptionClick { startRename(ch) }
                             .onTapGesture {
@@ -307,6 +319,7 @@ struct ContentView: View {
                                   meters: vm.meters,
                                   isRenaming: renamingChannel == eqCh,
                                   renameText: $renameText,
+                                  rowHeight: sidebarRowHeight,
                                   onCommitRename: { commitRename() },
                                   chIdx: eqCh)
                             .onOptionClick { startRename(eqCh) }
