@@ -39,6 +39,7 @@ private let NOTIFY_EVT_PARAM_CHANGED: UInt8 = 0x02
 private let NOTIFY_EVT_BULK_INVALIDATED: UInt8 = 0x03
 private let NOTIFY_EVT_PRESET_LOADED: UInt8 = 0x04
 private let NOTIFY_EVT_INPUT_FORMAT: UInt8 = 0x05
+private let NOTIFY_EVT_SIGGEN_STATE: UInt8 = 0x07
 
 // Source tags (from ParamSource enum in firmware notify.h)
 private func sourceLabel(_ src: UInt8) -> String {
@@ -142,6 +143,18 @@ struct InterruptEvent: Identifiable {
             // 8 bytes: [ver, evt, flags, seq, slot, 0, 0, 0]
             let slot = bytes.count > 4 ? bytes[4] : 0
             return "\(seqStr) v2.PresetLoaded                slot=\(slot)"
+
+        case NOTIFY_EVT_SIGGEN_STATE:
+            // 8 bytes: [ver, evt, flags, seq, state, reason, signal_type, channel]
+            guard bytes.count >= 8 else {
+                return "\(seqStr) v2.SiggenState (short: \(bytes.count) bytes)"
+            }
+            let states = ["IDLE", "FADE_IN", "RUN", "GAP", "FADE_OUT"]
+            let reasons = ["-", "HOST", "COMPLETED", "PRESET", "RECONFIG"]
+            let state = Int(bytes[4]) < states.count ? states[Int(bytes[4])] : "state=\(bytes[4])"
+            let reason = Int(bytes[5]) < reasons.count ? reasons[Int(bytes[5])] : "reason=\(bytes[5])"
+            let channel = bytes[7] == 0xFF ? "-" : "\(bytes[7])"
+            return "\(seqStr) v2.SiggenState                 \(state) reason=\(reason) type=\(bytes[6]) ch=\(channel)"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -426,6 +439,12 @@ class InterruptMonitor: ObservableObject {
     /// (2/4/6/8) so the UI can relayout immediately.
     var onInputFormatChanged: ((_ channels: Int) -> Void)?
 
+    /// Fires on the main thread for every siggen state push
+    /// (NOTIFY_EVT_SIGGEN_STATE: start, stop, completion, reconfigure).
+    /// Carries the SiggenState, SIGGEN_STOP_* reason, active/last signal
+    /// type, and the walk channel (0xFF when not walking).
+    var onSiggenState: ((_ state: UInt8, _ reason: UInt8, _ signalType: UInt8, _ channel: UInt8) -> Void)?
+
     private let usb: USBDevice
     private var interfacePtr: USBDevice.InterfaceInterfacePtr?
     private var pollThread: Thread?
@@ -575,6 +594,21 @@ class InterruptMonitor: ObservableObject {
             let channels = Int(bytes[4])
             DispatchQueue.main.async {
                 handler(channels)
+            }
+        }
+
+        // Dispatch siggen state pushes so the Test Signals window reacts
+        // (completion, preset-load stop, walk advance) without polling lag.
+        if let handler = onSiggenState,
+           bytes.count >= 8,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_SIGGEN_STATE {
+            let state = bytes[4]
+            let reason = bytes[5]
+            let signalType = bytes[6]
+            let channel = bytes[7]
+            DispatchQueue.main.async {
+                handler(state, reason, signalType, channel)
             }
         }
 

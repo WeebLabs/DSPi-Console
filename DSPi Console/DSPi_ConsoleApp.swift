@@ -1800,7 +1800,7 @@ struct ControlSurfacesSettingsTab: View {
                    icon: "slider.horizontal.3") {
             Picker("", selection: nounBinding(slot)) {
                 ForEach(validNouns(forType: Int(drafts[slot].type)), id: \.self) { n in
-                    Text(nounName(n)).tag(n)
+                    Text(nounName(n, forType: Int(drafts[slot].type))).tag(n)
                 }
             }
             .labelsHidden()
@@ -2362,7 +2362,10 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    private func nounName(_ noun: Int) -> String {
+    private func nounName(_ noun: Int, forType type: Int) -> String {
+        // Clip is dual-use: an LED shows the state ("Clipping"), while a
+        // button's whole job is the clearing ("Clear Clipping").
+        if noun == CS_NOUN_CLIP && type != CS_TYPE_LED { return "Clear Clipping" }
         switch noun {
         case CS_NOUN_USER_VOLUME:   return "Volume"
         case CS_NOUN_MASTER_VOLUME: return "Master Volume"
@@ -2372,7 +2375,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_LEVELLER:      return "Volume Leveller"
         case CS_NOUN_PRESET:        return "Preset"
         case CS_NOUN_INPUT_SOURCE:  return "Input Source"
-        case CS_NOUN_CLIP:          return "Clip Indicator"
+        case CS_NOUN_CLIP:          return "Clipping"
         default:                    return "Parameter \(noun)"
         }
     }
@@ -2395,7 +2398,7 @@ struct ControlSurfacesSettingsTab: View {
 
     /// One-line plain-language summary of the whole binding.
     private func verbPhrase(_ b: CsBinding) -> String {
-        let noun = nounName(Int(b.noun))
+        let noun = nounName(Int(b.noun), forType: Int(b.type))
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
         switch Int(b.action) {
         case CS_ACT_ADJUST:     return "Turn to set \(noun)."
@@ -2405,7 +2408,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_TOGGLE:     return "Press to toggle \(noun)."
         case CS_ACT_SET:        return "Press to set \(noun)."
         case CS_ACT_FOLLOW:     return "\(noun) follows the switch position."
-        case CS_ACT_TRIGGER:    return "Press to clear \(noun)."
+        // The noun name carries the verb for a trigger ("Clear Clipping").
+        case CS_ACT_TRIGGER:    return "Press to \(noun.lowercased())."
         case CS_ACT_IND_EQUALS: return "Lights to indicate \(noun)."
         default:                return ""
         }
@@ -4545,6 +4549,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
     @StateObject private var graphWindowController = GraphWindowController()
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
+    @StateObject private var testSignalsWindowController = TestSignalsWindowController()
     @ObservedObject private var vm = AppState.shared.viewModel
 
     var body: some Scene {
@@ -4694,6 +4699,11 @@ struct DSPi_ConsoleApp: App {
                     levellerWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("V", modifiers: [.command, .shift])
+
+                Button("Test Signals...") {
+                    testSignalsWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("G", modifiers: [.command, .shift])
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)

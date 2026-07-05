@@ -334,6 +334,10 @@ struct ContentView: View {
                                 }
                             }
                             .contextMenu {
+                                if vm.isDeviceConnected && vm.siggenSupported {
+                                    Button("Identify") { vm.identifyOutput(out.index) }
+                                    Divider()
+                                }
                                 Button("Rename") { startRename(eqCh) }
                                 Divider()
                                 Button("Copy Parameters") {

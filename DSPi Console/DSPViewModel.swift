@@ -333,6 +333,175 @@ struct CsStatusPacket: Equatable {
     }
 }
 
+// MARK: - Test Signal Generator Wire Structs
+//
+// Wire-format structs mirroring firmware `siggen.h`
+// (test_signals_spec.md §3).  All packed, little-endian; floats are IEEE-754
+// single precision.  The generator is transient: never persisted to flash,
+// stopped by preset load and factory reset.
+
+/// The 36-byte generator configuration - payload of REQ_SIGGEN_SET_CONFIG and
+/// response of REQ_SIGGEN_GET_CONFIG (spec §3.1).  p1..p4 are per-type
+/// parameters (spec §2); duration/repeat/gap depend on the timing model
+/// (spec §6).
+struct SiggenConfig: Equatable {
+    var version: UInt8 = SIGGEN_CFG_VERSION
+    var signalType: UInt8 = 0          // SiggenType 0..14
+    var channelMask: UInt16 = 0        // bit i = output i; clamped to valid outputs
+    var invertMask: UInt16 = 0         // polarity-inverted subset of channelMask
+    var flags: UInt8 = 0               // SIGGEN_FLAG_* bitmask
+    var levelDB: Float = -20.0         // peak level dBFS, -120..0
+    var durationMS: UInt32 = 0         // timing-model dependent
+    var repeatCount: UInt16 = 0        // timing-model dependent (0 = infinite)
+    var gapMS: UInt16 = 0              // inter-cycle silence
+    var p1: Float = 0
+    var p2: Float = 0
+    var p3: Float = 0
+    var p4: Float = 0
+
+    /// Serialize to the 36-byte wire layout.  Byte 7 is reserved (0).
+    func toData() -> Data {
+        var d = Data(count: 36)
+        d[0] = version
+        d[1] = signalType
+        func putU16(_ v: UInt16, _ off: Int) {
+            d[off] = UInt8(v & 0xFF)
+            d[off + 1] = UInt8((v >> 8) & 0xFF)
+        }
+        func putU32(_ v: UInt32, _ off: Int) {
+            for i in 0..<4 { d[off + i] = UInt8((v >> (8 * i)) & 0xFF) }
+        }
+        func putF32(_ v: Float, _ off: Int) { putU32(v.bitPattern, off) }
+        putU16(channelMask, 2)
+        putU16(invertMask, 4)
+        d[6] = flags
+        // 7 reserved (0)
+        putF32(levelDB, 8)
+        putU32(durationMS, 12)
+        putU16(repeatCount, 16)
+        putU16(gapMS, 18)
+        putF32(p1, 20)
+        putF32(p2, 24)
+        putF32(p3, 28)
+        putF32(p4, 32)
+        return d
+    }
+
+    /// Parse the 36-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> SiggenConfig? {
+        guard data.count >= 36 else { return nil }
+        let b = data.startIndex
+        func u16(_ off: Int) -> UInt16 {
+            UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8)
+        }
+        func u32(_ off: Int) -> UInt32 {
+            (0..<4).reduce(UInt32(0)) { $0 | (UInt32(data[b + off + $1]) << (8 * $1)) }
+        }
+        func f32(_ off: Int) -> Float { Float(bitPattern: u32(off)) }
+        return SiggenConfig(
+            version: data[b + 0], signalType: data[b + 1],
+            channelMask: u16(2), invertMask: u16(4), flags: data[b + 6],
+            levelDB: f32(8), durationMS: u32(12),
+            repeatCount: u16(16), gapMS: u16(18),
+            p1: f32(20), p2: f32(24), p3: f32(28), p4: f32(32))
+    }
+}
+
+/// REQ_SIGGEN_GET_STATUS response (16 bytes; spec §3.2).  `state` already
+/// folds in the fade overlay (FADE_IN / FADE_OUT).
+struct SiggenStatus: Equatable {
+    var version: UInt8 = SIGGEN_CFG_VERSION
+    var state: UInt8 = SIGGEN_STATE_IDLE
+    var signalType: UInt8 = 0          // active or last SiggenType
+    var activeChannel: UInt8 = 0xFF    // walk channel; 0xFF when not walking
+    var elapsedMS: UInt32 = 0
+    var cyclesDone: UInt16 = 0
+    var stopReason: UInt8 = SIGGEN_STOP_NONE
+    var currentFreq: Float = 0         // instantaneous sweep Hz; 0 when not sweeping
+
+    var isRunning: Bool { state != SIGGEN_STATE_IDLE }
+
+    static func fromData(_ data: Data) -> SiggenStatus? {
+        guard data.count >= 16 else { return nil }
+        let b = data.startIndex
+        func u32(_ off: Int) -> UInt32 {
+            (0..<4).reduce(UInt32(0)) { $0 | (UInt32(data[b + off + $1]) << (8 * $1)) }
+        }
+        return SiggenStatus(
+            version: data[b + 0], state: data[b + 1],
+            signalType: data[b + 2], activeChannel: data[b + 3],
+            elapsedMS: u32(4),
+            cyclesDone: UInt16(data[b + 8]) | (UInt16(data[b + 9]) << 8),
+            stopReason: data[b + 10],
+            currentFreq: Float(bitPattern: u32(12)))
+    }
+}
+
+/// Caps header returned by REQ_SIGGEN_GET_CAPS, wValue = 0xFFFF (8 bytes;
+/// spec §3.3).  `multitoneMax` and `outputChannels` are the two
+/// platform-dependent fields (RP2040: 5/8, RP2350: 9/16).
+struct SiggenCapsHeader: Equatable {
+    var version: UInt8 = 0
+    var typeCount: UInt8 = 0
+    var outputChannels: UInt8 = 0
+    var multitoneMax: UInt8 = 0
+    var validChannelMask: UInt16 = 0
+
+    static func fromData(_ data: Data) -> SiggenCapsHeader? {
+        guard data.count >= 8 else { return nil }
+        let b = data.startIndex
+        return SiggenCapsHeader(
+            version: data[b + 0], typeCount: data[b + 1],
+            outputChannels: data[b + 2], multitoneMax: data[b + 3],
+            validChannelMask: UInt16(data[b + 4]) | (UInt16(data[b + 5]) << 8))
+    }
+}
+
+/// One of the four per-parameter descriptors inside a SiggenTypeDesc
+/// (13 bytes each; spec §3.4).  Floats are unaligned on the wire.
+struct SiggenParamDesc: Equatable {
+    var semantic: UInt8 = SIGGEN_PARAM_UNUSED
+    var min: Float = 0
+    var max: Float = 0
+    var def: Float = 0
+
+    var isUsed: Bool { semantic != SIGGEN_PARAM_UNUSED }
+}
+
+/// Per-type descriptor returned by REQ_SIGGEN_GET_CAPS with wValue = type
+/// index (62 bytes; spec §3.4).  The authoritative source for parameter
+/// ranges and defaults - already reflects the running platform's
+/// multitone_max.
+struct SiggenTypeDesc: Equatable {
+    var id: UInt8 = 0
+    var name: String = ""              // NUL-padded 8-char short name on the wire
+    var timingModel: UInt8 = SIGGEN_TIMING_CONTINUOUS
+    var params: [SiggenParamDesc] = Array(repeating: SiggenParamDesc(), count: 4)
+
+    static func fromData(_ data: Data) -> SiggenTypeDesc? {
+        guard data.count >= 62 else { return nil }
+        let b = data.startIndex
+        func f32(_ off: Int) -> Float {
+            Float(bitPattern: (0..<4).reduce(UInt32(0)) {
+                $0 | (UInt32(data[b + off + $1]) << (8 * $1))
+            })
+        }
+        let nameBytes = data[(b + 1)..<(b + 9)].prefix { $0 != 0 }
+        var params: [SiggenParamDesc] = []
+        for i in 0..<4 {
+            let o = 10 + i * 13
+            params.append(SiggenParamDesc(
+                semantic: data[b + o],
+                min: f32(o + 1), max: f32(o + 5), def: f32(o + 9)))
+        }
+        return SiggenTypeDesc(
+            id: data[b + 0],
+            name: String(decoding: nameBytes, as: UTF8.self),
+            timingModel: data[b + 9],
+            params: params)
+    }
+}
+
 // MARK: - View Model
 
 class DSPViewModel: ObservableObject {
@@ -461,6 +630,27 @@ class DSPViewModel: ObservableObject {
     @Published var csNounDescs: [CsNounDesc] = []
     @Published var csBindings: [CsBinding] = Array(repeating: CsBinding(), count: CS_MAX_BINDINGS)
     @Published var csStatus: CsStatusPacket = CsStatusPacket()
+
+    // Test signal generator (siggen) - onboard measurement/diagnostic signals
+    // injected into the output mix buffers.  Transient only: never persisted,
+    // stopped by preset load / factory reset.  `siggenSupported` flips true
+    // when the firmware answers REQ_SIGGEN_GET_CAPS (0xA8); older firmware
+    // STALLs and the Tools window shows an unsupported notice.  `siggenDraft`
+    // is the host-side editing config (what Start sends); `siggenStatus` is
+    // the live engine state, refreshed by polling and by the
+    // NOTIFY_EVT_SIGGEN_STATE push.  See test_signals_spec.md.
+    @Published var siggenSupported: Bool = false
+    @Published var siggenCaps: SiggenCapsHeader = SiggenCapsHeader()
+    @Published var siggenTypeDescs: [SiggenTypeDesc] = []
+    @Published var siggenDraft: SiggenConfig = SiggenConfig(
+        signalType: SIGGEN_SINE, channelMask: 0x0003, p1: 1000)
+    @Published var siggenStatus: SiggenStatus = SiggenStatus()
+
+    /// Device-served parameter descriptor table for a type, or nil before the
+    /// caps fetch (the UI falls back to the spec §2 defaults table).
+    func siggenTypeDesc(for type: UInt8) -> SiggenTypeDesc? {
+        siggenTypeDescs.first { $0.id == type }
+    }
 
     // Preset state
     @Published var presetOccupied: UInt16 = 0
@@ -727,6 +917,19 @@ class DSPViewModel: ObservableObject {
             }
         }
 
+        // Siggen state pushes (start / stop / completion / reconfigure).
+        // The 8-byte event carries state+reason+type+channel; mirror those
+        // immediately for a snappy transport UI, then refresh the full
+        // status (elapsed / cycles / freq) off the main thread.
+        AppState.shared.interruptMonitor.onSiggenState = { [weak self] state, reason, signalType, channel in
+            guard let self = self else { return }
+            self.siggenStatus.state = state
+            self.siggenStatus.stopReason = reason
+            self.siggenStatus.signalType = signalType
+            self.siggenStatus.activeChannel = channel
+            self.pollQueue.async { self.fetchSiggenStatus() }
+        }
+
         // 1. Subscribe to USB connection changes AND Trigger Fetch
         usb.$isConnected
             .receive(on: RunLoop.main)
@@ -734,6 +937,7 @@ class DSPViewModel: ObservableObject {
                 self?.isDeviceConnected = connected
                 if !connected {
                     self?.savedSnapshot = nil
+                    self?.siggenStatus = SiggenStatus()
                     self?.presetOccupied = 0
                     self?.presetNames = Array(repeating: "", count: 10)
                     self?.activePresetSlot = 0

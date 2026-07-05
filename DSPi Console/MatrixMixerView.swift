@@ -308,6 +308,14 @@ struct MatrixMixerView: View {
                 .frame(width: columnWidth, height: 48)
                 .contentShape(Rectangle())
                 .contextMenu {
+                    if vm.isDeviceConnected && vm.siggenSupported {
+                        // Identify plays the ident tone on this output; a
+                        // matrix-disabled output would render silent, so gate
+                        // on enabled (spec §5.3 intersection rule).
+                        Button("Identify") { vm.identifyOutput(out.index) }
+                            .disabled(!vm.outputEnabled[out.index])
+                        Divider()
+                    }
                     Button("Rename") { startRename(out.index) }
                     Divider()
                     Button("Copy Parameters") {

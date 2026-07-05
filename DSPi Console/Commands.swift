@@ -21,6 +21,7 @@ extension DSPViewModel {
         fetchDacHwMuteConfig()
         fetchControlInterfaces()
         fetchControlSurfaces()
+        fetchSiggen()
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -1477,6 +1478,118 @@ extension DSPViewModel {
         fetchCsBinding(slot: slot)
         fetchCsStatus()
         return result
+    }
+
+    // MARK: - Test Signal Generator
+
+    /// Enumerate siggen capabilities + live state at connect.  The caps
+    /// header (REQ_SIGGEN_GET_CAPS, wValue=0xFFFF) doubles as the feature
+    /// probe: older firmware STALLs it and the Tools window shows its
+    /// unsupported notice.  On success we cache every per-type descriptor
+    /// (the authoritative parameter ranges/defaults, spec §3.4) plus the
+    /// applied config and status, and seed the editing draft.
+    func fetchSiggen() {
+        guard let h = usb.getControlRequest(request: REQ_SIGGEN_GET_CAPS, value: SIGGEN_CAPS_HEADER, index: 2, length: 8),
+              let caps = SiggenCapsHeader.fromData(h) else {
+            DispatchQueue.main.async { self.siggenSupported = false }
+            return
+        }
+        var descs: [SiggenTypeDesc] = []
+        for t in 0..<Int(caps.typeCount) {
+            guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_CAPS, value: UInt16(t), index: 2, length: 62),
+                  let desc = SiggenTypeDesc.fromData(d) else { continue }
+            descs.append(desc)
+        }
+        // The applied config: a zeroed struct (channelMask == 0) means
+        // nothing was ever staged - keep the local draft in that case.
+        let applied = usb.getControlRequest(request: REQ_SIGGEN_GET_CONFIG, value: 0, index: 2, length: 36)
+            .flatMap(SiggenConfig.fromData)
+        DispatchQueue.main.async {
+            self.siggenSupported = true
+            self.siggenCaps = caps
+            self.siggenTypeDescs = descs
+            if let cfg = applied, cfg.channelMask != 0 {
+                self.siggenDraft = cfg
+            } else {
+                // Clamp the default draft mask to this platform's outputs.
+                self.siggenDraft.channelMask &= caps.validChannelMask
+                if self.siggenDraft.channelMask == 0 { self.siggenDraft.channelMask = 1 }
+            }
+        }
+        fetchSiggenStatus()
+    }
+
+    /// Read the 16-byte live status (state, elapsed, cycles, sweep freq)
+    /// into `siggenStatus`.  Cheap enough to poll while running.
+    func fetchSiggenStatus() {
+        guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_STATUS, value: 0, index: 2, length: 16),
+              let st = SiggenStatus.fromData(d) else { return }
+        DispatchQueue.main.async { self.siggenStatus = st }
+    }
+
+    /// Stage a config (OUT, 36 bytes).  Never auto-starts; if the generator
+    /// is already running the firmware restarts it with a fade
+    /// (stop_reason = RECONFIG), which is what makes live editing safe.
+    func siggenSetConfig(_ cfg: SiggenConfig) {
+        usb.sendControlRequest(request: REQ_SIGGEN_SET_CONFIG, value: 0, index: 2, data: cfg.toData())
+    }
+
+    /// Issue a parameterless transport action (write-as-read: an IN transfer
+    /// carrying the action in wValue, acknowledged with one status byte).
+    /// Returns false on STALL (unknown action, or START with no staged
+    /// config).  Blocks; call off the main thread.
+    @discardableResult
+    func siggenControl(_ action: UInt16) -> Bool {
+        guard let d = usb.getControlRequest(request: REQ_SIGGEN_CONTROL, value: action, index: 2, length: 1),
+              d.first == 1 else { return false }
+        return true
+    }
+
+    /// Stage `cfg` and start (or restart) the generator, then refresh the
+    /// status.  The send is queued ahead of the control read on the USB
+    /// serial queue, so ordering is guaranteed.  Blocks; call off main.
+    func siggenStart(with cfg: SiggenConfig) {
+        siggenSetConfig(cfg)
+        siggenControl(SIGGEN_CTL_START)
+        fetchSiggenStatus()
+    }
+
+    /// Stop the generator (faded by default, hard stop when `immediate`),
+    /// then refresh the status.  Blocks; call off main.
+    func siggenStop(immediate: Bool = false) {
+        siggenControl(immediate ? SIGGEN_CTL_STOP_NOW : SIGGEN_CTL_STOP)
+        fetchSiggenStatus()
+    }
+
+    /// Play the channel-ID ident tone on a single output (matrix output index
+    /// 0..8) so a listener can physically locate it.  Stages a CHANNEL_ID
+    /// config masked to just that output and starts it: the firmware's walk
+    /// position latches to the lowest set mask bit, so it plays exactly
+    /// (index + 1) pentatonic blips at that channel's pitch (spec §2.2).  Two
+    /// passes then auto-complete to idle - brief but unmistakable.
+    ///
+    /// Transient, never persisted; leaves the Test Signals editing draft
+    /// untouched (a running user signal is restarted as the ident and resumes
+    /// only if the user restarts it).  No-op when the firmware has no
+    /// generator.  Dispatches the blocking USB work off the caller's thread,
+    /// so it is safe to invoke directly from a menu action on the main thread.
+    func identifyOutput(_ outputIndex: Int) {
+        guard siggenSupported, outputIndex >= 0, outputIndex < 16 else { return }
+        let bit = UInt16(1) << UInt16(outputIndex)
+        // Clamp to the platform's valid outputs (caps mask is authoritative);
+        // fall back to the raw bit before the first caps fetch.
+        let validMask = siggenCaps.validChannelMask != 0 ? siggenCaps.validChannelMask : bit
+        let mask = bit & validMask
+        guard mask != 0 else { return }
+        let cfg = SiggenConfig(
+            signalType: SIGGEN_CHANNEL_ID,
+            channelMask: mask,
+            levelDB: -12.0,        // spec §13.4 ident level; trim/volume still apply
+            repeatCount: 2,        // two passes over the single channel, then idle
+            p1: 120.0)             // 120 ms blips (CHANNEL_ID default)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.siggenStart(with: cfg)
+        }
     }
 
     // MARK: - Bulk Parameter Transfer

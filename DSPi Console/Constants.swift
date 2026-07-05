@@ -402,6 +402,80 @@ func csDbToQ8(_ db: Float) -> Int16 {
 /// Inverse of `csDbToQ8`.
 func csQ8ToDb(_ q8: Int16) -> Float { Float(q8) / 256.0 }
 
+// Test signal generator ("siggen") request codes (0xA4-0xA8; 0xA9-0xAF
+// reserved).  See Documentation/Features/test_signals_spec.md.  Transient
+// only: never persisted, stopped by preset load / factory reset.  SET_CONFIG
+// is an OUT transfer carrying the 36-byte SiggenConfig (never auto-starts;
+// restarts with a fade if already running); CONTROL is write-as-read (an IN
+// transfer carrying the action in wValue, returning 1 status byte).
+let REQ_SIGGEN_SET_CONFIG: UInt8 = 0xA4   // OUT 36 bytes: SiggenConfig
+let REQ_SIGGEN_GET_CONFIG: UInt8 = 0xA5   // IN 36 bytes: applied SiggenConfig
+let REQ_SIGGEN_CONTROL: UInt8    = 0xA6   // IN 1 byte: wValue = SIGGEN_CTL_*
+let REQ_SIGGEN_GET_STATUS: UInt8 = 0xA7   // IN 16 bytes: SiggenStatus
+let REQ_SIGGEN_GET_CAPS: UInt8   = 0xA8   // IN: wValue=0xFFFF header, else SiggenTypeDesc
+
+let SIGGEN_CFG_VERSION: UInt8 = 1
+let SIGGEN_CAPS_HEADER: UInt16 = 0xFFFF   // wValue selecting the caps header
+
+// SiggenConfig.flags bitmask (spec §5).
+let SIGGEN_FLAG_RAW: UInt8    = 0x01   // bypass per-channel crossover + PEQ
+let SIGGEN_FLAG_DECORR: UInt8 = 0x02   // independent noise per channel (WHITE/PINK)
+let SIGGEN_FLAG_WALK: UInt8   = 0x04   // play masked channels one at a time
+
+// REQ_SIGGEN_CONTROL actions (wValue).
+let SIGGEN_CTL_STOP: UInt16     = 0    // fade out, then idle
+let SIGGEN_CTL_START: UInt16    = 1    // (re)start with the applied config
+let SIGGEN_CTL_STOP_NOW: UInt16 = 2    // immediate hard stop, no fade
+
+// SiggenStatus.state / NOTIFY_EVT_SIGGEN_STATE state byte.
+let SIGGEN_STATE_IDLE: UInt8     = 0
+let SIGGEN_STATE_FADE_IN: UInt8  = 1
+let SIGGEN_STATE_RUN: UInt8      = 2
+let SIGGEN_STATE_GAP: UInt8      = 3
+let SIGGEN_STATE_FADE_OUT: UInt8 = 4
+
+// SiggenStatus.stopReason / notification reason byte.
+let SIGGEN_STOP_NONE: UInt8      = 0
+let SIGGEN_STOP_HOST: UInt8      = 1
+let SIGGEN_STOP_COMPLETED: UInt8 = 2
+let SIGGEN_STOP_PRESET: UInt8    = 3
+let SIGGEN_STOP_RECONFIG: UInt8  = 4
+
+// SiggenTypeDesc.timingModel (spec §6): how duration/repeat/gap are read.
+let SIGGEN_TIMING_CONTINUOUS: UInt8 = 0
+let SIGGEN_TIMING_SWEEP: UInt8      = 1
+let SIGGEN_TIMING_PATTERN: UInt8    = 2
+
+// SiggenParamDesc.semantic: what each of p1..p4 means for a type.
+let SIGGEN_PARAM_UNUSED: UInt8  = 0
+let SIGGEN_PARAM_FREQ_HZ: UInt8 = 1
+let SIGGEN_PARAM_MS: UInt8      = 2
+let SIGGEN_PARAM_CYCLES: UInt8  = 3
+let SIGGEN_PARAM_COUNT: UInt8   = 4
+let SIGGEN_PARAM_RATIO: UInt8   = 5
+let SIGGEN_PARAM_PATTERN: UInt8 = 6
+
+// SiggenType ids (spec §2).  The catalogue is device-served via GET_CAPS;
+// these ids are only used for type-specific UI (labels, glyphs, presets).
+let SIGGEN_SINE: UInt8       = 0
+let SIGGEN_SQUARE: UInt8     = 1
+let SIGGEN_WHITE: UInt8      = 2
+let SIGGEN_PINK: UInt8       = 3
+let SIGGEN_SWEEP_LOG: UInt8  = 4
+let SIGGEN_SWEEP_LIN: UInt8  = 5
+let SIGGEN_SWEEP_STEP: UInt8 = 6
+let SIGGEN_IMPULSE: UInt8    = 7
+let SIGGEN_CLICKS_ALT: UInt8 = 8
+let SIGGEN_POLARITY: UInt8   = 9
+let SIGGEN_TONE_BURST: UInt8 = 10
+let SIGGEN_TONE_PAIR: UInt8  = 11
+let SIGGEN_MULTITONE: UInt8  = 12
+let SIGGEN_ISP: UInt8        = 13
+let SIGGEN_CHANNEL_ID: UInt8 = 14
+
+let SIGGEN_LEVEL_MIN_DB: Float = -120.0
+let SIGGEN_LEVEL_MAX_DB: Float = 0.0
+
 // Firmware update request codes
 let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0
 
