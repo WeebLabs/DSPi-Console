@@ -310,6 +310,98 @@ let UART_CTRL_BAUD_CHOICES: [UInt32]   = [9600, 19200, 38400, 57600, 115200, 230
 let PARAM_SRC_UART: UInt8              = 8
 let PARAM_SRC_I2C: UInt8               = 9
 
+// Control Surfaces (user-wired physical controls and indicators).  See
+// Documentation/Features/control_surfaces_spec.md.  Buttons, toggle switches,
+// potentiometers, rotary encoders, and indicator LEDs on spare GPIOs, each
+// bound to one firmware parameter.  Config is device-global (stored in the
+// preset directory, survives factory reset), configured over USB.  SET is
+// deferred: the outcome is polled back via REQ_GET_CS_STATUS.
+
+// Change-notification source tag for parameter changes a physical control
+// makes (spec §7.3); mirrors the firmware ParamSource enum.
+let PARAM_SRC_GPIO: UInt8              = 5
+
+// Request codes (0x84-0x87).
+let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 16 bytes: CsBinding, wValue = slot (0-7)
+let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 16 bytes: live CsBinding, wValue = slot
+let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 28-byte header+types; wValue=noun -> 8-byte CsNounDesc
+let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN 12 bytes: CsStatusPacket
+
+// Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
+// above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
+let CS_STATUS_INVALID_SLOT: UInt8   = 0x10   // slot index >= 8
+let CS_STATUS_INVALID_TYPE: UInt8   = 0x11   // type >= CS_TYPE_COUNT
+let CS_STATUS_INVALID_NOUN: UInt8   = 0x12   // noun >= CS_NOUN_COUNT
+let CS_STATUS_INVALID_ACTION: UInt8 = 0x13   // action not allowed for this type+noun
+let CS_STATUS_INVALID_VALUE: UInt8  = 0x14   // value/step/range out of bounds, or unknown flags bits
+let CS_STATUS_PIN_NOT_ADC: UInt8    = 0x15   // a pot on a non-ADC GPIO
+let CS_STATUS_PENDING: UInt8        = 0x16   // SET accepted, main-loop apply not yet run (poll again)
+
+// Limits / sentinels (spec §2).
+let CS_MAX_BINDINGS: Int      = 8
+let CS_GPIO_UNUSED: UInt8     = 0xFF
+let CS_CONFIG_VERSION: UInt8  = 1
+let CS_CAPS_ALL: UInt16       = 0xFFFF   // wValue selecting the caps header + type table
+/// ADC-capable GPIOs (ADC0..2 on both platforms) - the only pins a
+/// potentiometer may occupy.  GPIO 29 (VSYS/3 monitor) is excluded.
+let CS_ADC_PINS: [UInt8]      = [26, 27, 28]
+
+// CsType (component wired up).  Append-only; index into the caps type table.
+let CS_TYPE_NONE: Int    = 0
+let CS_TYPE_BUTTON: Int  = 1
+let CS_TYPE_SWITCH: Int  = 2
+let CS_TYPE_POT: Int     = 3
+let CS_TYPE_ENCODER: Int = 4
+let CS_TYPE_LED: Int     = 5
+
+// CsNoun (firmware parameter driven or shown).
+let CS_NOUN_USER_VOLUME: Int   = 0
+let CS_NOUN_MASTER_VOLUME: Int = 1
+let CS_NOUN_USER_MUTE: Int     = 2
+let CS_NOUN_LOUDNESS: Int      = 3
+let CS_NOUN_CROSSFEED: Int     = 4
+let CS_NOUN_LEVELLER: Int      = 5
+let CS_NOUN_PRESET: Int        = 6
+let CS_NOUN_INPUT_SOURCE: Int  = 7
+let CS_NOUN_CLIP: Int          = 8
+
+// CsAction (operation applied).  Action bit position in the caps masks is
+// (1 << action); CS_ACT_BIT(a) below builds that mask.
+let CS_ACT_ADJUST: Int     = 0   // pot: absolute position maps onto a value range
+let CS_ACT_STEP: Int       = 1   // encoder: +/- step per detent (enum: next/prev)
+let CS_ACT_INC: Int        = 2   // button: + step per press (enum: next)
+let CS_ACT_DEC: Int        = 3   // button: - step per press (enum: previous)
+let CS_ACT_TOGGLE: Int     = 4   // button: invert a bool per press
+let CS_ACT_SET: Int        = 5   // button: set the noun to `value` per press
+let CS_ACT_FOLLOW: Int     = 6   // switch: bool tracks the switch position
+let CS_ACT_TRIGGER: Int    = 7   // button: fire the noun's command (e.g. clip clear)
+let CS_ACT_IND_EQUALS: Int = 8   // LED: lit while noun value == `value`
+
+/// Action-bit mask helper: `CS_ACT_BIT(CS_ACT_STEP)` == 0x0002.
+func CS_ACT_BIT(_ action: Int) -> UInt16 { UInt16(1) << UInt16(action) }
+
+// CsBinding.flags bitfield (spec §6).
+let CS_FLAG_INVERT: UInt8  = 0x01   // input active-high w/ pull-down; LED active-low
+let CS_FLAG_REVERSE: UInt8 = 0x02   // pot / encoder: invert direction
+let CS_FLAG_WRAP: UInt8    = 0x04   // enum STEP/INC/DEC wraps around the ends
+
+// CsNounDesc.kind values.
+let CS_KIND_CONTINUOUS: UInt8 = 0   // float dB, 8.8 fixed point on the wire
+let CS_KIND_BOOL: UInt8       = 1
+let CS_KIND_ENUM: UInt8       = 2
+
+// CsTypeDesc.pin_class values.
+let CS_PINCLASS_ANY: UInt8 = 0
+let CS_PINCLASS_ADC: UInt8 = 1      // GPIO 26..28
+
+/// Continuous (dB) operands are signed 8.8 fixed point: 1.0 dB = 256.
+func csDbToQ8(_ db: Float) -> Int16 {
+    let v = (db * 256.0).rounded()
+    return Int16(max(Float(Int16.min), min(Float(Int16.max), v)))
+}
+/// Inverse of `csDbToQ8`.
+func csQ8ToDb(_ q8: Int16) -> Float { Float(q8) / 256.0 }
+
 // Firmware update request codes
 let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0
 

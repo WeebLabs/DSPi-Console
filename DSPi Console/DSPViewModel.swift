@@ -16,6 +16,7 @@ enum PinConsumer: Equatable {
     case dacMute
     case uartCtrl       // UART control interface (covers both TX and RX pins)
     case i2cCtrl        // I2C control interface (covers both SDA and SCL pins)
+    case controlSurface(Int)  // one Control Surfaces binding slot (covers both its GPIOs)
 }
 
 // MARK: - DAC Hardware Mute Config
@@ -175,6 +176,163 @@ struct CtrlIfaceStatus: Equatable {
     }
 }
 
+// MARK: - Control Surfaces
+//
+// Wire-format structs mirroring firmware `control_surfaces.h`
+// (control_surfaces_spec.md §2).  All packed, little-endian, no padding.  A
+// binding attaches one physical component (CsType) to one firmware parameter
+// (CsNoun) through one operation (CsAction) on one or two GPIOs.  The config
+// is device-global (stored in the preset directory; survives factory reset).
+
+/// One user-wired control binding (16 bytes).  The same bytes appear on the
+/// wire (REQ_SET/GET_CS_BINDING) and in flash.  Continuous (dB) operands use
+/// signed 8.8 fixed point (1.0 dB = 256); bool/enum operands are plain ints.
+struct CsBinding: Equatable {
+    var type: UInt8 = 0                 // CsType; 0 (CS_TYPE_NONE) = slot cleared
+    var noun: UInt8 = 0                 // CsNoun
+    var action: UInt8 = 0              // CsAction
+    var flags: UInt8 = 0              // CS_FLAG_* bitfield
+    var gpio0: UInt8 = 0             // primary GPIO
+    // Second GPIO (encoders); CS_GPIO_UNUSED (0xFF) for a configured single-pin
+    // component.  The default is 0 so a default-constructed CsBinding() is the
+    // all-zero "cleared slot" blob the device stores (spec §8.3) - a configured
+    // single-pin binding sets this to 0xFF explicitly.
+    var gpio1: UInt8 = 0
+    var value: Int16 = 0            // SET target / IND_EQUALS comparand
+    var step: Int16 = 0            // STEP/INC/DEC size; 0 = default (1 dB / 1 enum step)
+    var rangeMin: Int16 = 0       // pot span low end (8.8 dB); both 0 = the noun's full range
+    var rangeMax: Int16 = 0       // pot span high end (8.8 dB)
+
+    /// True when the slot holds a component (not CS_TYPE_NONE).
+    var isConfigured: Bool { type != UInt8(CS_TYPE_NONE) }
+
+    /// Serialize to the 16-byte wire layout.  Bytes 6-7 are reserved (0).
+    func toData() -> Data {
+        var d = Data(count: 16)
+        d[0] = type
+        d[1] = noun
+        d[2] = action
+        d[3] = flags
+        d[4] = gpio0
+        d[5] = gpio1
+        // 6-7 reserved (0)
+        func put(_ v: Int16, _ off: Int) {
+            let u = UInt16(bitPattern: v)
+            d[off] = UInt8(u & 0xFF)
+            d[off + 1] = UInt8((u >> 8) & 0xFF)
+        }
+        put(value, 8)
+        put(step, 10)
+        put(rangeMin, 12)
+        put(rangeMax, 14)
+        return d
+    }
+
+    /// Parse the 16-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> CsBinding? {
+        guard data.count >= 16 else { return nil }
+        let b = data.startIndex
+        func i16(_ off: Int) -> Int16 {
+            Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
+        }
+        return CsBinding(
+            type: data[b + 0], noun: data[b + 1], action: data[b + 2], flags: data[b + 3],
+            gpio0: data[b + 4], gpio1: data[b + 5],
+            value: i16(8), step: i16(10), rangeMin: i16(12), rangeMax: i16(14))
+    }
+}
+
+/// One entry of the capability type table (4 bytes; spec §2.4).  Says which
+/// actions a component can drive, how many GPIOs it consumes, and its pin class.
+struct CsTypeDesc: Equatable {
+    var actions: UInt16 = 0   // CS_ACT_BIT mask this component can drive
+    var pinCount: UInt8 = 0   // GPIOs consumed (1 or 2)
+    var pinClass: UInt8 = 0   // CS_PINCLASS_ANY / _ADC
+}
+
+/// Capability header returned by REQ_GET_CS_CAPS, wValue = 0xFFFF (28 bytes;
+/// spec §2.4).  Hosts build their picker UI from this, not from hardcoded
+/// tables, so a future firmware's new types appear with no app change.
+struct CsCapsHeader: Equatable {
+    var capsVersion: UInt8 = 0
+    var maxBindings: UInt8 = 0
+    var typeCount: UInt8 = 0
+    var nounCount: UInt8 = 0
+    var types: [CsTypeDesc] = []
+
+    static func fromData(_ data: Data) -> CsCapsHeader? {
+        guard data.count >= 4 else { return nil }
+        let b = data.startIndex
+        let typeCount = data[b + 2]
+        guard data.count >= 4 + Int(typeCount) * 4 else { return nil }
+        var types: [CsTypeDesc] = []
+        for i in 0..<Int(typeCount) {
+            let o = b + 4 + i * 4
+            types.append(CsTypeDesc(
+                actions: UInt16(data[o]) | (UInt16(data[o + 1]) << 8),
+                pinCount: data[o + 2],
+                pinClass: data[o + 3]))
+        }
+        return CsCapsHeader(capsVersion: data[b + 0], maxBindings: data[b + 1],
+                            typeCount: typeCount, nounCount: data[b + 3], types: types)
+    }
+}
+
+/// Per-noun descriptor returned by REQ_GET_CS_CAPS, wValue = noun index
+/// (8 bytes; spec §2.5).  Says the noun's kind, enum size, dB range, and the
+/// action mask it accepts.
+struct CsNounDesc: Equatable {
+    var kind: UInt8 = 0        // CS_KIND_*
+    var enumCount: UInt8 = 0   // valid enum values 0..enumCount-1 (ENUM only)
+    var actions: UInt16 = 0    // CS_ACT_BIT mask this noun accepts
+    var minQ8: Int16 = 0       // continuous range low end, 8.8 dB
+    var maxQ8: Int16 = 0       // continuous range high end, 8.8 dB
+
+    static func fromData(_ data: Data) -> CsNounDesc? {
+        guard data.count >= 8 else { return nil }
+        let b = data.startIndex
+        func i16(_ off: Int) -> Int16 {
+            Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
+        }
+        return CsNounDesc(
+            kind: data[b + 0], enumCount: data[b + 1],
+            actions: UInt16(data[b + 2]) | (UInt16(data[b + 3]) << 8),
+            minQ8: i16(4), maxQ8: i16(6))
+    }
+}
+
+/// REQ_GET_CS_STATUS response (12 bytes; spec §2.6).  `lastStatus`/`lastSlot`
+/// report the most recent SET's outcome; `activeMask` bit N = binding N is
+/// live; `slotStatus[N]` = that slot's per-apply health (0 = ok, else a failure
+/// code, e.g. a boot pin collision).
+struct CsStatusPacket: Equatable {
+    var lastStatus: UInt8 = 0
+    var lastSlot: UInt8 = 0
+    var maxBindings: UInt8 = 0
+    var activeMask: UInt8 = 0
+    var slotStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_BINDINGS)
+
+    /// True when binding `slot` is live (its `activeMask` bit is set).
+    func isSlotActive(_ slot: Int) -> Bool {
+        slot >= 0 && slot < 8 && (activeMask & (UInt8(1) << UInt8(slot))) != 0
+    }
+
+    /// This slot's per-apply health code (0 = ok / cleared).
+    func slotHealth(_ slot: Int) -> UInt8 {
+        slot >= 0 && slot < slotStatus.count ? slotStatus[slot] : 0
+    }
+
+    static func fromData(_ data: Data) -> CsStatusPacket? {
+        guard data.count >= 12 else { return nil }
+        let b = data.startIndex
+        var slots: [UInt8] = []
+        for i in 0..<CS_MAX_BINDINGS { slots.append(data[b + 4 + i]) }
+        return CsStatusPacket(
+            lastStatus: data[b + 0], lastSlot: data[b + 1],
+            maxBindings: data[b + 2], activeMask: data[b + 3], slotStatus: slots)
+    }
+}
+
 // MARK: - View Model
 
 class DSPViewModel: ObservableObject {
@@ -289,6 +447,20 @@ class DSPViewModel: ObservableObject {
     @Published var i2cCtrlConfig: I2cCtrlConfig = I2cCtrlConfig()
     @Published var ctrlIfaceStatus: CtrlIfaceStatus = CtrlIfaceStatus()
     @Published var controlInterfacesSupported: Bool = false
+
+    // Control Surfaces - user-wired physical controls (buttons, switches, pots,
+    // encoders, indicator LEDs) bound to firmware parameters on spare GPIOs.
+    // Device-global config (stored in the preset directory, survives factory
+    // reset).  `controlSurfacesSupported` flips true when the firmware answers
+    // REQ_GET_CS_CAPS (0x86); older firmware STALLs and the Settings page hides
+    // itself.  The picker UI is built entirely from the device-served caps
+    // (`csCaps` + `csNounDescs`), never from hardcoded tables (spec §4).  See
+    // control_surfaces_spec.md.
+    @Published var controlSurfacesSupported: Bool = false
+    @Published var csCaps: CsCapsHeader = CsCapsHeader()
+    @Published var csNounDescs: [CsNounDesc] = []
+    @Published var csBindings: [CsBinding] = Array(repeating: CsBinding(), count: CS_MAX_BINDINGS)
+    @Published var csStatus: CsStatusPacket = CsStatusPacket()
 
     // Preset state
     @Published var presetOccupied: UInt16 = 0
@@ -485,6 +657,17 @@ class DSPViewModel: ObservableObject {
         if consumer != .i2cCtrl, ctrlIfaceStatus.i2cLive,
            pin == i2cCtrlConfig.sdaPin || pin == i2cCtrlConfig.sclPin {
             return "I2C Control"
+        }
+        // Control Surfaces reserve their GPIO(s) only while the binding is LIVE
+        // (its active_mask bit is set) - a cleared binding, or one kept down by
+        // a boot pin-collision, holds no GPIOs.  Mirrors the firmware's
+        // control_surfaces_owns_pin rule (spec §10).
+        for slot in 0..<min(csBindings.count, CS_MAX_BINDINGS)
+        where consumer != .controlSurface(slot) && csStatus.isSlotActive(slot) {
+            let bind = csBindings[slot]
+            if bind.gpio0 == pin || (bind.gpio1 != CS_GPIO_UNUSED && bind.gpio1 == pin) {
+                return "Control Surface \(slot + 1)"
+            }
         }
         return nil
     }

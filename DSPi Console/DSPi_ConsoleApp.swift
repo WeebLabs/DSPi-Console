@@ -66,7 +66,7 @@ class AppSettings: ObservableObject {
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case general, graphing, advanced
-    case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces
+    case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
 
     var id: Self { self }
 
@@ -80,6 +80,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .i2sConfig:        return "I2S Configuration"
         case .spdifInput:       return "Inputs"
         case .controlInterfaces: return "Control Interfaces"
+        case .controlSurfaces:  return "Control Surfaces"
         }
     }
 
@@ -93,6 +94,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .i2sConfig:        return "waveform.path"
         case .spdifInput:       return "arrow.down.to.line"
         case .controlInterfaces: return "cpu"
+        case .controlSurfaces:  return "dial.medium"
         }
     }
 
@@ -109,6 +111,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .i2sConfig:        return Color(red: 0.16, green: 0.41, blue: 0.74)  // ocean blue
         case .spdifInput:       return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
         case .controlInterfaces: return Color(red: 0.30, green: 0.44, blue: 0.66) // dusk blue
+        case .controlSurfaces:  return Color(red: 0.27, green: 0.52, blue: 0.70)  // steel cyan
         }
     }
 
@@ -119,6 +122,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .i2sConfig:         return vm.platformName != "STM32H723"
         case .spdifInput:        return vm.inputSourceSupported
         case .controlInterfaces: return vm.controlInterfacesSupported
+        case .controlSurfaces:   return vm.controlSurfacesSupported
         default:                 return true
         }
     }
@@ -127,7 +131,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     static let groups: [(title: String, items: [SettingsCategory])] = [
         ("Application", [.general, .advanced]),
         ("Display",     [.graphing]),
-        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .controlInterfaces, .globalParams]),
+        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .controlInterfaces, .controlSurfaces, .globalParams]),
     ]
 }
 
@@ -339,6 +343,7 @@ struct SettingsView: View {
         case .i2sConfig:        HardwareSettingsTab(section: .i2s)
         case .spdifInput:       HardwareSettingsTab(section: .spdif)
         case .controlInterfaces: ControlInterfacesSettingsTab()
+        case .controlSurfaces:  ControlSurfacesSettingsTab()
         }
     }
 }
@@ -1470,6 +1475,1012 @@ struct ControlInterfacesSettingsTab: View {
                     ? "Baud rate is out of range (9600 - 1000000)"
                     : "Address is out of range (0x08 - 0x77)", true)
         default:                        return ("Failed to apply \(iface) configuration", true)
+        }
+    }
+}
+
+// MARK: - Control Surfaces Settings Tab
+//
+// User-wired physical controls (buttons, switches, pots, encoders, indicator
+// LEDs) on spare GPIOs, each bound to one firmware parameter.  The whole picker
+// is built from the device-served capability tables (`vm.csCaps` +
+// `vm.csNounDescs`), never from hardcoded lists, so a future firmware's new
+// component types / parameters appear with no app change (spec §4).  Each of
+// the eight slots edits a local draft; Apply sends the 16-byte binding and
+// polls the deferred-apply outcome back.  See control_surfaces_spec.md.
+struct ControlSurfacesSettingsTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+
+    // Local, editable drafts seeded from the device's live bindings.  A slot is
+    // "dirty" (Apply enabled) when its draft differs from the live binding.
+    @State private var drafts: [CsBinding] = Array(repeating: CsBinding(), count: CS_MAX_BINDINGS)
+    @State private var slotMessages: [Int: (message: String, isError: Bool)] = [:]
+    @State private var applyingSlot: Int? = nil
+
+    /// Number of binding slots the device exposes (falls back to the wire max).
+    private var slotCount: Int {
+        let n = Int(vm.csCaps.maxBindings)
+        return n > 0 ? min(n, CS_MAX_BINDINGS) : CS_MAX_BINDINGS
+    }
+
+    var body: some View {
+        Form {
+            if vm.csCaps.types.isEmpty {
+                Section {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading control-surface capabilities from the device...")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+            } else {
+                if visibleSlots.isEmpty {
+                    // The empty state carries its own Add Control button.
+                    emptyStateSection
+                } else {
+                    ForEach(visibleSlots, id: \.self) { slot in
+                        slotSection(slot)
+                    }
+                    addSection
+                }
+            }
+
+            Section {
+                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, and indicator LEDs to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC pin (GPIO 26, 27, or 28) between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes are applied and saved over USB.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } footer: {
+                if vm.csCaps.capsVersion != 0 {
+                    Text("Control-surface capability version \(vm.csCaps.capsVersion).")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            seedDrafts()
+            DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
+        }
+        // Re-seed a slot when its live binding changes and the user has no
+        // pending edits for it, so an external change never strands a draft.
+        .onReceive(vm.$csBindings) { newBindings in
+            for slot in 0..<min(drafts.count, newBindings.count) {
+                if applyingSlot != slot && drafts[slot] == vm.csBindings[slot] {
+                    drafts[slot] = newBindings[slot]
+                }
+            }
+        }
+    }
+
+    private func seedDrafts() {
+        var seeded = Array(repeating: CsBinding(), count: CS_MAX_BINDINGS)
+        for slot in 0..<min(CS_MAX_BINDINGS, vm.csBindings.count) {
+            seeded[slot] = vm.csBindings[slot]
+        }
+        drafts = seeded
+    }
+
+    // MARK: Add / remove
+
+    /// Slots that currently hold a control (edited draft or live on the device),
+    /// shown as cards.  Empty slots are hidden until "Add a Control" fills one.
+    private var visibleSlots: [Int] {
+        (0..<slotCount).filter { drafts[$0].isConfigured || vm.csBindings[$0].isConfigured }
+    }
+
+    /// The lowest slot with neither a draft nor a live binding, or nil when full.
+    private var firstFreeSlot: Int? {
+        (0..<slotCount).first { !drafts[$0].isConfigured && !vm.csBindings[$0].isConfigured }
+    }
+
+    @ViewBuilder
+    private var emptyStateSection: some View {
+        Section {
+            VStack(spacing: 14) {
+                // A hint of what can be wired up: one badge per component type.
+                HStack(spacing: 10) {
+                    ForEach(realTypes, id: \.self) { t in
+                        csTypeBadge(t, size: 28)
+                    }
+                }
+                VStack(spacing: 3) {
+                    Text("No Controls Configured")
+                        .font(.headline)
+                    Text("Wire a button, switch, knob, encoder, or LED to a spare GPIO and bind it to a device function.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                }
+                addMenu(prominent: true)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+        }
+    }
+
+    @ViewBuilder
+    private var addSection: some View {
+        Section {
+            HStack {
+                addMenu(prominent: false)
+                Spacer()
+                if firstFreeSlot == nil {
+                    Text("All \(slotCount) control slots are in use.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    /// The "Add Control" menu: picking a component type directly creates its
+    /// card, already seeded with sensible defaults.
+    @ViewBuilder
+    private func addMenu(prominent: Bool) -> some View {
+        let menu = Menu {
+            ForEach(realTypes, id: \.self) { t in
+                Button { addControl(type: t) } label: {
+                    Label(typeName(t), systemImage: typeIcon(t))
+                }
+            }
+        } label: {
+            Label("Add Control", systemImage: "plus")
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .disabled(firstFreeSlot == nil)
+
+        if prominent {
+            menu.buttonStyle(.borderedProminent).controlSize(.regular)
+        } else {
+            menu.controlSize(.regular)
+        }
+    }
+
+    /// Create a new draft binding of `type` in the first free slot so its
+    /// editor card appears.
+    private func addControl(type: Int) {
+        guard let slot = firstFreeSlot else { return }
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            drafts[slot] = makeBinding(type: type, slot: slot)
+        }
+        slotMessages[slot] = nil
+    }
+
+    /// Remove a control.  If it was applied to the device, clear the slot there
+    /// too (send CS_TYPE_NONE); an unapplied new draft is just dropped locally.
+    private func removeControl(_ slot: Int) {
+        slotMessages[slot] = nil
+        guard vm.csBindings[slot].isConfigured else {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                drafts[slot] = CsBinding()   // never applied - drop the draft
+            }
+            return
+        }
+        applyingSlot = slot
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = vm.setCsBinding(slot: slot, binding: CsBinding())
+            DispatchQueue.main.async {
+                applyingSlot = nil
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    drafts[slot] = vm.csBindings[slot]   // now cleared on the device
+                }
+                slotMessages[slot] = nil
+            }
+        }
+    }
+
+    // MARK: Slot section
+
+    @ViewBuilder
+    private func slotSection(_ slot: Int) -> some View {
+        let b = drafts[slot]
+        Section {
+            cardHeader(slot)
+
+            if b.isConfigured {
+                if vm.csBindings[slot].isConfigured && !vm.csStatus.isSlotActive(slot) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                        Text(inactiveReason(slot))
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
+
+                nounRow(slot)
+                if validActions(type: Int(b.type), noun: Int(b.noun)).count > 1 {
+                    actionRow(slot)
+                }
+                pinRows(slot)
+                operandRows(slot)
+                flagRows(slot)
+            }
+
+            applyRow(slot)
+        }
+    }
+
+    /// The card's identity row: a tinted component badge, the component type as
+    /// an inline menu (tap to swap the component), the plain-language summary,
+    /// a live status pill, and the remove button.
+    @ViewBuilder
+    private func cardHeader(_ slot: Int) -> some View {
+        let b = drafts[slot]
+        let type = Int(b.type)
+        HStack(spacing: 12) {
+            csTypeBadge(type, size: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Menu {
+                    ForEach(realTypes, id: \.self) { t in
+                        Button { typeBinding(slot).wrappedValue = t } label: {
+                            Label(typeName(t), systemImage: typeIcon(t))
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(typeName(type))
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Change the component type")
+
+                Text(verbPhrase(b))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            statusPill(slot)
+            Button(role: .destructive) {
+                removeControl(slot)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(.secondary)
+            .help("Remove this control")
+            .disabled(applyingSlot == slot)
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// A rounded, tinted gradient badge for a component type - the card's glyph.
+    private func csTypeBadge(_ type: Int, size: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+            .fill(typeTint(type).gradient)
+            .frame(width: size, height: size)
+            .overlay(
+                Image(systemName: typeIcon(type))
+                    .font(.system(size: size * 0.48, weight: .medium))
+                    .foregroundStyle(.white)
+            )
+            .shadow(color: typeTint(type).opacity(0.35), radius: 2, y: 1)
+    }
+
+    /// Dot-and-text status capsule: Active / Inactive on the device, or New
+    /// for a card that hasn't been applied yet.
+    @ViewBuilder
+    private func statusPill(_ slot: Int) -> some View {
+        let (text, color): (String, Color) = {
+            if !vm.csBindings[slot].isConfigured { return ("New", .accentColor) }
+            if vm.csStatus.isSlotActive(slot) { return ("Active", .green) }
+            return ("Inactive", .orange)
+        }()
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(text)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(color.opacity(0.12)))
+    }
+
+    // MARK: Noun / Action rows
+
+    @ViewBuilder
+    private func nounRow(_ slot: Int) -> some View {
+        settingRow(title: "Controls",
+                   detail: "The device function this control drives.",
+                   icon: "slider.horizontal.3") {
+            Picker("", selection: nounBinding(slot)) {
+                ForEach(validNouns(forType: Int(drafts[slot].type)), id: \.self) { n in
+                    Text(nounName(n)).tag(n)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func actionRow(_ slot: Int) -> some View {
+        let noun = Int(drafts[slot].noun)
+        settingRow(title: "On Press",
+                   detail: "What a press does.",
+                   icon: "hand.tap") {
+            Picker("", selection: actionBinding(slot)) {
+                ForEach(validActions(type: Int(drafts[slot].type), noun: noun), id: \.self) { a in
+                    Text(actionName(a, noun: noun)).tag(a)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    // MARK: Pin rows
+
+    @ViewBuilder
+    private func pinRows(_ slot: Int) -> some View {
+        let type = Int(drafts[slot].type)
+        let twoPin = (typeDesc(type)?.pinCount ?? 1) >= 2
+        let adc = (typeDesc(type)?.pinClass ?? 0) == CS_PINCLASS_ADC
+        if twoPin {
+            csPinRow(slot, title: "GPIO A", detail: "Encoder channel A.",
+                     icon: "a.circle", isSecond: false, adc: adc)
+            csPinRow(slot, title: "GPIO B", detail: "Encoder channel B.",
+                     icon: "b.circle", isSecond: true, adc: adc)
+        } else {
+            csPinRow(slot, title: "GPIO", detail: pinDetail(type),
+                     icon: "cable.connector", isSecond: false, adc: adc)
+        }
+    }
+
+    @ViewBuilder
+    private func csPinRow(_ slot: Int, title: String, detail: String,
+                          icon: String, isSecond: Bool, adc: Bool) -> some View {
+        let candidates = pinCandidates(slot: slot, type: Int(drafts[slot].type), isSecond: isSecond)
+        settingRow(title: title, detail: detail, icon: icon) {
+            Picker("", selection: Binding(
+                get: { isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0 },
+                set: { newPin in
+                    var nb = drafts[slot]
+                    if isSecond { nb.gpio1 = newPin } else { nb.gpio0 = newPin }
+                    drafts[slot] = nb
+                })) {
+                let current = isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0
+                if !candidates.contains(current) {
+                    Text(current == CS_GPIO_UNUSED ? "None" : "GPIO \(current)").tag(current)
+                }
+                ForEach(candidates, id: \.self) { p in Text("GPIO \(p)").tag(p) }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    // MARK: Value / step / range operands
+
+    @ViewBuilder
+    private func operandRows(_ slot: Int) -> some View {
+        let b = drafts[slot]
+        let noun = Int(b.noun)
+        let action = Int(b.action)
+        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+
+        switch action {
+        case CS_ACT_ADJUST:
+            if kind == CS_KIND_CONTINUOUS {
+                potRangeRows(slot)
+            }
+        case CS_ACT_STEP, CS_ACT_INC, CS_ACT_DEC:
+            if kind == CS_KIND_CONTINUOUS {
+                stepDbRow(slot)
+            } else if kind == CS_KIND_ENUM {
+                enumStepRow(slot)
+            }
+        case CS_ACT_SET:
+            if kind == CS_KIND_CONTINUOUS {
+                targetDbRow(slot)
+            } else if kind == CS_KIND_BOOL {
+                boolValueRow(slot, title: "Set To")
+            } else if kind == CS_KIND_ENUM {
+                enumValueRow(slot, title: "Set To")
+            }
+        case CS_ACT_IND_EQUALS:
+            if kind == CS_KIND_BOOL {
+                boolValueRow(slot, title: "Light When")
+            } else if kind == CS_KIND_ENUM {
+                enumValueRow(slot, title: "Light When")
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func potRangeRows(_ slot: Int) -> some View {
+        let nd = nounDesc(Int(drafts[slot].noun))
+        let lo = csQ8ToDb(nd?.minQ8 ?? -12800)
+        let hi = csQ8ToDb(nd?.maxQ8 ?? 0)
+        // A custom span is signalled by either range field being non-zero
+        // (both zero = the noun's full range).
+        let custom = drafts[slot].rangeMin != 0 || drafts[slot].rangeMax != 0
+        Toggle(isOn: Binding(
+            get: { custom },
+            set: { on in
+                var nb = drafts[slot]
+                if on {
+                    nb.rangeMin = nd?.minQ8 ?? 0
+                    nb.rangeMax = nd?.maxQ8 ?? 0
+                } else {
+                    nb.rangeMin = 0
+                    nb.rangeMax = 0
+                }
+                drafts[slot] = nb
+            })) {
+            settingLabel(title: "Limit Range",
+                         detail: "Map the knob onto a portion of the \(fmtDb(lo)) to \(fmtDb(hi)) range.",
+                         icon: "arrow.left.and.right")
+        }
+        .toggleStyle(.switch)
+
+        if custom {
+            settingRow(title: "Minimum",
+                       detail: "Level at the fully counter-clockwise position.",
+                       icon: "arrow.down.to.line") {
+                ValueField(label: "dB", value: csQ8ToDb(drafts[slot].rangeMin),
+                           width: 56, scrollStep: 0.5) { v in
+                    var nb = drafts[slot]
+                    nb.rangeMin = csDbToQ8(min(hi, max(lo, v)))
+                    drafts[slot] = nb
+                }
+            }
+            settingRow(title: "Maximum",
+                       detail: "Level at the fully clockwise position.",
+                       icon: "arrow.up.to.line") {
+                ValueField(label: "dB", value: csQ8ToDb(drafts[slot].rangeMax),
+                           width: 56, scrollStep: 0.5) { v in
+                    var nb = drafts[slot]
+                    nb.rangeMax = csDbToQ8(min(hi, max(lo, v)))
+                    drafts[slot] = nb
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func stepDbRow(_ slot: Int) -> some View {
+        settingRow(title: "Step Size",
+                   detail: "Level added or removed per detent/press.",
+                   icon: "plusminus") {
+            ValueField(label: "dB",
+                       value: drafts[slot].step == 0 ? 1.0 : csQ8ToDb(drafts[slot].step),
+                       width: 52, scrollStep: 0.5, minValue: 0.1) { v in
+                var nb = drafts[slot]
+                nb.step = csDbToQ8(max(0.1, v))
+                drafts[slot] = nb
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func enumStepRow(_ slot: Int) -> some View {
+        let maxStep = max(1, Int(nounDesc(Int(drafts[slot].noun))?.enumCount ?? 2) - 1)
+        settingRow(title: "Step Size",
+                   detail: "Positions advanced per detent/press.",
+                   icon: "plusminus") {
+            HStack(spacing: 8) {
+                Text("\(currentEnumStep(slot))")
+                    .font(.body.monospacedDigit())
+                    .frame(width: 20, alignment: .trailing)
+                Stepper("", value: Binding(
+                    get: { currentEnumStep(slot) },
+                    set: { var nb = drafts[slot]; nb.step = Int16($0); drafts[slot] = nb }
+                ), in: 1...maxStep)
+                .labelsHidden()
+            }
+            .fixedSize()
+        }
+    }
+
+    private func currentEnumStep(_ slot: Int) -> Int {
+        let s = Int(drafts[slot].step)
+        return s <= 0 ? 1 : s
+    }
+
+    @ViewBuilder
+    private func targetDbRow(_ slot: Int) -> some View {
+        let nd = nounDesc(Int(drafts[slot].noun))
+        let lo = csQ8ToDb(nd?.minQ8 ?? -12800)
+        let hi = csQ8ToDb(nd?.maxQ8 ?? 0)
+        settingRow(title: "Target Level",
+                   detail: "Level each press applies (\(fmtDb(lo)) to \(fmtDb(hi))).",
+                   icon: "target") {
+            ValueField(label: "dB",
+                       value: csQ8ToDb(drafts[slot].value),
+                       width: 56, scrollStep: 0.5) { v in
+                var nb = drafts[slot]
+                nb.value = csDbToQ8(min(hi, max(lo, v)))
+                drafts[slot] = nb
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func boolValueRow(_ slot: Int, title: String) -> some View {
+        let noun = Int(drafts[slot].noun)
+        settingRow(title: title,
+                   detail: title == "Light When" ? "Light the LED when the function is in this state."
+                                                  : "The state a press applies.",
+                   icon: "switch.2") {
+            Picker("", selection: Binding(
+                get: { drafts[slot].value != 0 },
+                set: { var nb = drafts[slot]; nb.value = $0 ? 1 : 0; drafts[slot] = nb })) {
+                Text(boolLabel(noun, on: true)).tag(true)
+                Text(boolLabel(noun, on: false)).tag(false)
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func enumValueRow(_ slot: Int, title: String) -> some View {
+        let noun = Int(drafts[slot].noun)
+        let count = Int(nounDesc(noun)?.enumCount ?? 1)
+        settingRow(title: title,
+                   detail: title == "Light When" ? "Light the LED for this selection."
+                                                  : "The selection a press applies.",
+                   icon: "list.number") {
+            Picker("", selection: Binding(
+                get: { Int(drafts[slot].value) },
+                set: { var nb = drafts[slot]; nb.value = Int16($0); drafts[slot] = nb })) {
+                ForEach(Array(0..<max(1, count)), id: \.self) { i in
+                    Text(enumValueLabel(noun: noun, value: i)).tag(i)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    // MARK: Flag toggles
+
+    @ViewBuilder
+    private func flagRows(_ slot: Int) -> some View {
+        let b = drafts[slot]
+        let type = Int(b.type)
+        let action = Int(b.action)
+        let kind = nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL
+        let isEnumStep = kind == CS_KIND_ENUM &&
+            (action == CS_ACT_STEP || action == CS_ACT_INC || action == CS_ACT_DEC)
+
+        if type == CS_TYPE_POT || type == CS_TYPE_ENCODER {
+            flagToggle(slot, CS_FLAG_REVERSE,
+                       title: "Reverse Direction",
+                       detail: type == CS_TYPE_POT ? "Clockwise decreases the value."
+                                                   : "Clockwise steps down.",
+                       icon: "arrow.left.arrow.right")
+        }
+        if isEnumStep {
+            flagToggle(slot, CS_FLAG_WRAP,
+                       title: "Wrap Around",
+                       detail: "Step past the last position back to the first.",
+                       icon: "arrow.triangle.2.circlepath")
+        }
+        flagToggle(slot, CS_FLAG_INVERT,
+                   title: invertTitle(type),
+                   detail: invertDetail(type),
+                   icon: "bolt")
+    }
+
+    @ViewBuilder
+    private func flagToggle(_ slot: Int, _ mask: UInt8, title: String, detail: String, icon: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { (drafts[slot].flags & mask) != 0 },
+            set: { on in
+                var nb = drafts[slot]
+                if on { nb.flags |= mask } else { nb.flags &= ~mask }
+                drafts[slot] = nb
+            })) {
+            settingLabel(title: title, detail: detail, icon: icon)
+        }
+        .toggleStyle(.switch)
+    }
+
+    // MARK: Apply row
+
+    @ViewBuilder
+    private func applyRow(_ slot: Int) -> some View {
+        let dirty = drafts[slot] != vm.csBindings[slot]
+        let applying = applyingSlot == slot
+        let status = slotMessages[slot]
+        HStack(spacing: 8) {
+            if let status = status, !dirty {
+                Image(systemName: status.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundColor(status.isError ? .orange : .green)
+                    .font(.caption)
+                Text(status.message)
+                    .font(.caption)
+                    .foregroundColor(status.isError ? .orange : .secondary)
+            } else if dirty {
+                Text("Unapplied changes")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            if applying { ProgressView().controlSize(.small) }
+            Button("Revert") {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    drafts[slot] = vm.csBindings[slot]
+                }
+                slotMessages[slot] = nil
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+            .disabled(!dirty || applying)
+            Button("Apply") { applySlot(slot) }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!dirty || applying || !vm.isDeviceConnected)
+        }
+    }
+
+    private func applySlot(_ slot: Int) {
+        let binding = drafts[slot]
+        applyingSlot = slot
+        slotMessages[slot] = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setCsBinding(slot: slot, binding: binding)
+            DispatchQueue.main.async {
+                applyingSlot = nil
+                drafts[slot] = vm.csBindings[slot]
+                slotMessages[slot] = statusMessage(status)
+            }
+        }
+    }
+
+    // MARK: Shared row helpers (mirror the Control Interfaces page)
+
+    @ViewBuilder
+    private func settingLabel(title: String, detail: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.body)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func settingRow<Control: View>(title: String, detail: String, icon: String,
+                                           @ViewBuilder control: () -> Control) -> some View {
+        HStack {
+            settingLabel(title: title, detail: detail, icon: icon)
+            Spacer()
+            control()
+        }
+    }
+
+    // MARK: Caps-driven model helpers
+
+    private func typeDesc(_ type: Int) -> CsTypeDesc? {
+        (type >= 0 && type < vm.csCaps.types.count) ? vm.csCaps.types[type] : nil
+    }
+
+    private func nounDesc(_ noun: Int) -> CsNounDesc? {
+        (noun >= 0 && noun < vm.csNounDescs.count) ? vm.csNounDescs[noun] : nil
+    }
+
+    /// Configurable component types (every type but NONE), from the caps table.
+    private var realTypes: [Int] {
+        let n = Int(vm.csCaps.typeCount)
+        guard n > 1 else { return [] }
+        return Array(1..<n)
+    }
+
+    /// Nouns a given component type can drive (non-empty action intersection).
+    private func validNouns(forType type: Int) -> [Int] {
+        guard let td = typeDesc(type) else { return [] }
+        return (0..<vm.csNounDescs.count).filter { n in
+            (vm.csNounDescs[n].actions & td.actions) != 0
+        }
+    }
+
+    /// Legal actions for a (type, noun) pair = AND of their two action masks.
+    private func validActions(type: Int, noun: Int) -> [Int] {
+        guard let td = typeDesc(type), let nd = nounDesc(noun) else { return [] }
+        let eff = td.actions & nd.actions
+        return (0..<16).filter { (eff & CS_ACT_BIT($0)) != 0 }
+    }
+
+    /// A sensible default action for a freshly picked (type, noun).
+    private func defaultAction(type: Int, noun: Int) -> Int {
+        let avail = validActions(type: type, noun: noun)
+        guard !avail.isEmpty else { return 0 }
+        let pref: [Int]
+        switch type {
+        case CS_TYPE_POT:     pref = [CS_ACT_ADJUST]
+        case CS_TYPE_ENCODER: pref = [CS_ACT_STEP]
+        case CS_TYPE_SWITCH:  pref = [CS_ACT_FOLLOW]
+        case CS_TYPE_LED:     pref = [CS_ACT_IND_EQUALS]
+        case CS_TYPE_BUTTON:  pref = [CS_ACT_TOGGLE, CS_ACT_TRIGGER, CS_ACT_INC, CS_ACT_SET, CS_ACT_DEC]
+        default:              pref = []
+        }
+        for a in pref where avail.contains(a) { return a }
+        return avail.first ?? 0
+    }
+
+    /// Build a fresh binding when a slot's component type changes.
+    private func makeBinding(type: Int, slot: Int) -> CsBinding {
+        if type == CS_TYPE_NONE { return CsBinding() }
+        var b = CsBinding()
+        b.type = UInt8(type)
+        let noun = validNouns(forType: type).first ?? CS_NOUN_MASTER_VOLUME
+        b.noun = UInt8(noun)
+        b.action = UInt8(defaultAction(type: type, noun: noun))
+        let adc = (typeDesc(type)?.pinClass ?? 0) == CS_PINCLASS_ADC
+        let twoPin = (typeDesc(type)?.pinCount ?? 1) >= 2
+        let free = freePins(slot: slot, adcOnly: adc)
+        b.gpio0 = free.first ?? (adc ? (CS_ADC_PINS.first ?? 26) : (HardwareSettingsTab.validPins.first ?? 0))
+        if twoPin {
+            b.gpio1 = free.dropFirst().first ?? (b.gpio0 == 0 ? 1 : 0)
+        } else {
+            b.gpio1 = CS_GPIO_UNUSED
+        }
+        return defaultOperands(for: b)
+    }
+
+    /// Reset value/step/range to sensible defaults for the binding's action+kind.
+    private func defaultOperands(for binding: CsBinding) -> CsBinding {
+        var b = binding
+        let noun = Int(b.noun)
+        let action = Int(b.action)
+        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        b.value = 0; b.step = 0; b.rangeMin = 0; b.rangeMax = 0
+        switch action {
+        case CS_ACT_STEP, CS_ACT_INC, CS_ACT_DEC:
+            if kind == CS_KIND_CONTINUOUS { b.step = csDbToQ8(1.0) }
+            else if kind == CS_KIND_ENUM { b.step = 1 }
+        case CS_ACT_SET:
+            if kind == CS_KIND_CONTINUOUS { b.value = nounDesc(noun)?.maxQ8 ?? 0 }
+            else if kind == CS_KIND_BOOL { b.value = 1 }
+        case CS_ACT_IND_EQUALS:
+            if kind == CS_KIND_BOOL { b.value = 1 }
+        default:
+            break
+        }
+        return b
+    }
+
+    private func freePins(slot: Int, adcOnly: Bool) -> [UInt8] {
+        let base = adcOnly ? CS_ADC_PINS : HardwareSettingsTab.validPins
+        return base.filter { vm.pinInUseBy($0, excluding: .controlSurface(slot)) == nil }
+    }
+
+    /// GPIO options for a pin picker: mux-free pins (ADC-only for pots), the
+    /// currently-selected pin always kept visible, and the sibling encoder pin
+    /// excluded so the two channels can't collide.
+    private func pinCandidates(slot: Int, type: Int, isSecond: Bool) -> [UInt8] {
+        let adc = (typeDesc(type)?.pinClass ?? 0) == CS_PINCLASS_ADC
+        let base = adc ? CS_ADC_PINS : HardwareSettingsTab.validPins
+        let twoPin = (typeDesc(type)?.pinCount ?? 1) >= 2
+        let sibling: UInt8? = twoPin ? (isSecond ? drafts[slot].gpio0 : drafts[slot].gpio1) : nil
+        let current = isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0
+        return base.filter { p in
+            p != sibling &&
+            (p == current || vm.pinInUseBy(p, excluding: .controlSurface(slot)) == nil)
+        }
+    }
+
+    // MARK: Bindings that re-default on structural changes
+
+    private func typeBinding(_ slot: Int) -> Binding<Int> {
+        Binding(
+            get: { Int(drafts[slot].type) },
+            set: { newType in
+                if newType != Int(drafts[slot].type) {
+                    drafts[slot] = makeBinding(type: newType, slot: slot)
+                }
+            })
+    }
+
+    private func nounBinding(_ slot: Int) -> Binding<Int> {
+        Binding(
+            get: { Int(drafts[slot].noun) },
+            set: { newNoun in
+                guard newNoun != Int(drafts[slot].noun) else { return }
+                var b = drafts[slot]
+                b.noun = UInt8(newNoun)
+                let acts = validActions(type: Int(b.type), noun: newNoun)
+                if !acts.contains(Int(b.action)) {
+                    b.action = UInt8(defaultAction(type: Int(b.type), noun: newNoun))
+                }
+                drafts[slot] = defaultOperands(for: b)
+            })
+    }
+
+    private func actionBinding(_ slot: Int) -> Binding<Int> {
+        Binding(
+            get: { Int(drafts[slot].action) },
+            set: { newAction in
+                guard newAction != Int(drafts[slot].action) else { return }
+                var b = drafts[slot]
+                b.action = UInt8(newAction)
+                drafts[slot] = defaultOperands(for: b)
+            })
+    }
+
+    // MARK: Display labels
+
+    private func typeName(_ type: Int) -> String {
+        switch type {
+        case CS_TYPE_NONE:    return "None"
+        case CS_TYPE_BUTTON:  return "Push Button"
+        case CS_TYPE_SWITCH:  return "Toggle Switch"
+        case CS_TYPE_POT:     return "Potentiometer / Fader"
+        case CS_TYPE_ENCODER: return "Rotary Encoder"
+        case CS_TYPE_LED:     return "Indicator LED"
+        default:              return "Type \(type)"
+        }
+    }
+
+    private func typeIcon(_ type: Int) -> String {
+        switch type {
+        case CS_TYPE_BUTTON:  return "hand.tap"
+        case CS_TYPE_SWITCH:  return "switch.2"
+        case CS_TYPE_POT:     return "dial.medium"
+        case CS_TYPE_ENCODER: return "dial.high"
+        case CS_TYPE_LED:     return "lightbulb.fill"
+        default:              return "dial.medium"
+        }
+    }
+
+    /// Badge tint per component type.  Cool hues matching the settings sidebar
+    /// palette, with a warm amber reserved for the LED (it is, after all, a light).
+    private func typeTint(_ type: Int) -> Color {
+        switch type {
+        case CS_TYPE_BUTTON:  return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
+        case CS_TYPE_SWITCH:  return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
+        case CS_TYPE_POT:     return Color(red: 0.21, green: 0.49, blue: 0.82)  // blue
+        case CS_TYPE_ENCODER: return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
+        case CS_TYPE_LED:     return Color(red: 0.93, green: 0.63, blue: 0.18)  // amber
+        default:              return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
+        }
+    }
+
+    private func nounName(_ noun: Int) -> String {
+        switch noun {
+        case CS_NOUN_USER_VOLUME:   return "Volume"
+        case CS_NOUN_MASTER_VOLUME: return "Master Volume"
+        case CS_NOUN_USER_MUTE:     return "Mute"
+        case CS_NOUN_LOUDNESS:      return "Loudness"
+        case CS_NOUN_CROSSFEED:     return "Crossfeed"
+        case CS_NOUN_LEVELLER:      return "Volume Leveller"
+        case CS_NOUN_PRESET:        return "Preset"
+        case CS_NOUN_INPUT_SOURCE:  return "Input Source"
+        case CS_NOUN_CLIP:          return "Clip Indicator"
+        default:                    return "Parameter \(noun)"
+        }
+    }
+
+    private func actionName(_ action: Int, noun: Int) -> String {
+        let isEnum = (nounDesc(noun)?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
+        switch action {
+        case CS_ACT_ADJUST:     return "Adjust"
+        case CS_ACT_STEP:       return "Step"
+        case CS_ACT_INC:        return isEnum ? "Next" : "Increase"
+        case CS_ACT_DEC:        return isEnum ? "Previous" : "Decrease"
+        case CS_ACT_TOGGLE:     return "Toggle"
+        case CS_ACT_SET:        return "Set value"
+        case CS_ACT_FOLLOW:     return "Follow position"
+        case CS_ACT_TRIGGER:    return "Trigger"
+        case CS_ACT_IND_EQUALS: return "Indicate"
+        default:                return "Action \(action)"
+        }
+    }
+
+    /// One-line plain-language summary of the whole binding.
+    private func verbPhrase(_ b: CsBinding) -> String {
+        let noun = nounName(Int(b.noun))
+        let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
+        switch Int(b.action) {
+        case CS_ACT_ADJUST:     return "Turn to set \(noun)."
+        case CS_ACT_STEP:       return "Turn to step \(noun)."
+        case CS_ACT_INC:        return isEnum ? "Press to select the next \(noun)." : "Press to raise \(noun)."
+        case CS_ACT_DEC:        return isEnum ? "Press to select the previous \(noun)." : "Press to lower \(noun)."
+        case CS_ACT_TOGGLE:     return "Press to toggle \(noun)."
+        case CS_ACT_SET:        return "Press to set \(noun)."
+        case CS_ACT_FOLLOW:     return "\(noun) follows the switch position."
+        case CS_ACT_TRIGGER:    return "Press to clear \(noun)."
+        case CS_ACT_IND_EQUALS: return "Lights to indicate \(noun)."
+        default:                return ""
+        }
+    }
+
+    private func boolLabel(_ noun: Int, on: Bool) -> String {
+        if noun == CS_NOUN_CLIP { return on ? "Clipping" : "Not clipping" }
+        return on ? "On" : "Off"
+    }
+
+    private func enumValueLabel(noun: Int, value: Int) -> String {
+        switch noun {
+        case CS_NOUN_PRESET:
+            let name = (value >= 0 && value < vm.presetNames.count) ? vm.presetNames[value] : ""
+            return name.isEmpty ? "Preset \(value + 1)" : "Preset \(value + 1) - \(name)"
+        case CS_NOUN_INPUT_SOURCE:
+            let names = ["USB", "S/PDIF", "I2S"]
+            return (value >= 0 && value < names.count) ? names[value] : "Source \(value)"
+        default:
+            return "\(value)"
+        }
+    }
+
+    private func pinDetail(_ type: Int) -> String {
+        switch type {
+        case CS_TYPE_POT: return "ADC pin (GPIO 26, 27, or 28), wiper to the pin."
+        case CS_TYPE_LED: return "Output pin driving the LED."
+        default:          return "Wired between this GPIO and GND."
+        }
+    }
+
+    private func invertTitle(_ type: Int) -> String {
+        switch type {
+        case CS_TYPE_LED:                    return "Active-Low LED"
+        case CS_TYPE_POT, CS_TYPE_ENCODER:   return "Pull-Down Wiring"
+        default:                             return "Active-High Wiring"
+        }
+    }
+
+    private func invertDetail(_ type: Int) -> String {
+        switch type {
+        case CS_TYPE_LED:
+            return "Drive the pin low to light the LED (LED wired to 3V3 through a resistor)."
+        case CS_TYPE_POT, CS_TYPE_ENCODER:
+            return "Wire the common terminal to 3V3 instead of GND (internal pull-down)."
+        default:
+            return "Component wired to 3V3 with the internal pull-down; default is to GND with pull-up."
+        }
+    }
+
+    private func fmtDb(_ v: Float) -> String {
+        String(format: "%.1f dB", v)
+    }
+
+    /// Why a stored-but-enabled binding isn't running (from its slot health code).
+    private func inactiveReason(_ slot: Int) -> String {
+        let code = vm.csStatus.slotHealth(slot)
+        let base = statusMessage(code).message
+        return "Not running: \(base.lowercased()) Reassign the conflicting pin, then apply."
+    }
+
+    /// Map a PIN_CONFIG_* / CS_STATUS_* apply outcome to inline feedback.
+    private func statusMessage(_ code: UInt8) -> (message: String, isError: Bool) {
+        switch code {
+        case PIN_CONFIG_SUCCESS:        return ("Applied and saved", false)
+        case PIN_CONFIG_INVALID_PIN:    return ("A pin is out of range, or an encoder's two pins are equal", true)
+        case PIN_CONFIG_PIN_IN_USE:     return ("A pin is already claimed by another peripheral or binding", true)
+        case CS_STATUS_INVALID_TYPE:    return ("Unsupported component type", true)
+        case CS_STATUS_INVALID_NOUN:    return ("Unsupported function", true)
+        case CS_STATUS_INVALID_ACTION:  return ("That action isn't allowed for this component and function", true)
+        case CS_STATUS_INVALID_VALUE:   return ("A value, step, or range is out of bounds", true)
+        case CS_STATUS_PIN_NOT_ADC:     return ("A potentiometer must use an ADC pin (GPIO 26, 27, or 28)", true)
+        case CS_STATUS_INVALID_SLOT:    return ("Invalid slot", true)
+        case CS_STATUS_PENDING:         return ("Still applying, please retry", true)
+        default:                        return ("Failed to apply the binding", true)
         }
     }
 }
