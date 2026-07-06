@@ -40,6 +40,7 @@ private let NOTIFY_EVT_BULK_INVALIDATED: UInt8 = 0x03
 private let NOTIFY_EVT_PRESET_LOADED: UInt8 = 0x04
 private let NOTIFY_EVT_INPUT_FORMAT: UInt8 = 0x05
 private let NOTIFY_EVT_SIGGEN_STATE: UInt8 = 0x07
+private let NOTIFY_EVT_ADAT_STATE: UInt8 = 0x08
 
 // Source tags (from ParamSource enum in firmware notify.h)
 private func sourceLabel(_ src: UInt8) -> String {
@@ -155,6 +156,13 @@ struct InterruptEvent: Identifiable {
             let reason = Int(bytes[5]) < reasons.count ? reasons[Int(bytes[5])] : "reason=\(bytes[5])"
             let channel = bytes[7] == 0xFF ? "-" : "\(bytes[7])"
             return "\(seqStr) v2.SiggenState                 \(state) reason=\(reason) type=\(bytes[6]) ch=\(channel)"
+
+        case NOTIFY_EVT_ADAT_STATE:
+            // 8 bytes: [ver, evt, flags, seq, enabled, active, pin, 0]
+            guard bytes.count >= 8 else {
+                return "\(seqStr) v2.AdatState (short: \(bytes.count) bytes)"
+            }
+            return "\(seqStr) v2.AdatState                   enabled=\(bytes[4]) active=\(bytes[5]) pin=\(bytes[6])"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -380,6 +388,13 @@ private enum ParamOffsetDecoder {
             return ("user_volume.user_mute", fmtBool(payload))
         }
 
+        // ADAT bulk output config (5864..) — enable at +0, data pin at +1.
+        if off == BULK_ADAT_OFFSET && sz == 1 { return ("adat_config.enabled", fmtBool(payload)) }
+        if off == BULK_ADAT_OFFSET + 1 && sz == 1 {
+            let v = payload.first ?? 0
+            return ("adat_config.pin", v == 0 ? "default" : "GPIO \(v)")
+        }
+
         // Fallback — unknown offset
         return (String(format: "offset=0x%04X size=%d", off, sz), fmtHex(payload))
     }
@@ -444,6 +459,12 @@ class InterruptMonitor: ObservableObject {
     /// Carries the SiggenState, SIGGEN_STOP_* reason, active/last signal
     /// type, and the walk channel (0xFF when not walking).
     var onSiggenState: ((_ state: UInt8, _ reason: UInt8, _ signalType: UInt8, _ channel: UInt8) -> Void)?
+
+    /// Fires on the main thread for every ADAT stream state push
+    /// (NOTIFY_EVT_ADAT_STATE: start / stop, including rate-policy
+    /// auto-suspend/resume).  Carries the configured enable, live active flag,
+    /// and configured data pin.
+    var onAdatState: ((_ enabled: Bool, _ active: Bool, _ pin: UInt8) -> Void)?
 
     private let usb: USBDevice
     private var interfacePtr: USBDevice.InterfaceInterfacePtr?
@@ -609,6 +630,20 @@ class InterruptMonitor: ObservableObject {
             let channel = bytes[7]
             DispatchQueue.main.async {
                 handler(state, reason, signalType, channel)
+            }
+        }
+
+        // Dispatch ADAT state pushes so the Outputs page status row reacts to
+        // stream start/stop and rate-policy auto-suspend/resume without polling.
+        if let handler = onAdatState,
+           bytes.count >= 8,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_ADAT_STATE {
+            let enabled = bytes[4] != 0
+            let active = bytes[5] != 0
+            let pin = bytes[6]
+            DispatchQueue.main.async {
+                handler(enabled, active, pin)
             }
         }
 

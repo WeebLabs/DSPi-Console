@@ -17,6 +17,7 @@ enum PinConsumer: Equatable {
     case uartCtrl       // UART control interface (covers both TX and RX pins)
     case i2cCtrl        // I2C control interface (covers both SDA and SCL pins)
     case controlSurface(Int)  // one Control Surfaces binding slot (covers both its GPIOs)
+    case adatOut        // ADAT bulk output data pin
 }
 
 // MARK: - DAC Hardware Mute Config
@@ -68,6 +69,58 @@ struct DacHwMuteConfig: Equatable {
             holdMs:    UInt16(data[base + 4]) | (UInt16(data[base + 5]) << 8),
             releaseMs: UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
         )
+    }
+}
+
+// MARK: - ADAT Bulk Output Status
+//
+// 8-byte wire-format struct mirroring firmware `AdatStatus`
+// (REQ_GET_ADAT_STATUS, adat_output_spec.md §"AdatStatus").  Packed,
+// little-endian.  RP2040 returns all zeros.
+//
+// Byte layout:
+//   0:   enabled  (configured/persisted intent)
+//   1:   active   (stream currently running)
+//   2:   pin      (configured data GPIO)
+//   3:   rate_ok  (current sample rate is 44.1/48 kHz)
+//   4-5: resync_count (u16, stream restarts since boot)
+//   6-7: slip_count   (u16, emergency local resyncs; should stay 0)
+struct AdatStatus: Equatable {
+    var enabled: Bool = false
+    var active: Bool = false
+    var pin: UInt8 = 0
+    var rateOk: Bool = false
+    var resyncCount: UInt16 = 0
+    var slipCount: UInt16 = 0
+
+    /// Parse the 8-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> AdatStatus? {
+        guard data.count >= 8 else { return nil }
+        let base = data.startIndex
+        return AdatStatus(
+            enabled:     data[base + 0] != 0,
+            active:      data[base + 1] != 0,
+            pin:         data[base + 2],
+            rateOk:      data[base + 3] != 0,
+            resyncCount: UInt16(data[base + 4]) | (UInt16(data[base + 5]) << 8),
+            slipCount:   UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
+        )
+    }
+
+    /// User-facing one-line state description for the Settings status row.
+    var stateString: String {
+        if !enabled { return "Disabled" }
+        if active { return "Streaming" }
+        if !rateOk { return "Suspended (rate above 48 kHz)" }
+        return "Enabled"
+    }
+
+    /// Colored-dot tint for the Stats window state row (mirrors SpdifRxStatus).
+    var stateColor: Color {
+        if !enabled { return .gray }
+        if active { return .green }
+        if !rateOk { return .orange }   // enabled but suspended above 48 kHz
+        return .yellow                  // enabled, waiting to (re)start
     }
 }
 
@@ -607,6 +660,18 @@ class DSPViewModel: ObservableObject {
     @Published var dacHwMuteConfig: DacHwMuteConfig = DacHwMuteConfig()
     @Published var dacHwMuteSupported: Bool = false
 
+    // ADAT bulk output — streams all 8 main output channels as one ADAT
+    // lightpipe signal on a single GPIO (RP2350 only).  `adatSupported` flips
+    // true when the firmware answers REQ_GET_ADAT_STATUS (0xCE); older firmware
+    // and RP2040 STALL / return zeros and the Outputs page hides the section.
+    // Config (enable + pin) is part of the IO block governed by
+    // `presetOutputConfigMode`; `adatStatus` is the live engine state, refreshed
+    // by polling and by the NOTIFY_EVT_ADAT_STATE push.  See adat_output_spec.md.
+    @Published var adatSupported: Bool = false
+    @Published var adatEnabled: Bool = false
+    @Published var adatPin: UInt8 = ADAT_PIN_DEFAULT
+    @Published var adatStatus: AdatStatus = AdatStatus()
+
     // External control interfaces (UART / I2C target) - device-level config
     // exposing the vendor-command surface to an external microcontroller.
     // `controlInterfacesSupported` flips true when the firmware answers
@@ -837,6 +902,11 @@ class DSPViewModel: ObservableObject {
            pin == dacHwMuteConfig.pin {
             return "DAC Mute"
         }
+        // ADAT owns its GPIO only while enabled (mirrors the firmware: a
+        // disabled ADAT stream holds no pin, so its GPIO is free for other uses).
+        if consumer != .adatOut, adatSupported, adatEnabled, pin == adatPin {
+            return "ADAT Output"
+        }
         // External control interfaces reserve their pins only while LIVE (a
         // disabled interface, or one kept down by a boot pin-collision, holds
         // no GPIOs) - mirrors the firmware's is_pin_in_use rule (spec §5.3).
@@ -928,6 +998,22 @@ class DSPViewModel: ObservableObject {
             self.siggenStatus.signalType = signalType
             self.siggenStatus.activeChannel = channel
             self.pollQueue.async { self.fetchSiggenStatus() }
+        }
+
+        // ADAT stream state pushes (start / stop / rate-policy auto-suspend or
+        // resume).  The 8-byte event carries enabled+active+pin; mirror those
+        // immediately for a snappy Outputs-page status row, then refresh the
+        // full AdatStatus (resync / slip counts) off the main thread.
+        AppState.shared.interruptMonitor.onAdatState = { [weak self] enabled, active, pin in
+            guard let self = self else { return }
+            self.adatEnabled = enabled
+            self.adatStatus.enabled = enabled
+            self.adatStatus.active = active
+            if pin != 0 {
+                self.adatPin = pin
+                self.adatStatus.pin = pin
+            }
+            self.pollQueue.async { self.fetchAdatStatus() }
         }
 
         // 1. Subscribe to USB connection changes AND Trigger Fetch
@@ -1106,7 +1192,9 @@ class DSPViewModel: ObservableObject {
             i2sRxPins: i2sInputSupported ? Array(i2sRxPins.prefix(i2sMaxPairs)) : nil,
             i2sInputChannels: i2sInputSupported ? i2sInputChannels : nil,
             i2sInputRate: i2sInputSupported ? i2sInputRateHz : nil,
-            lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil
+            lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil,
+            adatEnabled: adatSupported ? adatEnabled : nil,
+            adatPin: adatSupported ? adatPin : nil
         )
     }
 

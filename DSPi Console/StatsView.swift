@@ -210,6 +210,12 @@ class StatsViewModel: ObservableObject {
     @Published var lgSoundSyncStatus: LgSoundSyncStatus = LgSoundSyncStatus()
     @Published var lgSoundSyncSupported: Bool = false
 
+    // ADAT bulk output diagnostics (RP2350 only).  Polled on the same
+    // 2-second cadence; `adatSupported` stays false on RP2040 (zeros) and on
+    // firmware that STALLs REQ_GET_ADAT_STATUS.  See adat_output_spec.md.
+    @Published var adatStatus: AdatStatus = AdatStatus()
+    @Published var adatSupported: Bool = false
+
     private var previousStarvationTotal: UInt32? = nil
     private var hasConnectedOnce = false
     private var pollTimer: Timer?
@@ -330,6 +336,23 @@ class StatsViewModel: ObservableObject {
         fetchStarvationStats()
         fetchSpdifRxStatus()
         fetchLgSoundSyncStatus()
+        fetchAdatStatus()
+    }
+
+    /// Poll REQ_GET_ADAT_STATUS (0xCE) for the ADAT diagnostics section.  A
+    /// STALL (nil) or a non-RP2350 platform leaves `adatSupported` false so the
+    /// section stays hidden.  RP2040 returns all-zero, also treated as absent.
+    func fetchAdatStatus() {
+        guard let usb = usb, isConnected else { return }
+        guard let data = usb.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+              let status = AdatStatus.fromData(data) else {
+            DispatchQueue.main.async { self.adatSupported = false }
+            return
+        }
+        DispatchQueue.main.async {
+            self.adatSupported = (self.platformName == "RP2350")
+            self.adatStatus = status
+        }
     }
 
     /// REQ_GET_LG_SOUND_SYNC_STATUS (0xE8): returns the 16-byte
@@ -727,6 +750,43 @@ struct StatsView: View {
                                       value: vm.lgSoundSyncStatus.volumeString)
                         SystemInfoRow(title: "TV Mute",
                                       value: vm.lgSoundSyncStatus.muted ? "On" : "Off")
+                    }
+                }
+
+                // ADAT Bulk Output Section (RP2350 only; hidden otherwise)
+                if vm.adatSupported {
+                    Divider()
+
+                    Text("ADAT Bulk Output")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        // State with color indicator — mirrors the S/PDIF row.
+                        HStack {
+                            Text("State")
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(vm.adatStatus.stateColor)
+                                    .frame(width: 6, height: 6)
+                                Text(vm.adatStatus.stateString)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 1)
+
+                        SystemInfoRow(title: "Streaming",
+                                      value: vm.adatStatus.active ? "Yes" : "No")
+                        SystemInfoRow(title: "Rate Supported",
+                                      value: vm.adatStatus.rateOk ? "Yes" : "No")
+                        SystemInfoRow(title: "Data Pin", value: "GPIO \(vm.adatStatus.pin)")
+                        SystemInfoRow(title: "Resync Count", value: "\(vm.adatStatus.resyncCount)")
+                        // Slip count should stay 0; nonzero flags a stalled main
+                        // loop or DMA fault (spec §"AdatStatus").
+                        SystemInfoRow(title: "Slip Count", value: "\(vm.adatStatus.slipCount)")
                     }
                 }
 

@@ -74,6 +74,23 @@ let REQ_GET_MCK_PIN: UInt8        = 0xC7
 let REQ_SET_MCK_MULTIPLIER: UInt8 = 0xC8
 let REQ_GET_MCK_MULTIPLIER: UInt8 = 0xC9
 
+// ADAT bulk output request codes (RP2350 only).  Streams all 8 main output
+// channels (post-EQ/crossover/gain/mute/delay) as one ADAT lightpipe signal on
+// a single GPIO, concurrent with the SPDIF/I2S slots and PDM.  See
+// Documentation/Features/adat_output_spec.md.  SETs are IN-direction transfers
+// carrying the value in wValue and returning a PIN_CONFIG_* status byte (same
+// shape as REQ_SET_SPDIF_RX_PIN).  On RP2040 both SETs return INVALID_OUTPUT
+// and the GETs return zeros.
+let REQ_SET_ADAT_ENABLE: UInt8    = 0xCA   // IN: wValue = 0/1, returns status
+let REQ_GET_ADAT_ENABLE: UInt8    = 0xCB   // IN 1 byte: configured enable (0/1)
+let REQ_SET_ADAT_PIN: UInt8       = 0xCC   // IN: wValue = GPIO (0 = default), returns status
+let REQ_GET_ADAT_PIN: UInt8       = 0xCD   // IN 1 byte: configured GPIO
+let REQ_GET_ADAT_STATUS: UInt8    = 0xCE   // IN 8 bytes: AdatStatus
+
+/// Platform default ADAT data GPIO (PICO_ADAT_PIN); pin 0 in flash/wire means
+/// "unset, use this default".
+let ADAT_PIN_DEFAULT: UInt8       = 12
+
 // Clip detection request codes
 let REQ_CLEAR_CLIPS: UInt8            = 0x83
 
@@ -117,13 +134,15 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V16 (unified channel model): inputs are first-class channels
-/// (PEQ + metering), outputs follow them.  Flat 5864-byte layout (RP2350).
-/// Compatibility is intentionally broken at V16 - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 16
-/// Full V16 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-let BULK_PARAMS_SIZE: UInt16            = 5864
-let WIRE_BULK_PARAMS_V16_SIZE: Int      = 5864
+/// Wire format V17 (unified channel model): inputs are first-class channels
+/// (PEQ + metering), outputs follow them.  V17 appends the 8-byte WireAdatConfig
+/// section (ADAT bulk output) as the final member, growing the flat layout from
+/// 5864 to 5872 bytes (RP2350).  Compatibility is intentionally broken - only
+/// this layout is accepted.
+let WIRE_FORMAT_VERSION: Int            = 17
+/// Full V17 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+let BULK_PARAMS_SIZE: UInt16            = 5872
+let WIRE_BULK_PARAMS_V17_SIZE: Int      = 5872
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
 let BULK_GLOBAL_OFFSET: Int             = 16
@@ -143,6 +162,7 @@ let BULK_LG_OFFSET: Int                 = 4728
 let BULK_USER_VOLUME_OFFSET: Int        = 4744  // user_volume_db, user_mute
 let BULK_DAC_HW_MUTE_OFFSET: Int        = 4760
 let BULK_CROSSOVER_OFFSET: Int          = 4776  // crossovers[17][4]
+let BULK_ADAT_OFFSET: Int               = 5864  // WireAdatConfig (enabled, pin, reserved[6])
 
 /// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
 let WIRE_CROSSPOINT_SIZE: Int           = 8

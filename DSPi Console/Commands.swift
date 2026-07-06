@@ -22,6 +22,7 @@ extension DSPViewModel {
         fetchControlInterfaces()
         fetchControlSurfaces()
         fetchSiggen()
+        fetchAdatConfig()
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -1165,6 +1166,75 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - ADAT Bulk Output Commands
+    //
+    // RP2350-only ADAT lightpipe of all 8 main output channels on one GPIO.
+    // See adat_output_spec.md.  Both SETs are IN-direction transfers carrying
+    // the value in wValue and returning a PIN_CONFIG_* status byte (same shape
+    // as REQ_SET_SPDIF_RX_PIN); on RP2040 they return INVALID_OUTPUT.
+
+    /// Probe + refresh live ADAT state via REQ_GET_ADAT_STATUS.  A STALL (nil)
+    /// means the firmware predates ADAT; combined with the RP2350 gate this sets
+    /// `adatSupported`.  Called from `fetchAll` after the bulk fetch.
+    func fetchAdatStatus() {
+        guard let data = usb.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+              let status = AdatStatus.fromData(data) else {
+            DispatchQueue.main.async { self.adatSupported = false }
+            return
+        }
+        DispatchQueue.main.async {
+            // The engine is compiled out on RP2040 (status all-zero); gate the UI
+            // on platform so a zeroed RP2040 response never shows the section.
+            self.adatSupported = (self.platformName == "RP2350")
+            self.adatStatus = status
+            self.adatEnabled = status.enabled
+            if status.pin != 0 { self.adatPin = status.pin }
+        }
+    }
+
+    /// Alias kept parallel to the other `fetch…Config` probes used by `fetchAll`.
+    func fetchAdatConfig() { fetchAdatStatus() }
+
+    /// Enable or disable the ADAT bulk output.  Enabling validates the
+    /// configured pin first (INVALID_PIN / PIN_IN_USE on conflict); disabling
+    /// always succeeds.  Returns the firmware status byte (0xFF on transfer
+    /// failure).
+    @discardableResult
+    func setAdatEnable(_ enabled: Bool) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_ADAT_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async {
+                    self.adatEnabled = enabled
+                    self.adatStatus.enabled = enabled
+                }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    /// Set the ADAT data GPIO.  `wValue = 0` resets to the platform default
+    /// (ADAT_PIN_DEFAULT).  May be issued while enabled; the firmware re-routes
+    /// under a muted restart.  Returns the firmware status byte.
+    @discardableResult
+    func setAdatPin(_ pin: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_ADAT_PIN, value: UInt16(pin), index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                let applied = pin == 0 ? ADAT_PIN_DEFAULT : pin
+                DispatchQueue.main.async {
+                    self.adatPin = applied
+                    self.adatStatus.pin = applied
+                }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
     // MARK: - Input Source Commands
 
     /// Probes GET_INPUT_SOURCE. If the device STALLs (nil), the feature is unsupported.
@@ -1606,11 +1676,11 @@ extension DSPViewModel {
             }
             return false
         }
-        // V16 is all-or-nothing: only the full, current layout is accepted.
+        // V17 is all-or-nothing: only the full, current layout is accepted.
         // A short or wrong-version payload means incompatible firmware - the
         // device is still connected, so don't disconnect (avoids a reconnect
         // loop); just record the version so the UI can react.
-        guard data.count >= WIRE_BULK_PARAMS_V16_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
+        guard data.count >= WIRE_BULK_PARAMS_V17_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
         }
@@ -1792,6 +1862,13 @@ extension DSPViewModel {
             bulkCrossovers[ch] = bands
         }
 
+        // --- ADAT bulk output config (offset 5864, WireAdatConfig) ---
+        // Live config: enabled + data pin (pin 0 => platform default).  RP2040
+        // reports zeros; ADAT support is gated on platform below.
+        let bulkAdatEnabled = data[BULK_ADAT_OFFSET] != 0
+        let bulkAdatPinRaw = data[BULK_ADAT_OFFSET + 1]
+        let bulkAdatPin = bulkAdatPinRaw == 0 ? ADAT_PIN_DEFAULT : bulkAdatPinRaw
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -1855,6 +1932,15 @@ extension DSPViewModel {
             self.lgSoundSyncSupported = true
             self.dacHwMuteConfig = bulkDacHwMute
             self.dacHwMuteSupported = true
+
+            // ADAT bulk output is RP2350-only (the engine is compiled out on
+            // RP2040, which reports zeros here).  fetchAdatConfig() refines this
+            // with live active/rate status right after the bulk fetch.
+            self.adatSupported = (platform == "RP2350")
+            self.adatEnabled = bulkAdatEnabled
+            self.adatPin = bulkAdatPin
+            self.adatStatus.enabled = bulkAdatEnabled
+            self.adatStatus.pin = bulkAdatPin
 
             self.firmwareWireFormatVersion = Int(formatVersion)
 
@@ -2387,6 +2473,27 @@ extension DSPViewModel {
             let pair = off - (BULK_INPUT_CONFIG_OFFSET + 5) + 1   // 1..3
             self.i2sInputSupported = true
             if self.i2sRxPins.indices.contains(pair) { self.i2sRxPins[pair] = payload[0] }
+            return
+        }
+
+        // adat_config.enabled (BULK_ADAT_OFFSET, 1 byte).  Fired when 0xCA
+        // toggles the stream, on bulk apply, and on preset load.  The richer
+        // live state (active / rate_ok) arrives via NOTIFY_EVT_ADAT_STATE and
+        // fetchAdatStatus(); here we just mirror the persisted enable intent.
+        if off == BULK_ADAT_OFFSET && sz == 1 && payload.count >= 1 {
+            let en = payload[0] != 0
+            if self.adatEnabled != en { self.adatEnabled = en }
+            self.adatStatus.enabled = en
+            return
+        }
+
+        // adat_config.pin (BULK_ADAT_OFFSET + 1, 1 byte).  Fired when 0xCC
+        // re-routes the data pin, on bulk apply, and on preset load.  A stored
+        // 0 means "unset — use the platform default".
+        if off == BULK_ADAT_OFFSET + 1 && sz == 1 && payload.count >= 1 {
+            let pin = payload[0] == 0 ? ADAT_PIN_DEFAULT : payload[0]
+            if self.adatPin != pin { self.adatPin = pin }
+            self.adatStatus.pin = pin
             return
         }
     }

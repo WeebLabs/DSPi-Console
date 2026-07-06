@@ -23,7 +23,9 @@ final class PresetSnapshotTests: XCTestCase {
         channelNames: [String] = ["USB L", "USB R", "Out L", "Out R", "Sub"],
         outputPins: [UInt8] = [6, 7, 8, 9, 10],
         outputSlotTypes: [UInt8] = [0, 0, 0, 0],
-        spdifRxPin: UInt8 = 11
+        spdifRxPin: UInt8 = 11,
+        adatEnabled: Bool? = nil,
+        adatPin: UInt8? = nil
     ) -> PresetSnapshot {
         PresetSnapshot(
             preampDB: preampDB,
@@ -68,7 +70,9 @@ final class PresetSnapshotTests: XCTestCase {
             i2sRxPins: nil,
             i2sInputChannels: nil,
             i2sInputRate: nil,
-            lgSoundSyncEnabled: nil
+            lgSoundSyncEnabled: nil,
+            adatEnabled: adatEnabled,
+            adatPin: adatPin
         )
     }
 
@@ -120,5 +124,29 @@ final class PresetSnapshotTests: XCTestCase {
         let newI = makeSnapshot(masterVolumeDB: -10, masterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT)
         XCTAssertFalse(PresetSnapshot.diff(from: oldI, to: newI, channelNames: names).hasChanges,
                        "master volume change should be ignored in INDEPENDENT mode")
+    }
+
+    func testAdatChangeGatedByOutputConfigMode() {
+        // ADAT config is part of the IO block: in WITH_PRESET mode an
+        // enable/pin change dirties the preset; in INDEPENDENT mode it doesn't
+        // (it lives in the device directory, saved via Save Output Config).
+        let old = makeSnapshot(outputConfigMode: OUTPUT_CONFIG_MODE_WITH_PRESET,
+                               adatEnabled: false, adatPin: 12)
+        let newEnabled = makeSnapshot(outputConfigMode: OUTPUT_CONFIG_MODE_WITH_PRESET,
+                                      adatEnabled: true, adatPin: 12)
+        XCTAssertTrue(PresetSnapshot.diff(from: old, to: newEnabled, channelNames: names).hasChanges,
+                      "ADAT enable change should be dirty in WITH_PRESET mode")
+
+        let newPin = makeSnapshot(outputConfigMode: OUTPUT_CONFIG_MODE_WITH_PRESET,
+                                  adatEnabled: false, adatPin: 13)
+        XCTAssertTrue(PresetSnapshot.diff(from: old, to: newPin, channelNames: names).hasChanges,
+                      "ADAT pin change should be dirty in WITH_PRESET mode")
+
+        let oldI = makeSnapshot(outputConfigMode: OUTPUT_CONFIG_MODE_INDEPENDENT,
+                                adatEnabled: false, adatPin: 12)
+        let newI = makeSnapshot(outputConfigMode: OUTPUT_CONFIG_MODE_INDEPENDENT,
+                                adatEnabled: true, adatPin: 13)
+        XCTAssertFalse(PresetSnapshot.diff(from: oldI, to: newI, channelNames: names).hasChanges,
+                       "ADAT change should be ignored in INDEPENDENT mode")
     }
 }

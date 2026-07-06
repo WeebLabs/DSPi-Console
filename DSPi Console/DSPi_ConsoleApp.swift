@@ -468,6 +468,8 @@ struct OutputConfigSnapshot: Equatable {
     var i2sRxPins: [UInt8]
     var i2sInputChannels: Int
     var i2sInputRateHz: UInt32
+    var adatEnabled: Bool
+    var adatPin: UInt8
 }
 
 /// App-lifetime owner of pending (unsaved) Settings changes, so the save bar
@@ -512,7 +514,9 @@ final class SettingsSaveCoordinator: ObservableObject {
             spdifRxPin: vm.spdifRxPin,
             i2sRxPins: vm.i2sRxPins,
             i2sInputChannels: vm.i2sInputChannels,
-            i2sInputRateHz: vm.i2sInputRateHz
+            i2sInputRateHz: vm.i2sInputRateHz,
+            adatEnabled: vm.adatEnabled,
+            adatPin: vm.adatPin
         )
     }
 
@@ -620,6 +624,12 @@ final class SettingsSaveCoordinator: ObservableObject {
                     _ = vm.setI2SRxPin(pair: pair, base.i2sRxPins[pair])
                 }
                 if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
+                // ADAT: restore the data pin first (re-routes under a muted
+                // restart if enabled), then the enable state to match baseline.
+                if vm.adatSupported {
+                    if vm.adatPin != base.adatPin { _ = vm.setAdatPin(base.adatPin) }
+                    if vm.adatEnabled != base.adatEnabled { _ = vm.setAdatEnable(base.adatEnabled) }
+                }
                 DispatchQueue.main.async { self.outputConfigDirty = false }
             }
         }
@@ -2709,6 +2719,54 @@ struct HardwareSettingsTab: View {
         }
     }
 
+    /// GPIO options for the ADAT data pin: the standard valid pins plus the
+    /// platform default (GPIO 12, which the shared list omits), de-duplicated
+    /// and sorted.  Pins owned by another consumer are filtered out, but the
+    /// current selection is always kept so the picker renders it.
+    private var adatPinOptions: [UInt8] {
+        let current = vm.adatPin
+        var seen = Set<UInt8>()
+        return ([ADAT_PIN_DEFAULT] + Self.validPins)
+            .filter { seen.insert($0).inserted }
+            .sorted()
+            .filter { $0 == current || pinInUseBy($0, excluding: .adatOut) == nil }
+    }
+
+    /// Map an ADAT SET status byte (enable or pin change) onto the inline
+    /// status row, re-syncing local state from the device on any rejection.
+    /// `label` is the human-readable action ("enabled" / "disabled" / "pin").
+    private func handleAdatStatus(_ status: UInt8, label: String, gpio: UInt8?) {
+        switch status {
+        case PIN_CONFIG_SUCCESS:
+            if label == "pin", let g = gpio {
+                statusMessage = "ADAT data pin set to GPIO \(g)"
+            } else {
+                statusMessage = "ADAT output \(label)"
+            }
+            statusIsError = false
+        case PIN_CONFIG_PIN_IN_USE:
+            if let g = gpio, let owner = pinInUseBy(g, excluding: .adatOut) {
+                statusMessage = "GPIO \(g) is already assigned to \(owner)"
+            } else {
+                statusMessage = "That pin is already in use"
+            }
+            statusIsError = true
+            vm.fetchAdatStatus()
+        case PIN_CONFIG_INVALID_PIN:
+            statusMessage = gpio.map { "GPIO \($0) isn't available on this device" } ?? "Invalid ADAT pin"
+            statusIsError = true
+            vm.fetchAdatStatus()
+        case PIN_CONFIG_INVALID_OUTPUT:
+            statusMessage = "ADAT output isn't supported on this device"
+            statusIsError = true
+            vm.fetchAdatStatus()
+        default:
+            statusMessage = label == "pin" ? "Failed to set ADAT pin" : "Failed to \(label == "enabled" ? "enable" : "disable") ADAT output"
+            statusIsError = true
+            vm.fetchAdatStatus()
+        }
+    }
+
     private func setPinForOutput(_ outputIndex: Int, pin: UInt8) {
         guard vm.isDeviceConnected else {
             statusMessage = "Device not connected"
@@ -2805,6 +2863,9 @@ struct HardwareSettingsTab: View {
                 if vm.inputSourceSupported {
                     vm.fetchSpdifRxPin()
                     vm.fetchI2SInputConfig()
+                }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    vm.fetchAdatConfig()
                 }
             }
         }
@@ -3226,6 +3287,81 @@ struct HardwareSettingsTab: View {
             Section {
                 ForEach(visiblePinOutputs) { output in
                     outputRow(output)
+                }
+            }
+
+            // ADAT bulk output (RP2350 only) — streams all 8 output channels as
+            // one optical ADAT lightpipe on a spare GPIO, alongside the
+            // SPDIF/I2S slots and PDM.  Enable + data pin are part of the IO
+            // block governed by the output-config persistence mode.
+            if vm.adatSupported {
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { vm.adatEnabled },
+                        set: { en in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
+                            let pin = vm.adatPin
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setAdatEnable(en)
+                                DispatchQueue.main.async {
+                                    handleAdatStatus(status, label: en ? "enabled" : "disabled", gpio: pin)
+                                }
+                            }
+                        }
+                    )) {
+                        HStack {
+                            Image(systemName: "fibrechannel")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enable ADAT")
+                                    .font(.body)
+                                Text("Stream all 8 output channels as one optical ADAT lightpipe (44.1/48 kHz, 24-bit). Runs alongside the existing outputs; drive a TOSLINK transmitter from the data pin.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .padding(.vertical, 4)
+
+                    // Data GPIO — may be changed while enabled (the firmware
+                    // re-routes under a brief muted restart).
+                    HStack {
+                        Image(systemName: "cable.connector")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Serial Data")
+                                .font(.body)
+                            Text("GPIO driving the ADAT optical output. Default GPIO \(ADAT_PIN_DEFAULT).")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.adatPin },
+                            set: { newPin in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let status = vm.setAdatPin(newPin)
+                                    DispatchQueue.main.async {
+                                        handleAdatStatus(status, label: "pin", gpio: newPin)
+                                    }
+                                }
+                            }
+                        )) {
+                            ForEach(adatPinOptions, id: \.self) { pin in
+                                Text("GPIO \(pin)").tag(pin)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                } header: {
+                    Label("Bulk Output", systemImage: "fibrechannel")
                 }
             }
 

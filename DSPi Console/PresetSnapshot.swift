@@ -78,6 +78,8 @@ struct PresetSnapshot: Equatable {
     let i2sInputChannels: Int? // active I2S input channel count (2/4/6/8); nil when unsupported
     let i2sInputRate: UInt32?  // selected I2S rate in Hz; nil when unsupported
     let lgSoundSyncEnabled: Bool?  // nil when firmware doesn't support LG Sound Sync
+    let adatEnabled: Bool?  // ADAT bulk output enable; nil when unsupported (RP2040 / old fw)
+    let adatPin: UInt8?     // ADAT data GPIO; nil when unsupported
 }
 
 // MARK: - Diff
@@ -328,6 +330,12 @@ extension PresetSnapshot {
             }
             if let oldRate = old.i2sInputRate, let newRate = new.i2sInputRate, oldRate != newRate {
                 changes.append(.init(category: "I2S Input", description: "I2S rate: \(oldRate) Hz → \(newRate) Hz"))
+            }
+            if let oldEn = old.adatEnabled, let newEn = new.adatEnabled, oldEn != newEn {
+                changes.append(.init(category: "ADAT", description: "ADAT output: \(newEn ? "enabled" : "disabled")"))
+            }
+            if let oldPin = old.adatPin, let newPin = new.adatPin, oldPin != newPin {
+                changes.append(.init(category: "ADAT", description: "ADAT pin: GPIO \(oldPin) → GPIO \(newPin)"))
             }
         }
 
