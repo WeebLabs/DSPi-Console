@@ -124,6 +124,84 @@ struct AdatStatus: Equatable {
     }
 }
 
+// MARK: - I2S Clock-Slave Status Data Model
+//
+// 16-byte I2sSlaveStatusPacket from REQ_GET_I2S_SLAVE_STATUS (0x8A), little-
+// endian.  Mirrors the SPDIF RX lock state machine but for the I2S clock-slave
+// role (external master drives BCK/LRCLK; the rate is auto-detected).  See
+// Documentation/Features/i2s_slave_input_spec.md §4.  Layout:
+//   0:    state       (I2sSlaveState 0-3)
+//   1:    clock_mode  (live mode 0=master / 1=slave)
+//   2:    lock_count  (locks since boot, saturates 255)
+//   3:    loss_count  (losses since boot, saturates 255)
+//   4-7:  detected_rate (snapped Hz 44100/48000/96000; 0 unless LOCKED)
+//   8-11: measured_hz (raw measured external rate; 0 when no clocks)
+//   12-15: reserved
+struct I2sSlaveStatus: Equatable {
+    var state: UInt8 = 0          // 0=INACTIVE, 1=ACQUIRING, 2=RELOCKING, 3=LOCKED
+    var clockMode: UInt8 = 0      // 0=master, 1=slave (live)
+    var lockCount: UInt8 = 0
+    var lossCount: UInt8 = 0
+    var detectedRate: UInt32 = 0
+    var measuredHz: UInt32 = 0
+
+    /// Parse the 16-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> I2sSlaveStatus? {
+        guard data.count >= 16 else { return nil }
+        let base = data.startIndex
+        func u32(_ off: Int) -> UInt32 {
+            UInt32(data[base + off]) | (UInt32(data[base + off + 1]) << 8)
+                | (UInt32(data[base + off + 2]) << 16) | (UInt32(data[base + off + 3]) << 24)
+        }
+        return I2sSlaveStatus(
+            state:        data[base + 0],
+            clockMode:    data[base + 1],
+            lockCount:    data[base + 2],
+            lossCount:    data[base + 3],
+            detectedRate: u32(4),
+            measuredHz:   u32(8)
+        )
+    }
+
+    var isSlave: Bool { clockMode == I2S_CLOCK_MODE_SLAVE }
+    var isLocked: Bool { state == 3 }
+
+    /// User-facing one-line state description.  ACQUIRING / RELOCKING /
+    /// INACTIVE all collapse to "waiting for external clock" per spec §7.
+    var stateString: String {
+        switch state {
+        case 0: return "Inactive"
+        case 1: return "Acquiring"
+        case 2: return "Relocking"
+        case 3: return "Locked"
+        default: return "Unknown (\(state))"
+        }
+    }
+
+    /// Colored-dot tint mirroring SpdifRxStatus (gray / yellow / orange / green).
+    var stateColor: Color {
+        switch state {
+        case 0: return .gray
+        case 1: return .yellow
+        case 2: return .orange
+        case 3: return .green
+        default: return .gray
+        }
+    }
+
+    /// Snapped locked rate for display; "-" until LOCKED.
+    var detectedRateString: String {
+        guard isLocked, detectedRate > 0 else { return "-" }
+        return String(format: "%.1f kHz", Double(detectedRate) / 1000.0)
+    }
+
+    /// Raw measured external rate for diagnostics; "-" when no clocks at all.
+    var measuredHzString: String {
+        guard measuredHz > 0 else { return "-" }
+        return String(format: "%.1f kHz", Double(measuredHz) / 1000.0)
+    }
+}
+
 // MARK: - External Control Interface Configs
 //
 // 8-byte wire-format structs mirroring firmware `UartCtrlConfig` /
@@ -789,6 +867,21 @@ class DSPViewModel: ObservableObject {
     @Published var i2sRxPins: [UInt8] = I2S_RX_PIN_DEFAULTS
     @Published var i2sInputRateHz: UInt32 = 48000               // selected I2S input rate
 
+    // I2S clock-slave input mode (firmware wire format V18+).  In SLAVE mode an
+    // external master drives BCK/LRCLK and the rate is auto-detected; MASTER
+    // (default) keeps DSPi as the clock authority.  `i2sClockModeSupported` is
+    // false on firmware that STALLs REQ_GET_I2S_CLOCK_MODE (0x89).  Live lock
+    // state arrives via REQ_GET_I2S_SLAVE_STATUS (0x8A) and NOTIFY event 0x09.
+    // See i2s_slave_input_spec.md.
+    @Published var i2sClockModeSupported: Bool = false
+    @Published var i2sClockMode: UInt8 = 0                      // 0=master, 1=slave (live)
+    @Published var i2sSlaveStatus: I2sSlaveStatus = I2sSlaveStatus()
+
+    /// True when the device is actively running in the I2S clock-slave role
+    /// (mode is slave AND I2S is the selected input source).  Gates the
+    /// rate/MCK relabelling in the I2S settings UI.
+    var i2sSlaveActive: Bool { i2sClockMode == I2S_CLOCK_MODE_SLAVE && inputSource == INPUT_SOURCE_I2S }
+
     /// Max I2S stereo pairs / channels for this platform (RP2350 = 4 pairs / 8 ch,
     /// RP2040 = 1 pair / 2 ch).  Used to gate the multichannel I2S UI.
     var i2sMaxPairs: Int { platformName == "RP2040" ? 1 : I2S_RX_MAX_PAIRS_RP2350 }
@@ -1363,6 +1456,18 @@ class DSPViewModel: ObservableObject {
             self.pollQueue.async { self.fetchAdatStatus() }
         }
 
+        // I2S clock-slave lock-state pushes (ACQUIRING / RELOCKING / INACTIVE /
+        // LOCKED).  The 9-byte event carries state + detected rate; mirror those
+        // immediately for a snappy I2S settings-page indicator, then refresh the
+        // full 16-byte status (lock/loss counts, measured Hz) off the main thread.
+        AppState.shared.interruptMonitor.onI2sSlaveState = { [weak self] state, detectedRate in
+            guard let self = self else { return }
+            self.i2sClockModeSupported = true
+            self.i2sSlaveStatus.state = state
+            self.i2sSlaveStatus.detectedRate = detectedRate
+            self.pollQueue.async { self.fetchI2SSlaveStatus() }
+        }
+
         // 1. Subscribe to USB connection changes AND Trigger Fetch
         usb.$isConnected
             .receive(on: RunLoop.main)
@@ -1545,6 +1650,7 @@ class DSPViewModel: ObservableObject {
             i2sRxPins: i2sInputSupported ? Array(i2sRxPins.prefix(i2sMaxPairs)) : nil,
             i2sInputChannels: i2sInputSupported ? i2sInputChannels : nil,
             i2sInputRate: i2sInputSupported ? i2sInputRateHz : nil,
+            i2sClockMode: i2sClockModeSupported ? i2sClockMode : nil,
             lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil,
             adatEnabled: adatSupported ? adatEnabled : nil,
             adatPin: adatSupported ? adatPin : nil

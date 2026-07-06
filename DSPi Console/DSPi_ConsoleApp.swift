@@ -506,6 +506,7 @@ struct OutputConfigSnapshot: Equatable {
     var i2sRxPins: [UInt8]
     var i2sInputChannels: Int
     var i2sInputRateHz: UInt32
+    var i2sClockMode: UInt8
     var adatEnabled: Bool
     var adatPin: UInt8
 }
@@ -555,6 +556,7 @@ final class SettingsSaveCoordinator: ObservableObject {
             i2sRxPins: vm.i2sRxPins,
             i2sInputChannels: vm.i2sInputChannels,
             i2sInputRateHz: vm.i2sInputRateHz,
+            i2sClockMode: vm.i2sClockMode,
             adatEnabled: vm.adatEnabled,
             adatPin: vm.adatPin
         )
@@ -682,6 +684,7 @@ final class SettingsSaveCoordinator: ObservableObject {
                     _ = vm.setI2SRxPin(pair: pair, base.i2sRxPins[pair])
                 }
                 if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
+                if vm.i2sClockMode != base.i2sClockMode { vm.setI2SClockMode(base.i2sClockMode) }
                 // ADAT: restore the data pin first (re-routes under a muted
                 // restart if enabled), then the enable state to match baseline.
                 if vm.adatSupported {
@@ -4408,13 +4411,16 @@ struct HardwareSettingsTab: View {
                             .frame(width: 16)
                         VStack(alignment: .leading, spacing: 1) {
                             Text("Master Clock (MCK)")
-                            Text("Clock reference for external DACs")
+                            Text(vm.i2sSlaveActive
+                                 ? "Forced off in I2S slave mode; a local MCK would be asynchronous to the external clocks. Kept and restored when leaving slave mode."
+                                 : "Clock reference for external DACs")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
                     }
                 }
                 .toggleStyle(.switch)
+                .disabled(vm.i2sSlaveActive)
 
                 HStack {
                     Image(systemName: "clock")
@@ -4454,7 +4460,7 @@ struct HardwareSettingsTab: View {
                     }
                     .labelsHidden()
                     .fixedSize()
-                    .disabled(vm.mckEnabled)
+                    .disabled(vm.mckEnabled || vm.i2sSlaveActive)
                 }
 
                 HStack {
@@ -4487,7 +4493,7 @@ struct HardwareSettingsTab: View {
                     }
                     .labelsHidden()
                     .fixedSize()
-                    .disabled(mck256UnsupportedAtCurrentRate)
+                    .disabled(mck256UnsupportedAtCurrentRate || vm.i2sSlaveActive)
                 }
 
                 if mck256UnsupportedAtCurrentRate {
@@ -4511,7 +4517,12 @@ struct HardwareSettingsTab: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("Input Sample Rate")
                                 .font(.body)
-                            Text("Rate for I2S input; DSPi drives the clocks, so the source must follow.")
+                            // In the clock-slave role the external master owns the
+                            // rate, so this selector only stores the master-mode
+                            // preference; show the auto-detected rate read-only.
+                            Text(vm.i2sSlaveActive
+                                 ? "Rate used in master mode. In slave mode the external master sets the rate (detected: \(vm.i2sSlaveStatus.detectedRateString))."
+                                 : "Rate for I2S input; DSPi drives the clocks, so the source must follow.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -4531,6 +4542,7 @@ struct HardwareSettingsTab: View {
                         }
                         .labelsHidden()
                         .fixedSize()
+                        .disabled(vm.i2sSlaveActive)
                     }
                 }
 
@@ -4624,6 +4636,75 @@ struct HardwareSettingsTab: View {
             // MARK: I2S Input
             if section == .spdif && vm.i2sInputSupported {
                 Section {
+                    // Clock mode — MASTER (DSPi drives BCK/LRCLK, app picks the
+                    // rate) or SLAVE (an external master drives the clocks and the
+                    // rate is auto-detected).  Only meaningful while the input
+                    // source is I2S; stored and applied at the next switch into
+                    // I2S otherwise.  Hidden on firmware that predates the feature.
+                    if vm.i2sClockModeSupported {
+                        HStack {
+                            Image(systemName: "clock.arrow.2.circlepath")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Clock Mode")
+                                    .font(.body)
+                                Text("Master: DSPi drives BCK/LRCLK. Slave: an external master drives the clocks and the rate is auto-detected.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { vm.i2sClockMode },
+                                set: { newMode in
+                                    SettingsSaveCoordinator.shared.beginOutputEdit()
+                                    DispatchQueue.global(qos: .userInitiated).async {
+                                        vm.setI2SClockMode(newMode)
+                                    }
+                                }
+                            )) {
+                                Text("Master").tag(I2S_CLOCK_MODE_MASTER)
+                                Text("Slave").tag(I2S_CLOCK_MODE_SLAVE)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .fixedSize()
+                        }
+
+                        // Live lock indicator, shown while the device is actually
+                        // running in the slave role (mode=slave AND source=I2S).
+                        // ACQUIRING / RELOCKING / INACTIVE collapse to a single
+                        // "waiting for external clock" reading with the raw
+                        // measured rate as a diagnostic (spec §7).
+                        if vm.i2sSlaveActive {
+                            HStack {
+                                Image(systemName: "dot.radiowaves.left.and.right")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 16)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Lock Status")
+                                        .font(.body)
+                                    Text(vm.i2sSlaveStatus.isLocked
+                                         ? "Locked to external clock at \(vm.i2sSlaveStatus.detectedRateString)."
+                                         : "Waiting for external clock (measured \(vm.i2sSlaveStatus.measuredHzString)).")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(vm.i2sSlaveStatus.stateColor)
+                                        .frame(width: 6, height: 6)
+                                    Text(vm.i2sSlaveStatus.stateString)
+                                        .font(.body)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+
                     // Channel count — 1..4 stereo pairs.  Multichannel (>2) is
                     // RP2350-only; on a stereo-only part this shows a static "2".
                     HStack {

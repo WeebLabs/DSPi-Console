@@ -74,6 +74,7 @@ final class PresetSnapshotTests: XCTestCase {
             i2sRxPins: nil,
             i2sInputChannels: nil,
             i2sInputRate: nil,
+            i2sClockMode: nil,
             lgSoundSyncEnabled: nil,
             adatEnabled: adatEnabled,
             adatPin: adatPin

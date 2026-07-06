@@ -145,18 +145,20 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V19 (unified channel model): inputs are first-class channels
-/// (PEQ + metering), outputs follow them.  V19 adds loudness_output_mask in the
+/// Wire format V21 (unified channel model): inputs are first-class channels
+/// (PEQ + metering), outputs follow them.  V21 claims a previously-reserved byte
+/// inside WireInputConfig for `i2s_clock_mode` (0=master, 1=slave) without
+/// changing the section or total size.  V20 repurposes WireCrossfeedParams'
+/// reserved byte (BULK_CROSSFEED_OFFSET + 3) as the crossfeed output_pair_mask;
+/// struct and payload sizes are unchanged.  V19 adds loudness_output_mask in the
 /// global section's former reserved[2] bytes (offset 22), so struct and payload
 /// sizes are unchanged from V18.  V18 grew WireLevellerConfig from 16 to 20 bytes
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
-/// V20 repurposes WireCrossfeedParams' reserved byte (BULK_CROSSFEED_OFFSET + 3)
-/// as the crossfeed output_pair_mask; struct and payload sizes are unchanged.
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 20
-/// Full V20 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// Unchanged from V19 - the crossfeed mask reuses a reserved byte.
+let WIRE_FORMAT_VERSION: Int            = 21
+/// Full V21 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Unchanged from V19/V20 - the clock-mode byte reuses reserved space.
 let BULK_PARAMS_SIZE: UInt16            = 5876
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
@@ -174,6 +176,9 @@ let BULK_LEVELLER_OFFSET: Int           = 4648  // WireLevellerConfig, 20 bytes 
 let BULK_PREAMP_OFFSET: Int             = 4668  // preamp_db[8]
 let BULK_MASTER_VOLUME_OFFSET: Int      = 4700
 let BULK_INPUT_CONFIG_OFFSET: Int       = 4716  // input_source, spdif_rx_pin, i2s_rx_pin, i2s_rate
+/// Byte +11 within WireInputConfig: i2s_clock_mode (0=master, 1=slave; V21+).
+/// Bytes +8/+9/+10 are the optional SPDIF 2/3 pins and enable mask.
+let BULK_INPUT_I2S_CLOCK_MODE_OFFSET: Int = 4727
 let BULK_LG_OFFSET: Int                 = 4732
 let BULK_USER_VOLUME_OFFSET: Int        = 4748  // user_volume_db, user_mute
 let BULK_DAC_HW_MUTE_OFFSET: Int        = 4764
@@ -303,6 +308,18 @@ func i2sRateEnumToHz(_ raw: UInt8) -> UInt32 {
 func i2sRateHzToEnum(_ hz: UInt32) -> UInt8 {
     UInt8(I2S_INPUT_RATES_HZ.firstIndex(of: hz) ?? 1)
 }
+
+// I2S clock-slave input mode (firmware wire format V18+).  See
+// Documentation/Features/i2s_slave_input_spec.md.  In SLAVE mode an external
+// master drives BCK/LRCLK (DSPi's clock pins become inputs) and the rate is
+// auto-detected; in MASTER mode (default) DSPi drives the clocks and the app
+// picks the rate.  The mode is only meaningful while the input source is I2S.
+let REQ_SET_I2S_CLOCK_MODE: UInt8   = 0x88   // OUT 1 byte: 0=master, 1=slave (deferred apply)
+let REQ_GET_I2S_CLOCK_MODE: UInt8   = 0x89   // IN 1 byte: live mode (0/1)
+let REQ_GET_I2S_SLAVE_STATUS: UInt8 = 0x8A   // IN 16 bytes: I2sSlaveStatusPacket
+
+let I2S_CLOCK_MODE_MASTER: UInt8    = 0
+let I2S_CLOCK_MODE_SLAVE: UInt8     = 1
 
 // DAC hardware-mute request codes (firmware V10+ wire format).  SET takes
 // a 16-byte DacHwMuteConfig OUT payload; GET returns 16 bytes; TEST is a

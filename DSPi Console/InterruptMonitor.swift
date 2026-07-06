@@ -41,6 +41,7 @@ private let NOTIFY_EVT_PRESET_LOADED: UInt8 = 0x04
 private let NOTIFY_EVT_INPUT_FORMAT: UInt8 = 0x05
 private let NOTIFY_EVT_SIGGEN_STATE: UInt8 = 0x07
 private let NOTIFY_EVT_ADAT_STATE: UInt8 = 0x08
+private let NOTIFY_EVT_I2S_SLAVE_STATE: UInt8 = 0x09
 
 // Source tags (from ParamSource enum in firmware notify.h)
 private func sourceLabel(_ src: UInt8) -> String {
@@ -163,6 +164,17 @@ struct InterruptEvent: Identifiable {
                 return "\(seqStr) v2.AdatState (short: \(bytes.count) bytes)"
             }
             return "\(seqStr) v2.AdatState                   enabled=\(bytes[4]) active=\(bytes[5]) pin=\(bytes[6])"
+
+        case NOTIFY_EVT_I2S_SLAVE_STATE:
+            // 9 bytes: [ver, evt, flags, seq, state, rate_LE(4)].  Note this
+            // event is 9 bytes where most v2 events are 8 (per-event length).
+            guard bytes.count >= 9 else {
+                return "\(seqStr) v2.I2sSlaveState (short: \(bytes.count) bytes)"
+            }
+            let states = ["INACTIVE", "ACQUIRING", "RELOCKING", "LOCKED"]
+            let state = Int(bytes[4]) < states.count ? states[Int(bytes[4])] : "state=\(bytes[4])"
+            let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
+            return "\(seqStr) v2.I2sSlaveState              \(state) rate=\(rate)"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -469,6 +481,11 @@ class InterruptMonitor: ObservableObject {
     /// and configured data pin.
     var onAdatState: ((_ enabled: Bool, _ active: Bool, _ pin: UInt8) -> Void)?
 
+    /// Fires on the main thread for every I2S clock-slave lock-state push
+    /// (NOTIFY_EVT_I2S_SLAVE_STATE: ACQUIRING / RELOCKING / INACTIVE / LOCKED).
+    /// Carries the I2sSlaveState and the detected rate in Hz (0 unless LOCKED).
+    var onI2sSlaveState: ((_ state: UInt8, _ detectedRate: UInt32) -> Void)?
+
     private let usb: USBDevice
     private var interfacePtr: USBDevice.InterfaceInterfacePtr?
     private var pollThread: Thread?
@@ -647,6 +664,20 @@ class InterruptMonitor: ObservableObject {
             let pin = bytes[6]
             DispatchQueue.main.async {
                 handler(enabled, active, pin)
+            }
+        }
+
+        // Dispatch I2S clock-slave lock-state pushes so the I2S settings-page
+        // indicator reacts to lock/loss/rate-change without polling lag.  This
+        // event is 9 bytes: [ver, evt, flags, seq, state, rate_LE(4)].
+        if let handler = onI2sSlaveState,
+           bytes.count >= 9,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_I2S_SLAVE_STATE {
+            let state = bytes[4]
+            let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
+            DispatchQueue.main.async {
+                handler(state, rate)
             }
         }
 

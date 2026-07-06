@@ -83,6 +83,7 @@ struct PresetSnapshot: Equatable {
     let i2sRxPins: [UInt8]?    // per-pair I2S RX data pins; nil when unsupported (pre-V12)
     let i2sInputChannels: Int? // active I2S input channel count (2/4/6/8); nil when unsupported
     let i2sInputRate: UInt32?  // selected I2S rate in Hz; nil when unsupported
+    let i2sClockMode: UInt8?   // I2S clock mode (0=master, 1=slave); nil when unsupported (pre-V18)
     let lgSoundSyncEnabled: Bool?  // nil when firmware doesn't support LG Sound Sync
     let adatEnabled: Bool?  // ADAT bulk output enable; nil when unsupported (RP2040 / old fw)
     let adatPin: UInt8?     // ADAT data GPIO; nil when unsupported
@@ -358,6 +359,10 @@ extension PresetSnapshot {
             }
             if let oldRate = old.i2sInputRate, let newRate = new.i2sInputRate, oldRate != newRate {
                 changes.append(.init(category: "I2S Input", description: "I2S rate: \(oldRate) Hz → \(newRate) Hz"))
+            }
+            if let oldMode = old.i2sClockMode, let newMode = new.i2sClockMode, oldMode != newMode {
+                let name: (UInt8) -> String = { $0 == I2S_CLOCK_MODE_SLAVE ? "Slave" : "Master" }
+                changes.append(.init(category: "I2S Input", description: "I2S clock mode: \(name(oldMode)) → \(name(newMode))"))
             }
             if let oldEn = old.adatEnabled, let newEn = new.adatEnabled, oldEn != newEn {
                 changes.append(.init(category: "ADAT", description: "ADAT output: \(newEn ? "enabled" : "disabled")"))

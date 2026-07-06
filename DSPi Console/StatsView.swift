@@ -220,6 +220,13 @@ class StatsViewModel: ObservableObject {
     @Published var adatStatus: AdatStatus = AdatStatus()
     @Published var adatSupported: Bool = false
 
+    // I2S clock-slave lock diagnostics (firmware V18+).  Polled on the same
+    // cadence; `i2sClockModeSupported` stays false on firmware that STALLs
+    // REQ_GET_I2S_SLAVE_STATUS.  The section is shown only while the device is
+    // in the slave role.  See i2s_slave_input_spec.md.
+    @Published var i2sSlaveStatus: I2sSlaveStatus = I2sSlaveStatus()
+    @Published var i2sClockModeSupported: Bool = false
+
     private var previousStarvationTotal: UInt32? = nil
     private var hasConnectedOnce = false
     private var pollTimer: Timer?
@@ -341,6 +348,23 @@ class StatsViewModel: ObservableObject {
         fetchSpdifRxStatus()
         fetchLgSoundSyncStatus()
         fetchAdatStatus()
+        fetchI2SSlaveStatus()
+    }
+
+    /// Poll REQ_GET_I2S_SLAVE_STATUS (0x8A) for the I2S clock-slave lock
+    /// diagnostics.  A STALL (nil) leaves `i2sClockModeSupported` false so the
+    /// section stays hidden on firmware that predates the feature.
+    func fetchI2SSlaveStatus() {
+        guard let usb = usb, isConnected else { return }
+        guard let data = usb.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+              let status = I2sSlaveStatus.fromData(data) else {
+            DispatchQueue.main.async { self.i2sClockModeSupported = false }
+            return
+        }
+        DispatchQueue.main.async {
+            self.i2sClockModeSupported = true
+            self.i2sSlaveStatus = status
+        }
     }
 
     /// Poll REQ_GET_ADAT_STATUS (0xCE) for the ADAT diagnostics section.  A
@@ -806,6 +830,40 @@ struct StatsView: View {
                         // Slip count should stay 0; nonzero flags a stalled main
                         // loop or DMA fault (spec §"AdatStatus").
                         SystemInfoRow(title: "Slip Count", value: "\(vm.adatStatus.slipCount)")
+                    }
+                }
+
+                // I2S Clock-Slave Section (shown only while in the slave role)
+                if vm.i2sClockModeSupported && vm.i2sSlaveStatus.isSlave {
+                    Divider()
+
+                    Text("I2S Input (Slave Clock)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        // State with color indicator — mirrors the S/PDIF row.
+                        HStack {
+                            Text("State")
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(vm.i2sSlaveStatus.stateColor)
+                                    .frame(width: 6, height: 6)
+                                Text(vm.i2sSlaveStatus.stateString)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 1)
+
+                        SystemInfoRow(title: "Detected Rate", value: vm.i2sSlaveStatus.detectedRateString)
+                        // Raw measured external rate: nonzero-but-never-locked
+                        // means an unsupported rate or wrong BCK ratio (spec §7).
+                        SystemInfoRow(title: "Measured Rate", value: vm.i2sSlaveStatus.measuredHzString)
+                        SystemInfoRow(title: "Lock Count", value: "\(vm.i2sSlaveStatus.lockCount)")
+                        SystemInfoRow(title: "Loss Count", value: "\(vm.i2sSlaveStatus.lossCount)")
                     }
                 }
 

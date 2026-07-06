@@ -1451,6 +1451,7 @@ extension DSPViewModel {
         }
         fetchI2SInputChannels()
         fetchInputRate()
+        fetchI2SClockMode()
     }
 
     /// Reads the active I2S input channel count (2/4/6/8).  STALLs on firmware
@@ -1527,6 +1528,54 @@ extension DSPViewModel {
     }
     // (The shared I2S BCK pin is set/read via setI2SBckPin/fetchI2SBckPin in the
     // I2S output section above — BCK is shared between I2S input and output.)
+
+    // MARK: - I2S Clock-Slave Input Mode
+
+    /// Reads the live I2S clock mode (0=master, 1=slave) via REQ_GET_I2S_CLOCK_MODE
+    /// (0x89).  STALLs on firmware that predates the clock-slave feature, which
+    /// leaves `i2sClockModeSupported` false so the mode picker hides itself.
+    /// On success it also fetches the current slave-lock status.
+    func fetchI2SClockMode() {
+        guard let d = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_MODE, value: 0, index: 2, length: 1),
+              d.count >= 1 else {
+            DispatchQueue.main.async { self.i2sClockModeSupported = false }
+            return
+        }
+        let mode = d[0]
+        DispatchQueue.main.async {
+            self.i2sClockModeSupported = true
+            self.i2sClockMode = mode
+        }
+        fetchI2SSlaveStatus()
+    }
+
+    /// Selects the I2S clock mode (0=master, 1=slave) via REQ_SET_I2S_CLOCK_MODE
+    /// (0x88), OUT 1 byte.  Fire-and-forget: the firmware defers the transition
+    /// to its main loop and only applies it while I2S is the input source (it is
+    /// otherwise recorded and applies at the next switch into I2S).  The live
+    /// mode is confirmed via the input_config.i2s_clock_mode PARAM_CHANGED (or
+    /// the first NOTIFY 0x09) - we optimistically mirror it here for a snappy UI.
+    /// Part of the output-config block, so callers in Settings must mark it dirty
+    /// (beginOutputEdit) for the save flow to pick it up.
+    func setI2SClockMode(_ mode: UInt8) {
+        let clamped: UInt8 = mode == I2S_CLOCK_MODE_SLAVE ? I2S_CLOCK_MODE_SLAVE : I2S_CLOCK_MODE_MASTER
+        DispatchQueue.main.async { self.i2sClockMode = clamped }
+        usb.sendControlRequest(request: REQ_SET_I2S_CLOCK_MODE, value: 0, index: 2, data: Data([clamped]))
+    }
+
+    /// Reads the 16-byte I2sSlaveStatusPacket via REQ_GET_I2S_SLAVE_STATUS (0x8A)
+    /// for the clock-slave lock-state indicator (state, lock/loss counts, snapped
+    /// + measured rates).  STALLs on firmware that predates the feature; the live
+    /// mode byte it carries also refreshes `i2sClockMode`.
+    func fetchI2SSlaveStatus() {
+        guard let d = usb.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+              let status = I2sSlaveStatus.fromData(d) else { return }
+        DispatchQueue.main.async {
+            self.i2sClockModeSupported = true
+            self.i2sSlaveStatus = status
+            self.i2sClockMode = status.clockMode
+        }
+    }
 
     // MARK: - External Control Interfaces (UART / I2C target)
 
@@ -2110,6 +2159,9 @@ extension DSPViewModel {
         let bulkSpdifRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 8],
                                            data[BULK_INPUT_CONFIG_OFFSET + 9]]
         let bulkSpdifEnabledExtP1 = data[BULK_INPUT_CONFIG_OFFSET + 10]
+        // V21+ I2S clock mode at +11 (0=master, 1=slave).
+        let bulkI2SClockMode = data[BULK_INPUT_I2S_CLOCK_MODE_OFFSET]
+
 
         // --- LG Sound Sync (offset 4728) — only `enabled` honoured on SET ---
         let bulkLgEnabled = data[BULK_LG_OFFSET] != 0
@@ -2225,6 +2277,12 @@ extension DSPViewModel {
             }
             if bulkI2SInputChannels != 0 { self.i2sInputChannels = bulkI2SInputChannels }
             self.i2sInputRateHz = bulkI2SInputRateHz
+            // Clock mode: the bulk payload is V21 by definition (strict version
+            // gate above), so the device supports the clock-slave feature.  The
+            // richer live lock state arrives via fetchI2SClockMode/0x09.
+            self.i2sClockModeSupported = true
+            self.i2sClockMode = bulkI2SClockMode
+            self.i2sSlaveStatus.clockMode = bulkI2SClockMode
             self.userVolumeDB = bulkUserVolume
             self.lgSoundSyncEnabled = bulkLgEnabled
             self.lgSoundSyncSupported = true
@@ -2778,6 +2836,22 @@ extension DSPViewModel {
             let pair = off - (BULK_INPUT_CONFIG_OFFSET + 5) + 1   // 1..3
             self.i2sInputSupported = true
             if self.i2sRxPins.indices.contains(pair) { self.i2sRxPins[pair] = payload[0] }
+            return
+        }
+
+        // input_config.i2s_clock_mode (offset 4727, 1 byte: 0=master/1=slave).
+        // Fired at the tail of the firmware's deferred mode-change transition
+        // (not at SET time) - i.e. the "mode is now live" confirmation.  A
+        // NOTIFY 0x09 with the fresh lock state follows; refresh the full status.
+        if off == BULK_INPUT_I2S_CLOCK_MODE_OFFSET && sz == 1 && payload.count >= 1 {
+            let mode = payload[0]
+            self.i2sClockModeSupported = true
+            self.i2sInputSupported = true
+            if self.i2sClockMode != mode { self.i2sClockMode = mode }
+            self.i2sSlaveStatus.clockMode = mode
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.fetchI2SSlaveStatus()
+            }
             return
         }
 
