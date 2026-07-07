@@ -237,53 +237,63 @@ struct CtrlIfaceStatus: Equatable {
 // (CsNoun) through one operation (CsAction) on one or two GPIOs.  The config
 // is device-global (stored in the preset directory; survives factory reset).
 
-/// One user-wired control binding (16 bytes).  The same bytes appear on the
-/// wire (REQ_SET/GET_CS_BINDING) and in flash.  Continuous (dB) operands use
-/// signed 8.8 fixed point (1.0 dB = 256); bool/enum operands are plain ints.
+/// One user-wired control binding (24 bytes, capability format v2).  The same
+/// bytes appear on the wire (REQ_SET/GET_CS_BINDING) and in flash.  Numeric
+/// operands are unit-encoded per the noun's unit (spec §2.1): dB / Q / percent
+/// as signed 8.8 fixed point, Hz as a plain integer, enum/bool as plain ints.
 struct CsBinding: Equatable {
-    var type: UInt8 = 0                 // CsType; 0 (CS_TYPE_NONE) = slot cleared
-    var noun: UInt8 = 0                 // CsNoun
-    var action: UInt8 = 0              // CsAction
-    var flags: UInt8 = 0              // CS_FLAG_* bitfield
-    var gpio0: UInt8 = 0             // primary GPIO
-    // Second GPIO (encoders); CS_GPIO_UNUSED (0xFF) for a configured single-pin
-    // component.  The default is 0 so a default-constructed CsBinding() is the
-    // all-zero "cleared slot" blob the device stores (spec §8.3) - a configured
-    // single-pin binding sets this to 0xFF explicitly.
+    var type: UInt8 = 0                 // Byte 0: CsType; 0 (CS_TYPE_NONE) = slot cleared
+    var noun: UInt8 = 0                 // Byte 1: CsNoun
+    var action: UInt8 = 0              // Byte 2: CsAction
+    var flags: UInt8 = 0              // Byte 3: CS_FLAG_* bitfield
+    var gpio0: UInt8 = 0             // Byte 4: primary GPIO
+    // Byte 5: second GPIO (encoders); CS_GPIO_UNUSED (0xFF) for a configured
+    // single-pin component.  The default is 0 so a default-constructed
+    // CsBinding() is the all-zero "cleared slot" blob the device stores
+    // (spec §8.3) - a configured single-pin binding sets this to 0xFF explicitly.
     var gpio1: UInt8 = 0
-    var value: Int16 = 0            // SET target / IND_EQUALS comparand
-    var step: Int16 = 0            // STEP/INC/DEC size; 0 = default (1 dB / 1 enum step)
-    var rangeMin: Int16 = 0       // pot span low end (8.8 dB); both 0 = the noun's full range
-    var rangeMax: Int16 = 0       // pot span high end (8.8 dB)
+    var event: UInt8 = 0            // Byte 6: CsEvent (buttons: press/long/double); 0 for other types
+    var target: UInt8 = 0          // Byte 7: channel address for targeted nouns; 0 otherwise
+    var index: UInt8 = 0           // Byte 8: filter band for CS_TARGET_DSP_BAND nouns; 0 otherwise
+    // Byte 9: reserved (0)
+    var value: Int16 = 0           // Bytes 10-11: SET/MOMENTARY target, IND_EQUALS/IND_ABOVE comparand
+    var step: Int16 = 0            // Bytes 12-13: STEP/INC/DEC size; 0 = the unit default
+    var rangeMin: Int16 = 0       // Bytes 14-15: pot / IND_LEVEL span low; both 0 = the noun's full range
+    var rangeMax: Int16 = 0       // Bytes 16-17: pot / IND_LEVEL span high
+    // Bytes 18-23: reserved2[6] (0)
 
     /// True when the slot holds a component (not CS_TYPE_NONE).
     var isConfigured: Bool { type != UInt8(CS_TYPE_NONE) }
 
-    /// Serialize to the 16-byte wire layout.  Bytes 6-7 are reserved (0).
+    /// Serialize to the 24-byte wire layout.  Bytes 9 and 18-23 are reserved (0).
     func toData() -> Data {
-        var d = Data(count: 16)
+        var d = Data(count: 24)
         d[0] = type
         d[1] = noun
         d[2] = action
         d[3] = flags
         d[4] = gpio0
         d[5] = gpio1
-        // 6-7 reserved (0)
+        d[6] = event
+        d[7] = target
+        d[8] = index
+        // 9 reserved (0)
         func put(_ v: Int16, _ off: Int) {
             let u = UInt16(bitPattern: v)
             d[off] = UInt8(u & 0xFF)
             d[off + 1] = UInt8((u >> 8) & 0xFF)
         }
-        put(value, 8)
-        put(step, 10)
-        put(rangeMin, 12)
-        put(rangeMax, 14)
+        put(value, 10)
+        put(step, 12)
+        put(rangeMin, 14)
+        put(rangeMax, 16)
+        // 18-23 reserved2 (0)
         return d
     }
 
-    /// Parse the 16-byte wire layout.  Returns nil if too short.
+    /// Parse the 24-byte wire layout.  Returns nil if too short.
     static func fromData(_ data: Data) -> CsBinding? {
-        guard data.count >= 16 else { return nil }
+        guard data.count >= 24 else { return nil }
         let b = data.startIndex
         func i16(_ off: Int) -> Int16 {
             Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
@@ -291,7 +301,8 @@ struct CsBinding: Equatable {
         return CsBinding(
             type: data[b + 0], noun: data[b + 1], action: data[b + 2], flags: data[b + 3],
             gpio0: data[b + 4], gpio1: data[b + 5],
-            value: i16(8), step: i16(10), rangeMin: i16(12), rangeMax: i16(14))
+            event: data[b + 6], target: data[b + 7], index: data[b + 8],
+            value: i16(10), step: i16(12), rangeMin: i16(14), rangeMax: i16(16))
     }
 }
 
@@ -303,9 +314,11 @@ struct CsTypeDesc: Equatable {
     var pinClass: UInt8 = 0   // CS_PINCLASS_ANY / _ADC
 }
 
-/// Capability header returned by REQ_GET_CS_CAPS, wValue = 0xFFFF (28 bytes;
-/// spec §2.4).  Hosts build their picker UI from this, not from hardcoded
-/// tables, so a future firmware's new types appear with no app change.
+/// Capability header returned by REQ_GET_CS_CAPS, wValue = 0xFFFF (32 bytes in
+/// v2: 4-byte header + 7 CsTypeDesc; spec §2.4).  Hosts build their picker UI
+/// from this, not from hardcoded tables, so a future firmware's new types
+/// appear with no app change.  The parser reads `typeCount` entries, so it
+/// adapts to any type-table size.
 struct CsCapsHeader: Equatable {
     var capsVersion: UInt8 = 0
     var maxBindings: UInt8 = 0
@@ -332,17 +345,27 @@ struct CsCapsHeader: Equatable {
 }
 
 /// Per-noun descriptor returned by REQ_GET_CS_CAPS, wValue = noun index
-/// (8 bytes; spec §2.5).  Says the noun's kind, enum size, dB range, and the
-/// action mask it accepts.
+/// (12 bytes in v2; spec §2.5).  Says the noun's kind, enum size, unit-encoded
+/// range, unit, target addressing, and the action mask it accepts.  An
+/// `actions == 0` noun is unavailable on this platform (e.g. ADAT on RP2040).
 struct CsNounDesc: Equatable {
     var kind: UInt8 = 0        // CS_KIND_*
     var enumCount: UInt8 = 0   // valid enum values 0..enumCount-1 (ENUM only)
-    var actions: UInt16 = 0    // CS_ACT_BIT mask this noun accepts
-    var minQ8: Int16 = 0       // continuous range low end, 8.8 dB
-    var maxQ8: Int16 = 0       // continuous range high end, 8.8 dB
+    var actions: UInt16 = 0    // CS_ACT_BIT mask this noun accepts; 0 = unavailable here
+    var minQ8: Int16 = 0       // continuous range low end, unit-encoded (2.1)
+    var maxQ8: Int16 = 0       // continuous range high end, unit-encoded
+    var unit: UInt8 = 0        // CS_UNIT_*
+    var targetKind: UInt8 = 0  // CS_TARGET_*
+    var targetCount: UInt8 = 0 // valid target values 0..targetCount-1; 0 when untargeted
+    var dflags: UInt8 = 0      // CS_NDF_* (deferred apply)
+
+    /// True when the noun addresses a channel (or channel + band).
+    var isTargeted: Bool { targetKind != CS_TARGET_NONE && targetCount > 0 }
+    /// True when the noun addresses a filter band (needs an `index` picker too).
+    var hasBand: Bool { targetKind == CS_TARGET_DSP_BAND }
 
     static func fromData(_ data: Data) -> CsNounDesc? {
-        guard data.count >= 8 else { return nil }
+        guard data.count >= 12 else { return nil }
         let b = data.startIndex
         func i16(_ off: Int) -> Int16 {
             Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
@@ -350,24 +373,27 @@ struct CsNounDesc: Equatable {
         return CsNounDesc(
             kind: data[b + 0], enumCount: data[b + 1],
             actions: UInt16(data[b + 2]) | (UInt16(data[b + 3]) << 8),
-            minQ8: i16(4), maxQ8: i16(6))
+            minQ8: i16(4), maxQ8: i16(6),
+            unit: data[b + 8], targetKind: data[b + 9],
+            targetCount: data[b + 10], dflags: data[b + 11])
     }
 }
 
-/// REQ_GET_CS_STATUS response (12 bytes; spec §2.6).  `lastStatus`/`lastSlot`
-/// report the most recent SET's outcome; `activeMask` bit N = binding N is
-/// live; `slotStatus[N]` = that slot's per-apply health (0 = ok, else a failure
-/// code, e.g. a boot pin collision).
+/// REQ_GET_CS_STATUS response (22 bytes in v2; spec §2.6).  `lastStatus`/
+/// `lastSlot` report the most recent SET's outcome; `activeMask` (uint16) bit N
+/// = binding N is live; `slotStatus[N]` = that slot's per-apply health (0 = ok,
+/// else a failure code, e.g. a boot pin collision).
 struct CsStatusPacket: Equatable {
     var lastStatus: UInt8 = 0
     var lastSlot: UInt8 = 0
     var maxBindings: UInt8 = 0
-    var activeMask: UInt8 = 0
-    var slotStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_BINDINGS)
+    // Byte 3: reserved
+    var activeMask: UInt16 = 0     // Bytes 4-5 (LE): bit N = binding N is live
+    var slotStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_BINDINGS)   // Bytes 6-21
 
     /// True when binding `slot` is live (its `activeMask` bit is set).
     func isSlotActive(_ slot: Int) -> Bool {
-        slot >= 0 && slot < 8 && (activeMask & (UInt8(1) << UInt8(slot))) != 0
+        slot >= 0 && slot < CS_MAX_BINDINGS && (activeMask & (UInt16(1) << UInt16(slot))) != 0
     }
 
     /// This slot's per-apply health code (0 = ok / cleared).
@@ -376,13 +402,13 @@ struct CsStatusPacket: Equatable {
     }
 
     static func fromData(_ data: Data) -> CsStatusPacket? {
-        guard data.count >= 12 else { return nil }
+        guard data.count >= 22 else { return nil }
         let b = data.startIndex
         var slots: [UInt8] = []
-        for i in 0..<CS_MAX_BINDINGS { slots.append(data[b + 4 + i]) }
+        for i in 0..<CS_MAX_BINDINGS { slots.append(data[b + 6 + i]) }
         return CsStatusPacket(
-            lastStatus: data[b + 0], lastSlot: data[b + 1],
-            maxBindings: data[b + 2], activeMask: data[b + 3], slotStatus: slots)
+            lastStatus: data[b + 0], lastSlot: data[b + 1], maxBindings: data[b + 2],
+            activeMask: UInt16(data[b + 4]) | (UInt16(data[b + 5]) << 8), slotStatus: slots)
     }
 }
 

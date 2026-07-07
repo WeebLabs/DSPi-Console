@@ -1496,8 +1496,10 @@ struct ControlInterfacesSettingsTab: View {
 // is built from the device-served capability tables (`vm.csCaps` +
 // `vm.csNounDescs`), never from hardcoded lists, so a future firmware's new
 // component types / parameters appear with no app change (spec §4).  Each of
-// the eight slots edits a local draft; Apply sends the 16-byte binding and
-// polls the deferred-apply outcome back.  See control_surfaces_spec.md.
+// the sixteen slots (capability format v2) edits a local draft; Apply sends the
+// 24-byte binding and polls the deferred-apply outcome back.  Buttons can carry
+// a press gesture (event) and many nouns address a channel/band (target/index).
+// See control_surfaces_spec.md.
 struct ControlSurfacesSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
 
@@ -1703,8 +1705,12 @@ struct ControlSurfacesSettingsTab: View {
                 }
 
                 nounRow(slot)
+                targetRows(slot)
                 if validActions(type: Int(b.type), noun: Int(b.noun)).count > 1 {
                     actionRow(slot)
+                }
+                if Int(b.type) == CS_TYPE_BUTTON {
+                    eventRow(slot)
                 }
                 pinRows(slot)
                 operandRows(slot)
@@ -1805,12 +1811,61 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private func nounRow(_ slot: Int) -> some View {
+        let type = Int(drafts[slot].type)
+        let current = Int(drafts[slot].noun)
+        let groups = nounGroups(forType: type)
         settingRow(title: "Controls",
                    detail: "The device function this control drives.",
                    icon: "slider.horizontal.3") {
-            Picker("", selection: nounBinding(slot)) {
-                ForEach(validNouns(forType: Int(drafts[slot].type)), id: \.self) { n in
-                    Text(nounName(n, forType: Int(drafts[slot].type))).tag(n)
+            Menu {
+                if groups.count <= 1 {
+                    // A single category: list its functions directly, no submenu.
+                    ForEach(groups.first?.nouns ?? [], id: \.self) { n in
+                        nounMenuItem(slot, n, type: type, current: current)
+                    }
+                } else {
+                    ForEach(groups, id: \.name) { group in
+                        Menu(group.name) {
+                            ForEach(group.nouns, id: \.self) { n in
+                                nounMenuItem(slot, n, type: type, current: current)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text(nounName(current, forType: type))
+            }
+            .menuStyle(.button)
+            .fixedSize()
+        }
+    }
+
+    /// One selectable function inside the Controls menu, check-marked when it's
+    /// the slot's current noun.
+    @ViewBuilder
+    private func nounMenuItem(_ slot: Int, _ noun: Int, type: Int, current: Int) -> some View {
+        Button { nounBinding(slot).wrappedValue = noun } label: {
+            if noun == current {
+                Label(nounName(noun, forType: type), systemImage: "checkmark")
+            } else {
+                Text(nounName(noun, forType: type))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func actionRow(_ slot: Int) -> some View {
+        let type = Int(drafts[slot].type)
+        let noun = Int(drafts[slot].noun)
+        let (title, detail): (String, String) = {
+            if isIndicatorType(type) { return ("Indicates", "How the LED reflects the function.") }
+            if type == CS_TYPE_BUTTON { return ("On Press", "What a press does.") }
+            return ("Behavior", "How this control drives the function.")
+        }()
+        settingRow(title: title, detail: detail, icon: "hand.tap") {
+            Picker("", selection: actionBinding(slot)) {
+                ForEach(validActions(type: type, noun: noun), id: \.self) { a in
+                    Text(actionName(a, noun: noun)).tag(a)
                 }
             }
             .labelsHidden()
@@ -1818,20 +1873,94 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    // MARK: Button gesture (event)
+
+    /// Which press gesture a button binding responds to (spec §6.1).  Several
+    /// button bindings can share one GPIO, one per gesture, to give a single
+    /// button multiple functions.
     @ViewBuilder
-    private func actionRow(_ slot: Int) -> some View {
-        let noun = Int(drafts[slot].noun)
-        settingRow(title: "On Press",
-                   detail: "What a press does.",
-                   icon: "hand.tap") {
-            Picker("", selection: actionBinding(slot)) {
-                ForEach(validActions(type: Int(drafts[slot].type), noun: noun), id: \.self) { a in
-                    Text(actionName(a, noun: noun)).tag(a)
-                }
+    private func eventRow(_ slot: Int) -> some View {
+        settingRow(title: "Gesture",
+                   detail: "Which press gesture triggers this. Bind several to one button GPIO for multiple functions.",
+                   icon: "hand.tap.fill") {
+            Picker("", selection: Binding(
+                get: { drafts[slot].event },
+                set: { var nb = drafts[slot]; nb.event = $0; drafts[slot] = nb })) {
+                Text("Press").tag(CS_EVENT_PRESS)
+                Text("Long press").tag(CS_EVENT_LONG)
+                Text("Double press").tag(CS_EVENT_DOUBLE)
             }
             .labelsHidden()
             .fixedSize()
         }
+    }
+
+    // MARK: Target (channel / band) rows
+
+    /// Channel (and, for filter nouns, band) address for a targeted noun
+    /// (spec §4.4).  Hidden for untargeted nouns.
+    @ViewBuilder
+    private func targetRows(_ slot: Int) -> some View {
+        if let nd = nounDesc(Int(drafts[slot].noun)), nd.isTargeted {
+            settingRow(title: "Channel",
+                       detail: "Which channel this control affects.",
+                       icon: "square.stack.3d.up") {
+                Picker("", selection: targetBinding(slot)) {
+                    ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                        Text(targetName(nd, t)).tag(t)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            if nd.hasBand {
+                let bands = bandOptions(noun: Int(drafts[slot].noun), dspChannel: Int(drafts[slot].target))
+                settingRow(title: "Band",
+                           detail: "Which filter band this control affects.",
+                           icon: "waveform.path.ecg") {
+                    Picker("", selection: indexBinding(slot)) {
+                        ForEach(bands, id: \.self) { band in
+                            Text(bandName(band)).tag(band)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+        }
+    }
+
+    /// Valid filter bands for a DSP_BAND noun on a given DSP channel: PEQ bands
+    /// 0-9 always, plus crossover bands 20-23 for FILTER_FREQ / FILTER_BYPASS on
+    /// output channels (spec §4.4).
+    private func bandOptions(noun: Int, dspChannel: Int) -> [Int] {
+        var bands = Array(0..<10)
+        let isOutput = dspChannel >= vm.chOut1
+        if isOutput && (noun == CS_NOUN_FILTER_FREQ || noun == CS_NOUN_FILTER_BYPASS) {
+            bands += [20, 21, 22, 23]
+        }
+        return bands
+    }
+
+    private func targetBinding(_ slot: Int) -> Binding<Int> {
+        Binding(
+            get: { Int(drafts[slot].target) },
+            set: { newTarget in
+                var b = drafts[slot]
+                b.target = UInt8(newTarget)
+                // Re-clamp the band if the new channel doesn't offer the current one.
+                if nounDesc(Int(b.noun))?.hasBand == true {
+                    let opts = bandOptions(noun: Int(b.noun), dspChannel: newTarget)
+                    if !opts.contains(Int(b.index)) { b.index = UInt8(opts.first ?? 0) }
+                }
+                drafts[slot] = b
+            })
+    }
+
+    private func indexBinding(_ slot: Int) -> Binding<Int> {
+        Binding(
+            get: { Int(drafts[slot].index) },
+            set: { var nb = drafts[slot]; nb.index = UInt8($0); drafts[slot] = nb })
     }
 
     // MARK: Pin rows
@@ -1887,21 +2016,24 @@ struct ControlSurfacesSettingsTab: View {
         switch action {
         case CS_ACT_ADJUST:
             if kind == CS_KIND_CONTINUOUS {
-                potRangeRows(slot)
+                csSpanRows(slot, title: "Limit Range",
+                           loDetail: "Level at the fully counter-clockwise position.",
+                           hiDetail: "Level at the fully clockwise position.")
             }
         case CS_ACT_STEP, CS_ACT_INC, CS_ACT_DEC:
             if kind == CS_KIND_CONTINUOUS {
-                stepDbRow(slot)
+                csStepRow(slot)
             } else if kind == CS_KIND_ENUM {
                 enumStepRow(slot)
             }
-        case CS_ACT_SET:
+        case CS_ACT_SET, CS_ACT_MOMENTARY:
+            let verb = action == CS_ACT_MOMENTARY ? "Hold Value" : "Set To"
             if kind == CS_KIND_CONTINUOUS {
-                targetDbRow(slot)
+                csValueRow(slot, title: verb, detail: "Level each press applies.")
             } else if kind == CS_KIND_BOOL {
-                boolValueRow(slot, title: "Set To")
+                boolValueRow(slot, title: verb)
             } else if kind == CS_KIND_ENUM {
-                enumValueRow(slot, title: "Set To")
+                enumValueRow(slot, title: verb)
             }
         case CS_ACT_IND_EQUALS:
             if kind == CS_KIND_BOOL {
@@ -1909,16 +2041,40 @@ struct ControlSurfacesSettingsTab: View {
             } else if kind == CS_KIND_ENUM {
                 enumValueRow(slot, title: "Light When")
             }
+        case CS_ACT_IND_ABOVE:
+            if kind == CS_KIND_CONTINUOUS {
+                csValueRow(slot, title: "Light Above", detail: "Light the LED once the value reaches this.")
+            }
+        case CS_ACT_IND_LEVEL:
+            if kind == CS_KIND_CONTINUOUS {
+                csSpanRows(slot, title: "Brightness Range",
+                           loDetail: "Value mapped to the LED fully off.",
+                           hiDetail: "Value mapped to the LED fully lit.")
+            }
         default:
             EmptyView()
         }
     }
 
-    @ViewBuilder
-    private func potRangeRows(_ slot: Int) -> some View {
+    /// Unit for the current draft's noun (dB / Hz / Q / percent / none).
+    private func nounUnit(_ slot: Int) -> UInt8 {
+        nounDesc(Int(drafts[slot].noun))?.unit ?? CS_UNIT_DB
+    }
+
+    /// The noun's full natural-unit range [lo, hi].
+    private func nounRange(_ slot: Int) -> (lo: Float, hi: Float) {
         let nd = nounDesc(Int(drafts[slot].noun))
-        let lo = csQ8ToDb(nd?.minQ8 ?? -12800)
-        let hi = csQ8ToDb(nd?.maxQ8 ?? 0)
+        let unit = nd?.unit ?? CS_UNIT_DB
+        return (csDecodeValue(nd?.minQ8 ?? 0, unit: unit), csDecodeValue(nd?.maxQ8 ?? 0, unit: unit))
+    }
+
+    /// Optional custom span (rangeMin/rangeMax) with a full-range toggle, used by
+    /// pot ADJUST (custom knob span) and PWM LED IND_LEVEL (brightness mapping).
+    @ViewBuilder
+    private func csSpanRows(_ slot: Int, title: String, loDetail: String, hiDetail: String) -> some View {
+        let nd = nounDesc(Int(drafts[slot].noun))
+        let unit = nd?.unit ?? CS_UNIT_DB
+        let (lo, hi) = nounRange(slot)
         // A custom span is signalled by either range field being non-zero
         // (both zero = the noun's full range).
         let custom = drafts[slot].rangeMin != 0 || drafts[slot].rangeMax != 0
@@ -1935,46 +2091,52 @@ struct ControlSurfacesSettingsTab: View {
                 }
                 drafts[slot] = nb
             })) {
-            settingLabel(title: "Limit Range",
-                         detail: "Map the knob onto a portion of the \(fmtDb(lo)) to \(fmtDb(hi)) range.",
+            settingLabel(title: title,
+                         detail: "Map onto a portion of the \(fmtUnit(lo, unit)) to \(fmtUnit(hi, unit)) range.",
                          icon: "arrow.left.and.right")
         }
         .toggleStyle(.switch)
 
         if custom {
-            settingRow(title: "Minimum",
-                       detail: "Level at the fully counter-clockwise position.",
-                       icon: "arrow.down.to.line") {
-                ValueField(label: "dB", value: csQ8ToDb(drafts[slot].rangeMin),
-                           width: 56, scrollStep: 0.5) { v in
+            settingRow(title: "Minimum", detail: loDetail, icon: "arrow.down.to.line") {
+                ValueField(label: csUnitSymbol(unit), value: csDecodeValue(drafts[slot].rangeMin, unit: unit),
+                           width: 64, scrollStep: unitScrollStep(unit), maxDecimals: unitDecimals(unit)) { v in
                     var nb = drafts[slot]
-                    nb.rangeMin = csDbToQ8(min(hi, max(lo, v)))
+                    nb.rangeMin = csEncodeValue(min(hi, max(lo, v)), unit: unit)
                     drafts[slot] = nb
                 }
             }
-            settingRow(title: "Maximum",
-                       detail: "Level at the fully clockwise position.",
-                       icon: "arrow.up.to.line") {
-                ValueField(label: "dB", value: csQ8ToDb(drafts[slot].rangeMax),
-                           width: 56, scrollStep: 0.5) { v in
+            settingRow(title: "Maximum", detail: hiDetail, icon: "arrow.up.to.line") {
+                ValueField(label: csUnitSymbol(unit), value: csDecodeValue(drafts[slot].rangeMax, unit: unit),
+                           width: 64, scrollStep: unitScrollStep(unit), maxDecimals: unitDecimals(unit)) { v in
                     var nb = drafts[slot]
-                    nb.rangeMax = csDbToQ8(min(hi, max(lo, v)))
+                    nb.rangeMax = csEncodeValue(min(hi, max(lo, v)), unit: unit)
                     drafts[slot] = nb
                 }
             }
         }
     }
 
+    /// Unit-aware step field.  dB / percent step linearly in their unit; Hz / Q
+    /// step multiplicatively, so their step is expressed in octaves.
     @ViewBuilder
-    private func stepDbRow(_ slot: Int) -> some View {
+    private func csStepRow(_ slot: Int) -> some View {
+        let unit = nounUnit(slot)
+        let isLog = unit == CS_UNIT_HZ || unit == CS_UNIT_Q
+        let logStep: Float = 1.0 / 12.0
+        let logMin: Float = 1.0 / 48.0
+        let dflt: Float = isLog ? logStep : 1.0
+        let cur = drafts[slot].step == 0 ? dflt : csDecodeStep(drafts[slot].step, unit: unit)
         settingRow(title: "Step Size",
-                   detail: "Level added or removed per detent/press.",
+                   detail: isLog ? "Ratio per detent/press, in octaves." : "Amount added or removed per detent/press.",
                    icon: "plusminus") {
-            ValueField(label: "dB",
-                       value: drafts[slot].step == 0 ? 1.0 : csQ8ToDb(drafts[slot].step),
-                       width: 52, scrollStep: 0.5, minValue: 0.1) { v in
+            ValueField(label: isLog ? "oct" : csUnitSymbol(unit),
+                       value: cur, width: 64,
+                       scrollStep: isLog ? logStep : unitScrollStep(unit),
+                       minValue: isLog ? logMin : 0.1,
+                       maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
                 var nb = drafts[slot]
-                nb.step = csDbToQ8(max(0.1, v))
+                nb.step = csEncodeStep(max(isLog ? logMin : 0.1, v), unit: unit)
                 drafts[slot] = nb
             }
         }
@@ -2005,19 +2167,19 @@ struct ControlSurfacesSettingsTab: View {
         return s <= 0 ? 1 : s
     }
 
+    /// Unit-aware single-value field (SET/MOMENTARY target, IND_ABOVE threshold).
     @ViewBuilder
-    private func targetDbRow(_ slot: Int) -> some View {
-        let nd = nounDesc(Int(drafts[slot].noun))
-        let lo = csQ8ToDb(nd?.minQ8 ?? -12800)
-        let hi = csQ8ToDb(nd?.maxQ8 ?? 0)
-        settingRow(title: "Target Level",
-                   detail: "Level each press applies (\(fmtDb(lo)) to \(fmtDb(hi))).",
+    private func csValueRow(_ slot: Int, title: String, detail: String) -> some View {
+        let unit = nounUnit(slot)
+        let (lo, hi) = nounRange(slot)
+        settingRow(title: title,
+                   detail: "\(detail) (\(fmtUnit(lo, unit)) to \(fmtUnit(hi, unit))).",
                    icon: "target") {
-            ValueField(label: "dB",
-                       value: csQ8ToDb(drafts[slot].value),
-                       width: 56, scrollStep: 0.5) { v in
+            ValueField(label: csUnitSymbol(unit),
+                       value: csDecodeValue(drafts[slot].value, unit: unit),
+                       width: 64, scrollStep: unitScrollStep(unit), maxDecimals: unitDecimals(unit)) { v in
                 var nb = drafts[slot]
-                nb.value = csDbToQ8(min(hi, max(lo, v)))
+                nb.value = csEncodeValue(min(hi, max(lo, v)), unit: unit)
                 drafts[slot] = nb
             }
         }
@@ -2079,11 +2241,26 @@ struct ControlSurfacesSettingsTab: View {
                                                    : "Clockwise steps down.",
                        icon: "arrow.left.arrow.right")
         }
+        // Acceleration: encoders only (fast rotation multiplies the step).
+        if type == CS_TYPE_ENCODER {
+            flagToggle(slot, CS_FLAG_ACCEL,
+                       title: "Acceleration",
+                       detail: "Fast spins move in larger steps; slow spins stay fine.",
+                       icon: "hare")
+        }
         if isEnumStep {
             flagToggle(slot, CS_FLAG_WRAP,
                        title: "Wrap Around",
                        detail: "Step past the last position back to the first.",
                        icon: "arrow.triangle.2.circlepath")
+        }
+        // Auto-repeat: a button INC/DEC bound to the plain press gesture.
+        if type == CS_TYPE_BUTTON && (action == CS_ACT_INC || action == CS_ACT_DEC)
+            && b.event == CS_EVENT_PRESS {
+            flagToggle(slot, CS_FLAG_REPEAT,
+                       title: "Repeat While Held",
+                       detail: "After holding ~0.4 s the press repeats automatically.",
+                       icon: "repeat")
         }
         flagToggle(slot, CS_FLAG_INVERT,
                    title: invertTitle(type),
@@ -2210,6 +2387,42 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    /// Display grouping for the 35-noun Controls picker.  Ordered categories,
+    /// each listing the nouns it contains; the menu filters these to the ones a
+    /// given component type can actually drive.  A noun not named here (a future
+    /// firmware's addition) still appears, under "Other".
+    private static let nounCategories: [(name: String, nouns: [Int])] = [
+        ("Volume & Mute", [CS_NOUN_USER_VOLUME, CS_NOUN_MASTER_VOLUME, CS_NOUN_USER_MUTE]),
+        ("Sound", [CS_NOUN_LOUDNESS, CS_NOUN_CROSSFEED, CS_NOUN_CROSSFEED_PRESET,
+                   CS_NOUN_CROSSFEED_ITD, CS_NOUN_EQ_BYPASS, CS_NOUN_LEVELLER,
+                   CS_NOUN_LEVELLER_AMOUNT, CS_NOUN_LEVELLER_SPEED, CS_NOUN_LEVELLER_LOOKAHEAD]),
+        ("Input & Presets", [CS_NOUN_PRESET, CS_NOUN_INPUT_SOURCE, CS_NOUN_LG_SYNC]),
+        ("Channels", [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE, CS_NOUN_OUTPUT_ENABLE]),
+        ("Filters", [CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN, CS_NOUN_FILTER_Q,
+                     CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS]),
+        ("Tools", [CS_NOUN_SIGGEN, CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
+        ("Status", [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
+                    CS_NOUN_USB_STREAMING, CS_NOUN_ADAT_ACTIVE, CS_NOUN_LG_PRESENT, CS_NOUN_LG_MUTED]),
+    ]
+
+    /// The valid nouns for `type`, bucketed into the display categories above
+    /// (empty categories dropped, unknown nouns collected under "Other").
+    private func nounGroups(forType type: Int) -> [(name: String, nouns: [Int])] {
+        let valid = validNouns(forType: type)
+        let validSet = Set(valid)
+        var used = Set<Int>()
+        var groups: [(name: String, nouns: [Int])] = []
+        for cat in Self.nounCategories {
+            let ns = cat.nouns.filter { validSet.contains($0) }
+            guard !ns.isEmpty else { continue }
+            ns.forEach { used.insert($0) }
+            groups.append((cat.name, ns))
+        }
+        let others = valid.filter { !used.contains($0) }
+        if !others.isEmpty { groups.append(("Other", others)) }
+        return groups
+    }
+
     /// Legal actions for a (type, noun) pair = AND of their two action masks.
     private func validActions(type: Int, noun: Int) -> [Int] {
         guard let td = typeDesc(type), let nd = nounDesc(noun) else { return [] }
@@ -2226,8 +2439,9 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_POT:     pref = [CS_ACT_ADJUST]
         case CS_TYPE_ENCODER: pref = [CS_ACT_STEP]
         case CS_TYPE_SWITCH:  pref = [CS_ACT_FOLLOW]
-        case CS_TYPE_LED:     pref = [CS_ACT_IND_EQUALS]
-        case CS_TYPE_BUTTON:  pref = [CS_ACT_TOGGLE, CS_ACT_TRIGGER, CS_ACT_INC, CS_ACT_SET, CS_ACT_DEC]
+        case CS_TYPE_LED:     pref = [CS_ACT_IND_EQUALS, CS_ACT_IND_ABOVE]
+        case CS_TYPE_LED_PWM: pref = [CS_ACT_IND_LEVEL, CS_ACT_IND_ABOVE, CS_ACT_IND_EQUALS]
+        case CS_TYPE_BUTTON:  pref = [CS_ACT_TOGGLE, CS_ACT_TRIGGER, CS_ACT_INC, CS_ACT_SET, CS_ACT_DEC, CS_ACT_MOMENTARY]
         default:              pref = []
         }
         for a in pref where avail.contains(a) { return a }
@@ -2255,23 +2469,35 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     /// Reset value/step/range to sensible defaults for the binding's action+kind.
+    /// Leaves `target`/`index` alone (they persist across action edits; the noun
+    /// picker resets them when the addressing changes).
     private func defaultOperands(for binding: CsBinding) -> CsBinding {
         var b = binding
-        let noun = Int(b.noun)
+        let nd = nounDesc(Int(b.noun))
         let action = Int(b.action)
-        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        let kind = nd?.kind ?? CS_KIND_BOOL
+        let unit = nd?.unit ?? CS_UNIT_DB
         b.value = 0; b.step = 0; b.rangeMin = 0; b.rangeMax = 0
         switch action {
         case CS_ACT_STEP, CS_ACT_INC, CS_ACT_DEC:
-            if kind == CS_KIND_CONTINUOUS { b.step = csDbToQ8(1.0) }
-            else if kind == CS_KIND_ENUM { b.step = 1 }
-        case CS_ACT_SET:
-            if kind == CS_KIND_CONTINUOUS { b.value = nounDesc(noun)?.maxQ8 ?? 0 }
+            // Continuous: step 0 = the firmware unit default (1 dB / 1 % / 1/12
+            // octave).  Enum: one position per detent/press.
+            if kind == CS_KIND_ENUM { b.step = 1 }
+        case CS_ACT_SET, CS_ACT_MOMENTARY:
+            if kind == CS_KIND_CONTINUOUS { b.value = nd?.maxQ8 ?? 0 }
             else if kind == CS_KIND_BOOL { b.value = 1 }
         case CS_ACT_IND_EQUALS:
             if kind == CS_KIND_BOOL { b.value = 1 }
+        case CS_ACT_IND_ABOVE:
+            // Default the LED threshold to a quarter of the way up the range
+            // (e.g. -45 dB on a -60..0 level meter).
+            if kind == CS_KIND_CONTINUOUS {
+                let lo = csDecodeValue(nd?.minQ8 ?? 0, unit: unit)
+                let hi = csDecodeValue(nd?.maxQ8 ?? 0, unit: unit)
+                b.value = csEncodeValue(lo + 0.25 * (hi - lo), unit: unit)
+            }
         default:
-            break
+            break   // IND_LEVEL / ADJUST use the full range (0,0)
         }
         return b
     }
@@ -2283,17 +2509,38 @@ struct ControlSurfacesSettingsTab: View {
 
     /// GPIO options for a pin picker: mux-free pins (ADC-only for pots), the
     /// currently-selected pin always kept visible, and the sibling encoder pin
-    /// excluded so the two channels can't collide.
+    /// excluded so the two channels can't collide.  A button may additionally
+    /// share a GPIO already held by other button bindings (one binding per
+    /// gesture; spec §6.1), so those pins stay selectable for a button.
     private func pinCandidates(slot: Int, type: Int, isSecond: Bool) -> [UInt8] {
         let adc = (typeDesc(type)?.pinClass ?? 0) == CS_PINCLASS_ADC
         let base = adc ? CS_ADC_PINS : HardwareSettingsTab.validPins
         let twoPin = (typeDesc(type)?.pinCount ?? 1) >= 2
         let sibling: UInt8? = twoPin ? (isSecond ? drafts[slot].gpio0 : drafts[slot].gpio1) : nil
         let current = isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0
+        let isButton = type == CS_TYPE_BUTTON
         return base.filter { p in
-            p != sibling &&
-            (p == current || vm.pinInUseBy(p, excluding: .controlSurface(slot)) == nil)
+            if p == sibling { return false }
+            if p == current { return true }
+            if vm.pinInUseBy(p, excluding: .controlSurface(slot)) == nil { return true }
+            // A button can share a pin whose only other owners are buttons.
+            return isButton && csPinButtonShareable(p, excludingSlot: slot)
         }
+    }
+
+    /// True when every live Control Surface binding on `pin` (other than
+    /// `excludingSlot`) is a button, so another button may share the GPIO.
+    /// Returns false if any non-button binding, or a non-CS peripheral, holds it.
+    private func csPinButtonShareable(_ pin: UInt8, excludingSlot: Int) -> Bool {
+        var sawButton = false
+        for s in 0..<min(vm.csBindings.count, CS_MAX_BINDINGS)
+        where s != excludingSlot && vm.csStatus.isSlotActive(s) {
+            let bind = vm.csBindings[s]
+            guard bind.gpio0 == pin || (bind.gpio1 != CS_GPIO_UNUSED && bind.gpio1 == pin) else { continue }
+            if Int(bind.type) != CS_TYPE_BUTTON { return false }
+            sawButton = true
+        }
+        return sawButton
     }
 
     // MARK: Bindings that re-default on structural changes
@@ -2315,6 +2562,10 @@ struct ControlSurfacesSettingsTab: View {
                 guard newNoun != Int(drafts[slot].noun) else { return }
                 var b = drafts[slot]
                 b.noun = UInt8(newNoun)
+                // Reset the channel/band address; the new noun may address
+                // differently (or not at all).
+                b.target = 0
+                b.index = 0
                 let acts = validActions(type: Int(b.type), noun: newNoun)
                 if !acts.contains(Int(b.action)) {
                     b.action = UInt8(defaultAction(type: Int(b.type), noun: newNoun))
@@ -2344,6 +2595,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_POT:     return "Potentiometer / Fader"
         case CS_TYPE_ENCODER: return "Rotary Encoder"
         case CS_TYPE_LED:     return "Indicator LED"
+        case CS_TYPE_LED_PWM: return "Dimmable LED"
         default:              return "Type \(type)"
         }
     }
@@ -2355,12 +2607,13 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_POT:     return "dial.medium"
         case CS_TYPE_ENCODER: return "dial.high"
         case CS_TYPE_LED:     return "lightbulb.fill"
+        case CS_TYPE_LED_PWM: return "sun.max.fill"
         default:              return "dial.medium"
         }
     }
 
     /// Badge tint per component type.  Cool hues matching the settings sidebar
-    /// palette, with a warm amber reserved for the LED (it is, after all, a light).
+    /// palette, with warm hues reserved for the LEDs (they are, after all, lights).
     private func typeTint(_ type: Int) -> Color {
         switch type {
         case CS_TYPE_BUTTON:  return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
@@ -2368,25 +2621,60 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_POT:     return Color(red: 0.21, green: 0.49, blue: 0.82)  // blue
         case CS_TYPE_ENCODER: return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
         case CS_TYPE_LED:     return Color(red: 0.93, green: 0.63, blue: 0.18)  // amber
+        case CS_TYPE_LED_PWM: return Color(red: 0.90, green: 0.45, blue: 0.20)  // warm orange
         default:              return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
         }
     }
 
+    /// True when this component only shows state (LED or PWM LED).
+    private func isIndicatorType(_ type: Int) -> Bool {
+        type == CS_TYPE_LED || type == CS_TYPE_LED_PWM
+    }
+
     private func nounName(_ noun: Int, forType type: Int) -> String {
-        // Clip is dual-use: an LED shows the state ("Clipping"), while a
-        // button's whole job is the clearing ("Clear Clipping").
-        if noun == CS_NOUN_CLIP && type != CS_TYPE_LED { return "Clear Clipping" }
+        // A few nouns read differently as an indicator vs. a control: an LED
+        // "Clipping" shows the state, while a button's job is the clearing.
+        if !isIndicatorType(type) {
+            if noun == CS_NOUN_CLIP { return "Clear Clipping" }
+            if noun == CS_NOUN_DAC_MUTE_TEST { return "Test DAC Mute" }
+        }
         switch noun {
-        case CS_NOUN_USER_VOLUME:   return "Volume"
-        case CS_NOUN_MASTER_VOLUME: return "Master Volume"
-        case CS_NOUN_USER_MUTE:     return "Mute"
-        case CS_NOUN_LOUDNESS:      return "Loudness"
-        case CS_NOUN_CROSSFEED:     return "Crossfeed"
-        case CS_NOUN_LEVELLER:      return "Volume Leveller"
-        case CS_NOUN_PRESET:        return "Preset"
-        case CS_NOUN_INPUT_SOURCE:  return "Input Source"
-        case CS_NOUN_CLIP:          return "Clipping"
-        default:                    return "Parameter \(noun)"
+        case CS_NOUN_USER_VOLUME:        return "Volume"
+        case CS_NOUN_MASTER_VOLUME:      return "Master Volume"
+        case CS_NOUN_USER_MUTE:          return "Mute"
+        case CS_NOUN_LOUDNESS:           return "Loudness"
+        case CS_NOUN_CROSSFEED:          return "Crossfeed"
+        case CS_NOUN_LEVELLER:           return "Volume Leveller"
+        case CS_NOUN_PRESET:             return "Preset"
+        case CS_NOUN_INPUT_SOURCE:       return "Input Source"
+        case CS_NOUN_CLIP:               return "Clipping"
+        case CS_NOUN_EQ_BYPASS:          return "EQ Bypass"
+        case CS_NOUN_LG_SYNC:            return "LG Sound Sync"
+        case CS_NOUN_CROSSFEED_PRESET:   return "Crossfeed Preset"
+        case CS_NOUN_CROSSFEED_ITD:      return "Crossfeed ITD"
+        case CS_NOUN_LEVELLER_AMOUNT:    return "Leveller Amount"
+        case CS_NOUN_LEVELLER_SPEED:     return "Leveller Speed"
+        case CS_NOUN_LEVELLER_LOOKAHEAD: return "Leveller Lookahead"
+        case CS_NOUN_PREAMP:             return "Input Preamp"
+        case CS_NOUN_OUTPUT_GAIN:        return "Output Gain"
+        case CS_NOUN_OUTPUT_MUTE:        return "Output Mute"
+        case CS_NOUN_OUTPUT_ENABLE:      return "Output Enable"
+        case CS_NOUN_FILTER_FREQ:        return "Filter Frequency"
+        case CS_NOUN_FILTER_GAIN:        return "Filter Gain"
+        case CS_NOUN_FILTER_Q:           return "Filter Q"
+        case CS_NOUN_FILTER_TYPE:        return "Filter Type"
+        case CS_NOUN_FILTER_BYPASS:      return "Filter Bypass"
+        case CS_NOUN_SIGGEN:             return "Test Signal"
+        case CS_NOUN_DAC_MUTE_TEST:      return "DAC Mute Test"
+        case CS_NOUN_CLIP_CH:            return "Channel Clipping"
+        case CS_NOUN_LEVEL:              return "Channel Level"
+        case CS_NOUN_SPDIF_LOCK:         return "S/PDIF Lock"
+        case CS_NOUN_SAMPLE_RATE:        return "Sample Rate"
+        case CS_NOUN_USB_STREAMING:      return "USB Streaming"
+        case CS_NOUN_ADAT_ACTIVE:        return "ADAT Active"
+        case CS_NOUN_LG_PRESENT:         return "LG Source Present"
+        case CS_NOUN_LG_MUTED:           return "LG Muted"
+        default:                         return "Parameter \(noun)"
         }
     }
 
@@ -2402,32 +2690,63 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_FOLLOW:     return "Follow position"
         case CS_ACT_TRIGGER:    return "Trigger"
         case CS_ACT_IND_EQUALS: return "Indicate"
+        case CS_ACT_MOMENTARY:  return "Hold"
+        case CS_ACT_IND_ABOVE:  return "Indicate above"
+        case CS_ACT_IND_LEVEL:  return "Show level"
         default:                return "Action \(action)"
         }
     }
 
     /// One-line plain-language summary of the whole binding.
     private func verbPhrase(_ b: CsBinding) -> String {
-        let noun = nounName(Int(b.noun), forType: Int(b.type))
+        let noun = nounName(Int(b.noun), forType: Int(b.type)) + targetSuffix(b)
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
+        let press = pressWord(b)
         switch Int(b.action) {
         case CS_ACT_ADJUST:     return "Turn to set \(noun)."
         case CS_ACT_STEP:       return "Turn to step \(noun)."
-        case CS_ACT_INC:        return isEnum ? "Press to select the next \(noun)." : "Press to raise \(noun)."
-        case CS_ACT_DEC:        return isEnum ? "Press to select the previous \(noun)." : "Press to lower \(noun)."
-        case CS_ACT_TOGGLE:     return "Press to toggle \(noun)."
-        case CS_ACT_SET:        return "Press to set \(noun)."
+        case CS_ACT_INC:        return isEnum ? "\(press) to select the next \(noun)." : "\(press) to raise \(noun)."
+        case CS_ACT_DEC:        return isEnum ? "\(press) to select the previous \(noun)." : "\(press) to lower \(noun)."
+        case CS_ACT_TOGGLE:     return "\(press) to toggle \(noun)."
+        case CS_ACT_SET:        return "\(press) to set \(noun)."
+        case CS_ACT_MOMENTARY:  return "Hold to engage \(noun); releases when let go."
         case CS_ACT_FOLLOW:     return "\(noun) follows the switch position."
         // The noun name carries the verb for a trigger ("Clear Clipping").
-        case CS_ACT_TRIGGER:    return "Press to \(noun.lowercased())."
+        case CS_ACT_TRIGGER:    return "\(press) to \(noun.lowercased())."
         case CS_ACT_IND_EQUALS: return "Lights to indicate \(noun)."
+        case CS_ACT_IND_ABOVE:  return "Lights when \(noun) is above a level."
+        case CS_ACT_IND_LEVEL:  return "Brightness follows \(noun)."
         default:                return ""
         }
     }
 
+    /// "Press" / "Long-press" / "Double-press" for a button binding's gesture.
+    private func pressWord(_ b: CsBinding) -> String {
+        guard Int(b.type) == CS_TYPE_BUTTON else { return "Press" }
+        switch b.event {
+        case CS_EVENT_LONG:   return "Long-press"
+        case CS_EVENT_DOUBLE: return "Double-press"
+        default:              return "Press"
+        }
+    }
+
+    /// " (Output 1)" / " (Band 3)" suffix for a targeted binding's summary.
+    private func targetSuffix(_ b: CsBinding) -> String {
+        guard let nd = nounDesc(Int(b.noun)), nd.isTargeted else { return "" }
+        var s = " (\(targetName(nd, Int(b.target)))"
+        if nd.hasBand { s += ", \(bandName(Int(b.index)))" }
+        return s + ")"
+    }
+
     private func boolLabel(_ noun: Int, on: Bool) -> String {
-        if noun == CS_NOUN_CLIP { return on ? "Clipping" : "Not clipping" }
-        return on ? "On" : "Off"
+        switch noun {
+        case CS_NOUN_CLIP, CS_NOUN_CLIP_CH: return on ? "Clipping" : "Not clipping"
+        case CS_NOUN_USER_MUTE, CS_NOUN_OUTPUT_MUTE, CS_NOUN_LG_MUTED: return on ? "Muted" : "Unmuted"
+        case CS_NOUN_SPDIF_LOCK:  return on ? "Locked" : "Unlocked"
+        case CS_NOUN_USB_STREAMING, CS_NOUN_ADAT_ACTIVE, CS_NOUN_SIGGEN: return on ? "Active" : "Idle"
+        case CS_NOUN_LG_PRESENT:  return on ? "Present" : "Absent"
+        default:                  return on ? "On" : "Off"
+        }
     }
 
     private func enumValueLabel(noun: Int, value: Int) -> String {
@@ -2438,22 +2757,58 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_INPUT_SOURCE:
             let names = ["USB", "S/PDIF", "I2S"]
             return (value >= 0 && value < names.count) ? names[value] : "Source \(value)"
+        case CS_NOUN_SAMPLE_RATE:
+            let names = ["44.1 kHz", "48 kHz", "96 kHz"]
+            return (value >= 0 && value < names.count) ? names[value] : "Rate \(value)"
+        case CS_NOUN_LEVELLER_SPEED:
+            let names = ["Slow", "Medium", "Fast"]
+            return (value >= 0 && value < names.count) ? names[value] : "Speed \(value)"
+        case CS_NOUN_CROSSFEED_PRESET:
+            let names = ["Default", "Chu Moy", "Meier", "Custom"]
+            return (value >= 0 && value < names.count) ? names[value] : "Preset \(value)"
+        case CS_NOUN_FILTER_TYPE:
+            let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "Low Pass",
+                         "High Pass", "Notch", "All Pass", "All Pass (1st)",
+                         "Low Shelf (1st)", "High Shelf (1st)"]
+            return (value >= 0 && value < names.count) ? names[value] : "Type \(value)"
         default:
             return "\(value)"
         }
     }
 
+    /// Display name for a targeted noun's channel address (`target` byte).
+    private func targetName(_ nd: CsNounDesc, _ target: Int) -> String {
+        func dsp(_ c: Int) -> String {
+            (c >= 0 && c < vm.channelNames.count && !vm.channelNames[c].isEmpty)
+                ? vm.channelNames[c] : "Channel \(c + 1)"
+        }
+        switch nd.targetKind {
+        case CS_TARGET_INPUT_CH:
+            return dsp(target)
+        case CS_TARGET_OUTPUT_CH:
+            return dsp(target + vm.chOut1)
+        default: // DSP_CH / DSP_BAND
+            return dsp(target)
+        }
+    }
+
+    /// Display name for a filter band index (PEQ 0-9, crossover 20-23).
+    private func bandName(_ band: Int) -> String {
+        if band >= 20 && band <= 23 { return "Crossover \(band - 19)" }
+        return "Band \(band + 1)"
+    }
+
     private func pinDetail(_ type: Int) -> String {
         switch type {
-        case CS_TYPE_POT: return "ADC pin (GPIO 26, 27, or 28), wiper to the pin."
-        case CS_TYPE_LED: return "Output pin driving the LED."
-        default:          return "Wired between this GPIO and GND."
+        case CS_TYPE_POT:                    return "ADC pin (GPIO 26, 27, or 28), wiper to the pin."
+        case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Output pin driving the LED."
+        default:                             return "Wired between this GPIO and GND."
         }
     }
 
     private func invertTitle(_ type: Int) -> String {
         switch type {
-        case CS_TYPE_LED:                    return "Active-Low LED"
+        case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Active-Low LED"
         case CS_TYPE_POT, CS_TYPE_ENCODER:   return "Pull-Down Wiring"
         default:                             return "Active-High Wiring"
         }
@@ -2463,6 +2818,8 @@ struct ControlSurfacesSettingsTab: View {
         switch type {
         case CS_TYPE_LED:
             return "Drive the pin low to light the LED (LED wired to 3V3 through a resistor)."
+        case CS_TYPE_LED_PWM:
+            return "Invert the PWM duty for an LED wired to 3V3 through a resistor."
         case CS_TYPE_POT, CS_TYPE_ENCODER:
             return "Wire the common terminal to 3V3 instead of GND (internal pull-down)."
         default:
@@ -2472,6 +2829,37 @@ struct ControlSurfacesSettingsTab: View {
 
     private func fmtDb(_ v: Float) -> String {
         String(format: "%.1f dB", v)
+    }
+
+    /// Format a natural-unit value with its unit symbol (Hz integer, Q two
+    /// decimals, dB/percent one decimal).
+    private func fmtUnit(_ v: Float, _ unit: UInt8) -> String {
+        switch unit {
+        case CS_UNIT_HZ:      return String(format: "%.0f Hz", v)
+        case CS_UNIT_Q:       return String(format: "Q %.2f", v)
+        case CS_UNIT_PERCENT: return String(format: "%.0f %%", v)
+        case CS_UNIT_DB:      return String(format: "%.1f dB", v)
+        default:              return String(format: "%.0f", v)
+        }
+    }
+
+    /// Scroll-wheel / field increment appropriate to a unit.
+    private func unitScrollStep(_ unit: UInt8) -> Float {
+        switch unit {
+        case CS_UNIT_HZ:      return 10
+        case CS_UNIT_Q:       return 0.1
+        case CS_UNIT_PERCENT: return 1
+        default:              return 0.5   // dB
+        }
+    }
+
+    /// Field decimal places appropriate to a unit (Hz/percent whole, Q fine).
+    private func unitDecimals(_ unit: UInt8) -> Int {
+        switch unit {
+        case CS_UNIT_HZ, CS_UNIT_PERCENT: return 0
+        case CS_UNIT_Q:                   return 2
+        default:                          return 1   // dB
+        }
     }
 
     /// Why a stored-but-enabled binding isn't running (from its slot health code).
@@ -2490,10 +2878,15 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_INVALID_TYPE:    return ("Unsupported component type", true)
         case CS_STATUS_INVALID_NOUN:    return ("Unsupported function", true)
         case CS_STATUS_INVALID_ACTION:  return ("That action isn't allowed for this component and function", true)
-        case CS_STATUS_INVALID_VALUE:   return ("A value, step, or range is out of bounds", true)
+        case CS_STATUS_INVALID_VALUE:   return ("A value, step, range, or flag is out of bounds", true)
         case CS_STATUS_PIN_NOT_ADC:     return ("A potentiometer must use an ADC pin (GPIO 26, 27, or 28)", true)
         case CS_STATUS_INVALID_SLOT:    return ("Invalid slot", true)
         case CS_STATUS_PENDING:         return ("Still applying, please retry", true)
+        case CS_STATUS_INVALID_TARGET:  return ("The selected channel or band isn't valid for this function", true)
+        case CS_STATUS_INVALID_EVENT:   return ("That press gesture isn't allowed here", true)
+        case CS_STATUS_PWM_CONFLICT:    return ("This PWM LED pin conflicts with another dimmable LED", true)
+        case CS_STATUS_EVENT_IN_USE:    return ("Another button already uses this GPIO and gesture", true)
+        case CS_STATUS_BUSY:            return ("The device was busy; please apply again", true)
         default:                        return ("Failed to apply the binding", true)
         }
     }

@@ -1479,19 +1479,20 @@ extension DSPViewModel {
     /// Enumerate Control Surfaces capabilities + live state at connect.  The
     /// caps header (REQ_GET_CS_CAPS, wValue=0xFFFF) doubles as the feature
     /// probe: older firmware STALLs it and the Settings page hides itself.  On
-    /// success we cache the type table, every per-noun descriptor, all 8 live
+    /// success we cache the type table, every per-noun descriptor, all live
     /// bindings, and the status packet, so the picker UI is built entirely from
     /// device-served tables (spec §4/§8.1).
     func fetchControlSurfaces() {
-        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 28),
+        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 32),
               let caps = CsCapsHeader.fromData(h) else {
             DispatchQueue.main.async { self.controlSurfacesSupported = false }
             return
         }
-        // Per-noun descriptors (kind, enum count, dB range, accepted actions).
+        // Per-noun descriptors (kind, enum count, unit-encoded range, unit,
+        // target addressing, accepted actions).
         var nouns: [CsNounDesc] = []
         for n in 0..<Int(caps.nounCount) {
-            guard let d = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: UInt16(n), index: 2, length: 8),
+            guard let d = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: UInt16(n), index: 2, length: 12),
                   let desc = CsNounDesc.fromData(d) else { continue }
             nouns.append(desc)
         }
@@ -1504,26 +1505,26 @@ extension DSPViewModel {
         for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
     }
 
-    /// Read the live 16-byte binding for one slot into `csBindings[slot]`.
+    /// Read the live 24-byte binding for one slot into `csBindings[slot]`.
     func fetchCsBinding(slot: Int) {
         guard slot >= 0, slot < CS_MAX_BINDINGS,
-              let d = usb.getControlRequest(request: REQ_GET_CS_BINDING, value: UInt16(slot), index: 2, length: 16),
+              let d = usb.getControlRequest(request: REQ_GET_CS_BINDING, value: UInt16(slot), index: 2, length: 24),
               let bind = CsBinding.fromData(d) else { return }
         DispatchQueue.main.async {
             if slot < self.csBindings.count { self.csBindings[slot] = bind }
         }
     }
 
-    /// Read the 12-byte status packet (last-apply outcome, active mask, per-slot
+    /// Read the 22-byte status packet (last-apply outcome, active mask, per-slot
     /// health).  Cheap enough to poll after a SET.
     func fetchCsStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 12),
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 22),
               let st = CsStatusPacket.fromData(d) else { return }
         DispatchQueue.main.async { self.csStatus = st }
     }
 
     /// Apply and persist one Control Surface binding to `slot`.  SET (0x84) is
-    /// an OUT transfer carrying the 16-byte binding; the firmware validates +
+    /// an OUT transfer carrying the 24-byte binding; the firmware validates +
     /// applies it deferred on its main loop and persists the whole table to
     /// flash only on success (spec §3.2).  The outcome is not synchronous: we
     /// poll REQ_GET_CS_STATUS (0x87) until `lastSlot == slot` and `lastStatus`
@@ -1538,7 +1539,7 @@ extension DSPViewModel {
         var result: UInt8 = CS_STATUS_PENDING
         for _ in 0..<25 {
             Thread.sleep(forTimeInterval: 0.02)
-            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 12),
+            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 22),
                   let st = CsStatusPacket.fromData(d) else { continue }
             if Int(st.lastSlot) == slot && st.lastStatus != CS_STATUS_PENDING {
                 result = st.lastStatus

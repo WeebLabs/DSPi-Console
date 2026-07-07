@@ -341,49 +341,85 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87).
-let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 16 bytes: CsBinding, wValue = slot (0-7)
-let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 16 bytes: live CsBinding, wValue = slot
-let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 28-byte header+types; wValue=noun -> 8-byte CsNounDesc
-let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN 12 bytes: CsStatusPacket
+// Request codes (0x84-0x87).  Capability format version 2 (spec §"Wire
+// reference"): the binding grew 16 -> 24 bytes, the status packet 12 -> 22,
+// the noun descriptor 8 -> 12, and the caps header to 32 (7 types).
+let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15)
+let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
+let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 32-byte header+types; wValue=noun -> 12-byte CsNounDesc
+let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN 22 bytes: CsStatusPacket
 
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
-let CS_STATUS_INVALID_SLOT: UInt8   = 0x10   // slot index >= 8
-let CS_STATUS_INVALID_TYPE: UInt8   = 0x11   // type >= CS_TYPE_COUNT
-let CS_STATUS_INVALID_NOUN: UInt8   = 0x12   // noun >= CS_NOUN_COUNT
-let CS_STATUS_INVALID_ACTION: UInt8 = 0x13   // action not allowed for this type+noun
-let CS_STATUS_INVALID_VALUE: UInt8  = 0x14   // value/step/range out of bounds, or unknown flags bits
-let CS_STATUS_PIN_NOT_ADC: UInt8    = 0x15   // a pot on a non-ADC GPIO
-let CS_STATUS_PENDING: UInt8        = 0x16   // SET accepted, main-loop apply not yet run (poll again)
+let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16
+let CS_STATUS_INVALID_TYPE: UInt8    = 0x11   // type >= CS_TYPE_COUNT
+let CS_STATUS_INVALID_NOUN: UInt8    = 0x12   // noun >= CS_NOUN_COUNT
+let CS_STATUS_INVALID_ACTION: UInt8  = 0x13   // action not allowed for this type+noun (incl. platform-disabled noun)
+let CS_STATUS_INVALID_VALUE: UInt8   = 0x14   // value/step/range out of bounds, unknown flags, misused ACCEL/REPEAT, non-zero reserved
+let CS_STATUS_PIN_NOT_ADC: UInt8     = 0x15   // a pot on a non-ADC GPIO
+let CS_STATUS_PENDING: UInt8         = 0x16   // SET accepted, main-loop apply not yet run (poll again)
+let CS_STATUS_INVALID_TARGET: UInt8  = 0x17   // target/index out of range for the noun (or non-zero on untargeted)
+let CS_STATUS_INVALID_EVENT: UInt8   = 0x18   // bad event, event on a non-button, or MOMENTARY/REPEAT on a non-press event
+let CS_STATUS_PWM_CONFLICT: UInt8    = 0x19   // PWM LED collides with another on the same slice+channel
+let CS_STATUS_EVENT_IN_USE: UInt8    = 0x1A   // another button binding already has this GPIO+event pair
+let CS_STATUS_BUSY: UInt8            = 0x1B   // SET dropped; a previous binding SET is still queued for apply
 
 // Limits / sentinels (spec §2).
-let CS_MAX_BINDINGS: Int      = 8
+let CS_MAX_BINDINGS: Int      = 16
 let CS_GPIO_UNUSED: UInt8     = 0xFF
-let CS_CONFIG_VERSION: UInt8  = 1
+let CS_CONFIG_VERSION: UInt8  = 2
 let CS_CAPS_ALL: UInt16       = 0xFFFF   // wValue selecting the caps header + type table
 /// ADC-capable GPIOs (ADC0..2 on both platforms) - the only pins a
 /// potentiometer may occupy.  GPIO 29 (VSYS/3 monitor) is excluded.
 let CS_ADC_PINS: [UInt8]      = [26, 27, 28]
 
 // CsType (component wired up).  Append-only; index into the caps type table.
-let CS_TYPE_NONE: Int    = 0
-let CS_TYPE_BUTTON: Int  = 1
-let CS_TYPE_SWITCH: Int  = 2
-let CS_TYPE_POT: Int     = 3
-let CS_TYPE_ENCODER: Int = 4
-let CS_TYPE_LED: Int     = 5
+let CS_TYPE_NONE: Int     = 0
+let CS_TYPE_BUTTON: Int   = 1
+let CS_TYPE_SWITCH: Int   = 2
+let CS_TYPE_POT: Int      = 3
+let CS_TYPE_ENCODER: Int  = 4
+let CS_TYPE_LED: Int      = 5
+let CS_TYPE_LED_PWM: Int  = 6   // hardware-PWM-dimmed LED (IND_LEVEL meter)
 
-// CsNoun (firmware parameter driven or shown).
-let CS_NOUN_USER_VOLUME: Int   = 0
-let CS_NOUN_MASTER_VOLUME: Int = 1
-let CS_NOUN_USER_MUTE: Int     = 2
-let CS_NOUN_LOUDNESS: Int      = 3
-let CS_NOUN_CROSSFEED: Int     = 4
-let CS_NOUN_LEVELLER: Int      = 5
-let CS_NOUN_PRESET: Int        = 6
-let CS_NOUN_INPUT_SOURCE: Int  = 7
-let CS_NOUN_CLIP: Int          = 8
+// CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns);
+// the app reads the live count and per-noun descriptors from the caps, so
+// these are only used by the display-label helpers.
+let CS_NOUN_USER_VOLUME: Int       = 0
+let CS_NOUN_MASTER_VOLUME: Int     = 1
+let CS_NOUN_USER_MUTE: Int         = 2
+let CS_NOUN_LOUDNESS: Int          = 3
+let CS_NOUN_CROSSFEED: Int         = 4
+let CS_NOUN_LEVELLER: Int          = 5
+let CS_NOUN_PRESET: Int            = 6
+let CS_NOUN_INPUT_SOURCE: Int      = 7
+let CS_NOUN_CLIP: Int              = 8
+let CS_NOUN_EQ_BYPASS: Int         = 9
+let CS_NOUN_LG_SYNC: Int           = 10
+let CS_NOUN_CROSSFEED_PRESET: Int  = 11
+let CS_NOUN_CROSSFEED_ITD: Int     = 12
+let CS_NOUN_LEVELLER_AMOUNT: Int   = 13
+let CS_NOUN_LEVELLER_SPEED: Int    = 14
+let CS_NOUN_LEVELLER_LOOKAHEAD: Int = 15
+let CS_NOUN_PREAMP: Int            = 16
+let CS_NOUN_OUTPUT_GAIN: Int       = 17
+let CS_NOUN_OUTPUT_MUTE: Int       = 18
+let CS_NOUN_OUTPUT_ENABLE: Int     = 19
+let CS_NOUN_FILTER_FREQ: Int       = 20
+let CS_NOUN_FILTER_GAIN: Int       = 21
+let CS_NOUN_FILTER_Q: Int          = 22
+let CS_NOUN_FILTER_TYPE: Int       = 23
+let CS_NOUN_FILTER_BYPASS: Int     = 24
+let CS_NOUN_SIGGEN: Int            = 25
+let CS_NOUN_DAC_MUTE_TEST: Int     = 26
+let CS_NOUN_CLIP_CH: Int           = 27
+let CS_NOUN_LEVEL: Int             = 28
+let CS_NOUN_SPDIF_LOCK: Int        = 29
+let CS_NOUN_SAMPLE_RATE: Int       = 30
+let CS_NOUN_USB_STREAMING: Int     = 31
+let CS_NOUN_ADAT_ACTIVE: Int       = 32
+let CS_NOUN_LG_PRESENT: Int        = 33
+let CS_NOUN_LG_MUTED: Int          = 34
 
 // CsAction (operation applied).  Action bit position in the caps masks is
 // (1 << action); CS_ACT_BIT(a) below builds that mask.
@@ -396,19 +432,47 @@ let CS_ACT_SET: Int        = 5   // button: set the noun to `value` per press
 let CS_ACT_FOLLOW: Int     = 6   // switch: bool tracks the switch position
 let CS_ACT_TRIGGER: Int    = 7   // button: fire the noun's command (e.g. clip clear)
 let CS_ACT_IND_EQUALS: Int = 8   // LED: lit while noun value == `value`
+let CS_ACT_MOMENTARY: Int  = 9   // button (press): set to `value` while held, restore on release
+let CS_ACT_IND_ABOVE: Int  = 10  // LED: lit while a continuous noun value >= `value`
+let CS_ACT_IND_LEVEL: Int  = 11  // PWM LED: brightness follows the noun across its range
 
 /// Action-bit mask helper: `CS_ACT_BIT(CS_ACT_STEP)` == 0x0002.
 func CS_ACT_BIT(_ action: Int) -> UInt16 { UInt16(1) << UInt16(action) }
 
-// CsBinding.flags bitfield (spec §6).
+// CsBinding.flags bitfield (spec §2.2.1 / §6).
 let CS_FLAG_INVERT: UInt8  = 0x01   // input active-high w/ pull-down; LED active-low
 let CS_FLAG_REVERSE: UInt8 = 0x02   // pot / encoder: invert direction
 let CS_FLAG_WRAP: UInt8    = 0x04   // enum STEP/INC/DEC wraps around the ends
+let CS_FLAG_ACCEL: UInt8   = 0x08   // encoder only: fast rotation multiplies the step
+let CS_FLAG_REPEAT: UInt8  = 0x10   // button INC/DEC on the press event: auto-repeat while held
+
+// CsBinding.event (buttons only; MUST be 0 for other types).  Spec §6.1.
+let CS_EVENT_PRESS: UInt8  = 0   // short press
+let CS_EVENT_LONG: UInt8   = 1   // held >= 500 ms
+let CS_EVENT_DOUBLE: UInt8 = 2   // two taps within 350 ms
 
 // CsNounDesc.kind values.
-let CS_KIND_CONTINUOUS: UInt8 = 0   // float dB, 8.8 fixed point on the wire
+let CS_KIND_CONTINUOUS: UInt8 = 0   // numeric value, unit-encoded on the wire (see CS_UNIT_*)
 let CS_KIND_BOOL: UInt8       = 1
 let CS_KIND_ENUM: UInt8       = 2
+
+// CsNounDesc.unit values (spec §2.1).  Fixes the wire encoding of
+// value/range/step and the stepping law.
+let CS_UNIT_NONE: UInt8    = 0   // plain integer (bool 0/1, enum 0..N-1)
+let CS_UNIT_DB: UInt8      = 1   // signed 8.8 dB (1 dB = 256), linear stepping
+let CS_UNIT_HZ: UInt8      = 2   // plain integer Hz, logarithmic stepping (step = 8.8 octaves)
+let CS_UNIT_Q: UInt8       = 3   // 8.8 Q (0.707 = 181), logarithmic stepping (step = 8.8 octaves)
+let CS_UNIT_PERCENT: UInt8 = 4   // 8.8 percent (1 % = 256), linear stepping
+
+// CsNounDesc.target_kind values (spec §4.4).
+let CS_TARGET_NONE: UInt8      = 0
+let CS_TARGET_INPUT_CH: UInt8  = 1   // target = input channel 0..N-1
+let CS_TARGET_OUTPUT_CH: UInt8 = 2   // target = output channel 0..N-1
+let CS_TARGET_DSP_CH: UInt8    = 3   // target = DSP channel (inputs first, then outputs)
+let CS_TARGET_DSP_BAND: UInt8  = 4   // target = DSP channel, index = filter band
+
+// CsNounDesc.dflags bitfield.
+let CS_NDF_DEFERRED: UInt8 = 0x01   // apply is deferred; the engine steps from a target shadow
 
 // CsTypeDesc.pin_class values.
 let CS_PINCLASS_ANY: UInt8 = 0
@@ -421,6 +485,48 @@ func csDbToQ8(_ db: Float) -> Int16 {
 }
 /// Inverse of `csDbToQ8`.
 func csQ8ToDb(_ q8: Int16) -> Float { Float(q8) / 256.0 }
+
+/// Clamp a rounded float to the Int16 range.
+private func csClampInt16(_ v: Float) -> Int16 {
+    Int16(max(Float(Int16.min), min(Float(Int16.max), v.rounded())))
+}
+
+/// True when a unit encodes value/range as 8.8 fixed point (dB, Q, percent);
+/// false for the plain-integer units (none, Hz).
+func csUnitIsFixedPoint(_ unit: UInt8) -> Bool {
+    unit == CS_UNIT_DB || unit == CS_UNIT_Q || unit == CS_UNIT_PERCENT
+}
+
+/// Encode a natural-unit value (dB / Hz / Q / percent / plain) to the wire
+/// int16 per the noun's unit (spec §2.1).
+func csEncodeValue(_ v: Float, unit: UInt8) -> Int16 {
+    csClampInt16(csUnitIsFixedPoint(unit) ? v * 256.0 : v)
+}
+/// Inverse of `csEncodeValue`.
+func csDecodeValue(_ q: Int16, unit: UInt8) -> Float {
+    csUnitIsFixedPoint(unit) ? Float(q) / 256.0 : Float(q)
+}
+
+/// Encode a step operand.  Continuous units carry the step as 8.8 (dB / octaves
+/// / percent); the enum/plain unit carries a plain position count.
+func csEncodeStep(_ v: Float, unit: UInt8) -> Int16 {
+    csClampInt16(unit == CS_UNIT_NONE ? v : v * 256.0)
+}
+/// Inverse of `csEncodeStep`.
+func csDecodeStep(_ q: Int16, unit: UInt8) -> Float {
+    unit == CS_UNIT_NONE ? Float(q) : Float(q) / 256.0
+}
+
+/// Short symbol for a unit, for value/range field labels.
+func csUnitSymbol(_ unit: UInt8) -> String {
+    switch unit {
+    case CS_UNIT_DB:      return "dB"
+    case CS_UNIT_HZ:      return "Hz"
+    case CS_UNIT_Q:       return "Q"
+    case CS_UNIT_PERCENT: return "%"
+    default:              return ""
+    }
+}
 
 // Test signal generator ("siggen") request codes (0xA4-0xA8; 0xA9-0xAF
 // reserved).  See Documentation/Features/test_signals_spec.md.  Transient
