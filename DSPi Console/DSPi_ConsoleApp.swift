@@ -122,7 +122,9 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .i2sConfig:         return vm.platformName != "STM32H723"
         case .spdifInput:        return vm.inputSourceSupported
         case .controlInterfaces: return vm.controlInterfacesSupported
-        case .controlSurfaces:   return vm.controlSurfacesSupported
+        // Shown while disconnected too (the page carries its own placeholder);
+        // hidden only when a connected device lacks the feature.
+        case .controlSurfaces:   return vm.controlSurfacesSupported || !vm.isDeviceConnected
         default:                 return true
         }
     }
@@ -1509,6 +1511,16 @@ struct ControlSurfacesSettingsTab: View {
     @State private var slotMessages: [Int: (message: String, isError: Bool)] = [:]
     @State private var applyingSlot: Int? = nil
 
+    // Cards start collapsed so the list reads as an at-a-glance overview; a
+    // newly added control opens for editing.  Collapse state is per-visit.
+    @State private var expandedSlots: Set<Int> = []
+
+    // User-given names, shown in the card header so collapsed cards are
+    // tellable apart.  The wire binding has no name field, so names live
+    // app-side in UserDefaults, keyed by slot.
+    @State private var slotNames: [Int: String] = [:]
+    private static let slotNamesKey = "controlSurfaceSlotNames"
+
     /// Number of binding slots the device exposes (falls back to the wire max).
     private var slotCount: Int {
         let n = Int(vm.csCaps.maxBindings)
@@ -1518,12 +1530,20 @@ struct ControlSurfacesSettingsTab: View {
     var body: some View {
         Form {
             if vm.csCaps.types.isEmpty {
-                Section {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Reading control-surface capabilities from the device...")
-                            .font(.caption).foregroundColor(.secondary)
+                // No capability tables yet: either the device is still being
+                // read, or there is no device to read.  The picker UI is built
+                // entirely from device-served tables, so without them the page
+                // can only explain itself.
+                if vm.isDeviceConnected {
+                    Section {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Reading control-surface capabilities from the device...")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
                     }
+                } else {
+                    disconnectedSection
                 }
             } else {
                 if visibleSlots.isEmpty {
@@ -1552,6 +1572,7 @@ struct ControlSurfacesSettingsTab: View {
         .formStyle(.grouped)
         .onAppear {
             seedDrafts()
+            loadSlotNames()
             DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
         }
         // Re-seed a slot when its live binding changes and the user has no
@@ -1573,6 +1594,38 @@ struct ControlSurfacesSettingsTab: View {
         drafts = seeded
     }
 
+    // MARK: Custom names
+
+    private func loadSlotNames() {
+        let stored = UserDefaults.standard.dictionary(forKey: Self.slotNamesKey) as? [String: String] ?? [:]
+        slotNames = Dictionary(uniqueKeysWithValues: stored.compactMap { key, name in
+            Int(key).map { ($0, name) }
+        })
+    }
+
+    private func saveSlotNames() {
+        let stored = Dictionary(uniqueKeysWithValues: slotNames.map { (String($0.key), $0.value) })
+        UserDefaults.standard.set(stored, forKey: Self.slotNamesKey)
+    }
+
+    /// Editable custom name for a slot; clearing the field removes the name
+    /// (the header falls back to the component-type placeholder).
+    private func nameBinding(_ slot: Int) -> Binding<String> {
+        Binding(
+            get: { slotNames[slot] ?? "" },
+            set: { newValue in
+                slotNames[slot] = newValue.isEmpty ? nil : newValue
+                saveSlotNames()
+            })
+    }
+
+    private func toggleExpanded(_ slot: Int) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            if expandedSlots.contains(slot) { expandedSlots.remove(slot) }
+            else { expandedSlots.insert(slot) }
+        }
+    }
+
     // MARK: Add / remove
 
     /// Slots that currently hold a control (edited draft or live on the device),
@@ -1584,6 +1637,31 @@ struct ControlSurfacesSettingsTab: View {
     /// The lowest slot with neither a draft nor a live binding, or nil when full.
     private var firstFreeSlot: Int? {
         (0..<slotCount).first { !drafts[$0].isConfigured && !vm.csBindings[$0].isConfigured }
+    }
+
+    /// Placeholder while no device is connected.  Everything on this page is
+    /// device-served (capability tables) and device-stored (bindings), so
+    /// there is nothing to edit offline.
+    @ViewBuilder
+    private var disconnectedSection: some View {
+        Section {
+            VStack(spacing: 10) {
+                Image(systemName: "cable.connector.slash")
+                    .font(.system(size: 28))
+                    .foregroundColor(.secondary)
+                VStack(spacing: 3) {
+                    Text("No Device Connected")
+                        .font(.headline)
+                    Text("Control surfaces are stored on the device. Connect a DSPi to view and configure its wired controls.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+        }
     }
 
     @ViewBuilder
@@ -1642,7 +1720,7 @@ struct ControlSurfacesSettingsTab: View {
         }
         .menuStyle(.button)
         .fixedSize()
-        .disabled(firstFreeSlot == nil)
+        .disabled(firstFreeSlot == nil || !vm.isDeviceConnected)
 
         if prominent {
             menu.buttonStyle(.borderedProminent).controlSize(.regular)
@@ -1657,6 +1735,7 @@ struct ControlSurfacesSettingsTab: View {
         guard let slot = firstFreeSlot else { return }
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
             drafts[slot] = makeBinding(type: type, slot: slot)
+            expandedSlots.insert(slot)   // open the new card for editing
         }
         slotMessages[slot] = nil
     }
@@ -1665,6 +1744,9 @@ struct ControlSurfacesSettingsTab: View {
     /// too (send CS_TYPE_NONE); an unapplied new draft is just dropped locally.
     private func removeControl(_ slot: Int) {
         slotMessages[slot] = nil
+        slotNames[slot] = nil
+        saveSlotNames()
+        expandedSlots.remove(slot)
         guard vm.csBindings[slot].isConfigured else {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                 drafts[slot] = CsBinding()   // never applied - drop the draft
@@ -1689,10 +1771,11 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func slotSection(_ slot: Int) -> some View {
         let b = drafts[slot]
+        let expanded = expandedSlots.contains(slot)
         Section {
             cardHeader(slot)
 
-            if b.isConfigured {
+            if b.isConfigured && expanded {
                 if vm.csBindings[slot].isConfigured && !vm.csStatus.isSlotActive(slot) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -1717,42 +1800,62 @@ struct ControlSurfacesSettingsTab: View {
                 flagRows(slot)
             }
 
-            applyRow(slot)
+            // A collapsed card still surfaces pending edits and apply results
+            // so nothing actionable hides behind the fold.
+            if expanded || drafts[slot] != vm.csBindings[slot]
+                || applyingSlot == slot || slotMessages[slot] != nil {
+                applyRow(slot)
+            }
         }
     }
 
-    /// The card's identity row: a tinted component badge, the component type as
-    /// an inline menu (tap to swap the component), the plain-language summary,
-    /// a live status pill, and the remove button.
+    /// The card's identity row: a disclosure chevron, a tinted component badge
+    /// (tap to swap the component type), an editable name over the
+    /// plain-language summary, a live status pill, and the remove button.
+    /// This row is all a collapsed card shows, so it carries everything needed
+    /// to tell controls apart at a glance.
     @ViewBuilder
     private func cardHeader(_ slot: Int) -> some View {
         let b = drafts[slot]
         let type = Int(b.type)
+        let expanded = expandedSlots.contains(slot)
+        let hasName = !(slotNames[slot] ?? "").isEmpty
         HStack(spacing: 12) {
-            csTypeBadge(type, size: 32)
-            VStack(alignment: .leading, spacing: 2) {
-                Menu {
-                    ForEach(realTypes, id: \.self) { t in
-                        Button { typeBinding(slot).wrappedValue = t } label: {
-                            Label(typeName(t), systemImage: typeIcon(t))
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(typeName(type))
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundColor(.secondary)
+            Button { toggleExpanded(slot) } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help(expanded ? "Collapse" : "Expand")
+
+            Menu {
+                ForEach(realTypes, id: \.self) { t in
+                    Button { typeBinding(slot).wrappedValue = t } label: {
+                        Label(typeName(t), systemImage: typeIcon(t))
                     }
                 }
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Change the component type")
+            } label: {
+                csTypeBadge(type, size: 32)
+            }
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Change the component type")
 
-                Text(verbPhrase(b))
+            VStack(alignment: .leading, spacing: 2) {
+                TextField("", text: nameBinding(slot), prompt: Text(typeName(type)))
+                    .textFieldStyle(.plain)
+                    .font(.headline)
+                    .frame(maxWidth: 280, alignment: .leading)
+                    .help("Click to rename this control")
+
+                // When a custom name hides the component type, restate it in
+                // the summary line.
+                Text(hasName ? "\(typeName(type)) - \(verbPhrase(b))" : verbPhrase(b))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -1767,7 +1870,10 @@ struct ControlSurfacesSettingsTab: View {
             .buttonStyle(.borderless)
             .foregroundColor(.secondary)
             .help("Remove this control")
-            .disabled(applyingSlot == slot)
+            // Removing a device-stored binding needs the device; an unapplied
+            // draft can be dropped any time.
+            .disabled(applyingSlot == slot
+                      || (vm.csBindings[slot].isConfigured && !vm.isDeviceConnected))
         }
         .padding(.vertical, 4)
     }
