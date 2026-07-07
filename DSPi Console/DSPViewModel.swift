@@ -314,17 +314,19 @@ struct CsTypeDesc: Equatable {
     var pinClass: UInt8 = 0   // CS_PINCLASS_ANY / _ADC
 }
 
-/// Capability header returned by REQ_GET_CS_CAPS, wValue = 0xFFFF (32 bytes in
-/// v2: 4-byte header + 7 CsTypeDesc; spec §2.4).  Hosts build their picker UI
-/// from this, not from hardcoded tables, so a future firmware's new types
-/// appear with no app change.  The parser reads `typeCount` entries, so it
-/// adapts to any type-table size.
+/// Capability header returned by REQ_GET_CS_CAPS, wValue = 0xFFFF (40 bytes in
+/// v3: 4-byte header + 8 CsTypeDesc + a 4-byte tail; spec §2.4).  Hosts build
+/// their picker UI from this, not from hardcoded tables, so a future firmware's
+/// new types appear with no app change.  The parser reads `typeCount` entries
+/// and locates the v3 tail at offset `4 + 4*typeCount`, so it adapts to any
+/// type-table size and stays compatible with a shorter v2 header.
 struct CsCapsHeader: Equatable {
     var capsVersion: UInt8 = 0
     var maxBindings: UInt8 = 0
     var typeCount: UInt8 = 0
     var nounCount: UInt8 = 0
     var types: [CsTypeDesc] = []
+    var maxIrCommands: UInt8 = 0   // v3 tail: IR command sub-slots (0 if pre-v3)
 
     static func fromData(_ data: Data) -> CsCapsHeader? {
         guard data.count >= 4 else { return nil }
@@ -339,8 +341,13 @@ struct CsCapsHeader: Equatable {
                 pinCount: data[o + 2],
                 pinClass: data[o + 3]))
         }
+        // The v3 tail (max_ir_commands) sits after the variable-length type
+        // table; absent on a v2 header, in which case IR is unavailable.
+        let tail = b + 4 + Int(typeCount) * 4
+        let maxIr: UInt8 = data.count > tail ? data[tail] : 0
         return CsCapsHeader(capsVersion: data[b + 0], maxBindings: data[b + 1],
-                            typeCount: typeCount, nounCount: data[b + 3], types: types)
+                            typeCount: typeCount, nounCount: data[b + 3], types: types,
+                            maxIrCommands: maxIr)
     }
 }
 
@@ -379,17 +386,22 @@ struct CsNounDesc: Equatable {
     }
 }
 
-/// REQ_GET_CS_STATUS response (22 bytes in v2; spec §2.6).  `lastStatus`/
-/// `lastSlot` report the most recent SET's outcome; `activeMask` (uint16) bit N
-/// = binding N is live; `slotStatus[N]` = that slot's per-apply health (0 = ok,
-/// else a failure code, e.g. a boot pin collision).
+/// REQ_GET_CS_STATUS response (32 bytes in v3; spec §2.6).  `lastStatus`/
+/// `lastSlot` report the most recent deferred SET's outcome (`lastSlot` =
+/// 0x80|n for an IR sub-slot, 0xFF for save/revert); `dirty` = the live config
+/// differs from flash (unsaved preview); `activeMask` (uint16) bit N = binding N
+/// is live; `slotStatus[N]` = that slot's per-apply health.  The v3 tail adds
+/// the IR component's active mask, learn state, and per-command health.
 struct CsStatusPacket: Equatable {
     var lastStatus: UInt8 = 0
     var lastSlot: UInt8 = 0
     var maxBindings: UInt8 = 0
-    // Byte 3: reserved
+    var dirty: Bool = false        // Byte 3: 1 = unsaved live changes (v3)
     var activeMask: UInt16 = 0     // Bytes 4-5 (LE): bit N = binding N is live
     var slotStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_BINDINGS)   // Bytes 6-21
+    var irActiveMask: UInt8 = 0    // Byte 22: bit N = IR command N is live (v3)
+    var irLearnState: UInt8 = 0    // Byte 23: CS_IR_LEARN_STATE_* (v3)
+    var irCmdStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_IR_COMMANDS)   // Bytes 24-31
 
     /// True when binding `slot` is live (its `activeMask` bit is set).
     func isSlotActive(_ slot: Int) -> Bool {
@@ -401,14 +413,108 @@ struct CsStatusPacket: Equatable {
         slot >= 0 && slot < slotStatus.count ? slotStatus[slot] : 0
     }
 
+    /// True when IR command sub-slot `n` is live (valid, learned, receiver up).
+    func isIrCmdActive(_ sub: Int) -> Bool {
+        sub >= 0 && sub < CS_MAX_IR_COMMANDS && (irActiveMask & (UInt8(1) << UInt8(sub))) != 0
+    }
+
+    /// This IR sub-slot's per-apply health code (0 = ok / cleared).
+    func irCmdHealth(_ sub: Int) -> UInt8 {
+        sub >= 0 && sub < irCmdStatus.count ? irCmdStatus[sub] : 0
+    }
+
     static func fromData(_ data: Data) -> CsStatusPacket? {
+        // Base (v2) layout is 22 bytes; the v3 tail (IR fields) runs to 32.
         guard data.count >= 22 else { return nil }
         let b = data.startIndex
         var slots: [UInt8] = []
         for i in 0..<CS_MAX_BINDINGS { slots.append(data[b + 6 + i]) }
+        var irStatus = Array(repeating: UInt8(0), count: CS_MAX_IR_COMMANDS)
+        var irActive: UInt8 = 0
+        var learn: UInt8 = 0
+        if data.count >= 32 {
+            irActive = data[b + 22]
+            learn = data[b + 23]
+            for i in 0..<CS_MAX_IR_COMMANDS { irStatus[i] = data[b + 24 + i] }
+        }
         return CsStatusPacket(
             lastStatus: data[b + 0], lastSlot: data[b + 1], maxBindings: data[b + 2],
-            activeMask: UInt16(data[b + 4]) | (UInt16(data[b + 5]) << 8), slotStatus: slots)
+            dirty: data[b + 3] != 0,
+            activeMask: UInt16(data[b + 4]) | (UInt16(data[b + 5]) << 8), slotStatus: slots,
+            irActiveMask: irActive, irLearnState: learn, irCmdStatus: irStatus)
+    }
+}
+
+/// One learned IR remote-button command (16 bytes; spec §2.7).  Semantically a
+/// button-shaped binding: the noun/action/target/value/step fields follow the
+/// same CsBinding rules, fired by the learned `code` instead of a GPIO edge.
+/// The same bytes appear on the wire (REQ_SET/GET_CS_IR_CMD) and in flash.
+struct IrCommand: Equatable {
+    var noun: UInt8 = 0            // Byte 0: CsNoun
+    var action: UInt8 = 0         // Byte 1: CsAction (button subset)
+    var flags: UInt8 = 0          // Byte 2: CS_FLAG_WRAP / CS_FLAG_REPEAT only
+    var target: UInt8 = 0         // Byte 3: channel address for targeted nouns
+    var index: UInt8 = 0          // Byte 4: filter band for CS_TARGET_DSP_BAND
+    var proto: UInt8 = 0          // Byte 5: CS_IR_PROTO_*; 0 (NONE) = empty sub-slot
+    var value: Int16 = 0          // Bytes 6-7: SET/MOMENTARY target, unit-encoded
+    var step: Int16 = 0           // Bytes 8-9: INC/DEC size; 0 = the unit default
+    // Bytes 10-11: reserved (0)
+    var code: UInt32 = 0          // Bytes 12-15 (LE): the learned code; 0 = never learned
+
+    /// True when the sub-slot holds a learned command (not CS_IR_PROTO_NONE).
+    var isConfigured: Bool { proto != CS_IR_PROTO_NONE }
+
+    /// Serialize to the 16-byte wire layout.  Bytes 10-11 are reserved (0).
+    func toData() -> Data {
+        var d = Data(count: 16)
+        d[0] = noun
+        d[1] = action
+        d[2] = flags
+        d[3] = target
+        d[4] = index
+        d[5] = proto
+        func put16(_ v: Int16, _ off: Int) {
+            let u = UInt16(bitPattern: v)
+            d[off] = UInt8(u & 0xFF); d[off + 1] = UInt8((u >> 8) & 0xFF)
+        }
+        put16(value, 6)
+        put16(step, 8)
+        // 10-11 reserved (0)
+        for i in 0..<4 { d[12 + i] = UInt8((code >> (8 * UInt32(i))) & 0xFF) }
+        return d
+    }
+
+    /// Parse the 16-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> IrCommand? {
+        guard data.count >= 16 else { return nil }
+        let b = data.startIndex
+        func i16(_ off: Int) -> Int16 {
+            Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
+        }
+        let code = (0..<4).reduce(UInt32(0)) { $0 | (UInt32(data[b + 12 + $1]) << (8 * UInt32($1))) }
+        return IrCommand(
+            noun: data[b + 0], action: data[b + 1], flags: data[b + 2],
+            target: data[b + 3], index: data[b + 4], proto: data[b + 5],
+            value: i16(6), step: i16(8), code: code)
+    }
+}
+
+/// Result of REQ_CS_IR_LEARN, wValue = 2 (8 bytes; spec §3.6.1):
+/// {state, protocol, 0, 0, code_le32}.  `state` is CS_IR_LEARN_STATE_DONE (2)
+/// with protocol/code valid, or _TIMEOUT (3) / _ARMED (1) / _IDLE (0).
+struct CsIrLearnResult: Equatable {
+    var state: UInt8 = 0
+    var proto: UInt8 = 0
+    var code: UInt32 = 0
+
+    var isDone: Bool { state == CS_IR_LEARN_STATE_DONE }
+    var isTimeout: Bool { state == CS_IR_LEARN_STATE_TIMEOUT }
+
+    static func fromData(_ data: Data) -> CsIrLearnResult? {
+        guard data.count >= 8 else { return nil }
+        let b = data.startIndex
+        let code = (0..<4).reduce(UInt32(0)) { $0 | (UInt32(data[b + 4 + $1]) << (8 * UInt32($1))) }
+        return CsIrLearnResult(state: data[b + 0], proto: data[b + 1], code: code)
     }
 }
 
@@ -721,6 +827,20 @@ class DSPViewModel: ObservableObject {
     @Published var csNounDescs: [CsNounDesc] = []
     @Published var csBindings: [CsBinding] = Array(repeating: CsBinding(), count: CS_MAX_BINDINGS)
     @Published var csStatus: CsStatusPacket = CsStatusPacket()
+    /// Device-persistent per-slot names (spec §3.4), read at connect and written
+    /// on rename.  Empty = unnamed.  These are directory metadata, outside the
+    /// Apply/Save/Revert preview: a name SET persists immediately.
+    @Published var csNames: [String] = Array(repeating: "", count: CS_MAX_BINDINGS)
+    /// Learned IR remote-button commands (spec §2.7), one per sub-slot.  Only
+    /// meaningful while a CS_TYPE_IR component (the receiver) is configured.
+    @Published var csIrCommands: [IrCommand] = Array(repeating: IrCommand(), count: CS_MAX_IR_COMMANDS)
+    /// True while a v3 firmware exposes the IR receiver component + command table
+    /// (caps `max_ir_commands` > 0 and the type table carries CS_TYPE_IR).
+    var csIrSupported: Bool {
+        csCaps.maxIrCommands > 0 && csCaps.typeCount > UInt8(CS_TYPE_IR)
+    }
+    /// True when the live Control Surfaces config has unsaved preview changes.
+    var csDirty: Bool { csStatus.dirty }
 
     // Test signal generator (siggen) - onboard measurement/diagnostic signals
     // injected into the output mix buffers.  Transient only: never persisted,

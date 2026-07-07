@@ -1483,7 +1483,7 @@ extension DSPViewModel {
     /// bindings, and the status packet, so the picker UI is built entirely from
     /// device-served tables (spec §4/§8.1).
     func fetchControlSurfaces() {
-        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 32),
+        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 40),
               let caps = CsCapsHeader.fromData(h) else {
             DispatchQueue.main.async { self.controlSurfacesSupported = false }
             return
@@ -1502,7 +1502,17 @@ extension DSPViewModel {
             self.csNounDescs = nouns
         }
         fetchCsStatus()
-        for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
+        for slot in 0..<CS_MAX_BINDINGS {
+            fetchCsBinding(slot: slot)
+            fetchCsName(slot: slot)
+        }
+        // IR command sub-slots (only populated when a receiver is configured,
+        // but always safe to read - an empty sub-slot reads back all-zero).
+        if caps.maxIrCommands > 0 {
+            for sub in 0..<min(Int(caps.maxIrCommands), CS_MAX_IR_COMMANDS) {
+                fetchCsIrCommand(sub: sub)
+            }
+        }
     }
 
     /// Read the live 24-byte binding for one slot into `csBindings[slot]`.
@@ -1515,40 +1525,148 @@ extension DSPViewModel {
         }
     }
 
-    /// Read the 22-byte status packet (last-apply outcome, active mask, per-slot
-    /// health).  Cheap enough to poll after a SET.
+    /// Read the device-persistent name for one slot into `csNames[slot]`
+    /// (spec §3.4).  Synchronous read of the directory RAM cache; always 32
+    /// bytes, NUL-terminated.  Empty when the slot is unnamed.
+    func fetchCsName(slot: Int) {
+        guard slot >= 0, slot < CS_MAX_BINDINGS,
+              let d = usb.getControlRequest(request: REQ_GET_CS_NAME, value: UInt16(slot), index: 2, length: UInt16(CS_NAME_LEN)) else { return }
+        let name = String(decoding: d.prefix { $0 != 0 }, as: UTF8.self)
+        DispatchQueue.main.async {
+            if slot < self.csNames.count { self.csNames[slot] = name }
+        }
+    }
+
+    /// Read one live 16-byte IR command sub-slot into `csIrCommands[sub]`.
+    func fetchCsIrCommand(sub: Int) {
+        guard sub >= 0, sub < CS_MAX_IR_COMMANDS,
+              let d = usb.getControlRequest(request: REQ_GET_CS_IR_CMD, value: UInt16(sub), index: 2, length: 16),
+              let cmd = IrCommand.fromData(d) else { return }
+        DispatchQueue.main.async {
+            if sub < self.csIrCommands.count { self.csIrCommands[sub] = cmd }
+        }
+    }
+
+    /// Read the 32-byte status packet (last-apply outcome, dirty flag, active
+    /// mask, per-slot health, IR tail).  Cheap enough to poll after a SET.
     func fetchCsStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 22),
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 32),
               let st = CsStatusPacket.fromData(d) else { return }
         DispatchQueue.main.async { self.csStatus = st }
     }
 
-    /// Apply and persist one Control Surface binding to `slot`.  SET (0x84) is
-    /// an OUT transfer carrying the 24-byte binding; the firmware validates +
-    /// applies it deferred on its main loop and persists the whole table to
-    /// flash only on success (spec §3.2).  The outcome is not synchronous: we
-    /// poll REQ_GET_CS_STATUS (0x87) until `lastSlot == slot` and `lastStatus`
-    /// leaves CS_STATUS_PENDING, then refresh the live binding + status.
-    /// Returns the PIN_CONFIG_* / CS_STATUS_* result (0xFF if readback failed).
-    /// USB-only; must be called off the main thread (it blocks).
-    @discardableResult
-    func setCsBinding(slot: Int, binding: CsBinding) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_BINDING, value: UInt16(slot), index: 2, data: binding.toData())
-        // Poll for the deferred apply.  A directory-sector flash write is a few
-        // ms; give ~500 ms of budget (25 x 20 ms) before giving up.
+    /// Poll REQ_GET_CS_STATUS until a deferred SET/save/revert resolves, i.e.
+    /// `lastSlot == expectedSlot` and `lastStatus != CS_STATUS_PENDING`, or the
+    /// ~500 ms budget (25 x 20 ms) runs out.  Returns the final status code
+    /// (0xFF if no readback ever succeeded).  USB-only; blocks - call off-main.
+    private func pollCsDeferred(expectedSlot: UInt8) -> UInt8 {
         var result: UInt8 = CS_STATUS_PENDING
         for _ in 0..<25 {
             Thread.sleep(forTimeInterval: 0.02)
-            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 22),
+            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 32),
                   let st = CsStatusPacket.fromData(d) else { continue }
-            if Int(st.lastSlot) == slot && st.lastStatus != CS_STATUS_PENDING {
+            if st.lastSlot == expectedSlot && st.lastStatus != CS_STATUS_PENDING {
                 result = st.lastStatus
                 break
             }
         }
+        return result
+    }
+
+    /// Apply one Control Surface binding to `slot` (live-only preview; spec §3.2
+    /// / §3.5).  SET (0x84) is an OUT transfer carrying the 24-byte binding; the
+    /// firmware validates + applies it deferred on its main loop and marks the
+    /// live config dirty on success - nothing reaches flash until `csSave()`.
+    /// The outcome is not synchronous: we poll REQ_GET_CS_STATUS (0x87) until
+    /// `lastSlot == slot` leaves CS_STATUS_PENDING, then refresh the live
+    /// binding + status.  Returns the PIN_CONFIG_* / CS_STATUS_* result (0xFF if
+    /// readback failed).  USB-only; must be called off the main thread (blocks).
+    @discardableResult
+    func setCsBinding(slot: Int, binding: CsBinding) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_CS_BINDING, value: UInt16(slot), index: 2, data: binding.toData())
+        let result = pollCsDeferred(expectedSlot: UInt8(slot))
         fetchCsBinding(slot: slot)
         fetchCsStatus()
         return result
+    }
+
+    /// Set (or clear) a slot's device-persistent name (spec §3.4).  SET (0x8B)
+    /// is an OUT transfer; the persist is deferred but immediate (outside the
+    /// Apply/Save/Revert preview), so it survives a revert.  Send a single NUL
+    /// byte to clear.  Returns the PIN_CONFIG_* / CS_STATUS_* result.  USB-only;
+    /// must be called off the main thread (blocks on the poll).
+    @discardableResult
+    func setCsName(slot: Int, name: String) -> UInt8 {
+        // Truncate to 31 characters + implicit NUL (the firmware truncates too).
+        var bytes = Array(name.utf8.prefix(CS_NAME_LEN - 1))
+        if bytes.isEmpty { bytes = [0] }   // empty payload is INVALID_VALUE; one NUL clears
+        usb.sendControlRequest(request: REQ_SET_CS_NAME, value: UInt16(slot), index: 2, data: Data(bytes))
+        let result = pollCsDeferred(expectedSlot: UInt8(slot))
+        fetchCsName(slot: slot)
+        fetchCsStatus()
+        return result
+    }
+
+    /// Apply one IR command sub-slot (live-only preview; spec §3.6).  SET (0x8D)
+    /// carries the 16-byte IrCommand; the outcome is reported with
+    /// `lastSlot == 0x80 | sub`.  Send an all-zero record to clear.  Returns the
+    /// status code.  USB-only; must be called off the main thread (blocks).
+    @discardableResult
+    func setCsIrCommand(sub: Int, command: IrCommand) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_CS_IR_CMD, value: UInt16(sub), index: 2, data: command.toData())
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_IR_FLAG | UInt8(sub))
+        fetchCsIrCommand(sub: sub)
+        fetchCsStatus()
+        return result
+    }
+
+    /// Persist the whole live Control Surfaces config (16 bindings + 8 IR
+    /// commands) in one flash write and clear `dirty` (REQ_CS_SAVE, 0x9D; spec
+    /// §3.5).  Deferred, reported with `lastSlot == 0xFF`.  Returns the status
+    /// code.  USB-only; must be called off the main thread (blocks).
+    @discardableResult
+    func csSave() -> UInt8 {
+        _ = usb.getControlRequest(request: REQ_CS_SAVE, value: 0, index: 2, length: 1)
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_SAVE)
+        fetchCsStatus()
+        return result
+    }
+
+    /// Discard the live preview by reloading the stored config (REQ_CS_REVERT,
+    /// 0x9E; spec §3.5), then clear `dirty`.  Deferred, reported with
+    /// `lastSlot == 0xFF`.  Refreshes every binding + IR command afterward so
+    /// the UI reflects the restored state.  Returns the status code.  USB-only;
+    /// must be called off the main thread (blocks).
+    @discardableResult
+    func csRevert() -> UInt8 {
+        _ = usb.getControlRequest(request: REQ_CS_REVERT, value: 0, index: 2, length: 1)
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_SAVE)
+        for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
+        for sub in 0..<CS_MAX_IR_COMMANDS { fetchCsIrCommand(sub: sub) }
+        fetchCsStatus()
+        return result
+    }
+
+    /// Arm the IR learn listener (REQ_CS_IR_LEARN wValue=1; spec §3.6.1).  The
+    /// device listens on the receiver for up to 10 s for the next cleanly
+    /// decoded remote button.  Returns true on the acknowledgement byte; false
+    /// if it STALLs (no live IR component -> CS_STATUS_NO_IR).  USB-only.
+    @discardableResult
+    func csIrLearnArm() -> Bool {
+        usb.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_ARM, index: 2, length: 1) != nil
+    }
+
+    /// Cancel an armed IR learn (REQ_CS_IR_LEARN wValue=0); state returns to idle.
+    func csIrLearnCancel() {
+        _ = usb.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_CANCEL, index: 2, length: 1)
+    }
+
+    /// Read the current IR learn result (REQ_CS_IR_LEARN wValue=2 -> 8 bytes;
+    /// spec §3.6.1): the state and, when done, the captured protocol + code.
+    /// USB-only; safe to poll while armed.
+    func csIrLearnRead() -> CsIrLearnResult? {
+        guard let d = usb.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_READ, index: 2, length: 8) else { return nil }
+        return CsIrLearnResult.fromData(d)
     }
 
     // MARK: - Test Signal Generator

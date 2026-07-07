@@ -341,17 +341,27 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87).  Capability format version 2 (spec §"Wire
-// reference"): the binding grew 16 -> 24 bytes, the status packet 12 -> 22,
-// the noun descriptor 8 -> 12, and the caps header to 32 (7 types).
-let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15)
+// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 3
+// (spec §"Wire reference" / §11.1): v2 grew the binding 16 -> 24 bytes, the
+// noun descriptor 8 -> 12, added per-slot names; v3 adds the IR remote receiver
+// component with a learned-command table, and the Apply/Save/Revert preview
+// model.  The caps header is now 40 bytes (8 types + max_ir_commands tail) and
+// the status packet 32 bytes (byte 3 = dirty, plus the IR tail).
+let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
-let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 32-byte header+types; wValue=noun -> 12-byte CsNounDesc
-let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN 22 bytes: CsStatusPacket
+let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
+let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN 32 bytes: CsStatusPacket
+let REQ_SET_CS_NAME: UInt8    = 0x8B   // OUT 1-32 byte name, wValue = slot; deferred, persists immediately
+let REQ_GET_CS_NAME: UInt8    = 0x8C   // IN 32-byte NUL-terminated name, wValue = slot
+let REQ_SET_CS_IR_CMD: UInt8  = 0x8D   // OUT 16 bytes: IrCommand, wValue = sub-slot (0-7); live-only preview
+let REQ_GET_CS_IR_CMD: UInt8  = 0x8E   // IN 16 bytes: live IrCommand, wValue = sub-slot
+let REQ_CS_IR_LEARN: UInt8    = 0x8F   // IN: wValue 1=arm/0=cancel -> 1 ack byte; wValue 2=read -> 8-byte result
+let REQ_CS_SAVE: UInt8        = 0x9D   // IN 1 ack byte: persist the whole live config (deferred, lastSlot=0xFF)
+let REQ_CS_REVERT: UInt8      = 0x9E   // IN 1 ack byte: discard the preview, reload flash (deferred, lastSlot=0xFF)
 
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
-let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16
+let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16 (IR sub-slot >= 8)
 let CS_STATUS_INVALID_TYPE: UInt8    = 0x11   // type >= CS_TYPE_COUNT
 let CS_STATUS_INVALID_NOUN: UInt8    = 0x12   // noun >= CS_NOUN_COUNT
 let CS_STATUS_INVALID_ACTION: UInt8  = 0x13   // action not allowed for this type+noun (incl. platform-disabled noun)
@@ -362,13 +372,23 @@ let CS_STATUS_INVALID_TARGET: UInt8  = 0x17   // target/index out of range for t
 let CS_STATUS_INVALID_EVENT: UInt8   = 0x18   // bad event, event on a non-button, or MOMENTARY/REPEAT on a non-press event
 let CS_STATUS_PWM_CONFLICT: UInt8    = 0x19   // PWM LED collides with another on the same slice+channel
 let CS_STATUS_EVENT_IN_USE: UInt8    = 0x1A   // another button binding already has this GPIO+event pair
-let CS_STATUS_BUSY: UInt8            = 0x1B   // SET dropped; a previous binding SET is still queued for apply
+let CS_STATUS_BUSY: UInt8            = 0x1B   // SET dropped; a previous SET (or save/revert) of the same kind is still queued
+let CS_STATUS_FLASH_ERROR: UInt8     = 0x1C   // the directory persist failed (name SET or REQ_CS_SAVE)
+let CS_STATUS_IR_IN_USE: UInt8       = 0x1D   // another slot already holds the IR component (one receiver per device)
+let CS_STATUS_NO_IR: UInt8           = 0x1E   // learn was armed with no live CS_TYPE_IR binding
 
 // Limits / sentinels (spec §2).
-let CS_MAX_BINDINGS: Int      = 16
-let CS_GPIO_UNUSED: UInt8     = 0xFF
-let CS_CONFIG_VERSION: UInt8  = 2
-let CS_CAPS_ALL: UInt16       = 0xFFFF   // wValue selecting the caps header + type table
+let CS_MAX_BINDINGS: Int       = 16
+let CS_MAX_IR_COMMANDS: Int    = 8    // IR command sub-slots per device (spec §2.4)
+let CS_NAME_LEN: Int           = 32   // per-slot name buffer, NUL-terminated (spec §3.4)
+let CS_GPIO_UNUSED: UInt8      = 0xFF
+let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v3
+let CS_IR_CONFIG_VERSION: UInt8 = 1   // CsIrConfig.version (IR command table)
+let CS_CAPS_ALL: UInt16        = 0xFFFF   // wValue selecting the caps header + type table
+/// `lastSlot` sentinel for a save/revert outcome (spec §2.6).
+let CS_LAST_SLOT_SAVE: UInt8   = 0xFF
+/// `lastSlot` high bit marks an IR sub-slot outcome: 0x80 | sub-slot.
+let CS_LAST_SLOT_IR_FLAG: UInt8 = 0x80
 /// ADC-capable GPIOs (ADC0..2 on both platforms) - the only pins a
 /// potentiometer may occupy.  GPIO 29 (VSYS/3 monitor) is excluded.
 let CS_ADC_PINS: [UInt8]      = [26, 27, 28]
@@ -381,6 +401,7 @@ let CS_TYPE_POT: Int      = 3
 let CS_TYPE_ENCODER: Int  = 4
 let CS_TYPE_LED: Int      = 5
 let CS_TYPE_LED_PWM: Int  = 6   // hardware-PWM-dimmed LED (IND_LEVEL meter)
+let CS_TYPE_IR: Int       = 7   // IR remote receiver (container: one pin + learned command sub-slots)
 
 // CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns);
 // the app reads the live count and per-noun descriptors from the caps, so
@@ -477,6 +498,36 @@ let CS_NDF_DEFERRED: UInt8 = 0x01   // apply is deferred; the engine steps from 
 // CsTypeDesc.pin_class values.
 let CS_PINCLASS_ANY: UInt8 = 0
 let CS_PINCLASS_ADC: UInt8 = 1      // GPIO 26..28
+
+// IrCommand.protocol values (spec §2.7).  The host treats protocol+code as an
+// opaque learned pair; the names are for display/diagnostics only.
+let CS_IR_PROTO_NONE: UInt8 = 0     // empty sub-slot
+let CS_IR_PROTO_NEC: UInt8  = 1
+let CS_IR_PROTO_RC5: UInt8  = 2
+let CS_IR_PROTO_RC6: UInt8  = 3
+let CS_IR_PROTO_HASH: UInt8 = 4     // timing-signature hash (any undecoded remote)
+
+// REQ_CS_IR_LEARN wValue actions (spec §3.6.1).
+let CS_IR_LEARN_CANCEL: UInt16 = 0
+let CS_IR_LEARN_ARM: UInt16    = 1
+let CS_IR_LEARN_READ: UInt16   = 2
+
+// CsStatusPacket.ir_learn_state / learn-result state values (spec §2.6 / §3.6.1).
+let CS_IR_LEARN_STATE_IDLE: UInt8    = 0
+let CS_IR_LEARN_STATE_ARMED: UInt8   = 1   // listening on the receiver
+let CS_IR_LEARN_STATE_DONE: UInt8    = 2   // a code was captured
+let CS_IR_LEARN_STATE_TIMEOUT: UInt8 = 3   // 10 s elapsed with no clean decode
+
+/// Short display name for an IR protocol (spec §2.7).
+func csIrProtocolName(_ proto: UInt8) -> String {
+    switch proto {
+    case CS_IR_PROTO_NEC:  return "NEC"
+    case CS_IR_PROTO_RC5:  return "RC5"
+    case CS_IR_PROTO_RC6:  return "RC6"
+    case CS_IR_PROTO_HASH: return "Generic"
+    default:               return "None"
+    }
+}
 
 /// Continuous (dB) operands are signed 8.8 fixed point: 1.0 dB = 256.
 func csDbToQ8(_ db: Float) -> Int16 {

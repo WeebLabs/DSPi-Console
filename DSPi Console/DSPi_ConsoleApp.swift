@@ -1502,6 +1502,59 @@ struct ControlInterfacesSettingsTab: View {
 // 24-byte binding and polls the deferred-apply outcome back.  Buttons can carry
 // a press gesture (event) and many nouns address a channel/band (target/index).
 // See control_surfaces_spec.md.
+
+/// A borderless, left-aligned single-line text field for use inside a grouped
+/// Form.  A grouped Form on macOS force-right-aligns any SwiftUI TextField's
+/// text and prompt (it styles the field as the row's trailing "value" column;
+/// .multilineTextAlignment / .fixedSize have no effect), so this drops to
+/// AppKit where NSTextField keeps its natural left alignment.
+struct LeftAlignedTextField: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+    var onCommit: () -> Void = {}
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .boldSystemFont(ofSize: NSFont.preferredFont(forTextStyle: .headline).pointSize)
+        field.alignment = .left
+        field.lineBreakMode = .byTruncatingTail
+        field.cell?.sendsActionOnEndEditing = false
+        field.delegate = context.coordinator
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        // Don't stomp the field (and the cursor) mid-edit; the binding is fed
+        // keystroke-by-keystroke from the delegate while editing.
+        if field.currentEditor() == nil, field.stringValue != text {
+            field.stringValue = text
+        }
+        field.placeholderString = placeholder
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: LeftAlignedTextField
+        init(_ parent: LeftAlignedTextField) { self.parent = parent }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        // Fires on Enter and on losing focus - commit in both cases.
+        func controlTextDidEndEditing(_ notification: Notification) {
+            parent.onCommit()
+        }
+    }
+}
+
 struct ControlSurfacesSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
 
@@ -1515,11 +1568,30 @@ struct ControlSurfacesSettingsTab: View {
     // newly added control opens for editing.  Collapse state is per-visit.
     @State private var expandedSlots: Set<Int> = []
 
+    // IR remote command sub-slots (device-global; shown under the receiver
+    // card).  `irDrafts` mirrors `vm.csIrCommands` for local editing; the learn
+    // flow captures a protocol+code into the draft being edited.
+    @State private var irDrafts: [IrCommand] = Array(repeating: IrCommand(), count: CS_MAX_IR_COMMANDS)
+    @State private var applyingSub: Int? = nil
+    @State private var subMessages: [Int: (message: String, isError: Bool)] = [:]
+    @State private var learningSub: Int? = nil
+    @State private var learnMessage: String? = nil
+
     // User-given names, shown in the card header so collapsed cards are
-    // tellable apart.  The wire binding has no name field, so names live
-    // app-side in UserDefaults, keyed by slot.
-    @State private var slotNames: [Int: String] = [:]
-    private static let slotNamesKey = "controlSurfaceSlotNames"
+    // tellable apart.  Names are device-persistent (spec §3.4), read into
+    // `vm.csNames`; this is a local editing buffer committed on submit / close
+    // so a keystroke doesn't trigger a blocking device write.  A slot with no
+    // buffered edit shows the live device name.
+    @State private var nameEdits: [Int: String] = [:]
+    // One-time migration of the old app-side names (UserDefaults) onto the
+    // device the first time a v3 device that supports device names connects.
+    @State private var didMigrateLegacyNames = false
+    private static let legacyNamesKey = "controlSurfaceSlotNames"
+
+    // Global Save/Revert (the Apply/Save/Revert preview model; spec §3.5):
+    // binding + IR command applies are live-only previews until saved.
+    @State private var savingConfig = false
+    @State private var configMessage: (message: String, isError: Bool)? = nil
 
     /// Number of binding slots the device exposes (falls back to the wire max).
     private var slotCount: Int {
@@ -1546,6 +1618,7 @@ struct ControlSurfacesSettingsTab: View {
                     disconnectedSection
                 }
             } else {
+                if vm.csDirty || configMessage != nil { saveBar }
                 if visibleSlots.isEmpty {
                     // The empty state carries its own Add Control button.
                     emptyStateSection
@@ -1558,7 +1631,7 @@ struct ControlSurfacesSettingsTab: View {
             }
 
             Section {
-                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, and indicator LEDs to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC pin (GPIO 26, 27, or 28) between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes are applied and saved over USB.")
+                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, indicator LEDs, and an IR remote receiver to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC pin (GPIO 26, 27, or 28) between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default. An IR receiver module's OUT pin connects to any GPIO, and its remote buttons are learned by pressing them at the device.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes take effect immediately as a live preview; use Save to Device to keep them across a reboot, or Revert to discard them.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             } footer: {
@@ -1572,15 +1645,26 @@ struct ControlSurfacesSettingsTab: View {
         .formStyle(.grouped)
         .onAppear {
             seedDrafts()
-            loadSlotNames()
             DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
         }
+        .onDisappear { commitAllNames() }
         // Re-seed a slot when its live binding changes and the user has no
         // pending edits for it, so an external change never strands a draft.
         .onReceive(vm.$csBindings) { newBindings in
             for slot in 0..<min(drafts.count, newBindings.count) {
                 if applyingSlot != slot && drafts[slot] == vm.csBindings[slot] {
                     drafts[slot] = newBindings[slot]
+                }
+            }
+        }
+        // Once the device names arrive, migrate any legacy app-side names.
+        .onReceive(vm.$csNames) { _ in migrateLegacyNamesIfNeeded() }
+        // Re-seed an IR command draft when its live value changes and there is
+        // no pending edit for it (mirror of the binding re-seed above).
+        .onReceive(vm.$csIrCommands) { newCmds in
+            for sub in 0..<min(irDrafts.count, newCmds.count) {
+                if applyingSub != sub && learningSub != sub && irDrafts[sub] == vm.csIrCommands[sub] {
+                    irDrafts[sub] = newCmds[sub]
                 }
             }
         }
@@ -1592,31 +1676,62 @@ struct ControlSurfacesSettingsTab: View {
             seeded[slot] = vm.csBindings[slot]
         }
         drafts = seeded
+        var seededIr = Array(repeating: IrCommand(), count: CS_MAX_IR_COMMANDS)
+        for sub in 0..<min(CS_MAX_IR_COMMANDS, vm.csIrCommands.count) {
+            seededIr[sub] = vm.csIrCommands[sub]
+        }
+        irDrafts = seededIr
     }
 
-    // MARK: Custom names
+    // MARK: Custom names (device-persistent; spec §3.4)
 
-    private func loadSlotNames() {
-        let stored = UserDefaults.standard.dictionary(forKey: Self.slotNamesKey) as? [String: String] ?? [:]
-        slotNames = Dictionary(uniqueKeysWithValues: stored.compactMap { key, name in
-            Int(key).map { ($0, name) }
-        })
+    /// The name shown for a slot: a pending local edit, else the live device name.
+    private func slotName(_ slot: Int) -> String {
+        if let edit = nameEdits[slot] { return edit }
+        return slot < vm.csNames.count ? vm.csNames[slot] : ""
     }
 
-    private func saveSlotNames() {
-        let stored = Dictionary(uniqueKeysWithValues: slotNames.map { (String($0.key), $0.value) })
-        UserDefaults.standard.set(stored, forKey: Self.slotNamesKey)
-    }
-
-    /// Editable custom name for a slot; clearing the field removes the name
-    /// (the header falls back to the component-type placeholder).
+    /// Editable name for a slot; buffers keystrokes locally until committed.
     private func nameBinding(_ slot: Int) -> Binding<String> {
         Binding(
-            get: { slotNames[slot] ?? "" },
-            set: { newValue in
-                slotNames[slot] = newValue.isEmpty ? nil : newValue
-                saveSlotNames()
-            })
+            get: { slotName(slot) },
+            set: { nameEdits[slot] = $0 })
+    }
+
+    /// Persist a slot's edited name to the device if it changed (deferred SET,
+    /// outside the Apply/Save/Revert preview; spec §3.4).  A no-op when the
+    /// buffer matches the live device name.
+    private func commitName(_ slot: Int) {
+        guard let edited = nameEdits[slot] else { return }
+        let live = slot < vm.csNames.count ? vm.csNames[slot] : ""
+        guard edited != live else { nameEdits[slot] = nil; return }
+        guard vm.isDeviceConnected else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = vm.setCsName(slot: slot, name: edited)
+            DispatchQueue.main.async { nameEdits[slot] = nil }
+        }
+    }
+
+    /// Flush every pending name edit (called when the page closes).
+    private func commitAllNames() {
+        for slot in Array(nameEdits.keys) { commitName(slot) }
+    }
+
+    /// Push any legacy app-side names (old UserDefaults store) onto the device
+    /// once, for slots the device hasn't named yet, then retire the local store.
+    private func migrateLegacyNamesIfNeeded() {
+        guard !didMigrateLegacyNames, vm.controlSurfacesSupported else { return }
+        didMigrateLegacyNames = true
+        guard let stored = UserDefaults.standard.dictionary(forKey: Self.legacyNamesKey) as? [String: String],
+              !stored.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            for (key, name) in stored {
+                guard let slot = Int(key), slot >= 0, slot < CS_MAX_BINDINGS, !name.isEmpty else { continue }
+                let live = slot < vm.csNames.count ? vm.csNames[slot] : ""
+                if live.isEmpty { _ = vm.setCsName(slot: slot, name: name) }
+            }
+            UserDefaults.standard.removeObject(forKey: Self.legacyNamesKey)
+        }
     }
 
     private func toggleExpanded(_ slot: Int) {
@@ -1705,12 +1820,92 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    // MARK: Save / Revert (Apply/Save/Revert preview model; spec §3.5)
+
+    /// Device-global "unsaved changes" banner.  Control and IR-command applies
+    /// are live-only previews: they behave immediately but do not survive a
+    /// reboot until saved.  Save persists the whole live config in one flash
+    /// write; Revert discards the preview and reloads what is stored.
+    @ViewBuilder
+    private var saveBar: some View {
+        Section {
+            HStack(spacing: 10) {
+                if let msg = configMessage, !vm.csDirty {
+                    Image(systemName: msg.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundColor(msg.isError ? .orange : .green)
+                    Text(msg.message)
+                        .font(.callout)
+                        .foregroundColor(msg.isError ? .orange : .secondary)
+                } else {
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Unsaved changes")
+                            .font(.callout.weight(.medium))
+                        Text("Your controls are live now but will not survive a reboot until saved to the device.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                if savingConfig { ProgressView().controlSize(.small) }
+                Button("Revert") { revertConfig() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(csBusy || !vm.csDirty || !vm.isDeviceConnected)
+                Button("Save to Device") { saveConfig() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(csBusy || !vm.csDirty || !vm.isDeviceConnected)
+            }
+        }
+    }
+
+    /// True while any deferred Control Surfaces operation is in flight.  Because
+    /// binding, name, IR-command, save, and revert all report through one shared
+    /// status channel (spec §3.2), the UI serializes them: each op disables the
+    /// others until it resolves.
+    private var csBusy: Bool {
+        applyingSlot != nil || applyingSub != nil || savingConfig || learningSub != nil
+    }
+
+    private func saveConfig() {
+        savingConfig = true
+        configMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.csSave()
+            DispatchQueue.main.async {
+                savingConfig = false
+                configMessage = status == PIN_CONFIG_SUCCESS
+                    ? ("Saved to the device", false)
+                    : (statusMessage(status).message, true)
+            }
+        }
+    }
+
+    private func revertConfig() {
+        savingConfig = true
+        configMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.csRevert()
+            DispatchQueue.main.async {
+                savingConfig = false
+                // Re-seed drafts from the restored live bindings.
+                seedDrafts()
+                slotMessages.removeAll()
+                configMessage = status == PIN_CONFIG_SUCCESS
+                    ? ("Reverted to the saved configuration", false)
+                    : (statusMessage(status).message, true)
+            }
+        }
+    }
+
     /// The "Add Control" menu: picking a component type directly creates its
     /// card, already seeded with sensible defaults.
     @ViewBuilder
     private func addMenu(prominent: Bool) -> some View {
         let menu = Menu {
-            ForEach(realTypes, id: \.self) { t in
+            ForEach(addableTypes, id: \.self) { t in
                 Button { addControl(type: t) } label: {
                     Label(typeName(t), systemImage: typeIcon(t))
                 }
@@ -1744,18 +1939,24 @@ struct ControlSurfacesSettingsTab: View {
     /// too (send CS_TYPE_NONE); an unapplied new draft is just dropped locally.
     private func removeControl(_ slot: Int) {
         slotMessages[slot] = nil
-        slotNames[slot] = nil
-        saveSlotNames()
+        nameEdits[slot] = nil
         expandedSlots.remove(slot)
+        let hadName = slot < vm.csNames.count && !vm.csNames[slot].isEmpty
         guard vm.csBindings[slot].isConfigured else {
+            // Never applied to the device - just drop the local draft.  A name
+            // set for the slot is device state, so clear it there too.
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                drafts[slot] = CsBinding()   // never applied - drop the draft
+                drafts[slot] = CsBinding()
+            }
+            if hadName && vm.isDeviceConnected {
+                DispatchQueue.global(qos: .userInitiated).async { _ = vm.setCsName(slot: slot, name: "") }
             }
             return
         }
         applyingSlot = slot
         DispatchQueue.global(qos: .userInitiated).async {
             _ = vm.setCsBinding(slot: slot, binding: CsBinding())
+            if hadName { _ = vm.setCsName(slot: slot, name: "") }
             DispatchQueue.main.async {
                 applyingSlot = nil
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -1787,17 +1988,28 @@ struct ControlSurfacesSettingsTab: View {
                     }
                 }
 
-                nounRow(slot)
-                targetRows(slot)
-                if validActions(type: Int(b.type), noun: Int(b.noun)).count > 1 {
-                    actionRow(slot)
+                if Int(b.type) == CS_TYPE_IR {
+                    // The IR receiver is a container: pin + sense, then its
+                    // learned remote-button command table (spec §2.7 / §6.8).
+                    pinRows(slot)
+                    flagToggle(slot, CS_FLAG_INVERT,
+                               title: invertTitle(CS_TYPE_IR),
+                               detail: invertDetail(CS_TYPE_IR),
+                               icon: "bolt")
+                    irCommandsSection(slot)
+                } else {
+                    nounRow(slot)
+                    targetRows(slot)
+                    if validActions(type: Int(b.type), noun: Int(b.noun)).count > 1 {
+                        actionRow(slot)
+                    }
+                    if Int(b.type) == CS_TYPE_BUTTON {
+                        eventRow(slot)
+                    }
+                    pinRows(slot)
+                    operandRows(slot)
+                    flagRows(slot)
                 }
-                if Int(b.type) == CS_TYPE_BUTTON {
-                    eventRow(slot)
-                }
-                pinRows(slot)
-                operandRows(slot)
-                flagRows(slot)
             }
 
             // A collapsed card still surfaces pending edits and apply results
@@ -1819,7 +2031,7 @@ struct ControlSurfacesSettingsTab: View {
         let b = drafts[slot]
         let type = Int(b.type)
         let expanded = expandedSlots.contains(slot)
-        let hasName = !(slotNames[slot] ?? "").isEmpty
+        let hasName = !slotName(slot).isEmpty
         HStack(spacing: 12) {
             Button { toggleExpanded(slot) } label: {
                 Image(systemName: "chevron.right")
@@ -1837,6 +2049,7 @@ struct ControlSurfacesSettingsTab: View {
                     Button { typeBinding(slot).wrappedValue = t } label: {
                         Label(typeName(t), systemImage: typeIcon(t))
                     }
+                    .disabled(t == CS_TYPE_IR && !irTypeAvailable(forSlot: slot))
                 }
             } label: {
                 csTypeBadge(type, size: 32)
@@ -1847,9 +2060,9 @@ struct ControlSurfacesSettingsTab: View {
             .help("Change the component type")
 
             VStack(alignment: .leading, spacing: 2) {
-                TextField("", text: nameBinding(slot), prompt: Text(typeName(type)))
-                    .textFieldStyle(.plain)
-                    .font(.headline)
+                LeftAlignedTextField(text: nameBinding(slot),
+                                     placeholder: typeName(type),
+                                     onCommit: { commitName(slot) })
                     .frame(maxWidth: 280, alignment: .leading)
                     .help("Click to rename this control")
 
@@ -2162,17 +2375,23 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// Unit for the current draft's noun (dB / Hz / Q / percent / none).
-    private func nounUnit(_ slot: Int) -> UInt8 {
-        nounDesc(Int(drafts[slot].noun))?.unit ?? CS_UNIT_DB
+    /// Unit for a noun (dB / Hz / Q / percent / none), independent of any slot.
+    private func unitFor(noun: Int) -> UInt8 {
+        nounDesc(noun)?.unit ?? CS_UNIT_DB
     }
 
-    /// The noun's full natural-unit range [lo, hi].
-    private func nounRange(_ slot: Int) -> (lo: Float, hi: Float) {
-        let nd = nounDesc(Int(drafts[slot].noun))
+    /// A noun's full natural-unit range [lo, hi], independent of any slot.
+    private func rangeFor(noun: Int) -> (lo: Float, hi: Float) {
+        let nd = nounDesc(noun)
         let unit = nd?.unit ?? CS_UNIT_DB
         return (csDecodeValue(nd?.minQ8 ?? 0, unit: unit), csDecodeValue(nd?.maxQ8 ?? 0, unit: unit))
     }
+
+    /// Unit for the current draft's noun (dB / Hz / Q / percent / none).
+    private func nounUnit(_ slot: Int) -> UInt8 { unitFor(noun: Int(drafts[slot].noun)) }
+
+    /// The noun's full natural-unit range [lo, hi].
+    private func nounRange(_ slot: Int) -> (lo: Float, hi: Float) { rangeFor(noun: Int(drafts[slot].noun)) }
 
     /// Optional custom span (rangeMin/rangeMax) with a full-range toggle, used by
     /// pot ADJUST (custom knob span) and PWM LED IND_LEVEL (brightness mapping).
@@ -2422,7 +2641,7 @@ struct ControlSurfacesSettingsTab: View {
             Button("Apply") { applySlot(slot) }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(!dirty || applying || !vm.isDeviceConnected)
+                .disabled(!dirty || applying || savingConfig || !vm.isDeviceConnected)
         }
     }
 
@@ -2438,6 +2657,490 @@ struct ControlSurfacesSettingsTab: View {
                 slotMessages[slot] = statusMessage(status)
             }
         }
+    }
+
+    // MARK: IR remote command table (spec §2.7 / §3.6)
+    //
+    // The IR receiver is one container binding; its remote buttons are separate
+    // 16-byte IrCommand sub-slots, device-global (8 of them).  Each is a
+    // button-shaped command (noun/action/target/value/step) fired by a learned
+    // protocol+code instead of a GPIO edge.
+
+    /// IR command sub-slots the device exposes (0 on a pre-v3 device).
+    private var maxSubs: Int { min(Int(vm.csCaps.maxIrCommands), CS_MAX_IR_COMMANDS) }
+
+    /// True when a sub-slot holds a started draft or a live command.
+    private func subOccupied(_ sub: Int) -> Bool {
+        (sub < irDrafts.count && irDrafts[sub] != IrCommand())
+            || (sub < vm.csIrCommands.count && vm.csIrCommands[sub].isConfigured)
+    }
+
+    private var visibleSubs: [Int] { (0..<maxSubs).filter { subOccupied($0) } }
+    private var firstFreeSub: Int? { (0..<maxSubs).first { !subOccupied($0) } }
+
+    /// Nouns an IR remote button can drive (button action repertoire).
+    private var irNouns: [Int] { validNouns(forType: CS_TYPE_IR) }
+
+    /// Reset an IR command's value/step to sensible defaults for its action+kind;
+    /// leaves the learned protocol/code and target/index intact.
+    private func defaultIrOperands(for command: IrCommand) -> IrCommand {
+        var c = command
+        let nd = nounDesc(Int(c.noun))
+        let action = Int(c.action)
+        let kind = nd?.kind ?? CS_KIND_BOOL
+        c.value = 0; c.step = 0; c.flags = 0
+        switch action {
+        case CS_ACT_INC, CS_ACT_DEC:
+            if kind == CS_KIND_ENUM { c.step = 1 }
+        case CS_ACT_SET, CS_ACT_MOMENTARY:
+            if kind == CS_KIND_CONTINUOUS { c.value = nd?.maxQ8 ?? 0 }
+            else if kind == CS_KIND_BOOL { c.value = 1 }
+        default:
+            break
+        }
+        return c
+    }
+
+    /// The learned-command table shown under an applied IR receiver card.
+    @ViewBuilder
+    private func irCommandsSection(_ slot: Int) -> some View {
+        let receiverLive = vm.csStatus.isSlotActive(slot)
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().padding(.vertical, 2)
+            HStack {
+                settingLabel(title: "Remote Buttons",
+                             detail: "Learn buttons on any remote and bind each to a function.",
+                             icon: "av.remote")
+                Spacer()
+                Text("\(visibleSubs.count)/\(maxSubs)")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            if !receiverLive {
+                Text("Apply the receiver above before learning remote buttons.")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
+            ForEach(visibleSubs, id: \.self) { sub in
+                irCommandCard(sub, receiverLive: receiverLive)
+            }
+            Button { addIrCommand() } label: {
+                Label("Add Remote Button", systemImage: "plus")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(firstFreeSub == nil || !vm.isDeviceConnected)
+        }
+    }
+
+    @ViewBuilder
+    private func irCommandCard(_ sub: Int, receiverLive: Bool) -> some View {
+        let c = irDrafts[sub]
+        let learning = learningSub == sub
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                irCodeChip(sub)
+                Spacer(minLength: 8)
+                if learning {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { cancelLearn() }
+                        .buttonStyle(.borderless).controlSize(.small)
+                } else {
+                    Button {
+                        startLearn(sub)
+                    } label: {
+                        Label(c.isConfigured ? "Re-learn" : "Learn Button",
+                              systemImage: "dot.radiowaves.left.and.right")
+                    }
+                    .buttonStyle(.bordered).controlSize(.small)
+                    .disabled(!receiverLive || !vm.isDeviceConnected || learningSub != nil || savingConfig)
+                }
+                Button(role: .destructive) { removeIrCommand(sub) } label: {
+                    Image(systemName: "trash").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless).foregroundColor(.secondary)
+                .disabled(applyingSub == sub || learning)
+            }
+            if learning, let lm = learnMessage {
+                Text(lm).font(.caption2).foregroundColor(.secondary)
+            }
+
+            irNounRow(sub)
+            irTargetRows(sub)
+            if validActions(type: CS_TYPE_IR, noun: Int(c.noun)).count > 1 { irActionRow(sub) }
+            irOperandRows(sub)
+            irFlagRows(sub)
+            irApplyRow(sub)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.secondary.opacity(0.06)))
+    }
+
+    /// The learned protocol + code chip (or a "not learned yet" placeholder).
+    @ViewBuilder
+    private func irCodeChip(_ sub: Int) -> some View {
+        let c = irDrafts[sub]
+        if c.isConfigured {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.caption)
+                Text("\(csIrProtocolName(c.proto)) \(String(format: "0x%08X", c.code))")
+                    .font(.caption.monospaced())
+            }
+        } else {
+            HStack(spacing: 5) {
+                Image(systemName: "circle.dashed").foregroundColor(.secondary).font(.caption)
+                Text("Not learned").font(.caption).foregroundColor(.secondary)
+            }
+        }
+    }
+
+    // MARK: IR command editor rows (button-shaped; write to irDrafts[sub])
+
+    @ViewBuilder
+    private func irNounRow(_ sub: Int) -> some View {
+        let current = Int(irDrafts[sub].noun)
+        let groups = nounGroups(forType: CS_TYPE_IR)
+        settingRow(title: "Controls",
+                   detail: "The device function this remote button drives.",
+                   icon: "slider.horizontal.3") {
+            Menu {
+                if groups.count <= 1 {
+                    ForEach(groups.first?.nouns ?? [], id: \.self) { n in irNounMenuItem(sub, n, current: current) }
+                } else {
+                    ForEach(groups, id: \.name) { group in
+                        Menu(group.name) {
+                            ForEach(group.nouns, id: \.self) { n in irNounMenuItem(sub, n, current: current) }
+                        }
+                    }
+                }
+            } label: {
+                Text(nounName(current, forType: CS_TYPE_IR))
+            }
+            .menuStyle(.button).fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func irNounMenuItem(_ sub: Int, _ noun: Int, current: Int) -> some View {
+        Button { setIrNoun(sub, noun) } label: {
+            if noun == current {
+                Label(nounName(noun, forType: CS_TYPE_IR), systemImage: "checkmark")
+            } else {
+                Text(nounName(noun, forType: CS_TYPE_IR))
+            }
+        }
+    }
+
+    private func setIrNoun(_ sub: Int, _ noun: Int) {
+        guard noun != Int(irDrafts[sub].noun) else { return }
+        var c = irDrafts[sub]
+        c.noun = UInt8(noun); c.target = 0; c.index = 0
+        let acts = validActions(type: CS_TYPE_IR, noun: noun)
+        if !acts.contains(Int(c.action)) { c.action = UInt8(defaultAction(type: CS_TYPE_IR, noun: noun)) }
+        irDrafts[sub] = defaultIrOperands(for: c)
+    }
+
+    @ViewBuilder
+    private func irActionRow(_ sub: Int) -> some View {
+        let noun = Int(irDrafts[sub].noun)
+        settingRow(title: "On Press", detail: "What pressing the remote button does.", icon: "hand.tap") {
+            Picker("", selection: Binding(
+                get: { Int(irDrafts[sub].action) },
+                set: { newAction in
+                    guard newAction != Int(irDrafts[sub].action) else { return }
+                    var c = irDrafts[sub]; c.action = UInt8(newAction)
+                    irDrafts[sub] = defaultIrOperands(for: c)
+                })) {
+                ForEach(validActions(type: CS_TYPE_IR, noun: noun), id: \.self) { a in
+                    Text(actionName(a, noun: noun)).tag(a)
+                }
+            }
+            .labelsHidden().fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func irTargetRows(_ sub: Int) -> some View {
+        if let nd = nounDesc(Int(irDrafts[sub].noun)), nd.isTargeted {
+            settingRow(title: "Channel", detail: "Which channel this affects.", icon: "square.stack.3d.up") {
+                Picker("", selection: Binding(
+                    get: { Int(irDrafts[sub].target) },
+                    set: { newTarget in
+                        var c = irDrafts[sub]; c.target = UInt8(newTarget)
+                        if nounDesc(Int(c.noun))?.hasBand == true {
+                            let opts = bandOptions(noun: Int(c.noun), dspChannel: newTarget)
+                            if !opts.contains(Int(c.index)) { c.index = UInt8(opts.first ?? 0) }
+                        }
+                        irDrafts[sub] = c
+                    })) {
+                    ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in Text(targetName(nd, t)).tag(t) }
+                }
+                .labelsHidden().fixedSize()
+            }
+            if nd.hasBand {
+                let bands = bandOptions(noun: Int(irDrafts[sub].noun), dspChannel: Int(irDrafts[sub].target))
+                settingRow(title: "Band", detail: "Which filter band this affects.", icon: "waveform.path.ecg") {
+                    Picker("", selection: Binding(
+                        get: { Int(irDrafts[sub].index) },
+                        set: { var c = irDrafts[sub]; c.index = UInt8($0); irDrafts[sub] = c })) {
+                        ForEach(bands, id: \.self) { band in Text(bandName(band)).tag(band) }
+                    }
+                    .labelsHidden().fixedSize()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func irOperandRows(_ sub: Int) -> some View {
+        let c = irDrafts[sub]
+        let noun = Int(c.noun)
+        let action = Int(c.action)
+        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        switch action {
+        case CS_ACT_INC, CS_ACT_DEC:
+            if kind == CS_KIND_CONTINUOUS { irStepRow(sub) }
+            else if kind == CS_KIND_ENUM { irEnumStepRow(sub) }
+        case CS_ACT_SET, CS_ACT_MOMENTARY:
+            let verb = action == CS_ACT_MOMENTARY ? "Hold Value" : "Set To"
+            if kind == CS_KIND_CONTINUOUS { irValueRow(sub, title: verb) }
+            else if kind == CS_KIND_BOOL { irBoolValueRow(sub, title: verb) }
+            else if kind == CS_KIND_ENUM { irEnumValueRow(sub, title: verb) }
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func irStepRow(_ sub: Int) -> some View {
+        let unit = unitFor(noun: Int(irDrafts[sub].noun))
+        let isLog = unit == CS_UNIT_HZ || unit == CS_UNIT_Q
+        let logStep: Float = 1.0 / 12.0
+        let logMin: Float = 1.0 / 48.0
+        let dflt: Float = isLog ? logStep : 1.0
+        let cur = irDrafts[sub].step == 0 ? dflt : csDecodeStep(irDrafts[sub].step, unit: unit)
+        settingRow(title: "Step Size",
+                   detail: isLog ? "Ratio per press, in octaves." : "Amount added or removed per press.",
+                   icon: "plusminus") {
+            ValueField(label: isLog ? "oct" : csUnitSymbol(unit), value: cur, width: 64,
+                       scrollStep: isLog ? logStep : unitScrollStep(unit),
+                       minValue: isLog ? logMin : 0.1,
+                       maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
+                var c = irDrafts[sub]; c.step = csEncodeStep(max(isLog ? logMin : 0.1, v), unit: unit); irDrafts[sub] = c
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func irEnumStepRow(_ sub: Int) -> some View {
+        let maxStep = max(1, Int(nounDesc(Int(irDrafts[sub].noun))?.enumCount ?? 2) - 1)
+        settingRow(title: "Step Size", detail: "Positions advanced per press.", icon: "plusminus") {
+            HStack(spacing: 8) {
+                Text("\(irEnumStep(sub))")
+                    .font(.body.monospacedDigit()).frame(width: 20, alignment: .trailing)
+                Stepper("", value: Binding(
+                    get: { irEnumStep(sub) },
+                    set: { var c = irDrafts[sub]; c.step = Int16($0); irDrafts[sub] = c }), in: 1...maxStep)
+                    .labelsHidden()
+            }
+            .fixedSize()
+        }
+    }
+
+    private func irEnumStep(_ sub: Int) -> Int { let s = Int(irDrafts[sub].step); return s <= 0 ? 1 : s }
+
+    @ViewBuilder
+    private func irValueRow(_ sub: Int, title: String) -> some View {
+        let unit = unitFor(noun: Int(irDrafts[sub].noun))
+        let (lo, hi) = rangeFor(noun: Int(irDrafts[sub].noun))
+        settingRow(title: title,
+                   detail: "Level each press applies (\(fmtUnit(lo, unit)) to \(fmtUnit(hi, unit))).",
+                   icon: "target") {
+            ValueField(label: csUnitSymbol(unit), value: csDecodeValue(irDrafts[sub].value, unit: unit),
+                       width: 64, scrollStep: unitScrollStep(unit), maxDecimals: unitDecimals(unit)) { v in
+                var c = irDrafts[sub]; c.value = csEncodeValue(min(hi, max(lo, v)), unit: unit); irDrafts[sub] = c
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func irBoolValueRow(_ sub: Int, title: String) -> some View {
+        let noun = Int(irDrafts[sub].noun)
+        settingRow(title: title, detail: "The state a press applies.", icon: "switch.2") {
+            Picker("", selection: Binding(
+                get: { irDrafts[sub].value != 0 },
+                set: { var c = irDrafts[sub]; c.value = $0 ? 1 : 0; irDrafts[sub] = c })) {
+                Text(boolLabel(noun, on: true)).tag(true)
+                Text(boolLabel(noun, on: false)).tag(false)
+            }
+            .labelsHidden().fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func irEnumValueRow(_ sub: Int, title: String) -> some View {
+        let noun = Int(irDrafts[sub].noun)
+        let count = Int(nounDesc(noun)?.enumCount ?? 1)
+        settingRow(title: title, detail: "The selection a press applies.", icon: "list.number") {
+            Picker("", selection: Binding(
+                get: { Int(irDrafts[sub].value) },
+                set: { var c = irDrafts[sub]; c.value = Int16($0); irDrafts[sub] = c })) {
+                ForEach(Array(0..<max(1, count)), id: \.self) { i in Text(enumValueLabel(noun: noun, value: i)).tag(i) }
+            }
+            .labelsHidden().fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func irFlagRows(_ sub: Int) -> some View {
+        let c = irDrafts[sub]
+        let noun = Int(c.noun)
+        let action = Int(c.action)
+        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        let isEnumStep = kind == CS_KIND_ENUM && (action == CS_ACT_INC || action == CS_ACT_DEC)
+        if isEnumStep {
+            irFlagToggle(sub, CS_FLAG_WRAP, title: "Wrap Around",
+                         detail: "Step past the last position back to the first.",
+                         icon: "arrow.triangle.2.circlepath")
+        }
+        if action == CS_ACT_INC || action == CS_ACT_DEC {
+            irFlagToggle(sub, CS_FLAG_REPEAT, title: "Repeat While Held",
+                         detail: "Holding the remote button repeats the step.",
+                         icon: "repeat")
+        }
+    }
+
+    private func irFlagToggle(_ sub: Int, _ mask: UInt8, title: String, detail: String, icon: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { (irDrafts[sub].flags & mask) != 0 },
+            set: { on in var c = irDrafts[sub]; if on { c.flags |= mask } else { c.flags &= ~mask }; irDrafts[sub] = c })) {
+            settingLabel(title: title, detail: detail, icon: icon)
+        }
+        .toggleStyle(.switch)
+    }
+
+    @ViewBuilder
+    private func irApplyRow(_ sub: Int) -> some View {
+        let dirty = irDrafts[sub] != vm.csIrCommands[sub]
+        let applying = applyingSub == sub
+        let status = subMessages[sub]
+        let learned = irDrafts[sub].isConfigured
+        HStack(spacing: 8) {
+            if let status = status, !dirty {
+                Image(systemName: status.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundColor(status.isError ? .orange : .green).font(.caption)
+                Text(status.message).font(.caption).foregroundColor(status.isError ? .orange : .secondary)
+            } else if !learned {
+                Text("Learn a remote button to enable this.").font(.caption).foregroundColor(.secondary)
+            } else if dirty {
+                Text("Unapplied changes").font(.caption).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            if applying { ProgressView().controlSize(.small) }
+            Button("Revert") {
+                irDrafts[sub] = vm.csIrCommands[sub]; subMessages[sub] = nil
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+            .disabled(!dirty || applying)
+            Button("Apply") { applyIrCommand(sub) }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(!dirty || applying || !learned || savingConfig || !vm.isDeviceConnected)
+        }
+    }
+
+    // MARK: IR command actions
+
+    private func addIrCommand() {
+        guard let sub = firstFreeSub else { return }
+        var c = IrCommand()
+        let noun = irNouns.first ?? CS_NOUN_USER_VOLUME
+        c.noun = UInt8(noun)
+        c.action = UInt8(defaultAction(type: CS_TYPE_IR, noun: noun))
+        irDrafts[sub] = defaultIrOperands(for: c)
+        subMessages[sub] = nil
+    }
+
+    private func removeIrCommand(_ sub: Int) {
+        subMessages[sub] = nil
+        guard vm.csIrCommands[sub].isConfigured else {
+            irDrafts[sub] = IrCommand()   // never applied - drop the draft
+            return
+        }
+        applyingSub = sub
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = vm.setCsIrCommand(sub: sub, command: IrCommand())
+            DispatchQueue.main.async {
+                applyingSub = nil
+                irDrafts[sub] = vm.csIrCommands[sub]
+                subMessages[sub] = nil
+            }
+        }
+    }
+
+    private func applyIrCommand(_ sub: Int) {
+        let cmd = irDrafts[sub]
+        applyingSub = sub
+        subMessages[sub] = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setCsIrCommand(sub: sub, command: cmd)
+            DispatchQueue.main.async {
+                applyingSub = nil
+                irDrafts[sub] = vm.csIrCommands[sub]
+                subMessages[sub] = statusMessage(status)
+            }
+        }
+    }
+
+    // MARK: IR learn flow (spec §3.6.1)
+
+    private func startLearn(_ sub: Int) {
+        learningSub = sub
+        learnMessage = "Point the remote at the receiver and press the button to learn."
+        subMessages[sub] = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard vm.csIrLearnArm() else {
+                DispatchQueue.main.async {
+                    learningSub = nil
+                    learnMessage = nil
+                    subMessages[sub] = ("No IR receiver is active - apply the receiver first.", true)
+                }
+                return
+            }
+            // The learn window is 10 s; poll the result a little past that.
+            var result: CsIrLearnResult? = nil
+            for _ in 0..<115 {
+                Thread.sleep(forTimeInterval: 0.1)
+                if let r = vm.csIrLearnRead(), r.state != CS_IR_LEARN_STATE_ARMED {
+                    result = r
+                    break
+                }
+            }
+            DispatchQueue.main.async { finishLearn(sub, result) }
+        }
+    }
+
+    private func finishLearn(_ sub: Int, _ result: CsIrLearnResult?) {
+        // Ignore a stale completion if the user cancelled or moved on.
+        guard learningSub == sub else { learnMessage = nil; return }
+        learningSub = nil
+        learnMessage = nil
+        guard let r = result, r.isDone, r.code != 0 else {
+            let timedOut = result?.isTimeout ?? false
+            subMessages[sub] = (timedOut ? "No remote button was detected - try again." : "Learn stopped.", timedOut)
+            return
+        }
+        var c = irDrafts[sub]
+        c.proto = r.proto
+        c.code = r.code
+        irDrafts[sub] = c
+        subMessages[sub] = ("Learned a \(csIrProtocolName(r.proto)) code. Apply to keep it.", false)
+    }
+
+    private func cancelLearn() {
+        guard let sub = learningSub else { return }
+        learningSub = nil
+        learnMessage = nil
+        subMessages[sub] = ("Learn cancelled.", false)
+        DispatchQueue.global(qos: .userInitiated).async { vm.csIrLearnCancel() }
     }
 
     // MARK: Shared row helpers (mirror the Control Interfaces page)
@@ -2483,6 +3186,25 @@ struct ControlSurfacesSettingsTab: View {
         let n = Int(vm.csCaps.typeCount)
         guard n > 1 else { return [] }
         return Array(1..<n)
+    }
+
+    /// The slot currently holding the IR receiver (draft or live), if any.  Only
+    /// one IR component is allowed per device (spec §1.4 / §4.2).
+    private var irReceiverSlot: Int? {
+        (0..<slotCount).first {
+            Int(drafts[$0].type) == CS_TYPE_IR || Int(vm.csBindings[$0].type) == CS_TYPE_IR
+        }
+    }
+
+    /// True when `slot` may become an IR receiver: no other slot already is one.
+    private func irTypeAvailable(forSlot slot: Int) -> Bool {
+        guard let existing = irReceiverSlot else { return true }
+        return existing == slot
+    }
+
+    /// Types offerable when adding a control: hide IR once a receiver exists.
+    private var addableTypes: [Int] {
+        realTypes.filter { $0 != CS_TYPE_IR || irReceiverSlot == nil }
     }
 
     /// Nouns a given component type can drive (non-empty action intersection).
@@ -2547,7 +3269,9 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_SWITCH:  pref = [CS_ACT_FOLLOW]
         case CS_TYPE_LED:     pref = [CS_ACT_IND_EQUALS, CS_ACT_IND_ABOVE]
         case CS_TYPE_LED_PWM: pref = [CS_ACT_IND_LEVEL, CS_ACT_IND_ABOVE, CS_ACT_IND_EQUALS]
-        case CS_TYPE_BUTTON:  pref = [CS_ACT_TOGGLE, CS_ACT_TRIGGER, CS_ACT_INC, CS_ACT_SET, CS_ACT_DEC, CS_ACT_MOMENTARY]
+        // A button and an IR remote command share the same action repertoire.
+        case CS_TYPE_BUTTON, CS_TYPE_IR:
+                              pref = [CS_ACT_TOGGLE, CS_ACT_TRIGGER, CS_ACT_INC, CS_ACT_SET, CS_ACT_DEC, CS_ACT_MOMENTARY]
         default:              pref = []
         }
         for a in pref where avail.contains(a) { return a }
@@ -2557,6 +3281,16 @@ struct ControlSurfacesSettingsTab: View {
     /// Build a fresh binding when a slot's component type changes.
     private func makeBinding(type: Int, slot: Int) -> CsBinding {
         if type == CS_TYPE_NONE { return CsBinding() }
+        // The IR receiver is a container: it carries only its pin and (optional)
+        // INVERT sense; noun/action/operands must all be zero (spec §4.2).  Its
+        // remote buttons are separate IrCommand sub-slots, not this binding.
+        if type == CS_TYPE_IR {
+            var ir = CsBinding()
+            ir.type = UInt8(CS_TYPE_IR)
+            ir.gpio0 = freePins(slot: slot, adcOnly: false).first ?? (HardwareSettingsTab.validPins.first ?? 0)
+            ir.gpio1 = CS_GPIO_UNUSED
+            return ir
+        }
         var b = CsBinding()
         b.type = UInt8(type)
         let noun = validNouns(forType: type).first ?? CS_NOUN_MASTER_VOLUME
@@ -2702,6 +3436,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_ENCODER: return "Rotary Encoder"
         case CS_TYPE_LED:     return "Indicator LED"
         case CS_TYPE_LED_PWM: return "Dimmable LED"
+        case CS_TYPE_IR:      return "IR Remote"
         default:              return "Type \(type)"
         }
     }
@@ -2714,6 +3449,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_ENCODER: return "dial.high"
         case CS_TYPE_LED:     return "lightbulb.fill"
         case CS_TYPE_LED_PWM: return "sun.max.fill"
+        case CS_TYPE_IR:      return "av.remote"
         default:              return "dial.medium"
         }
     }
@@ -2728,6 +3464,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_ENCODER: return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
         case CS_TYPE_LED:     return Color(red: 0.93, green: 0.63, blue: 0.18)  // amber
         case CS_TYPE_LED_PWM: return Color(red: 0.90, green: 0.45, blue: 0.20)  // warm orange
+        case CS_TYPE_IR:      return Color(red: 0.55, green: 0.35, blue: 0.72)  // violet
         default:              return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
         }
     }
@@ -2805,6 +3542,7 @@ struct ControlSurfacesSettingsTab: View {
 
     /// One-line plain-language summary of the whole binding.
     private func verbPhrase(_ b: CsBinding) -> String {
+        if Int(b.type) == CS_TYPE_IR { return "Receives commands from an IR remote." }
         let noun = nounName(Int(b.noun), forType: Int(b.type)) + targetSuffix(b)
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
         let press = pressWord(b)
@@ -2908,6 +3646,7 @@ struct ControlSurfacesSettingsTab: View {
         switch type {
         case CS_TYPE_POT:                    return "ADC pin (GPIO 26, 27, or 28), wiper to the pin."
         case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Output pin driving the LED."
+        case CS_TYPE_IR:                     return "GPIO wired to the receiver module's OUT (VCC to 3V3, GND to GND)."
         default:                             return "Wired between this GPIO and GND."
         }
     }
@@ -2916,6 +3655,7 @@ struct ControlSurfacesSettingsTab: View {
         switch type {
         case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Active-Low LED"
         case CS_TYPE_POT, CS_TYPE_ENCODER:   return "Pull-Down Wiring"
+        case CS_TYPE_IR:                     return "Idle-Low Receiver"
         default:                             return "Active-High Wiring"
         }
     }
@@ -2928,6 +3668,8 @@ struct ControlSurfacesSettingsTab: View {
             return "Invert the PWM duty for an LED wired to 3V3 through a resistor."
         case CS_TYPE_POT, CS_TYPE_ENCODER:
             return "Wire the common terminal to 3V3 instead of GND (internal pull-down)."
+        case CS_TYPE_IR:
+            return "The receiver idles low and pulls high on a mark; default is the usual idle-high, active-low module."
         default:
             return "Component wired to 3V3 with the internal pull-down; default is to GND with pull-up."
         }
@@ -2978,7 +3720,7 @@ struct ControlSurfacesSettingsTab: View {
     /// Map a PIN_CONFIG_* / CS_STATUS_* apply outcome to inline feedback.
     private func statusMessage(_ code: UInt8) -> (message: String, isError: Bool) {
         switch code {
-        case PIN_CONFIG_SUCCESS:        return ("Applied and saved", false)
+        case PIN_CONFIG_SUCCESS:        return ("Applied", false)
         case PIN_CONFIG_INVALID_PIN:    return ("A pin is out of range, or an encoder's two pins are equal", true)
         case PIN_CONFIG_PIN_IN_USE:     return ("A pin is already claimed by another peripheral or binding", true)
         case CS_STATUS_INVALID_TYPE:    return ("Unsupported component type", true)
@@ -2992,7 +3734,10 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_INVALID_EVENT:   return ("That press gesture isn't allowed here", true)
         case CS_STATUS_PWM_CONFLICT:    return ("This PWM LED pin conflicts with another dimmable LED", true)
         case CS_STATUS_EVENT_IN_USE:    return ("Another button already uses this GPIO and gesture", true)
-        case CS_STATUS_BUSY:            return ("The device was busy; please apply again", true)
+        case CS_STATUS_BUSY:            return ("The device was busy; please try again", true)
+        case CS_STATUS_FLASH_ERROR:     return ("The device could not write to flash", true)
+        case CS_STATUS_IR_IN_USE:       return ("Another slot already holds the IR receiver (one per device)", true)
+        case CS_STATUS_NO_IR:           return ("Add an IR receiver before learning a remote button", true)
         default:                        return ("Failed to apply the binding", true)
         }
     }
