@@ -4717,6 +4717,8 @@ struct HardwareSettingsTab: View {
                 ForEach(visiblePinOutputs) { output in
                     outputRow(output)
                 }
+            } header: {
+                Label("Slots", systemImage: "square.grid.2x2")
             }
 
             // ADAT bulk output (RP2350 only) — streams all 8 output channels as
