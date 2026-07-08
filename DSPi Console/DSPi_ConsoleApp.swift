@@ -1220,14 +1220,12 @@ struct ControlInterfacesSettingsTab: View {
     @ViewBuilder
     private var uartSection: some View {
         Section {
-            Toggle(isOn: $uartDraft.enabled) {
-                interfaceHeaderLabel(
-                    title: "Enable UART",
-                    detail: "Asynchronous 3.3V serial link, fixed 8N1 framing.",
-                    live: vm.ctrlIfaceStatus.uartLive,
-                    configEnabled: vm.uartCtrlConfig.enabled)
-            }
-            .toggleStyle(.switch)
+            interfaceHeader(
+                title: "Enable UART",
+                detail: "Asynchronous 3.3V serial link, fixed 8N1 framing.",
+                live: vm.ctrlIfaceStatus.uartLive,
+                configEnabled: vm.uartCtrlConfig.enabled,
+                isOn: $uartDraft.enabled)
 
             if uartDraft.enabled {
                 pinRow(title: "TX Pin",
@@ -1277,14 +1275,12 @@ struct ControlInterfacesSettingsTab: View {
     @ViewBuilder
     private var i2cSection: some View {
         Section {
-            Toggle(isOn: $i2cDraft.enabled) {
-                interfaceHeaderLabel(
-                    title: "Enable I2C Target",
-                    detail: "Device acts as an I2C slave; the controller is bus master. Poll-only (no async notifications).",
-                    live: vm.ctrlIfaceStatus.i2cLive,
-                    configEnabled: vm.i2cCtrlConfig.enabled)
-            }
-            .toggleStyle(.switch)
+            interfaceHeader(
+                title: "Enable I2C Target",
+                detail: "Device acts as an I2C slave; the controller is bus master. Poll-only (no async notifications).",
+                live: vm.ctrlIfaceStatus.i2cLive,
+                configEnabled: vm.i2cCtrlConfig.enabled,
+                isOn: $i2cDraft.enabled)
 
             if i2cDraft.enabled {
                 pinRow(title: "SDA Pin",
@@ -1328,12 +1324,15 @@ struct ControlInterfacesSettingsTab: View {
 
     // MARK: Row helpers
 
-    /// The header row of an interface section: title, description, and a live
-    /// status pill (Active / Inactive / Disabled).  "Inactive" flags the
-    /// spec's boot-collision case - the stored config is enabled but the pins
-    /// clash with the current output wiring, so the peripheral never came up.
+    /// The header row of an interface section: title, description, a live
+    /// status pill (Active / Inactive / Disabled), and the enable switch.  The
+    /// pill and switch share the title line; the description and any warning sit
+    /// below.  "Inactive" flags the spec's boot-collision case - the stored
+    /// config is enabled but the pins clash with the current output wiring, so
+    /// the peripheral never came up.
     @ViewBuilder
-    private func interfaceHeaderLabel(title: String, detail: String, live: Bool, configEnabled: Bool) -> some View {
+    private func interfaceHeader(title: String, detail: String, live: Bool,
+                                 configEnabled: Bool, isOn: Binding<Bool>) -> some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.body)
@@ -1348,6 +1347,9 @@ struct ControlInterfacesSettingsTab: View {
             }
             Spacer()
             statusPill(live: live, configEnabled: configEnabled)
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
         }
     }
 
@@ -2876,7 +2878,7 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private var addRemoteButton: some View {
         Button { addIrCommand() } label: {
-            Label("Add Remote Button", systemImage: "plus")
+            Text("Add Remote Button")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -2917,8 +2919,7 @@ struct ControlSurfacesSettingsTab: View {
                     Button {
                         startLearn(sub)
                     } label: {
-                        Label(c.isConfigured ? "Re-learn" : "Learn Button",
-                              systemImage: "dot.radiowaves.left.and.right")
+                        Text(c.isConfigured ? "Re-learn" : "Learn Button")
                     }
                     .buttonStyle(.bordered).controlSize(.small)
                     .disabled(!receiverLive || !vm.isDeviceConnected || learningSub != nil || savingConfig)
@@ -3987,9 +3988,13 @@ struct HardwareSettingsTab: View {
         return outputs
     }
 
-    // RP2040 valid GPIO pins (excludes 12=UART, 23-25=system)
+    // Valid GPIO pins - mirrors firmware is_valid_gpio_pin(): 0-22 and 26-28.
+    // Excludes 23-25 (power/LED).  GPIO 16/17 are general-purpose again since
+    // the debug UART was removed, and GPIO 12 (the ADAT default) is likewise
+    // free.  RP2350 additionally allows GPIO 29, but this list is shared with
+    // RP2040 (max GPIO 28), so 29 is not offered.
     static let validPins: [UInt8] = [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
         13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
         26, 27, 28
     ]
