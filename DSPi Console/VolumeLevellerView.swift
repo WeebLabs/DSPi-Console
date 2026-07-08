@@ -44,6 +44,15 @@ extension VolumeLevellerWindowController: NSWindowDelegate {
 struct VolumeLevellerView: View {
     @ObservedObject var vm: DSPViewModel
 
+    /// Number of input channels to expose in the mask grid (live layout, 2-8).
+    private var channelCount: Int { min(max(vm.effectiveInputChannels, 2), 8) }
+
+    /// Channel masks are only meaningful with more than two active inputs on a
+    /// multichannel-capable device; the section is hidden for stereo.
+    private var showMasks: Bool {
+        vm.numInputChannels > BASE_MATRIX_INPUTS && channelCount > 2
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -96,6 +105,11 @@ struct VolumeLevellerView: View {
 
     private var parameterSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if showMasks {
+                channelSection
+                Divider()
+            }
+
             Text("PARAMETERS")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
@@ -219,7 +233,7 @@ struct VolumeLevellerView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Lookahead")
                         .font(.system(size: 12, weight: .medium))
-                    Text("Adds 10ms latency. Improves transient handling.")
+                    Text("Adds 5ms latency. Improves transient handling.")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 }
@@ -234,6 +248,91 @@ struct VolumeLevellerView: View {
                 .disabled(!vm.isDeviceConnected)
             }
         }
+    }
+
+    // MARK: - Channels
+
+    private var channelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("CHANNELS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Menu {
+                    Button("All channels (Night mode)") {
+                        vm.setLevellerMasks(detector: 0xFF, apply: 0xFF)
+                    }
+                    Button("Center only (Dialog boost)") {
+                        vm.setLevellerMasks(detector: 0x04, apply: 0x04)
+                    }
+                    Button("Front L / R only") {
+                        vm.setLevellerMasks(detector: 0x03, apply: 0x03)
+                    }
+                } label: {
+                    Text("Presets")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(!vm.isDeviceConnected)
+            }
+
+            maskRow(
+                label: "Detector",
+                hint: "sets the shared gain",
+                isOn: { vm.levellerDetectorMask & (1 << $0) != 0 },
+                toggle: { vm.setLevellerDetectorChannel($0, enabled: $1) }
+            )
+
+            maskRow(
+                label: "Apply",
+                hint: "receives the gain",
+                isOn: { vm.levellerApplyMask & (1 << $0) != 0 },
+                toggle: { vm.setLevellerApplyChannel($0, enabled: $1) }
+            )
+        }
+    }
+
+    private func maskRow(label: String, hint: String,
+                         isOn: @escaping (Int) -> Bool,
+                         toggle: @escaping (Int, Bool) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                Text(hint)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+
+            HStack(spacing: 6) {
+                ForEach(0..<channelCount, id: \.self) { ch in
+                    channelChip(ch: ch, on: isOn(ch)) { toggle(ch, !isOn(ch)) }
+                }
+            }
+        }
+    }
+
+    private func channelChip(ch: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("\(ch + 1)")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .foregroundColor(on ? .white : .primary.opacity(0.6))
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(ch < vm.channelNames.count ? vm.channelNames[ch] : "Ch \(ch + 1)")
+        .disabled(!vm.isDeviceConnected)
+        .animation(.easeInOut(duration: 0.12), value: on)
     }
 
     private var speedDescription: String {

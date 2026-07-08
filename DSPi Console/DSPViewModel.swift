@@ -735,13 +735,16 @@ class DSPViewModel: ObservableObject {
     @Published var core1Mode: Int = 0  // 0=IDLE, 1=PDM, 2=EQ_WORKER
     @Published var outputPins: [UInt8] = [6, 7, 8, 9, 10]  // GPIO pins for SPDIF 1-4 + PDM
 
-    // Volume Leveller state
+    // Volume Leveller state (firmware factory defaults, overwritten on connect)
     @Published var levellerEnabled: Bool = false
-    @Published var levellerAmount: Float = 100.0
+    @Published var levellerAmount: Float = 50.0
     @Published var levellerSpeed: Int = 0        // 0=Slow, 1=Medium, 2=Fast
-    @Published var levellerMaxGainDB: Float = 24.0
-    @Published var levellerLookahead: Bool = false
-    @Published var levellerGateDB: Float = -70.0
+    @Published var levellerMaxGainDB: Float = 15.0
+    @Published var levellerLookahead: Bool = true
+    @Published var levellerGateDB: Float = -96.0
+    // V18 channel masks: bit k = input channel k. Default all-on = classic stereo link.
+    @Published var levellerDetectorMask: UInt8 = 0xFF
+    @Published var levellerApplyMask: UInt8 = 0xFF
 
     // I2S configuration state
     @Published var outputSlotTypes: [UInt8] = [0, 0, 0, 0]  // Per-slot: 0=S/PDIF, 1=I2S
@@ -1494,6 +1497,8 @@ class DSPViewModel: ObservableObject {
             levellerMaxGainDB: levellerMaxGainDB,
             levellerLookahead: levellerLookahead,
             levellerGateDB: levellerGateDB,
+            levellerDetectorMask: levellerDetectorMask,
+            levellerApplyMask: levellerApplyMask,
             channelDelays: channelDelays,
             matrixRouting: matrixRouting,
             matrixGain: matrixGain,

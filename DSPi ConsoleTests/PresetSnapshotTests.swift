@@ -48,6 +48,8 @@ final class PresetSnapshotTests: XCTestCase {
             levellerMaxGainDB: 0,
             levellerLookahead: false,
             levellerGateDB: -96,
+            levellerDetectorMask: 0xFF,
+            levellerApplyMask: 0xFF,
             channelDelays: [:],
             matrixRouting: [],
             matrixGain: [],

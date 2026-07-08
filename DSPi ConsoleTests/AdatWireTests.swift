@@ -17,15 +17,15 @@ final class AdatWireTests: XCTestCase {
         XCTAssertEqual(ADAT_PIN_DEFAULT, 12)
     }
 
-    /// V17 grew the flat layout by exactly the 8-byte WireAdatConfig section
-    /// appended after the crossover block (5864 -> 5872).
+    /// V18 grew WireLevellerConfig from 16 to 20 bytes (channel masks), shifting
+    /// every section after the leveller by +4 and the flat layout 5872 -> 5876.
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 17)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5872)
-        XCTAssertEqual(WIRE_BULK_PARAMS_V17_SIZE, 5872)
-        XCTAssertEqual(BULK_ADAT_OFFSET, 5864)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 18)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
+        XCTAssertEqual(WIRE_BULK_PARAMS_V18_SIZE, 5876)
+        XCTAssertEqual(BULK_ADAT_OFFSET, 5868)
         // The ADAT section is the final member: offset + 8 == total size.
-        XCTAssertEqual(BULK_ADAT_OFFSET + 8, WIRE_BULK_PARAMS_V17_SIZE)
+        XCTAssertEqual(BULK_ADAT_OFFSET + 8, WIRE_BULK_PARAMS_V18_SIZE)
         // It sits immediately after the crossover section (crossovers[17][4]).
         XCTAssertEqual(BULK_CROSSOVER_OFFSET + WIRE_MAX_CHANNELS * WIRE_MAX_XOVER_BANDS * WIRE_BAND_PARAMS_SIZE,
                        BULK_ADAT_OFFSET)

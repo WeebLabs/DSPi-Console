@@ -134,15 +134,16 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V17 (unified channel model): inputs are first-class channels
-/// (PEQ + metering), outputs follow them.  V17 appends the 8-byte WireAdatConfig
-/// section (ADAT bulk output) as the final member, growing the flat layout from
-/// 5864 to 5872 bytes (RP2350).  Compatibility is intentionally broken - only
-/// this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 17
-/// Full V17 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-let BULK_PARAMS_SIZE: UInt16            = 5872
-let WIRE_BULK_PARAMS_V17_SIZE: Int      = 5872
+/// Wire format V18 (unified channel model): inputs are first-class channels
+/// (PEQ + metering), outputs follow them.  V18 grows WireLevellerConfig from 16
+/// to 20 bytes (appending the detector/apply channel masks), shifting every
+/// section after the leveller by +4 and the flat layout from 5872 to 5876 bytes
+/// (RP2350).  Compatibility is intentionally broken - only this layout is
+/// accepted.
+let WIRE_FORMAT_VERSION: Int            = 18
+/// Full V18 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+let BULK_PARAMS_SIZE: UInt16            = 5876
+let WIRE_BULK_PARAMS_V18_SIZE: Int      = 5876
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
 let BULK_GLOBAL_OFFSET: Int             = 16
@@ -154,15 +155,15 @@ let BULK_PINS_OFFSET: Int               = 816
 let BULK_EQ_OFFSET: Int                 = 824   // eq[17][12]
 let BULK_CHANNEL_NAMES_OFFSET: Int      = 4088  // names[17][32]
 let BULK_I2S_OFFSET: Int                = 4632
-let BULK_LEVELLER_OFFSET: Int           = 4648
-let BULK_PREAMP_OFFSET: Int             = 4664  // preamp_db[8]
-let BULK_MASTER_VOLUME_OFFSET: Int      = 4696
-let BULK_INPUT_CONFIG_OFFSET: Int       = 4712  // input_source, spdif_rx_pin, i2s_rx_pin, i2s_rate
-let BULK_LG_OFFSET: Int                 = 4728
-let BULK_USER_VOLUME_OFFSET: Int        = 4744  // user_volume_db, user_mute
-let BULK_DAC_HW_MUTE_OFFSET: Int        = 4760
-let BULK_CROSSOVER_OFFSET: Int          = 4776  // crossovers[17][4]
-let BULK_ADAT_OFFSET: Int               = 5864  // WireAdatConfig (enabled, pin, reserved[6])
+let BULK_LEVELLER_OFFSET: Int           = 4648  // WireLevellerConfig, 20 bytes (V18: +detector/apply masks at +16/+17)
+let BULK_PREAMP_OFFSET: Int             = 4668  // preamp_db[8]
+let BULK_MASTER_VOLUME_OFFSET: Int      = 4700
+let BULK_INPUT_CONFIG_OFFSET: Int       = 4716  // input_source, spdif_rx_pin, i2s_rx_pin, i2s_rate
+let BULK_LG_OFFSET: Int                 = 4732
+let BULK_USER_VOLUME_OFFSET: Int        = 4748  // user_volume_db, user_mute
+let BULK_DAC_HW_MUTE_OFFSET: Int        = 4764
+let BULK_CROSSOVER_OFFSET: Int          = 4780  // crossovers[17][4]
+let BULK_ADAT_OFFSET: Int               = 5868  // WireAdatConfig (enabled, pin, reserved[6])
 
 /// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
 let WIRE_CROSSPOINT_SIZE: Int           = 8
@@ -193,6 +194,9 @@ let REQ_SET_LEVELLER_LOOKAHEAD: UInt8   = 0xBC
 let REQ_GET_LEVELLER_LOOKAHEAD: UInt8   = 0xBD
 let REQ_SET_LEVELLER_GATE: UInt8        = 0xBE
 let REQ_GET_LEVELLER_GATE: UInt8        = 0xBF
+// Channel masks (V18): 2 bytes [detector_mask, apply_mask], bit k = input channel k
+let REQ_SET_LEVELLER_MASKS: UInt8       = 0xDE
+let REQ_GET_LEVELLER_MASKS: UInt8       = 0xDF
 
 // Per-channel preamp request codes
 let REQ_SET_PREAMP_CH: UInt8           = 0xD0

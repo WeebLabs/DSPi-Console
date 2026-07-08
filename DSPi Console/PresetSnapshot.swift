@@ -53,6 +53,8 @@ struct PresetSnapshot: Equatable {
     let levellerMaxGainDB: Float
     let levellerLookahead: Bool
     let levellerGateDB: Float
+    let levellerDetectorMask: UInt8
+    let levellerApplyMask: UInt8
     let channelDelays: [Int: Float]
     let matrixRouting: [[Bool]]
     let matrixGain: [[Float]]
@@ -186,6 +188,12 @@ extension PresetSnapshot {
         }
         if old.levellerGateDB != new.levellerGateDB {
             changes.append(.init(category: "Leveller", description: "Leveller gate: \(formatVal(old.levellerGateDB)) dB → \(formatVal(new.levellerGateDB)) dB"))
+        }
+        if old.levellerDetectorMask != new.levellerDetectorMask {
+            changes.append(.init(category: "Leveller", description: "Leveller detector channels changed"))
+        }
+        if old.levellerApplyMask != new.levellerApplyMask {
+            changes.append(.init(category: "Leveller", description: "Leveller apply channels changed"))
         }
 
         // Channel Delays

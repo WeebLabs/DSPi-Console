@@ -843,6 +843,33 @@ extension DSPViewModel {
         usb.sendControlRequest(request: REQ_SET_LEVELLER_GATE, value: 0, index: 0, data: data)
     }
 
+    /// Sets both leveller channel masks (V18). `detector` selects which inputs
+    /// feed the shared RMS detector; `apply` selects which inputs receive the
+    /// shared gain. Bit k = input channel k. Sent as a single 2-byte payload;
+    /// the firmware switches masks glitch-free without a state reset.
+    func setLevellerMasks(detector: UInt8, apply: UInt8) {
+        self.levellerDetectorMask = detector
+        self.levellerApplyMask = apply
+        let data = Data([detector, apply])
+        usb.sendControlRequest(request: REQ_SET_LEVELLER_MASKS, value: 0, index: 0, data: data)
+    }
+
+    /// Toggles a single channel's bit in the detector mask and pushes both masks.
+    func setLevellerDetectorChannel(_ channel: Int, enabled: Bool) {
+        guard channel >= 0, channel < 8 else { return }
+        var mask = levellerDetectorMask
+        if enabled { mask |= (1 << channel) } else { mask &= ~(UInt8(1) << channel) }
+        setLevellerMasks(detector: mask, apply: levellerApplyMask)
+    }
+
+    /// Toggles a single channel's bit in the apply mask and pushes both masks.
+    func setLevellerApplyChannel(_ channel: Int, enabled: Bool) {
+        guard channel >= 0, channel < 8 else { return }
+        var mask = levellerApplyMask
+        if enabled { mask |= (1 << channel) } else { mask &= ~(UInt8(1) << channel) }
+        setLevellerMasks(detector: levellerDetectorMask, apply: mask)
+    }
+
     // MARK: - Matrix Mixer
 
     func setMatrixRoute(input: Int, output: Int, enabled: Bool, gain: Float, invert: Bool) {
@@ -1870,11 +1897,11 @@ extension DSPViewModel {
             }
             return false
         }
-        // V17 is all-or-nothing: only the full, current layout is accepted.
+        // V18 is all-or-nothing: only the full, current layout is accepted.
         // A short or wrong-version payload means incompatible firmware - the
         // device is still connected, so don't disconnect (avoids a reconnect
         // loop); just record the version so the UI can react.
-        guard data.count >= WIRE_BULK_PARAMS_V17_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
+        guard data.count >= WIRE_BULK_PARAMS_V18_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
         }
@@ -2001,6 +2028,8 @@ extension DSPViewModel {
         let lvlAmount: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_LEVELLER_OFFSET + 4, as: Float.self) }
         let lvlMaxGain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_LEVELLER_OFFSET + 8, as: Float.self) }
         let lvlGateDB: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_LEVELLER_OFFSET + 12, as: Float.self) }
+        let lvlDetectorMask = data[BULK_LEVELLER_OFFSET + 16]   // V18: bit k = input channel k feeds detector
+        let lvlApplyMask = data[BULK_LEVELLER_OFFSET + 17]      // V18: bit k = gain applied to input channel k
 
         // --- Per-Input Preamp (offset 4664, preamp_db[8]) ---
         var preampAll = Array(repeating: Float(0.0), count: MAX_MATRIX_INPUTS)
@@ -2114,6 +2143,8 @@ extension DSPViewModel {
             self.levellerMaxGainDB = lvlMaxGain
             self.levellerLookahead = lvlLookahead
             self.levellerGateDB = lvlGateDB
+            self.levellerDetectorMask = lvlDetectorMask
+            self.levellerApplyMask = lvlApplyMask
 
             self.channelData = channelFilters
             self.channelNames = names

@@ -336,6 +336,8 @@ private enum ParamOffsetDecoder {
         case BULK_LEVELLER_OFFSET + 4: return ("leveller.amount", fmtFloat(payload, suffix: "%"))
         case BULK_LEVELLER_OFFSET + 8: return ("leveller.max_gain_db", fmtFloat(payload, suffix: " dB"))
         case BULK_LEVELLER_OFFSET + 12: return ("leveller.gate_threshold_db", fmtFloat(payload, suffix: " dB"))
+        case BULK_LEVELLER_OFFSET + 16: return ("leveller.detector_mask", fmtHex(payload))
+        case BULK_LEVELLER_OFFSET + 17: return ("leveller.apply_mask", fmtHex(payload))
         default: break
         }
 
