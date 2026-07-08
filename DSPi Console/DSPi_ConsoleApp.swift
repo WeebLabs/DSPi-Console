@@ -1656,7 +1656,6 @@ struct ControlSurfacesSettingsTab: View {
     // Global Save/Revert (the Apply/Save/Revert preview model; spec §3.5):
     // binding + IR command applies are live-only previews until saved.
     @State private var savingConfig = false
-    @State private var configMessage: (message: String, isError: Bool)? = nil
 
     /// Number of binding slots the device exposes (falls back to the wire max).
     private var slotCount: Int {
@@ -1683,7 +1682,6 @@ struct ControlSurfacesSettingsTab: View {
                     disconnectedSection
                 }
             } else {
-                if vm.csDirty || configMessage != nil { saveBar }
                 if visibleSlots.isEmpty {
                     // The empty state carries its own Add Control button.
                     emptyStateSection
@@ -1708,6 +1706,15 @@ struct ControlSurfacesSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        // Unsaved-changes bar pinned to the bottom of the window, matching the
+        // global Settings save bar: it appears while there are live-but-unsaved
+        // control changes and just slides away once saved or reverted.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if vm.csDirty {
+                csSaveBar.transition(.move(edge: .bottom))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: vm.csDirty)
         .onAppear {
             seedDrafts()
             DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
@@ -1894,42 +1901,40 @@ struct ControlSurfacesSettingsTab: View {
 
     // MARK: Save / Revert (Apply/Save/Revert preview model; spec §3.5)
 
-    /// Device-global "unsaved changes" banner.  Control and IR-command applies
-    /// are live-only previews: they behave immediately but do not survive a
-    /// reboot until saved.  Save persists the whole live config in one flash
-    /// write; Revert discards the preview and reloads what is stored.
+    /// Bottom-of-window "unsaved changes" bar, styled like the global Settings
+    /// save bar.  Control / name / IR-command applies are live-only previews:
+    /// they behave immediately but do not survive a reboot until saved.  Save
+    /// persists the whole live config in one flash write; Revert reloads what is
+    /// stored.  The bar is shown by `.safeAreaInset` while `vm.csDirty`, so it
+    /// simply slides away once the change is saved or reverted.
     @ViewBuilder
-    private var saveBar: some View {
-        Section {
-            HStack(spacing: 10) {
-                if let msg = configMessage, !vm.csDirty {
-                    Image(systemName: msg.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .foregroundColor(msg.isError ? .orange : .green)
-                    Text(msg.message)
-                        .font(.callout)
-                        .foregroundColor(msg.isError ? .orange : .secondary)
-                } else {
-                    Image(systemName: "externaldrive.badge.exclamationmark")
-                        .foregroundColor(.orange)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Unsaved changes")
-                            .font(.callout.weight(.medium))
-                        Text("Your controls are live now but will not survive a reboot until saved to the device.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                Spacer(minLength: 8)
-                if savingConfig { ProgressView().controlSize(.small) }
-                Button("Revert") { revertConfig() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(csBusy || !vm.csDirty || !vm.isDeviceConnected)
-                Button("Save to Device") { saveConfig() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(csBusy || !vm.csDirty || !vm.isDeviceConnected)
+    private var csSaveBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundColor(.orange)
+                .font(.caption)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Unsaved changes")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Your controls are live now; saving keeps them across a reboot.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
+            Spacer(minLength: 8)
+            if savingConfig { ProgressView().controlSize(.small) }
+            Button("Revert") { revertConfig() }
+                .disabled(csBusy || !vm.isDeviceConnected)
+            Button("Save") { saveConfig() }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(csBusy || !vm.isDeviceConnected)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
         }
     }
 
@@ -1943,31 +1948,24 @@ struct ControlSurfacesSettingsTab: View {
 
     private func saveConfig() {
         savingConfig = true
-        configMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let status = vm.csSave()
-            DispatchQueue.main.async {
-                savingConfig = false
-                configMessage = status == PIN_CONFIG_SUCCESS
-                    ? ("Saved to the device", false)
-                    : (statusMessage(status).message, true)
-            }
+            _ = vm.csSave()
+            // csDirty flips false on success, sliding the bar away; on failure
+            // it stays set so the bar remains for a retry.
+            DispatchQueue.main.async { savingConfig = false }
         }
     }
 
     private func revertConfig() {
         savingConfig = true
-        configMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let status = vm.csRevert()
+            _ = vm.csRevert()
             DispatchQueue.main.async {
                 savingConfig = false
-                // Re-seed drafts from the restored live bindings.
+                // Re-seed drafts from the restored live bindings/names.
                 seedDrafts()
+                nameEdits.removeAll()
                 slotMessages.removeAll()
-                configMessage = status == PIN_CONFIG_SUCCESS
-                    ? ("Reverted to the saved configuration", false)
-                    : (statusMessage(status).message, true)
             }
         }
     }
