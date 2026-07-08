@@ -2090,7 +2090,7 @@ extension DSPViewModel {
             // (chOut1 reflects the freshly-set platformName.)
             if self.isOverviewMode {
                 for i in 0..<self.chOut1 {
-                    self.channelVisibility[i] = (i < min(self.activeInputChannels, self.chOut1))
+                    self.channelVisibility[i] = (i < self.effectiveInputChannels)
                 }
                 for outputIdx in 0..<numOutCh {
                     self.channelVisibility[self.eqChannel(forOutput: outputIdx)] = outEnabled[outputIdx]

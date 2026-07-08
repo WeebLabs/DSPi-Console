@@ -913,9 +913,18 @@ class DSPViewModel: ObservableObject {
     @Published var numInputChannels: Int = BASE_MATRIX_INPUTS
 
     /// Live ACTIVE input count (2/4/6/8), driven by the host's USB audio format.
-    /// Read from the status packet and the NOTIFY_EVT_INPUT_FORMAT push; used to
-    /// lay out exactly that many input strips (sidebar + matrix).  Always >= 2.
+    /// Read from the status packet and the NOTIFY_EVT_INPUT_FORMAT push.  This is
+    /// the device's view: it collapses to a stereo fallback whenever the host
+    /// drops the USB streaming interface to alt 0 (idle), so it is NOT used for
+    /// layout directly - see `effectiveInputChannels`.  Always >= 2.
     @Published var activeInputChannels: Int = BASE_MATRIX_INPUTS
+
+    /// Host-selected USB output channel count (2/4/6/8) read from CoreAudio, or
+    /// nil when the DSPi's CoreAudio device can't be resolved.  Unlike the device
+    /// report this survives the host idling to USB alt 0, so it is the
+    /// authoritative source for how many input strips to lay out.  Driven by
+    /// HostAudioFormatMonitor.
+    @Published var hostConfiguredInputChannels: Int? = nil
 
     /// True when the device supports multichannel (>2) USB input: an RP2350 on
     /// V16 firmware reporting 8 inputs.  Gates all multichannel UI (spec §4).
@@ -932,8 +941,16 @@ class DSPViewModel: ObservableObject {
     /// Unified EQ/channel index for a matrix output index (0-8).
     func eqChannel(forOutput output: Int) -> Int { output + chOut1 }
 
-    /// Number of input strips to render: the live active count (>= 2).
-    var numMatrixInputs: Int { max(BASE_MATRIX_INPUTS, min(activeInputChannels, chOut1)) }
+    /// Effective input channel count for layout (>= 2, <= chOut1).  Prefers the
+    /// host-selected USB format from CoreAudio (which stays correct while the
+    /// device idles to alt 0) and falls back to the live device-reported active
+    /// count only when the CoreAudio device can't be resolved.
+    var effectiveInputChannels: Int {
+        max(BASE_MATRIX_INPUTS, min(hostConfiguredInputChannels ?? activeInputChannels, chOut1))
+    }
+
+    /// Number of input strips to render (sidebar + matrix).
+    var numMatrixInputs: Int { effectiveInputChannels }
 
     // Firmware version tuple parsed from REQ_GET_PLATFORM (data[1] = major,
     // data[2] high nibble = minor, data[2] low nibble = patch).  nil before
@@ -1115,6 +1132,10 @@ class DSPViewModel: ObservableObject {
     private var pollTimer: DispatchSourceTimer?
     private let pollQueue = DispatchQueue(label: "com.foxdac.poll", qos: .userInteractive)
 
+    /// Reports the host-selected USB output channel count from CoreAudio, which
+    /// survives the device idling to USB alt 0.  Drives `hostConfiguredInputChannels`.
+    private let hostAudioFormatMonitor = HostAudioFormatMonitor()
+
     init(usb: USBDevice = AppState.shared.usb) {
         self.usb = usb
 
@@ -1164,6 +1185,20 @@ class DSPViewModel: ObservableObject {
                 if self.isOverviewMode { self.updateSelection(to: nil) }
             }
         }
+
+        // Authoritative input-channel count from the host's selected USB audio
+        // format (CoreAudio).  Unlike the device report above, this stays correct
+        // while the host idles the streaming interface to alt 0, so it drives the
+        // strip layout via effectiveInputChannels.  nil = DSPi not resolvable in
+        // CoreAudio; layout then falls back to activeInputChannels.
+        hostAudioFormatMonitor.onChannelCountChanged = { [weak self] channels in
+            guard let self = self else { return }
+            if self.hostConfiguredInputChannels != channels {
+                self.hostConfiguredInputChannels = channels
+                if self.isOverviewMode { self.updateSelection(to: nil) }
+            }
+        }
+        hostAudioFormatMonitor.start()
 
         // Siggen state pushes (start / stop / completion / reconfigure).
         // The 8-byte event carries state+reason+type+channel; mirror those
@@ -1264,7 +1299,7 @@ class DSPViewModel: ObservableObject {
                 activeEqChannel = nil
                 // Overview: show active input channels + all enabled outputs.
                 for eqCh in 0..<numChannels { channelVisibility[eqCh] = false }
-                for i in 0..<min(activeInputChannels, chOut1) { channelVisibility[i] = true }
+                for i in 0..<effectiveInputChannels { channelVisibility[i] = true }
                 for outputIdx in 0..<numOutputChannels {
                     channelVisibility[eqChannel(forOutput: outputIdx)] = outputEnabled[outputIdx]
                 }
