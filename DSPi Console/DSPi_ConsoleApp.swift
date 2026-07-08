@@ -1575,16 +1575,47 @@ struct LeftAlignedTextField: NSViewRepresentable {
 
     class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: LeftAlignedTextField
+        private var clickMonitor: Any?
         init(_ parent: LeftAlignedTextField) { self.parent = parent }
+
+        deinit { removeClickMonitor() }
 
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
             parent.text = field.stringValue
         }
 
+        // A grouped SwiftUI Form doesn't move first-responder off an embedded
+        // NSTextField when the user clicks static content or another row, so
+        // controlTextDidEndEditing (and thus the commit) would never fire on a
+        // click "around" the field.  While editing, watch for a mouse-down
+        // outside the field and resign first-responder, which ends editing.
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            guard clickMonitor == nil, let field = notification.object as? NSTextField else { return }
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak field] event in
+                guard let field = field, let window = field.window, event.window == window else { return event }
+                let pointInField = field.convert(event.locationInWindow, from: nil)
+                if !field.bounds.contains(pointInField) {
+                    // Defer to the next runloop pass so the click still lands on
+                    // whatever was clicked; only resign if this field is still the
+                    // one being edited (a click onto another field already ended
+                    // our editing through the normal path).
+                    DispatchQueue.main.async {
+                        if field.currentEditor() != nil { window.makeFirstResponder(nil) }
+                    }
+                }
+                return event
+            }
+        }
+
         // Fires on Enter and on losing focus - commit in both cases.
         func controlTextDidEndEditing(_ notification: Notification) {
+            removeClickMonitor()
             parent.onCommit()
+        }
+
+        private func removeClickMonitor() {
+            if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
         }
     }
 }
@@ -1681,7 +1712,6 @@ struct ControlSurfacesSettingsTab: View {
             seedDrafts()
             DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
         }
-        .onDisappear { commitAllNames() }
         // Re-seed a slot when its live binding changes and the user has no
         // pending edits for it, so an external change never strands a draft.
         .onReceive(vm.$csBindings) { newBindings in
@@ -1725,30 +1755,29 @@ struct ControlSurfacesSettingsTab: View {
         return slot < vm.csNames.count ? vm.csNames[slot] : ""
     }
 
-    /// Editable name for a slot; buffers keystrokes locally until committed.
+    /// Editable name for a slot; stages keystrokes locally.  A name edit is
+    /// staged like a binding edit (not pushed on Enter): it marks the card
+    /// Pending and Apply pushes it live (spec §3.4/§3.5).
     private func nameBinding(_ slot: Int) -> Binding<String> {
         Binding(
             get: { slotName(slot) },
             set: { nameEdits[slot] = $0 })
     }
 
-    /// Persist a slot's edited name to the device if it changed (deferred SET,
-    /// outside the Apply/Save/Revert preview; spec §3.4).  A no-op when the
-    /// buffer matches the live device name.
-    private func commitName(_ slot: Int) {
-        guard let edited = nameEdits[slot] else { return }
+    /// The staged (unapplied) name for a slot: a local edit that differs from
+    /// the live device name, or nil when there is no pending rename.  Editing
+    /// stages the name; Apply is what pushes it to the device.
+    private func stagedName(_ slot: Int) -> String? {
+        guard let edited = nameEdits[slot] else { return nil }
         let live = slot < vm.csNames.count ? vm.csNames[slot] : ""
-        guard edited != live else { nameEdits[slot] = nil; return }
-        guard vm.isDeviceConnected else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = vm.setCsName(slot: slot, name: edited)
-            DispatchQueue.main.async { nameEdits[slot] = nil }
-        }
+        return edited == live ? nil : edited
     }
 
-    /// Flush every pending name edit (called when the page closes).
-    private func commitAllNames() {
-        for slot in Array(nameEdits.keys) { commitName(slot) }
+    /// True when the card has changes not yet applied to the device: a binding
+    /// edit or a staged rename.  Drives the Pending pill and the Apply/Revert
+    /// row, so a name edit enables Apply exactly like a binding edit does.
+    private func slotDirty(_ slot: Int) -> Bool {
+        drafts[slot] != vm.csBindings[slot] || stagedName(slot) != nil
     }
 
     /// Push any legacy app-side names (old UserDefaults store) onto the device
@@ -1759,12 +1788,21 @@ struct ControlSurfacesSettingsTab: View {
         guard let stored = UserDefaults.standard.dictionary(forKey: Self.legacyNamesKey) as? [String: String],
               !stored.isEmpty else { return }
         DispatchQueue.global(qos: .userInitiated).async {
+            // Names are now part of the live preview (spec 3.4), so a bare SET
+            // no longer reaches flash.  Only persist the migration if the device
+            // was clean to begin with, so we don't silently commit a prior
+            // session's unsaved changes.
+            let wasClean = !vm.csStatus.dirty
+            var wrote = false
             for (key, name) in stored {
                 guard let slot = Int(key), slot >= 0, slot < CS_MAX_BINDINGS, !name.isEmpty else { continue }
                 let live = slot < vm.csNames.count ? vm.csNames[slot] : ""
-                if live.isEmpty { _ = vm.setCsName(slot: slot, name: name) }
+                if live.isEmpty { _ = vm.setCsName(slot: slot, name: name); wrote = true }
             }
             UserDefaults.standard.removeObject(forKey: Self.legacyNamesKey)
+            // Persist the migrated names so they stick across a reboot, matching
+            // the pre-preview behavior where a name SET wrote flash directly.
+            if wrote && wasClean { _ = vm.csSave() }
         }
     }
 
@@ -1958,8 +1996,10 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// Create a new draft binding of `type` in the first free slot so its
-    /// editor card appears.
+    /// Create a new binding of `type` in the first free slot so its editor card
+    /// appears, and apply it to the device right away as a live preview.  A new
+    /// control seeded with sensible defaults is already valid, so it should work
+    /// the moment it's added; only later edits are staged and pushed with Apply.
     private func addControl(type: Int) {
         guard let slot = firstFreeSlot else { return }
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -1967,6 +2007,7 @@ struct ControlSurfacesSettingsTab: View {
             expandedSlots.insert(slot)   // open the new card for editing
         }
         slotMessages[slot] = nil
+        applySlot(slot)
     }
 
     /// Remove a control.  If it was applied to the device, clear the slot there
@@ -2048,7 +2089,7 @@ struct ControlSurfacesSettingsTab: View {
 
             // A collapsed card still surfaces pending edits and apply results
             // so nothing actionable hides behind the fold.
-            if expanded || drafts[slot] != vm.csBindings[slot]
+            if expanded || slotDirty(slot)
                 || applyingSlot == slot || slotMessages[slot] != nil {
                 applyRow(slot)
             }
@@ -2095,8 +2136,7 @@ struct ControlSurfacesSettingsTab: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 LeftAlignedTextField(text: nameBinding(slot),
-                                     placeholder: typeName(type),
-                                     onCommit: { commitName(slot) })
+                                     placeholder: typeName(type))
                     .frame(maxWidth: 280, alignment: .leading)
                     .help("Click to rename this control")
 
@@ -2138,12 +2178,17 @@ struct ControlSurfacesSettingsTab: View {
             .shadow(color: typeTint(type).opacity(0.35), radius: 2, y: 1)
     }
 
-    /// Dot-and-text status capsule: Active / Inactive on the device, or New
-    /// for a card that hasn't been applied yet.
+    /// Dot-and-text status capsule reflecting the card's state: Pending (orange)
+    /// when it holds edits not yet applied to the device (a binding edit or a
+    /// staged rename), otherwise the live device state - Active (green) or
+    /// Inactive (orange).  This pill is the single status indicator; the apply
+    /// row no longer echoes "Applied".  A control auto-applies on add (draft ==
+    /// live) so it reads Active, not stuck Pending; an applied-but-unsaved change
+    /// surfaces on the global "unsaved changes" bar, not here.
     @ViewBuilder
     private func statusPill(_ slot: Int) -> some View {
         let (text, color): (String, Color) = {
-            if !vm.csBindings[slot].isConfigured { return ("New", .accentColor) }
+            if slotDirty(slot) { return ("Pending", .orange) }
             if vm.csStatus.isSlotActive(slot) { return ("Active", .green) }
             return ("Inactive", .orange)
         }()
@@ -2645,27 +2690,26 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private func applyRow(_ slot: Int) -> some View {
-        let dirty = drafts[slot] != vm.csBindings[slot]
+        let dirty = slotDirty(slot)
         let applying = applyingSlot == slot
         let status = slotMessages[slot]
         HStack(spacing: 8) {
-            if let status = status, !dirty {
-                Image(systemName: status.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .foregroundColor(status.isError ? .orange : .green)
+            // The card header's status pill now conveys applied / Pending state,
+            // so this row surfaces only an apply failure.
+            if let status = status, status.isError, !dirty {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
                     .font(.caption)
                 Text(status.message)
                     .font(.caption)
-                    .foregroundColor(status.isError ? .orange : .secondary)
-            } else if dirty {
-                Text("Unapplied changes")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.orange)
             }
             Spacer(minLength: 8)
             if applying { ProgressView().controlSize(.small) }
             Button("Revert") {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     drafts[slot] = vm.csBindings[slot]
+                    nameEdits[slot] = nil   // drop the staged rename too
                 }
                 slotMessages[slot] = nil
             }
@@ -2681,14 +2725,27 @@ struct ControlSurfacesSettingsTab: View {
 
     private func applySlot(_ slot: Int) {
         let binding = drafts[slot]
+        let bindingChanged = binding != vm.csBindings[slot]
+        let nameToApply = stagedName(slot)   // nil when the rename is a no-op
         applyingSlot = slot
         slotMessages[slot] = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let status = vm.setCsBinding(slot: slot, binding: binding)
+            // Push the binding and/or the staged name; surface the first failure.
+            var status: UInt8 = PIN_CONFIG_SUCCESS
+            if bindingChanged {
+                status = vm.setCsBinding(slot: slot, binding: binding)
+            }
+            if let name = nameToApply, status == PIN_CONFIG_SUCCESS {
+                status = vm.setCsName(slot: slot, name: name)
+            }
             DispatchQueue.main.async {
                 applyingSlot = nil
                 drafts[slot] = vm.csBindings[slot]
-                slotMessages[slot] = statusMessage(status)
+                nameEdits[slot] = nil   // staged name is now live (or unchanged)
+                // Success is shown by the status pill (Active); keep a message
+                // only when the apply failed.
+                let msg = statusMessage(status)
+                slotMessages[slot] = msg.isError ? msg : nil
             }
         }
     }

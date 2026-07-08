@@ -1513,6 +1513,12 @@ extension DSPViewModel {
                 fetchCsIrCommand(sub: sub)
             }
         }
+        // Runs after every fetch above (all dispatch to main in FIFO order): if
+        // the device is clean, snapshot the loaded config as the saved baseline
+        // so csDirty can tell net-zero edits from real ones.
+        DispatchQueue.main.async {
+            if !self.csStatus.dirty { self.captureCsCleanSnapshot() }
+        }
     }
 
     /// Read the live 24-byte binding for one slot into `csBindings[slot]`.
@@ -1590,9 +1596,10 @@ extension DSPViewModel {
         return result
     }
 
-    /// Set (or clear) a slot's device-persistent name (spec §3.4).  SET (0x8B)
-    /// is an OUT transfer; the persist is deferred but immediate (outside the
-    /// Apply/Save/Revert preview), so it survives a revert.  Send a single NUL
+    /// Set (or clear) a slot's name (spec §3.4).  SET (0x8B) is an OUT transfer
+    /// applied deferred like a binding: it's a live-only preview that sets the
+    /// device `dirty` flag, so the change takes effect immediately but only
+    /// reaches flash on csSave() and is undone by csRevert().  Send a single NUL
     /// byte to clear.  Returns the PIN_CONFIG_* / CS_STATUS_* result.  USB-only;
     /// must be called off the main thread (blocks on the poll).
     @discardableResult
@@ -1629,6 +1636,11 @@ extension DSPViewModel {
         _ = usb.getControlRequest(request: REQ_CS_SAVE, value: 0, index: 2, length: 1)
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_SAVE)
         fetchCsStatus()
+        // The live config is now the saved config: rebase the clean baseline so
+        // subsequent net-zero churn doesn't re-strand the banner.
+        if result == PIN_CONFIG_SUCCESS {
+            DispatchQueue.main.async { self.captureCsCleanSnapshot() }
+        }
         return result
     }
 
@@ -1641,9 +1653,15 @@ extension DSPViewModel {
     func csRevert() -> UInt8 {
         _ = usb.getControlRequest(request: REQ_CS_REVERT, value: 0, index: 2, length: 1)
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_SAVE)
-        for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
+        for slot in 0..<CS_MAX_BINDINGS {
+            fetchCsBinding(slot: slot)
+            fetchCsName(slot: slot)   // revert restores the stored names too (spec 3.4)
+        }
         for sub in 0..<CS_MAX_IR_COMMANDS { fetchCsIrCommand(sub: sub) }
         fetchCsStatus()
+        // Live now mirrors flash again; rebase the clean baseline after the
+        // re-fetches above land (FIFO on main).
+        DispatchQueue.main.async { self.captureCsCleanSnapshot() }
         return result
     }
 

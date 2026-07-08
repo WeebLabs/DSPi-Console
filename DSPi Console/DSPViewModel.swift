@@ -839,8 +839,40 @@ class DSPViewModel: ObservableObject {
     var csIrSupported: Bool {
         csCaps.maxIrCommands > 0 && csCaps.typeCount > UInt8(CS_TYPE_IR)
     }
+    /// The live Control Surfaces config as of the last moment the device
+    /// reported it clean (matching flash): the connect load, a Save, or a
+    /// Revert.  Compared against the current live config so a false "unsaved
+    /// changes" banner is suppressed when live edits net back to the saved
+    /// state (e.g. add a control then delete it).  The firmware's dirty flag is
+    /// sticky - it's set on every live SET and only cleared by Save/Revert, so
+    /// it cannot represent net-zero churn on its own.  nil until we first
+    /// observe a clean device, in which case we trust the firmware flag.
+    private var csCleanBindings: [CsBinding]? = nil
+    private var csCleanIrCommands: [IrCommand]? = nil
+    private var csCleanNames: [String]? = nil
+
     /// True when the live Control Surfaces config has unsaved preview changes.
-    var csDirty: Bool { csStatus.dirty }
+    /// Requires the firmware's sticky dirty flag AND a real difference from the
+    /// last-saved baseline, so add-then-remove (which leaves live == flash but
+    /// keeps the firmware flag set) no longer strands the banner.  Names are
+    /// part of the preview (spec 3.4/3.5), so a rename counts here too.
+    var csDirty: Bool {
+        guard csStatus.dirty else { return false }
+        guard let cleanBindings = csCleanBindings, let cleanIr = csCleanIrCommands,
+              let cleanNames = csCleanNames else {
+            return true   // no known-clean baseline: defer to the firmware flag
+        }
+        return csBindings != cleanBindings || csIrCommands != cleanIr || csNames != cleanNames
+    }
+
+    /// Record the current live config as the clean (== flash) baseline.  Call
+    /// on the main thread once the device reports it matches flash: after the
+    /// connect load, a successful Save, or a Revert.
+    func captureCsCleanSnapshot() {
+        csCleanBindings = csBindings
+        csCleanIrCommands = csIrCommands
+        csCleanNames = csNames
+    }
 
     // Test signal generator (siggen) - onboard measurement/diagnostic signals
     // injected into the output mix buffers.  Transient only: never persisted,
