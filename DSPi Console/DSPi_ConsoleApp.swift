@@ -4552,7 +4552,7 @@ struct HardwareSettingsTab: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 16)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text("Input Instances")
+                                Text("Instances")
                                     .font(.body)
                                 Text("\(vm.spdifEnabledCount) selectable input\(vm.spdifEnabledCount == 1 ? "" : "s") sharing one receiver")
                                     .font(.caption2)
@@ -4632,7 +4632,7 @@ struct HardwareSettingsTab: View {
                             .foregroundColor(.secondary)
                             .frame(width: 16)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("Input Channels")
+                            Text("Channels")
                                 .font(.body)
                             Text("\(vm.i2sActivePairs) stereo pair\(vm.i2sActivePairs == 1 ? "" : "s") of 24-bit audio, sample-aligned")
                                 .font(.caption2)
