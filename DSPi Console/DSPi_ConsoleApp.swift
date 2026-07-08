@@ -1793,8 +1793,14 @@ struct ControlSurfacesSettingsTab: View {
     /// global and edited inside the IR receiver card, so a change to one counts
     /// as pending work on that component.
     private var anyIrCommandDirty: Bool {
-        (0..<maxSubs).contains { $0 < irDrafts.count && $0 < vm.csIrCommands.count
-            && irDrafts[$0] != vm.csIrCommands[$0] }
+        (0..<maxSubs).contains { sub in
+            guard sub < irDrafts.count, sub < vm.csIrCommands.count else { return false }
+            let d = irDrafts[sub], live = vm.csIrCommands[sub]
+            // A learned draft that differs, or a cleared draft over a live one.
+            // A freshly-added, not-yet-learned button has nothing to apply, so
+            // it doesn't count until a code is learned.
+            return d != live && (d.isConfigured || live.isConfigured)
+        }
     }
 
     /// True when the card should read Pending: its own edits, or - for the IR
@@ -2101,11 +2107,11 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
 
-            // A collapsed card still surfaces pending edits and apply results
-            // so nothing actionable hides behind the fold.  Nested remote-button
-            // edits have their own apply rows, so this uses the receiver's own
-            // dirtiness, not the broad slotDirty.
-            if expanded || slotSelfDirty(slot)
+            // A collapsed card still surfaces pending edits and apply results so
+            // nothing actionable hides behind the fold.  Uses the broad
+            // slotDirty so a staged remote-button edit keeps the receiver's one
+            // Apply/Revert reachable even while the receiver is collapsed.
+            if expanded || slotDirty(slot)
                 || applyingSlot == slot || slotMessages[slot] != nil {
                 applyRow(slot)
             }
@@ -2706,10 +2712,17 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private func applyRow(_ slot: Int) -> some View {
-        let dirty = slotSelfDirty(slot)
+        // This one Apply/Revert acts on the whole component, including - for an
+        // IR receiver - every staged remote-button edit nested inside it.
+        let dirty = slotDirty(slot)
         let applying = applyingSlot == slot
         let status = slotMessages[slot]
         HStack(spacing: 8) {
+            // An expanded IR receiver puts "Add Remote Button" on this same row
+            // rather than a line of its own.
+            if Int(drafts[slot].type) == CS_TYPE_IR && expandedSlots.contains(slot) {
+                addRemoteButton
+            }
             // The card header's status pill now conveys applied / Pending state,
             // so this row surfaces only an apply failure.
             if let status = status, status.isError, !dirty {
@@ -2726,6 +2739,13 @@ struct ControlSurfacesSettingsTab: View {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     drafts[slot] = vm.csBindings[slot]
                     nameEdits[slot] = nil   // drop the staged rename too
+                    // Drop staged remote-button edits for an IR receiver as well.
+                    if Int(drafts[slot].type) == CS_TYPE_IR {
+                        for sub in 0..<min(irDrafts.count, vm.csIrCommands.count) {
+                            irDrafts[sub] = vm.csIrCommands[sub]
+                        }
+                        subMessages.removeAll()
+                    }
                 }
                 slotMessages[slot] = nil
             }
@@ -2743,10 +2763,21 @@ struct ControlSurfacesSettingsTab: View {
         let binding = drafts[slot]
         let bindingChanged = binding != vm.csBindings[slot]
         let nameToApply = stagedName(slot)   // nil when the rename is a no-op
+        // For an IR receiver, gather the learned remote-button drafts that differ
+        // from the device so this one Apply pushes them alongside the receiver.
+        let irToApply: [(sub: Int, cmd: IrCommand)] = Int(binding.type) == CS_TYPE_IR
+            ? (0..<min(irDrafts.count, vm.csIrCommands.count)).compactMap { sub in
+                let d = irDrafts[sub]
+                guard d != vm.csIrCommands[sub], d.isConfigured || vm.csIrCommands[sub].isConfigured
+                else { return nil }
+                return (sub, d)
+            }
+            : []
         applyingSlot = slot
         slotMessages[slot] = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            // Push the binding and/or the staged name; surface the first failure.
+            // Push the binding, the staged name, then each dirty remote button;
+            // stop reporting on the first failure.
             var status: UInt8 = PIN_CONFIG_SUCCESS
             if bindingChanged {
                 status = vm.setCsBinding(slot: slot, binding: binding)
@@ -2754,10 +2785,17 @@ struct ControlSurfacesSettingsTab: View {
             if let name = nameToApply, status == PIN_CONFIG_SUCCESS {
                 status = vm.setCsName(slot: slot, name: name)
             }
+            for item in irToApply where status == PIN_CONFIG_SUCCESS {
+                status = vm.setCsIrCommand(sub: item.sub, command: item.cmd)
+            }
             DispatchQueue.main.async {
                 applyingSlot = nil
                 drafts[slot] = vm.csBindings[slot]
                 nameEdits[slot] = nil   // staged name is now live (or unchanged)
+                for item in irToApply {
+                    irDrafts[item.sub] = vm.csIrCommands[item.sub]
+                    subMessages[item.sub] = nil
+                }
                 // Success is shown by the status pill (Active); keep a message
                 // only when the apply failed.
                 let msg = statusMessage(status)
@@ -2829,13 +2867,20 @@ struct ControlSurfacesSettingsTab: View {
             ForEach(visibleSubs, id: \.self) { sub in
                 irCommandCard(sub, receiverLive: receiverLive)
             }
-            Button { addIrCommand() } label: {
-                Label("Add Remote Button", systemImage: "plus")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(firstFreeSub == nil || !vm.isDeviceConnected)
+            // "Add Remote Button" shares the receiver's Apply/Revert row (see
+            // applyRow) rather than taking a line of its own.
         }
+    }
+
+    /// The "Add Remote Button" control, shared onto the IR receiver's Apply row.
+    @ViewBuilder
+    private var addRemoteButton: some View {
+        Button { addIrCommand() } label: {
+            Label("Add Remote Button", systemImage: "plus")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(firstFreeSub == nil || !vm.isDeviceConnected)
     }
 
     @ViewBuilder
@@ -2843,7 +2888,6 @@ struct ControlSurfacesSettingsTab: View {
         let c = irDrafts[sub]
         let learning = learningSub == sub
         let expanded = expandedSubs.contains(sub)
-        let irDirty = irDrafts[sub] != vm.csIrCommands[sub]
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Button { toggleExpandedSub(sub) } label: {
@@ -2895,11 +2939,15 @@ struct ControlSurfacesSettingsTab: View {
                 if validActions(type: CS_TYPE_IR, noun: Int(c.noun)).count > 1 { irActionRow(sub) }
                 irOperandRows(sub)
                 irFlagRows(sub)
-            }
-            // A collapsed card still surfaces pending edits and apply results so
-            // nothing actionable hides behind the fold.
-            if expanded || irDirty || applyingSub == sub || subMessages[sub] != nil {
-                irApplyRow(sub)
+                // Learn-flow feedback (e.g. "Learned a NEC code").  Applying is
+                // done by the receiver's single Apply, not per button.
+                if !learning, let msg = subMessages[sub] {
+                    HStack(spacing: 6) {
+                        Image(systemName: msg.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundColor(msg.isError ? .orange : .green).font(.caption)
+                        Text(msg.message).font(.caption).foregroundColor(msg.isError ? .orange : .secondary)
+                    }
+                }
             }
         }
         .padding(10)
@@ -3180,36 +3228,6 @@ struct ControlSurfacesSettingsTab: View {
         .toggleStyle(.switch)
     }
 
-    @ViewBuilder
-    private func irApplyRow(_ sub: Int) -> some View {
-        let dirty = irDrafts[sub] != vm.csIrCommands[sub]
-        let applying = applyingSub == sub
-        let status = subMessages[sub]
-        let learned = irDrafts[sub].isConfigured
-        HStack(spacing: 8) {
-            // Only a failure lingers here; applied/Pending state is shown by the
-            // receiver's status pill.
-            if let status = status, status.isError, !dirty {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange).font(.caption)
-                Text(status.message).font(.caption).foregroundColor(.orange)
-            } else if !learned {
-                Text("Learn a remote button to enable this.").font(.caption).foregroundColor(.secondary)
-            }
-            Spacer(minLength: 8)
-            if applying { ProgressView().controlSize(.small) }
-            Button("Revert") {
-                irDrafts[sub] = vm.csIrCommands[sub]; subMessages[sub] = nil
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
-            .disabled(!dirty || applying)
-            Button("Apply") { applyIrCommand(sub) }
-                .buttonStyle(.borderedProminent).controlSize(.small)
-                .disabled(!dirty || applying || !learned || savingConfig || !vm.isDeviceConnected)
-        }
-    }
-
     // MARK: IR command actions
 
     private func addIrCommand() {
@@ -3243,23 +3261,6 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    private func applyIrCommand(_ sub: Int) {
-        let cmd = irDrafts[sub]
-        applyingSub = sub
-        subMessages[sub] = nil
-        DispatchQueue.global(qos: .userInitiated).async {
-            let status = vm.setCsIrCommand(sub: sub, command: cmd)
-            DispatchQueue.main.async {
-                applyingSub = nil
-                irDrafts[sub] = vm.csIrCommands[sub]
-                // Success is conveyed by the receiver's pill returning to Active;
-                // keep a message only on failure, so a collapsed card's apply row
-                // doesn't linger showing "Applied".
-                let msg = statusMessage(status)
-                subMessages[sub] = msg.isError ? msg : nil
-            }
-        }
-    }
 
     // MARK: IR learn flow (spec §3.6.1)
 
