@@ -2650,8 +2650,15 @@ extension DSPViewModel {
             if self.inputSource != src {
                 self.inputSource = src
             }
+            let inputChannelCount = self.numInputChannels
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.fetchUserVolume()
+                // The firmware relabels default input-channel names to follow the
+                // new source (e.g. "SPDIF L/R"); custom names are preserved.
+                // Refetch the input rows so the sidebar/matrix reflect the change.
+                for ch in 0..<inputChannelCount {
+                    self?.fetchChannelName(channel: ch)
+                }
             }
             return
         }

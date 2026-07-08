@@ -1027,12 +1027,26 @@ class DSPViewModel: ObservableObject {
     /// Unified EQ/channel index for a matrix output index (0-8).
     func eqChannel(forOutput output: Int) -> Int { output + chOut1 }
 
-    /// Effective input channel count for layout (>= 2, <= chOut1).  Prefers the
-    /// host-selected USB format from CoreAudio (which stays correct while the
-    /// device idles to alt 0) and falls back to the live device-reported active
-    /// count only when the CoreAudio device can't be resolved.
+    /// Effective input channel count for layout (>= 2, <= chOut1).  The count is
+    /// governed by whichever source is active:
+    ///   - USB: the host-selected USB format from CoreAudio (which stays correct
+    ///     while the device idles to alt 0), falling back to the live
+    ///     device-reported active count only when CoreAudio can't be resolved.
+    ///   - S/PDIF (1/4/5): always stereo.
+    ///   - I2S: the configured I2S input channel count (2/4/6/8).
+    /// CoreAudio only reflects the USB stream's format, so it must not drive the
+    /// layout when a non-USB source is selected.
     var effectiveInputChannels: Int {
-        max(BASE_MATRIX_INPUTS, min(hostConfiguredInputChannels ?? activeInputChannels, chOut1))
+        let base: Int
+        switch inputSource {
+        case INPUT_SOURCE_SPDIF, INPUT_SOURCE_SPDIF2, INPUT_SOURCE_SPDIF3:
+            base = BASE_MATRIX_INPUTS
+        case INPUT_SOURCE_I2S:
+            base = i2sInputChannels
+        default:   // USB (or firmware without input switching, which reports USB)
+            base = hostConfiguredInputChannels ?? activeInputChannels
+        }
+        return max(BASE_MATRIX_INPUTS, min(base, chOut1))
     }
 
     /// Number of input strips to render (sidebar + matrix).
