@@ -66,7 +66,7 @@ struct ContentView: View {
     @State private var presetRenameText = ""
     @State private var presetSwitchInFlight = false
     @State private var settingsWindowOpen = false
-    @Environment(\.openSettings) private var openSettingsAction
+    @Environment(\.openWindow) private var openWindow
 
     private func commitRename() {
         guard let idx = renamingChannel else { return }
@@ -408,11 +408,11 @@ struct ContentView: View {
                             tooltip: "Settings",
                             action: {
                                 if settingsWindowOpen, let w = NSApp.windows.first(where: {
-                                    $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window"
+                                    $0.identifier?.rawValue == "dspiSettings"
                                 }) {
                                     w.close()
                                 } else {
-                                    openSettingsAction()
+                                    openWindow(id: "settings")
                                     settingsWindowOpen = true
                                 }
                             }
@@ -822,7 +822,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
             if let window = note.object as? NSWindow,
-               window.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" {
+               window.identifier?.rawValue == "dspiSettings" {
                 settingsWindowOpen = false
             }
         }

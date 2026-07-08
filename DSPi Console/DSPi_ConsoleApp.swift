@@ -172,9 +172,17 @@ private struct SettingsWindowConfigurator: NSViewRepresentable {
     }
 
     private final class ConfiguratorView: NSView {
+        /// Initial window content size. Width matches the two column widths
+        /// (sidebar 215 + detail 450); change these together. Height matches the
+        /// split view's `idealHeight`.
+        private static let initialContentSize = NSSize(width: 665, height: 580)
+
+        private var didSetInitialFrame = false
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             applyConfig()
+            applyInitialFrameIfNeeded()
         }
 
         func applyConfig() {
@@ -186,6 +194,27 @@ private struct SettingsWindowConfigurator: NSViewRepresentable {
             // the blur once content scrolls under the bar, so at rest the bar is
             // transparent - the macOS Settings behavior.
             window.titlebarAppearsTransparent = true
+            // Now that Settings is a plain `Window` scene (not a `Settings`
+            // scene), pin a stable identifier so open/close tracking can find it
+            // deterministically, and opt out of state restoration so it doesn't
+            // reopen on launch the way the old `Settings` scene never did.
+            window.identifier = NSUserInterfaceItemIdentifier("dspiSettings")
+            window.isRestorable = false
+        }
+
+        /// SwiftUI persists a `Window` scene's frame across launches (keyed to
+        /// the scene id). That saved frame overrides the content's ideal width,
+        /// so adjusting the column widths otherwise has no effect on the opening
+        /// size. Opt out of that persistence and pin the initial size ourselves,
+        /// once per window instance. The window stays freely resizable; the size
+        /// just isn't remembered across reopens (matching the old Settings scene,
+        /// which was always content-sized).
+        private func applyInitialFrameIfNeeded() {
+            guard !didSetInitialFrame, let window = window else { return }
+            didSetInitialFrame = true
+            window.setFrameAutosaveName("")   // stop restoring/persisting the frame
+            window.setContentSize(Self.initialContentSize)
+            window.center()
         }
     }
 }
@@ -237,7 +266,10 @@ struct SettingsView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(190)
+            // A firm minimum so the sidebar never starts narrow enough to
+            // truncate the longest labels ("Control Interfaces", "Global
+            // Parameters", "I2S Configuration"); `ideal` fixes the initial width.
+            .navigationSplitViewColumnWidth(min: 215, ideal: 215)
             // Must be on the sidebar content (not the split view) to take effect.
             .toolbar(removing: .sidebarToggle)
         } detail: {
@@ -254,9 +286,11 @@ struct SettingsView: View {
                 .animation(.easeInOut(duration: 0.2), value: saveCoordinator.hasPendingChanges)
                 // Size the detail COLUMN (not just its content). NavigationSplitView's
                 // detail column has a large default minimum width; `.frame` only
-                // shrinks the content inside it, leaving the column — and thus the
-                // window — wide. This is what actually narrows the window.
-                .navigationSplitViewColumnWidth(450)
+                // shrinks the content inside it, leaving the column - and thus the
+                // window - wide. The `min`/`ideal` pin the initial (narrow) width
+                // while leaving the column free to grow when the user resizes the
+                // now-resizable window, so it fills instead of leaving a gap.
+                .navigationSplitViewColumnWidth(min: 450, ideal: 450)
                 // Empty title suppresses the window's default "DSPi Console Settings"
                 // text. The page name is shown by our custom toolbar item below.
                 .navigationTitle("")
@@ -5917,6 +5951,22 @@ extension AppDelegate: NSWindowDelegate {
     }
 }
 
+/// Restores the standard "Settings..." menu item (Cmd+,) in the app menu. A
+/// `Settings` scene provides this automatically; since Settings is now a plain
+/// `Window` scene, we supply the item ourselves and open the window by id.
+private struct SettingsCommand: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings...") {
+                openWindow(id: "settings")
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+    }
+}
+
 // MARK: - App
 @main
 struct DSPi_ConsoleApp: App {
@@ -5950,6 +6000,10 @@ struct DSPi_ConsoleApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            // Restore the standard "Settings..." item (Cmd+,); the plain
+            // `Window` Settings scene no longer provides it automatically.
+            SettingsCommand()
+
             // Customize the standard "About DSPi Console" window. The panel
             // renders the bundle's name + version (CFBundleShortVersionString =
             // MARKETING_VERSION) automatically; we supply the credits string so
@@ -6100,13 +6154,19 @@ struct DSPi_ConsoleApp: App {
             }
         }
 
-        Settings {
+        // A plain `Window` scene rather than a `Settings` scene, so the window
+        // is user-resizable. Appearance is unchanged: `SettingsWindowConfigurator`
+        // styles the NSWindow (compact, transparent title bar) identically, and
+        // the standard "Settings..." menu item (Cmd+,) is restored by
+        // `SettingsCommand` in `.commands` below.
+        Window("Settings", id: "settings") {
             SettingsView()
         }
-        // Without this the window keeps whatever (wider) frame macOS restored
-        // from a previous launch — content-size hints alone never shrink it.
-        // `.contentSize` clamps the window's max size to its fixed content
-        // (sidebar + 340pt detail), so it can't sit wider than it needs to.
-        .windowResizability(.contentSize)
+        // `.contentMinSize` uses the content's size as the *minimum* while
+        // letting the user grow the window (unlike `.contentSize`, which pins
+        // min == max and blocks resizing). The detail column grows to fill.
+        .windowResizability(.contentMinSize)
+        // The old `Settings` scene opened centered; preserve that.
+        .defaultPosition(.center)
     }
 }
