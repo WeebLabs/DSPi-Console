@@ -1641,6 +1641,9 @@ struct ControlSurfacesSettingsTab: View {
     @State private var subMessages: [Int: (message: String, isError: Bool)] = [:]
     @State private var learningSub: Int? = nil
     @State private var learnMessage: String? = nil
+    // Remote-button cards start collapsed to an at-a-glance list; a newly added
+    // one opens for editing (mirrors the component cards' `expandedSlots`).
+    @State private var expandedSubs: Set<Int> = []
 
     // User-given names, shown in the card header so collapsed cards are
     // tellable apart.  Names are device-persistent (spec §3.4), read into
@@ -1780,11 +1783,24 @@ struct ControlSurfacesSettingsTab: View {
         return edited == live ? nil : edited
     }
 
-    /// True when the card has changes not yet applied to the device: a binding
-    /// edit or a staged rename.  Drives the Pending pill and the Apply/Revert
-    /// row, so a name edit enables Apply exactly like a binding edit does.
-    private func slotDirty(_ slot: Int) -> Bool {
+    /// The card's own unapplied edits: a binding edit or a staged rename.
+    /// Drives the receiver's Apply/Revert row (its Apply pushes exactly these).
+    private func slotSelfDirty(_ slot: Int) -> Bool {
         drafts[slot] != vm.csBindings[slot] || stagedName(slot) != nil
+    }
+
+    /// Unapplied edits to any learned remote button.  IR commands are device-
+    /// global and edited inside the IR receiver card, so a change to one counts
+    /// as pending work on that component.
+    private var anyIrCommandDirty: Bool {
+        (0..<maxSubs).contains { $0 < irDrafts.count && $0 < vm.csIrCommands.count
+            && irDrafts[$0] != vm.csIrCommands[$0] }
+    }
+
+    /// True when the card should read Pending: its own edits, or - for the IR
+    /// receiver - an unapplied edit to a remote button nested inside it.
+    private func slotDirty(_ slot: Int) -> Bool {
+        slotSelfDirty(slot) || (Int(drafts[slot].type) == CS_TYPE_IR && anyIrCommandDirty)
     }
 
     /// Push any legacy app-side names (old UserDefaults store) onto the device
@@ -2086,8 +2102,10 @@ struct ControlSurfacesSettingsTab: View {
             }
 
             // A collapsed card still surfaces pending edits and apply results
-            // so nothing actionable hides behind the fold.
-            if expanded || slotDirty(slot)
+            // so nothing actionable hides behind the fold.  Nested remote-button
+            // edits have their own apply rows, so this uses the receiver's own
+            // dirtiness, not the broad slotDirty.
+            if expanded || slotSelfDirty(slot)
                 || applyingSlot == slot || slotMessages[slot] != nil {
                 applyRow(slot)
             }
@@ -2688,7 +2706,7 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private func applyRow(_ slot: Int) -> some View {
-        let dirty = slotDirty(slot)
+        let dirty = slotSelfDirty(slot)
         let applying = applyingSlot == slot
         let status = slotMessages[slot]
         HStack(spacing: 8) {
@@ -2824,9 +2842,28 @@ struct ControlSurfacesSettingsTab: View {
     private func irCommandCard(_ sub: Int, receiverLive: Bool) -> some View {
         let c = irDrafts[sub]
         let learning = learningSub == sub
+        let expanded = expandedSubs.contains(sub)
+        let irDirty = irDrafts[sub] != vm.csIrCommands[sub]
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
+                Button { toggleExpandedSub(sub) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 12, height: 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help(expanded ? "Collapse" : "Expand")
+
                 irCodeChip(sub)
+                // Collapsed cards need enough to tell buttons apart: the learned
+                // code chip plus a plain-language summary of what it does.
+                if !expanded && c.isConfigured {
+                    Text(irVerbPhrase(c))
+                        .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                }
                 Spacer(minLength: 8)
                 if learning {
                     ProgressView().controlSize(.small)
@@ -2852,15 +2889,52 @@ struct ControlSurfacesSettingsTab: View {
                 Text(lm).font(.caption2).foregroundColor(.secondary)
             }
 
-            irNounRow(sub)
-            irTargetRows(sub)
-            if validActions(type: CS_TYPE_IR, noun: Int(c.noun)).count > 1 { irActionRow(sub) }
-            irOperandRows(sub)
-            irFlagRows(sub)
-            irApplyRow(sub)
+            if expanded {
+                irNounRow(sub)
+                irTargetRows(sub)
+                if validActions(type: CS_TYPE_IR, noun: Int(c.noun)).count > 1 { irActionRow(sub) }
+                irOperandRows(sub)
+                irFlagRows(sub)
+            }
+            // A collapsed card still surfaces pending edits and apply results so
+            // nothing actionable hides behind the fold.
+            if expanded || irDirty || applyingSub == sub || subMessages[sub] != nil {
+                irApplyRow(sub)
+            }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.secondary.opacity(0.06)))
+    }
+
+    private func toggleExpandedSub(_ sub: Int) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            if expandedSubs.contains(sub) { expandedSubs.remove(sub) }
+            else { expandedSubs.insert(sub) }
+        }
+    }
+
+    /// One-line summary of a learned remote button's action, for the collapsed
+    /// card (mirrors `verbPhrase` for component bindings).
+    private func irVerbPhrase(_ c: IrCommand) -> String {
+        let noun = nounName(Int(c.noun), forType: CS_TYPE_IR) + irTargetSuffix(c)
+        let isEnum = (nounDesc(Int(c.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
+        switch Int(c.action) {
+        case CS_ACT_INC:       return isEnum ? "Next \(noun)" : "Raise \(noun)"
+        case CS_ACT_DEC:       return isEnum ? "Previous \(noun)" : "Lower \(noun)"
+        case CS_ACT_TOGGLE:    return "Toggle \(noun)"
+        case CS_ACT_SET:       return "Set \(noun)"
+        case CS_ACT_MOMENTARY: return "Hold \(noun)"
+        case CS_ACT_TRIGGER:   return noun   // the noun carries the verb
+        default:               return noun
+        }
+    }
+
+    /// " (Output 1)" / " (Band 3)" suffix for a targeted IR command's summary.
+    private func irTargetSuffix(_ c: IrCommand) -> String {
+        guard let nd = nounDesc(Int(c.noun)), nd.isTargeted else { return "" }
+        var s = " (\(targetName(nd, Int(c.target)))"
+        if nd.hasBand { s += ", \(bandName(Int(c.index)))" }
+        return s + ")"
     }
 
     /// The learned protocol + code chip (or a "not learned yet" placeholder).
@@ -3113,14 +3187,14 @@ struct ControlSurfacesSettingsTab: View {
         let status = subMessages[sub]
         let learned = irDrafts[sub].isConfigured
         HStack(spacing: 8) {
-            if let status = status, !dirty {
-                Image(systemName: status.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .foregroundColor(status.isError ? .orange : .green).font(.caption)
-                Text(status.message).font(.caption).foregroundColor(status.isError ? .orange : .secondary)
+            // Only a failure lingers here; applied/Pending state is shown by the
+            // receiver's status pill.
+            if let status = status, status.isError, !dirty {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange).font(.caption)
+                Text(status.message).font(.caption).foregroundColor(.orange)
             } else if !learned {
                 Text("Learn a remote button to enable this.").font(.caption).foregroundColor(.secondary)
-            } else if dirty {
-                Text("Unapplied changes").font(.caption).foregroundColor(.secondary)
             }
             Spacer(minLength: 8)
             if applying { ProgressView().controlSize(.small) }
@@ -3144,12 +3218,16 @@ struct ControlSurfacesSettingsTab: View {
         let noun = irNouns.first ?? CS_NOUN_USER_VOLUME
         c.noun = UInt8(noun)
         c.action = UInt8(defaultAction(type: CS_TYPE_IR, noun: noun))
-        irDrafts[sub] = defaultIrOperands(for: c)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            irDrafts[sub] = defaultIrOperands(for: c)
+            expandedSubs.insert(sub)   // open the new button for editing
+        }
         subMessages[sub] = nil
     }
 
     private func removeIrCommand(_ sub: Int) {
         subMessages[sub] = nil
+        expandedSubs.remove(sub)
         guard vm.csIrCommands[sub].isConfigured else {
             irDrafts[sub] = IrCommand()   // never applied - drop the draft
             return
@@ -3174,7 +3252,11 @@ struct ControlSurfacesSettingsTab: View {
             DispatchQueue.main.async {
                 applyingSub = nil
                 irDrafts[sub] = vm.csIrCommands[sub]
-                subMessages[sub] = statusMessage(status)
+                // Success is conveyed by the receiver's pill returning to Active;
+                // keep a message only on failure, so a collapsed card's apply row
+                // doesn't linger showing "Applied".
+                let msg = statusMessage(status)
+                subMessages[sub] = msg.isError ? msg : nil
             }
         }
     }
