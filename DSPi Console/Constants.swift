@@ -229,14 +229,30 @@ let REQ_SET_INPUT_SOURCE: UInt8       = 0xE0
 let REQ_GET_INPUT_SOURCE: UInt8       = 0xE1
 let REQ_GET_SPDIF_RX_STATUS: UInt8    = 0xE2
 let REQ_GET_SPDIF_RX_CH_STATUS: UInt8 = 0xE3
+// REQ_SET/GET_SPDIF_RX_PIN are indexed since firmware v1.1.5: wValue high byte
+// selects the S/PDIF input (0..2), low byte is the GPIO.  A bare pin in wValue
+// (high byte 0) still addresses input 1, so older callers keep working.  The
+// SET is hot-swappable while the input is active (no OUTPUT_ACTIVE rejection).
 let REQ_SET_SPDIF_RX_PIN: UInt8       = 0xE4
 let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
+// Multiple-S/PDIF-input commands (firmware v1.1.5+).  STALL on older firmware,
+// which the app treats as "single S/PDIF input only".
+let REQ_SET_SPDIF_INPUT_ENABLE: UInt8 = 0xE9   // IN: wValue = (index<<8)|enable, returns status
+let REQ_GET_SPDIF_INPUT_CONFIG: UInt8 = 0xEF   // IN 5 bytes: count, enable_mask, pin[0..2]
 
 // Input source enum values (payload of 0xE0 / response of 0xE1, and
-// WireInputConfig byte 0).
-let INPUT_SOURCE_USB: Int   = 0
-let INPUT_SOURCE_SPDIF: Int = 1
-let INPUT_SOURCE_I2S: Int   = 2
+// WireInputConfig byte 0).  Values 4/5 are the two optional S/PDIF inputs;
+// value 3 is a reserved gap for a future ADAT input.
+let INPUT_SOURCE_USB: Int    = 0
+let INPUT_SOURCE_SPDIF: Int  = 1
+let INPUT_SOURCE_I2S: Int    = 2
+let INPUT_SOURCE_SPDIF2: Int = 4
+let INPUT_SOURCE_SPDIF3: Int = 5
+
+// S/PDIF input inventory: input 1 is always present; inputs 2/3 are optional and
+// disabled by default.  Default RX GPIOs are 5 / 20 / 21 for inputs 1 / 2 / 3.
+let SPDIF_RX_NUM_INPUTS: Int         = 3
+let SPDIF_RX_PIN_DEFAULTS: [UInt8]   = [5, 20, 21]
 
 // I2S input request codes (firmware wire format V12+).  See
 // Documentation/Features/i2s_input_spec.md.  The SET pin command is an

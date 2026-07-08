@@ -604,8 +604,8 @@ struct ContentView: View {
                                 Text("Source").font(.caption2).foregroundColor(.secondary)
                                 Spacer()
                                 BorderlessPopUpButton(
-                                    items: vm.i2sInputSupported ? [0, 1, 2] : [0, 1],
-                                    titleForItem: { $0 == 0 ? "USB" : ($0 == 1 ? "S/PDIF" : "I2S") },
+                                    items: vm.inputSourceOptions,
+                                    titleForItem: { vm.inputSourceTitle($0) },
                                     selection: Binding(
                                         get: { vm.inputSource },
                                         set: { source in

@@ -69,9 +69,11 @@ struct SpdifRxStatus {
     }
 
     var sourceString: String {
-        switch inputSource {
-        case 1: return "S/PDIF"
-        case 2: return "I2S"
+        switch Int(inputSource) {
+        case INPUT_SOURCE_SPDIF:  return "S/PDIF 1"
+        case INPUT_SOURCE_SPDIF2: return "S/PDIF 2"
+        case INPUT_SOURCE_SPDIF3: return "S/PDIF 3"
+        case INPUT_SOURCE_I2S:    return "I2S"
         default: return "USB"
         }
     }
@@ -202,6 +204,8 @@ class StatsViewModel: ObservableObject {
     @Published var spdifRxStatus: SpdifRxStatus = SpdifRxStatus()
     @Published var spdifRxChannelStatus: SpdifRxChannelStatus = SpdifRxChannelStatus()
     @Published var spdifRxPin: UInt8 = 11
+    /// GPIO of the currently-active S/PDIF input (tracks inputs 2/3 too).
+    @Published var spdifActiveRxPin: UInt8 = 11
     @Published var inputSourceSupported: Bool = false
 
     // LG Sound Sync runtime status (V8+ firmware).  Polled on the same
@@ -479,9 +483,24 @@ class StatsViewModel: ObservableObject {
             }
         }
 
+        // Resolve the GPIO of whichever S/PDIF input is active (inputs 2/3 have
+        // their own pins) so the RX Pin row stays accurate.
+        let srcIndex: Int
+        switch Int(status.inputSource) {
+        case INPUT_SOURCE_SPDIF2: srcIndex = 1
+        case INPUT_SOURCE_SPDIF3: srcIndex = 2
+        default: srcIndex = 0
+        }
+        var activePin = self.spdifRxPin
+        if let pd = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(srcIndex), index: 2, length: 1),
+           pd.count >= 1, pd[0] != 0 {
+            activePin = pd[0]
+        }
+
         DispatchQueue.main.async {
             self.spdifRxStatus = status
             self.spdifRxChannelStatus = chStatus
+            self.spdifActiveRxPin = activePin
         }
     }
 
@@ -681,7 +700,7 @@ struct StatsView: View {
                                       value: vm.spdifRxStatus.isLocked ? "\(vm.spdifRxStatus.parityErrors)" : "—")
                         SystemInfoRow(title: "FIFO Fill",
                                       value: vm.spdifRxStatus.isLocked ? "\(vm.spdifRxStatus.fifoFillPct)%" : "—")
-                        SystemInfoRow(title: "RX Pin", value: "GPIO \(vm.spdifRxPin)")
+                        SystemInfoRow(title: "RX Pin", value: "GPIO \(vm.spdifActiveRxPin)")
 
                         // IEC 60958 Channel Status (only when locked)
                         if vm.spdifRxStatus.isLocked {

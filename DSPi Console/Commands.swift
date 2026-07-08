@@ -1250,8 +1250,34 @@ extension DSPViewModel {
             }
         }
         if data != nil {
-            fetchSpdifRxPin()
+            fetchSpdifInputConfig()
             fetchI2SInputConfig()
+        }
+    }
+
+    /// Reads the whole S/PDIF input inventory in one transfer (REQ_GET_SPDIF_INPUT_CONFIG,
+    /// firmware v1.1.5+): input count, enable mask, and each input's GPIO pin.  On
+    /// older firmware the request STALLs; we fall back to the single-input pin read
+    /// (REQ_GET_SPDIF_RX_PIN index 0) and mark multi-input as unsupported.
+    func fetchSpdifInputConfig() {
+        guard let d = usb.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0, index: 2, length: 5),
+              d.count >= 5 else {
+            DispatchQueue.main.async {
+                self.multiSpdifSupported = false
+                self.spdifInputCount = 1
+            }
+            fetchSpdifRxPin()
+            return
+        }
+        let count = Int(d[0])
+        let mask = d[1]
+        let pin0 = d[2], pin1 = d[3], pin2 = d[4]
+        DispatchQueue.main.async {
+            self.multiSpdifSupported = true
+            self.spdifInputCount = count
+            self.spdifRxPin = pin0
+            self.spdifRxPinsExt = [pin1, pin2]
+            self.spdifExtEnabled = [(mask & 0x02) != 0, (mask & 0x04) != 0]
         }
     }
 
@@ -1271,21 +1297,52 @@ extension DSPViewModel {
         // moment instead of guessing a sleep duration.
     }
 
-    func fetchSpdifRxPin() {
-        if let data = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: 0, index: 2, length: 1),
+    /// Reads a single S/PDIF input's GPIO pin (default index 0 = input 1).
+    func fetchSpdifRxPin(index: Int = 0) {
+        if let data = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(index), index: 2, length: 1),
            data.count >= 1 {
-            DispatchQueue.main.async { self.spdifRxPin = data[0] }
+            let pin = data[0]
+            DispatchQueue.main.async {
+                if index == 0 { self.spdifRxPin = pin }
+                else if self.spdifRxPinsExt.indices.contains(index - 1) { self.spdifRxPinsExt[index - 1] = pin }
+            }
         }
     }
 
-    /// Set the GPIO pin used for the S/PDIF receiver. Requires SPDIF input to be inactive.
-    /// Single IN transfer: wValue = pin. Returns firmware status code.
+    /// Set the GPIO pin used for a S/PDIF input (index 0..2, default 0 = input 1).
+    /// Single IN transfer: wValue = (index << 8) | pin.  Returns the firmware
+    /// PIN_CONFIG_* status code.  The pin is hot-swappable while the input is
+    /// active (no OUTPUT_ACTIVE rejection); a disabled optional input stores the
+    /// pin as a preference validated at enable time.
     @discardableResult
-    func setSpdifRxPin(_ pin: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_SPDIF_RX_PIN, value: UInt16(pin), index: 2, length: 1) {
+    func setSpdifRxPin(index: Int = 0, _ pin: UInt8) -> UInt8 {
+        let wValue = UInt16((index << 8) | Int(pin))
+        if let d = usb.getControlRequest(request: REQ_SET_SPDIF_RX_PIN, value: wValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
-                DispatchQueue.main.async { self.spdifRxPin = pin }
+                DispatchQueue.main.async {
+                    if index == 0 { self.spdifRxPin = pin }
+                    else if self.spdifRxPinsExt.indices.contains(index - 1) { self.spdifRxPinsExt[index - 1] = pin }
+                }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    /// Enable or disable an optional S/PDIF input (index 1 = SPDIF 2, 2 = SPDIF 3).
+    /// Input 1 (index 0) is always enabled.  IN transfer: wValue = (index<<8)|enable.
+    /// Returns the firmware PIN_CONFIG_* status.  Enabling validates the configured
+    /// pin; disabling is refused (PIN_IN_USE) while the input is the active source.
+    @discardableResult
+    func setSpdifInputEnable(index: Int, _ enable: Bool) -> UInt8 {
+        let wValue = UInt16((index << 8) | (enable ? 1 : 0))
+        if let d = usb.getControlRequest(request: REQ_SET_SPDIF_INPUT_ENABLE, value: wValue, index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS, index >= 1, self.spdifExtEnabled.indices.contains(index - 1) {
+                let i = index - 1
+                DispatchQueue.main.async { self.spdifExtEnabled[i] = enable }
             }
             return status
         }
@@ -1965,6 +2022,13 @@ extension DSPViewModel {
         let bulkI2SRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 5],
                                          data[BULK_INPUT_CONFIG_OFFSET + 6],
                                          data[BULK_INPUT_CONFIG_OFFSET + 7]]
+        // v1.1.5 optional S/PDIF inputs 2/3: pins at +8/+9 (0 = keep live),
+        // enable mask "plus one" at +10 (0 = field absent; otherwise mask = enc-1,
+        // bit0 = SPDIF2, bit1 = SPDIF3).  The +1 encoding lets old hosts push
+        // zeros meaning "absent" rather than "disable both".
+        let bulkSpdifRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 8],
+                                           data[BULK_INPUT_CONFIG_OFFSET + 9]]
+        let bulkSpdifEnabledExtP1 = data[BULK_INPUT_CONFIG_OFFSET + 10]
 
         // --- LG Sound Sync (offset 4728) — only `enabled` honoured on SET ---
         let bulkLgEnabled = data[BULK_LG_OFFSET] != 0
@@ -2057,6 +2121,18 @@ extension DSPViewModel {
             self.inputSource = bulkInputSource
             self.inputSourceSupported = true
             self.spdifRxPin = bulkSpdifRxPin
+            // Optional S/PDIF 2/3: a non-zero enable-mask+1 byte marks the
+            // multiple-input feature present and carries the live enable state;
+            // ext pins of 0 mean "absent, keep the live pin".
+            if bulkSpdifEnabledExtP1 != 0 {
+                self.multiSpdifSupported = true
+                self.spdifInputCount = SPDIF_RX_NUM_INPUTS
+                let mask = bulkSpdifEnabledExtP1 - 1
+                self.spdifExtEnabled = [(mask & 0x01) != 0, (mask & 0x02) != 0]
+                for i in 0..<2 where bulkSpdifRxPinsExt[i] != 0 {
+                    self.spdifRxPinsExt[i] = bulkSpdifRxPinsExt[i]
+                }
+            }
             self.i2sInputSupported = true
             self.i2sRxPins[0] = bulkI2SRxPin
             for pair in 1..<min(4, self.i2sRxPins.count) where bulkI2SRxPinsExt[pair - 1] != 0 {

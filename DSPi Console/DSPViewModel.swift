@@ -11,7 +11,7 @@ enum PinConsumer: Equatable {
     case output(Int)    // slot or PDM index — indexes vm.outputPins[]
     case i2sBck         // also covers LRCLK (BCK + 1)
     case mck
-    case spdifRx
+    case spdifRx(Int)   // S/PDIF RX data pin, per input index (0..2)
     case i2sRx(Int)     // I2S input data pin, per stereo pair (0..3)
     case dacMute
     case uartCtrl       // UART control interface (covers both TX and RX pins)
@@ -752,9 +752,20 @@ class DSPViewModel: ObservableObject {
     @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
     // Input source state
-    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S
+    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S, 4=SPDIF2, 5=SPDIF3
     @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
-    @Published var spdifRxPin: UInt8 = 11             // GPIO pin for SPDIF RX
+    @Published var spdifRxPin: UInt8 = 11             // GPIO pin for S/PDIF input 1
+
+    // Multiple S/PDIF inputs (firmware v1.1.5+, probed via REQ_GET_SPDIF_INPUT_CONFIG).
+    // `multiSpdifSupported` is false on older firmware that STALLs 0xEF, in which
+    // case only input 1 (`spdifRxPin`) exists.  Inputs 2/3 are optional and
+    // disabled by default; a disabled input's pin is a stored preference only.
+    @Published var multiSpdifSupported: Bool = false
+    @Published var spdifInputCount: Int = 1
+    /// GPIO pins for optional S/PDIF inputs 2 and 3 (indices 1 and 2).
+    @Published var spdifRxPinsExt: [UInt8] = [SPDIF_RX_PIN_DEFAULTS[1], SPDIF_RX_PIN_DEFAULTS[2]]
+    /// Enable state for optional S/PDIF inputs 2 and 3 (indices 1 and 2).
+    @Published var spdifExtEnabled: [Bool] = [false, false]
 
     // I2S input state (firmware wire format V12+).  `i2sInputSupported` is
     // false on older firmware that STALLs REQ_GET_I2S_RX_PIN (0xF2) or returns
@@ -776,6 +787,81 @@ class DSPViewModel: ObservableObject {
     var supportsMultichannelI2S: Bool { i2sInputSupported && platformName == "RP2350" }
     /// Number of currently-active I2S stereo pairs (count / 2).
     var i2sActivePairs: Int { max(1, i2sInputChannels / 2) }
+
+    // MARK: - S/PDIF input helpers
+
+    /// GPIO pin configured for a S/PDIF input index (0 = input 1, 1/2 = optional).
+    func spdifPin(index: Int) -> UInt8 {
+        if index == 0 { return spdifRxPin }
+        let i = index - 1
+        return spdifRxPinsExt.indices.contains(i) ? spdifRxPinsExt[i] : SPDIF_RX_PIN_DEFAULTS[min(index, 2)]
+    }
+
+    /// Whether a S/PDIF input index is enabled.  Input 1 is always enabled.
+    func spdifInputEnabled(index: Int) -> Bool {
+        if index == 0 { return true }
+        let i = index - 1
+        return spdifExtEnabled.indices.contains(i) ? spdifExtEnabled[i] : false
+    }
+
+    /// Map a S/PDIF input index (0..2) to its InputSource enum value (1/4/5).
+    func spdifSource(forIndex index: Int) -> Int {
+        switch index {
+        case 0: return INPUT_SOURCE_SPDIF
+        case 1: return INPUT_SOURCE_SPDIF2
+        default: return INPUT_SOURCE_SPDIF3
+        }
+    }
+
+    /// Map an InputSource enum value (1/4/5) back to a S/PDIF input index (0..2),
+    /// or nil if it isn't a S/PDIF source.
+    func spdifIndex(forSource source: Int) -> Int? {
+        switch source {
+        case INPUT_SOURCE_SPDIF:  return 0
+        case INPUT_SOURCE_SPDIF2: return 1
+        case INPUT_SOURCE_SPDIF3: return 2
+        default: return nil
+        }
+    }
+
+    /// True when any optional S/PDIF input (2 or 3) is enabled — used to decide
+    /// whether input 1 should be labelled "S/PDIF 1" vs the bare "S/PDIF".
+    var anyOptionalSpdifEnabled: Bool { spdifExtEnabled.contains(true) }
+
+    /// Number of S/PDIF inputs treated as active for the count-selector UI:
+    /// the highest enabled input index + 1 (input 1 is always counted).  A
+    /// non-consecutive enable state (e.g. only input 3 on) still reports 3 so
+    /// every row up to the highest is shown; re-selecting a count normalises it.
+    var spdifEnabledCount: Int {
+        if spdifInputEnabled(index: 2) { return 3 }
+        if spdifInputEnabled(index: 1) { return 2 }
+        return 1
+    }
+
+    /// The list of selectable input-source values for the current device config,
+    /// in menu order: USB, S/PDIF 1, any enabled optional S/PDIF inputs, then I2S.
+    var inputSourceOptions: [Int] {
+        var opts: [Int] = [INPUT_SOURCE_USB, INPUT_SOURCE_SPDIF]
+        if multiSpdifSupported {
+            for idx in 1..<spdifInputCount where spdifInputEnabled(index: idx) {
+                opts.append(spdifSource(forIndex: idx))
+            }
+        }
+        if i2sInputSupported { opts.append(INPUT_SOURCE_I2S) }
+        return opts
+    }
+
+    /// User-facing title for an input-source value.
+    func inputSourceTitle(_ source: Int) -> String {
+        switch source {
+        case INPUT_SOURCE_USB:    return "USB"
+        case INPUT_SOURCE_SPDIF:  return anyOptionalSpdifEnabled ? "S/PDIF 1" : "S/PDIF"
+        case INPUT_SOURCE_SPDIF2: return "S/PDIF 2"
+        case INPUT_SOURCE_SPDIF3: return "S/PDIF 3"
+        case INPUT_SOURCE_I2S:    return "I2S"
+        default: return "Source \(source)"
+        }
+    }
 
     // LG Sound Sync — per-preset enable for LG TV optical-out volume decode.
     // `lgSoundSyncSupported` is set when V8+ bulk data is parsed or when an
@@ -1074,7 +1160,21 @@ class DSPViewModel: ObservableObject {
             if pin == i2sBckPin &+ 1 { return "I2S LRCLK" }
         }
         if consumer != .mck && pin == mckPin { return "I2S MCK" }
-        if consumer != .spdifRx && inputSourceSupported && pin == spdifRxPin { return "S/PDIF RX" }
+        // S/PDIF RX pins.  Input 1 is always reserved; the optional inputs 2/3
+        // are reserved only while enabled (a disabled input's pin is invisible
+        // to conflict checks, mirroring the firmware's per-input reservation).
+        if inputSourceSupported {
+            if consumer != .spdifRx(0) && pin == spdifRxPin {
+                return multiSpdifSupported && anyOptionalSpdifEnabled ? "S/PDIF 1 RX" : "S/PDIF RX"
+            }
+            if multiSpdifSupported {
+                for idx in 1..<spdifInputCount where spdifInputEnabled(index: idx) {
+                    if consumer != .spdifRx(idx) && pin == spdifPin(index: idx) {
+                        return "S/PDIF \(idx + 1) RX"
+                    }
+                }
+            }
+        }
         // I2S RX data pins.  Mirrors the firmware's two-tier rule:
         //   - Assigning an I2S RX pin itself keeps ALL configured pair pins
         //     mutually distinct (firmware i2s_rx_pair_pin_taken), so a pair can't
@@ -1401,6 +1501,8 @@ class DSPViewModel: ObservableObject {
             mckPin: mckPin,
             mckMultiplier: mckMultiplier,
             spdifRxPin: spdifRxPin,
+            spdifRxPinsExt: multiSpdifSupported ? spdifRxPinsExt : nil,
+            spdifExtEnabled: multiSpdifSupported ? spdifExtEnabled : nil,
             inputSource: inputSourceSupported ? inputSource : nil,
             i2sRxPins: i2sInputSupported ? Array(i2sRxPins.prefix(i2sMaxPairs)) : nil,
             i2sInputChannels: i2sInputSupported ? i2sInputChannels : nil,
