@@ -27,6 +27,11 @@ let REQ_SET_LOUDNESS_REF: UInt8       = 0x5A
 let REQ_GET_LOUDNESS_REF: UInt8       = 0x5B
 let REQ_SET_LOUDNESS_INTENSITY: UInt8 = 0x5C
 let REQ_GET_LOUDNESS_INTENSITY: UInt8 = 0x5D
+// Loudness output mask (V19): 2 bytes uint16 LE, bit k = output channel k
+let REQ_SET_LOUDNESS_MASK: UInt8      = 0xFA
+let REQ_GET_LOUDNESS_MASK: UInt8      = 0xFB
+/// Factory-default loudness output mask (all outputs compensated).
+let LOUDNESS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
 let REQ_SET_CROSSFEED: UInt8           = 0x5E
 let REQ_GET_CROSSFEED: UInt8           = 0x5F
 let REQ_SET_CROSSFEED_PRESET: UInt8    = 0x60
@@ -134,16 +139,17 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V18 (unified channel model): inputs are first-class channels
-/// (PEQ + metering), outputs follow them.  V18 grows WireLevellerConfig from 16
-/// to 20 bytes (appending the detector/apply channel masks), shifting every
-/// section after the leveller by +4 and the flat layout from 5872 to 5876 bytes
-/// (RP2350).  Compatibility is intentionally broken - only this layout is
-/// accepted.
-let WIRE_FORMAT_VERSION: Int            = 18
-/// Full V18 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Wire format V19 (unified channel model): inputs are first-class channels
+/// (PEQ + metering), outputs follow them.  V19 adds loudness_output_mask in the
+/// global section's former reserved[2] bytes (offset 22), so struct and payload
+/// sizes are unchanged from V18.  V18 grew WireLevellerConfig from 16 to 20 bytes
+/// (appending the detector/apply channel masks), shifting every section after the
+/// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
+/// Compatibility is intentionally broken - only this layout is accepted.
+let WIRE_FORMAT_VERSION: Int            = 19
+/// Full V19 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
 let BULK_PARAMS_SIZE: UInt16            = 5876
-let WIRE_BULK_PARAMS_V18_SIZE: Int      = 5876
+let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
 let BULK_GLOBAL_OFFSET: Int             = 16

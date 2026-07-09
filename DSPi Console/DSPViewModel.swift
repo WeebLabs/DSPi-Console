@@ -714,6 +714,9 @@ class DSPViewModel: ObservableObject {
     @Published var loudnessEnabled: Bool = false
     @Published var loudnessRefSPL: Float = 83.0
     @Published var loudnessIntensity: Float = 100.0
+    /// Per-output loudness mask (V19+): bit k enables compensation on output
+    /// channel k.  Default 0xFFFF = every output compensated.
+    @Published var loudnessOutputMask: UInt16 = LOUDNESS_DEFAULT_OUTPUT_MASK
     @Published var crossfeedEnabled: Bool = false
     @Published var crossfeedPreset: Int = 0
     @Published var crossfeedFreq: Float = 700.0
@@ -1078,6 +1081,11 @@ class DSPViewModel: ObservableObject {
     /// First-order low/high shelves (FilterType.lowShelf1 / .highShelf1)
     /// shipped in wire format V14.  Hidden from the PEQ picker until confirmed.
     var firmwareSupportsFirstOrderShelves: Bool { firmwareWireFormatVersion >= 14 }
+
+    /// Per-output loudness mask (cmds 0xFA/0xFB) shipped in wire format V19.
+    /// Gate the mask UI on this so older firmware (which applies loudness to
+    /// everything) never shows the selector.
+    var firmwareSupportsLoudnessMask: Bool { firmwareWireFormatVersion >= 19 }
 
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
     /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
@@ -1484,6 +1492,7 @@ class DSPViewModel: ObservableObject {
             platformName: platformName,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
+            loudnessOutputMask: loudnessOutputMask,
             loudnessRefSPL: loudnessRefSPL,
             loudnessIntensity: loudnessIntensity,
             crossfeedEnabled: crossfeedEnabled,

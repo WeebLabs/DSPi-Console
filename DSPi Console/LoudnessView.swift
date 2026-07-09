@@ -54,7 +54,7 @@ class LoudnessWindowController: NSObject, ObservableObject {
             let view = LoudnessView(vm: vm)
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 520),
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 600),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
@@ -111,6 +111,19 @@ private func loudnessCompensationDB(
 struct LoudnessView: View {
     @ObservedObject var vm: DSPViewModel
 
+    /// Output channels exposed in the mask grid (5 on RP2040, 9 on RP2350).
+    private var outputCount: Int { vm.numOutputChannels }
+
+    /// The per-output mask (cmds 0xFA/0xFB) shipped in wire format V19; hide the
+    /// selector on older firmware, which compensates every output unconditionally.
+    private var showMask: Bool { vm.firmwareSupportsLoudnessMask }
+
+    /// Display name for output channel `out` (unified channel index chOut1 + out).
+    private func outputName(_ out: Int) -> String {
+        let idx = vm.chOut1 + out
+        return idx < vm.channelNames.count ? vm.channelNames[idx] : "Out \(out + 1)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -133,7 +146,7 @@ struct LoudnessView: View {
                 }
             }
         }
-        .frame(width: 380, height: 480)
+        .frame(width: 380, height: 560)
     }
 
     // MARK: - Header
@@ -200,6 +213,11 @@ struct LoudnessView: View {
 
     private var parameterSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if showMask {
+                channelSection
+                Divider()
+            }
+
             Text("PARAMETERS")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
@@ -262,6 +280,73 @@ struct LoudnessView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    // MARK: - Output Channels
+
+    private var channelSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("OUTPUTS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Menu {
+                    Button("All outputs") {
+                        vm.setLoudnessMask(LOUDNESS_DEFAULT_OUTPUT_MASK)
+                    }
+                    Button("Slot 1 only (Headphones)") {
+                        vm.setLoudnessMask(0x0003)
+                    }
+                    Button("None") {
+                        vm.setLoudnessMask(0x0000)
+                    }
+                } label: {
+                    Text("Presets")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(!vm.isDeviceConnected)
+            }
+
+            Text("Compensate only the outputs feeding your low-level listening chain. Keep bass-managed pairs (mains + sub) together so the crossover stays coherent.")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 6) {
+                ForEach(0..<outputCount, id: \.self) { out in
+                    channelChip(
+                        out: out,
+                        on: vm.loudnessOutputMask & (UInt16(1) << out) != 0
+                    ) {
+                        vm.setLoudnessOutputChannel(out, enabled: vm.loudnessOutputMask & (UInt16(1) << out) == 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private func channelChip(out: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("\(out + 1)")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .foregroundColor(on ? .white : .primary.opacity(0.6))
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(outputName(out))
+        .disabled(!vm.isDeviceConnected)
+        .animation(.easeInOut(duration: 0.12), value: on)
     }
 }
 

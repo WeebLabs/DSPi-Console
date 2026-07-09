@@ -708,6 +708,30 @@ extension DSPViewModel {
         }
     }
 
+    /// Sets the per-output loudness mask (V19+).  Bit k enables compensation on
+    /// output channel k.  Sent as a 2-byte little-endian uint16; the firmware
+    /// switches masks glitch-free from the next packet (no recompute or reset).
+    func setLoudnessMask(_ mask: UInt16) {
+        self.loudnessOutputMask = mask
+        let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
+        usb.sendControlRequest(request: REQ_SET_LOUDNESS_MASK, value: 0, index: 0, data: data)
+    }
+
+    /// Toggles a single output channel's bit in the loudness mask and pushes it.
+    func setLoudnessOutputChannel(_ output: Int, enabled: Bool) {
+        guard output >= 0, output < 16 else { return }
+        var mask = loudnessOutputMask
+        if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
+        setLoudnessMask(mask)
+    }
+
+    func fetchLoudnessMask() {
+        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
+            let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
+            DispatchQueue.main.async { self.loudnessOutputMask = val }
+        }
+    }
+
     // MARK: - Headphone Crossfeed
 
     func setCrossfeed(_ enabled: Bool) {
@@ -1901,7 +1925,7 @@ extension DSPViewModel {
         // A short or wrong-version payload means incompatible firmware - the
         // device is still connected, so don't disconnect (avoids a reconnect
         // loop); just record the version so the UI can react.
-        guard data.count >= WIRE_BULK_PARAMS_V18_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
+        guard data.count >= WIRE_BULK_PARAMS_V19_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
         }
@@ -1923,6 +1947,7 @@ extension DSPViewModel {
         let preamp: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_GLOBAL_OFFSET, as: Float.self) }
         let bypassVal = data[BULK_GLOBAL_OFFSET + 4] != 0
         let loudnessEn = data[BULK_GLOBAL_OFFSET + 5] != 0
+        let loudnessMask = UInt16(data[BULK_GLOBAL_OFFSET + 6]) | (UInt16(data[BULK_GLOBAL_OFFSET + 7]) << 8)
         let loudnessRef: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_GLOBAL_OFFSET + 8, as: Float.self) }
         let loudnessInt: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_GLOBAL_OFFSET + 12, as: Float.self) }
 
@@ -2109,6 +2134,7 @@ extension DSPViewModel {
             self.masterVolumeDB = masterVol
             self.bypass = bypassVal
             self.loudnessEnabled = loudnessEn
+            self.loudnessOutputMask = loudnessMask
             self.loudnessRefSPL = loudnessRef
             self.loudnessIntensity = loudnessInt
 

@@ -206,6 +206,7 @@ private enum ParamOffsetDecoder {
         case 16: return ("global.preamp_gain_db", fmtFloat(payload, suffix: " dB"))
         case 20: return ("global.bypass", fmtBool(payload))
         case 21: return ("global.loudness_enabled", fmtBool(payload))
+        case 22: return ("global.loudness_output_mask", fmtHex(payload))
         case 24: return ("global.loudness_ref_spl", fmtFloat(payload, suffix: " dB SPL"))
         case 28: return ("global.loudness_intensity_pct", fmtFloat(payload, suffix: "%"))
         default: break

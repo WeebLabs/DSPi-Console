@@ -40,6 +40,7 @@ struct PresetSnapshot: Equatable {
     let platformName: String
     let bypass: Bool
     let loudnessEnabled: Bool
+    let loudnessOutputMask: UInt16
     let loudnessRefSPL: Float
     let loudnessIntensity: Float
     let crossfeedEnabled: Bool
@@ -142,6 +143,9 @@ extension PresetSnapshot {
         // Loudness
         if old.loudnessEnabled != new.loudnessEnabled {
             changes.append(.init(category: "Loudness", description: "Loudness: \(new.loudnessEnabled ? "enabled" : "disabled")"))
+        }
+        if old.loudnessOutputMask != new.loudnessOutputMask {
+            changes.append(.init(category: "Loudness", description: "Loudness outputs: \(String(format: "0x%04X", old.loudnessOutputMask)) → \(String(format: "0x%04X", new.loudnessOutputMask))"))
         }
         if old.loudnessRefSPL != new.loudnessRefSPL {
             changes.append(.init(category: "Loudness", description: "Loudness ref SPL: \(formatVal(old.loudnessRefSPL)) → \(formatVal(new.loudnessRefSPL))"))

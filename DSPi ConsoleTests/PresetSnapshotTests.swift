@@ -35,6 +35,7 @@ final class PresetSnapshotTests: XCTestCase {
             platformName: platformName,
             bypass: bypass,
             loudnessEnabled: false,
+            loudnessOutputMask: LOUDNESS_DEFAULT_OUTPUT_MASK,
             loudnessRefSPL: 80,
             loudnessIntensity: 0,
             crossfeedEnabled: false,
