@@ -823,6 +823,31 @@ extension DSPViewModel {
         }
     }
 
+    /// Sets the crossfeed output-pair mask (V20+).  Bit p runs crossfeed on output
+    /// pair p (outputs 2p / 2p+1).  Sent as a single byte; the firmware clamps it to
+    /// the platform's valid pair bits and switches masks glitch-free (no recompute).
+    func setCrossfeedMask(_ mask: UInt8) {
+        self.crossfeedOutputMask = mask
+        var val = mask
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_CROSSFEED_OUTPUTS, value: 0, index: 0, data: data)
+    }
+
+    /// Toggles a single output pair's bit in the crossfeed mask and pushes it.
+    func setCrossfeedOutputPair(_ pair: Int, enabled: Bool) {
+        guard pair >= 0, pair < 8 else { return }
+        var mask = crossfeedOutputMask
+        if enabled { mask |= (UInt8(1) << pair) } else { mask &= ~(UInt8(1) << pair) }
+        setCrossfeedMask(mask)
+    }
+
+    func fetchCrossfeedMask() {
+        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_OUTPUTS, value: 0, index: 0, length: 1), !d.isEmpty {
+            let val = d[0]
+            DispatchQueue.main.async { self.crossfeedOutputMask = val }
+        }
+    }
+
     // MARK: - Volume Leveller
 
     func setLeveller(_ enabled: Bool) {
@@ -1955,6 +1980,8 @@ extension DSPViewModel {
         let cfEnabled = data[BULK_CROSSFEED_OFFSET] != 0
         let cfPreset = Int(data[BULK_CROSSFEED_OFFSET + 1])
         let cfITD = data[BULK_CROSSFEED_OFFSET + 2] != 0
+        // Output-pair mask lives in the former reserved byte at offset 3 (V20+).
+        let cfOutputMask = data[BULK_CROSSFEED_OFFSET + 3]
         let cfFreq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_CROSSFEED_OFFSET + 4, as: Float.self) }
         let cfFeed: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_CROSSFEED_OFFSET + 8, as: Float.self) }
 
@@ -2143,6 +2170,7 @@ extension DSPViewModel {
             self.crossfeedITD = cfITD
             self.crossfeedFreq = cfFreq
             self.crossfeedFeed = cfFeed
+            self.crossfeedOutputMask = cfOutputMask
 
             self.channelDelays = delays
 

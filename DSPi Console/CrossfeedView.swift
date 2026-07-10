@@ -21,7 +21,7 @@ class CrossfeedWindowController: NSObject, ObservableObject {
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.contentMinSize = NSSize(width: 380, height: 300)
-            window?.contentMaxSize = NSSize(width: 380, height: 520)
+            window?.contentMaxSize = NSSize(width: 380, height: 680)
         }
 
         window?.center()
@@ -64,6 +64,24 @@ struct CrossfeedView: View {
 
     private var isCustom: Bool { vm.crossfeedPreset == 3 }
 
+    /// Number of stereo output pairs (S/PDIF instances): 2 on RP2040, 4 on RP2350.
+    /// Pair p covers output slots 2p / 2p+1; the mono PDM sub is never crossfed.
+    private var pairCount: Int { vm.numOutputSlots }
+
+    /// The per-pair mask (cmds 0xFC/0xFD) shipped in wire format V20; hide the
+    /// selector on older firmware, which crossfeeds a fixed set of outputs.
+    private var showPairMask: Bool { vm.firmwareSupportsCrossfeedMask }
+
+    /// Mask with every valid pair bit set, for the "All pairs" preset.
+    private var allPairsMask: UInt8 { pairCount >= 8 ? 0xFF : UInt8((1 << pairCount) - 1) }
+
+    /// Display name for one channel of output pair `p` (left = 0, right = 1).
+    /// Falls back to a generic label before channel names are fetched.
+    private func pairChannelName(_ p: Int, right: Bool) -> String {
+        let idx = vm.chOut1 + 2 * p + (right ? 1 : 0)
+        return idx < vm.channelNames.count ? vm.channelNames[idx] : "Out \(2 * p + (right ? 1 : 0) + 1)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             headerSection
@@ -77,6 +95,13 @@ struct CrossfeedView: View {
                         .padding(.horizontal, 16)
 
                     Divider().padding(.horizontal, 16)
+
+                    if showPairMask {
+                        outputPairSection
+                            .padding(.horizontal, 16)
+
+                        Divider().padding(.horizontal, 16)
+                    }
 
                     presetSection
                         .padding(.horizontal, 16)
@@ -299,6 +324,73 @@ struct CrossfeedView: View {
                 .disabled(!vm.isDeviceConnected)
             }
         }
+    }
+
+    // MARK: - Output Pair Selection
+
+    private var outputPairSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("OUTPUT PAIRS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Menu {
+                    Button("All pairs") {
+                        vm.setCrossfeedMask(allPairsMask)
+                    }
+                    Button("Pair 1 only (Headphones)") {
+                        vm.setCrossfeedMask(0x01)
+                    }
+                    Button("None") {
+                        vm.setCrossfeedMask(0x00)
+                    }
+                } label: {
+                    Text("Presets")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(!vm.isDeviceConnected)
+            }
+
+            Text("Crossfeed only the stereo output pairs feeding headphones. Speaker pairs stay bit-accurate. The mono sub is never crossfed.")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 6) {
+                ForEach(0..<pairCount, id: \.self) { p in
+                    pairChip(
+                        pair: p,
+                        on: vm.crossfeedOutputMask & (UInt8(1) << p) != 0
+                    ) {
+                        vm.setCrossfeedOutputPair(p, enabled: vm.crossfeedOutputMask & (UInt8(1) << p) == 0)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pairChip(pair p: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("\(p + 1)")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .foregroundColor(on ? .white : .primary.opacity(0.6))
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("\(pairChannelName(p, right: false)) / \(pairChannelName(p, right: true))")
+        .disabled(!vm.isDeviceConnected)
+        .animation(.easeInOut(duration: 0.12), value: on)
     }
 }
 

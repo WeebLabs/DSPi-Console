@@ -722,6 +722,10 @@ class DSPViewModel: ObservableObject {
     @Published var crossfeedFreq: Float = 700.0
     @Published var crossfeedFeed: Float = 4.5
     @Published var crossfeedITD: Bool = true
+    /// Crossfeed output-pair mask (V20+): bit p runs crossfeed on output pair p
+    /// (outputs 2p / 2p+1).  Default 0x01 = pair 1 only (outputs 0/1).  Filter
+    /// settings stay global; the mask only selects which pairs are crossfed.
+    @Published var crossfeedOutputMask: UInt8 = CROSSFEED_DEFAULT_OUTPUT_MASK
 
     // Matrix mixer state (up to 8 inputs x 9 outputs).  Backing arrays are
     // always MAX_MATRIX_INPUTS rows so crosspoint bindings for inputs 2-7 are
@@ -1086,6 +1090,11 @@ class DSPViewModel: ObservableObject {
     /// Gate the mask UI on this so older firmware (which applies loudness to
     /// everything) never shows the selector.
     var firmwareSupportsLoudnessMask: Bool { firmwareWireFormatVersion >= 19 }
+
+    /// True when the firmware ships the crossfeed output-pair mask (wire V20+).
+    /// Older firmware crossfeeds a fixed set of outputs, so the pair selector is
+    /// hidden and the app leaves the mask alone.
+    var firmwareSupportsCrossfeedMask: Bool { firmwareWireFormatVersion >= 20 }
 
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
     /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
@@ -1500,6 +1509,7 @@ class DSPViewModel: ObservableObject {
             crossfeedFreq: crossfeedFreq,
             crossfeedFeed: crossfeedFeed,
             crossfeedITD: crossfeedITD,
+            crossfeedOutputMask: crossfeedOutputMask,
             levellerEnabled: levellerEnabled,
             levellerAmount: levellerAmount,
             levellerSpeed: levellerSpeed,

@@ -48,6 +48,7 @@ struct PresetSnapshot: Equatable {
     let crossfeedFreq: Float
     let crossfeedFeed: Float
     let crossfeedITD: Bool
+    let crossfeedOutputMask: UInt8
     let levellerEnabled: Bool
     let levellerAmount: Float
     let levellerSpeed: Int
@@ -169,6 +170,9 @@ extension PresetSnapshot {
         }
         if old.crossfeedITD != new.crossfeedITD {
             changes.append(.init(category: "Crossfeed", description: "Crossfeed ITD: \(new.crossfeedITD ? "enabled" : "disabled")"))
+        }
+        if old.crossfeedOutputMask != new.crossfeedOutputMask {
+            changes.append(.init(category: "Crossfeed", description: "Crossfeed output pairs: \(String(format: "0x%02X", old.crossfeedOutputMask)) → \(String(format: "0x%02X", new.crossfeedOutputMask))"))
         }
 
         // Volume Leveller

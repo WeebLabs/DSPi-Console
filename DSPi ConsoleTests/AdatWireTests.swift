@@ -20,7 +20,9 @@ final class AdatWireTests: XCTestCase {
     /// V18 grew WireLevellerConfig from 16 to 20 bytes (channel masks), shifting
     /// every section after the leveller by +4 and the flat layout 5872 -> 5876.
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 19)
+        // V20 repurposes the crossfeed reserved byte as output_pair_mask; sizes
+        // are unchanged from V19.
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 20)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
         XCTAssertEqual(BULK_ADAT_OFFSET, 5868)

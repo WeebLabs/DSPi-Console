@@ -42,6 +42,12 @@ let REQ_SET_CROSSFEED_FEED: UInt8      = 0x64
 let REQ_GET_CROSSFEED_FEED: UInt8      = 0x65
 let REQ_SET_CROSSFEED_ITD: UInt8       = 0x66
 let REQ_GET_CROSSFEED_ITD: UInt8       = 0x67
+// Crossfeed output-pair mask (V20): 1 byte, bit p = run crossfeed on output pair p
+// (outputs 2p / 2p+1).  Filter settings stay global; the mask only selects pairs.
+let REQ_SET_CROSSFEED_OUTPUTS: UInt8   = 0xFC
+let REQ_GET_CROSSFEED_OUTPUTS: UInt8   = 0xFD
+/// Factory-default crossfeed output-pair mask (pair 1 only, i.e. outputs 0/1).
+let CROSSFEED_DEFAULT_OUTPUT_MASK: UInt8 = 0x01
 
 // Matrix mixer request codes
 let REQ_SET_MATRIX_ROUTE: UInt8    = 0x70
@@ -145,9 +151,12 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// sizes are unchanged from V18.  V18 grew WireLevellerConfig from 16 to 20 bytes
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
+/// V20 repurposes WireCrossfeedParams' reserved byte (BULK_CROSSFEED_OFFSET + 3)
+/// as the crossfeed output_pair_mask; struct and payload sizes are unchanged.
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 19
-/// Full V19 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+let WIRE_FORMAT_VERSION: Int            = 20
+/// Full V20 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Unchanged from V19 - the crossfeed mask reuses a reserved byte.
 let BULK_PARAMS_SIZE: UInt16            = 5876
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 

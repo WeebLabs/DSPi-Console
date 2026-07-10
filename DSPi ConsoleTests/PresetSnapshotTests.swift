@@ -43,6 +43,7 @@ final class PresetSnapshotTests: XCTestCase {
             crossfeedFreq: 700,
             crossfeedFeed: 0,
             crossfeedITD: false,
+            crossfeedOutputMask: CROSSFEED_DEFAULT_OUTPUT_MASK,
             levellerEnabled: false,
             levellerAmount: 0,
             levellerSpeed: 0,
