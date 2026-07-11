@@ -10,6 +10,7 @@ import Combine
 enum PinConsumer: Equatable {
     case output(Int)    // slot or PDM index — indexes vm.outputPins[]
     case i2sBck         // also covers LRCLK (BCK + 1)
+    case i2sBckSlave    // slave-mode BCK pair (LRCLK = BCK + 1); reserved only in SPLIT clock-pin mode
     case mck
     case spdifRx(Int)   // S/PDIF RX data pin, per input index (0..2)
     case i2sRx(Int)     // I2S input data pin, per stereo pair (0..3)
@@ -877,6 +878,16 @@ class DSPViewModel: ObservableObject {
     @Published var i2sClockMode: UInt8 = 0                      // 0=master, 1=slave (live)
     @Published var i2sSlaveStatus: I2sSlaveStatus = I2sSlaveStatus()
 
+    // I2S clock-pin mode (firmware clock_pins_spec.md).  UNIFIED (default) shares
+    // one BCK/LRCLK pair for both clock roles; SPLIT gives slave clocking its own
+    // pair (`i2sBckPinSlave`, LRCLK = +1), reserved only while SPLIT is active.
+    // `i2sClockPinModeSupported` is false on firmware that STALLs 0xFF / reports
+    // clock_pin_mode_p1 == 0 in bulk.  Default slave pair 26/27 (RP2350) or 12/13
+    // (RP2040); the live value is read back from the device (0xC3 role 1).
+    @Published var i2sClockPinModeSupported: Bool = false
+    @Published var i2sClockPinMode: UInt8 = 0                   // 0=unified, 1=split
+    @Published var i2sBckPinSlave: UInt8 = 26                   // slave-mode BCK; LRCLK = +1
+
     /// True when the device is actively running in the I2S clock-slave role
     /// (mode is slave AND I2S is the selected input source).  Gates the
     /// rate/MCK relabelling in the I2S settings UI.
@@ -1285,6 +1296,13 @@ class DSPViewModel: ObservableObject {
         if consumer != .i2sBck {
             if pin == i2sBckPin { return "I2S BCK" }
             if pin == i2sBckPin &+ 1 { return "I2S LRCLK" }
+        }
+        // Slave-mode clock pair: reserved only in SPLIT clock-pin mode.  In
+        // UNIFIED the pair is dormant and constrains nothing (mirrors the
+        // firmware i2s_clock_pin_claimed helper - clock_pins_spec.md §1).
+        if consumer != .i2sBckSlave && i2sClockPinMode == I2S_CLOCK_PIN_MODE_SPLIT {
+            if pin == i2sBckPinSlave { return "I2S Slave BCK" }
+            if pin == i2sBckPinSlave &+ 1 { return "I2S Slave LRCLK" }
         }
         if consumer != .mck && pin == mckPin { return "I2S MCK" }
         // S/PDIF RX pins.  Input 1 is always reserved; the optional inputs 2/3

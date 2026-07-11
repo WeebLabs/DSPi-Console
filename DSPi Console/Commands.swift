@@ -1161,22 +1161,34 @@ extension DSPViewModel {
         }
     }
 
-    /// Set BCK GPIO pin. Requires all slots to be S/PDIF. LRCLK = BCK + 1.
+    /// Set a BCK GPIO pin (LRCLK = BCK + 1).  `role` selects the master/unified
+    /// pair (0, the default and legacy behavior) or the slave pair (1, SPLIT
+    /// clock-pin mode only; storable any time while dormant).  wValue packs the
+    /// role in its high byte.  The master pair requires all slots to be S/PDIF
+    /// when it is the one clocking outputs (clock_pins_spec.md §3).
     @discardableResult
-    func setI2SBckPin(_ pin: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_I2S_BCK_PIN, value: UInt16(pin), index: 2, length: 1) {
+    func setI2SBckPin(_ pin: UInt8, role: UInt8 = I2S_BCK_ROLE_MASTER) -> UInt8 {
+        let wValue = (UInt16(role) << 8) | UInt16(pin)
+        if let d = usb.getControlRequest(request: REQ_SET_I2S_BCK_PIN, value: wValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
-                DispatchQueue.main.async { self.i2sBckPin = pin }
+                DispatchQueue.main.async {
+                    if role == I2S_BCK_ROLE_SLAVE { self.i2sBckPinSlave = pin }
+                    else { self.i2sBckPin = pin }
+                }
             }
             return status
         }
         return 0xFF
     }
 
-    func fetchI2SBckPin() {
-        if let d = usb.getControlRequest(request: REQ_GET_I2S_BCK_PIN, value: 0, index: 2, length: 1) {
-            DispatchQueue.main.async { self.i2sBckPin = d[0] }
+    func fetchI2SBckPin(role: UInt8 = I2S_BCK_ROLE_MASTER) {
+        if let d = usb.getControlRequest(request: REQ_GET_I2S_BCK_PIN, value: UInt16(role), index: 2, length: 1) {
+            let pin = d[0]
+            DispatchQueue.main.async {
+                if role == I2S_BCK_ROLE_SLAVE { self.i2sBckPinSlave = pin }
+                else { self.i2sBckPin = pin }
+            }
         }
     }
 
@@ -1452,6 +1464,7 @@ extension DSPViewModel {
         fetchI2SInputChannels()
         fetchInputRate()
         fetchI2SClockMode()
+        fetchI2SClockPinMode()
     }
 
     /// Reads the active I2S input channel count (2/4/6/8).  STALLs on firmware
@@ -1575,6 +1588,45 @@ extension DSPViewModel {
             self.i2sSlaveStatus = status
             self.i2sClockMode = status.clockMode
         }
+    }
+
+    // MARK: - I2S Clock-Pin Mode (Unified / Split)
+
+    /// Reads the live I2S clock-pin mode (0=unified, 1=split) via
+    /// REQ_GET_I2S_CLOCK_PIN_MODE (0xFF).  STALLs on firmware that predates the
+    /// feature, leaving `i2sClockPinModeSupported` false so the picker hides
+    /// itself.  On success it also reads the stored slave-pair BCK pin (role 1)
+    /// so the picker and pin-conflict checks reflect it even while dormant.
+    func fetchI2SClockPinMode() {
+        guard let d = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
+              d.count >= 1 else {
+            DispatchQueue.main.async { self.i2sClockPinModeSupported = false }
+            return
+        }
+        let mode = d[0]
+        DispatchQueue.main.async {
+            self.i2sClockPinModeSupported = true
+            self.i2sClockPinMode = mode
+        }
+        fetchI2SBckPin(role: I2S_BCK_ROLE_SLAVE)
+    }
+
+    /// Selects the I2S clock-pin mode (0=unified, 1=split) via
+    /// REQ_SET_I2S_CLOCK_PIN_MODE (0xFE), IN transfer returning a PIN_CONFIG_*
+    /// status.  Unlike the clock MODE (0x88) this applies synchronously - the
+    /// status byte is authoritative (only the hardware restart is deferred).
+    /// Part of the output-config block, so Settings callers must mark it dirty
+    /// (beginOutputEdit) for the save flow to pick it up.
+    @discardableResult
+    func setI2SClockPinMode(_ mode: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_I2S_CLOCK_PIN_MODE, value: UInt16(mode), index: 2, length: 1) {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async { self.i2sClockPinMode = mode }
+            }
+            return status
+        }
+        return 0xFF
     }
 
     // MARK: - External Control Interfaces (UART / I2C target)
@@ -2121,6 +2173,12 @@ extension DSPViewModel {
         let mckPinVal = data[BULK_I2S_OFFSET + 5]
         let mckEn = data[BULK_I2S_OFFSET + 6] != 0
         let mckMult = data[BULK_I2S_OFFSET + 7] == 1 ? 256 : 128
+        // Clock-pin mode + slave pair claim former reserved bytes (+8/+9), wire
+        // version unchanged (18).  clock_pin_mode_p1 is +1 encoded (0=absent on
+        // firmware without the feature - the feature-detection signal); slave
+        // BCK is a plain GPIO (0=absent → keep the live default).
+        let clockPinModeP1 = data[BULK_I2S_OFFSET + 8]
+        let bckPinSlaveRaw = data[BULK_I2S_OFFSET + 9]
 
         // --- Volume Leveller (offset 4648) ---
         let lvlEnabled = data[BULK_LEVELLER_OFFSET] != 0
@@ -2242,6 +2300,14 @@ extension DSPViewModel {
             self.mckPin = mckPinVal
             self.mckEnabled = mckEn
             self.mckMultiplier = mckMult
+            // Clock-pin mode: a nonzero +1-encoded value is the feature-detection
+            // signal (older firmware leaves the reserved byte 0).  Slave BCK 0
+            // means "unset"; keep the live default in that case.
+            if clockPinModeP1 != 0 {
+                self.i2sClockPinModeSupported = true
+                self.i2sClockPinMode = clockPinModeP1 - 1
+            }
+            if bckPinSlaveRaw != 0 { self.i2sBckPinSlave = bckPinSlaveRaw }
 
             self.levellerEnabled = lvlEnabled
             self.levellerAmount = lvlAmount
@@ -2852,6 +2918,30 @@ extension DSPViewModel {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.fetchI2SSlaveStatus()
             }
+            return
+        }
+
+        // i2s_config.bck_pin (BULK_I2S_OFFSET + 4, 1 byte).  Fired when 0xC2
+        // role 0 re-routes the master/unified BCK pair, on bulk, and on preset.
+        if off == BULK_I2S_OFFSET + 4 && sz == 1 && payload.count >= 1 {
+            if self.i2sBckPin != payload[0] { self.i2sBckPin = payload[0] }
+            return
+        }
+
+        // i2s_config.clock_pin_mode_p1 (BULK_I2S_CLOCK_PIN_MODE_OFFSET, 1 byte,
+        // +1 encoded: 1=unified, 2=split).  Fired when 0xFE applies, on bulk, and
+        // on preset load.  0xFE applies synchronously so this is a confirmation.
+        if off == BULK_I2S_CLOCK_PIN_MODE_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            let mode = payload[0] - 1
+            self.i2sClockPinModeSupported = true
+            if self.i2sClockPinMode != mode { self.i2sClockPinMode = mode }
+            return
+        }
+
+        // i2s_config.bck_pin_slave (BULK_I2S_BCK_PIN_SLAVE_OFFSET, 1 byte, plain
+        // GPIO).  Fired when 0xC2 role 1 moves the slave pair, on bulk, preset.
+        if off == BULK_I2S_BCK_PIN_SLAVE_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            if self.i2sBckPinSlave != payload[0] { self.i2sBckPinSlave = payload[0] }
             return
         }
 

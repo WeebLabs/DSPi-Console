@@ -507,6 +507,8 @@ struct OutputConfigSnapshot: Equatable {
     var i2sInputChannels: Int
     var i2sInputRateHz: UInt32
     var i2sClockMode: UInt8
+    var i2sClockPinMode: UInt8
+    var i2sBckPinSlave: UInt8
     var adatEnabled: Bool
     var adatPin: UInt8
 }
@@ -557,6 +559,8 @@ final class SettingsSaveCoordinator: ObservableObject {
             i2sInputChannels: vm.i2sInputChannels,
             i2sInputRateHz: vm.i2sInputRateHz,
             i2sClockMode: vm.i2sClockMode,
+            i2sClockPinMode: vm.i2sClockPinMode,
+            i2sBckPinSlave: vm.i2sBckPinSlave,
             adatEnabled: vm.adatEnabled,
             adatPin: vm.adatPin
         )
@@ -685,6 +689,16 @@ final class SettingsSaveCoordinator: ObservableObject {
                 }
                 if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
                 if vm.i2sClockMode != base.i2sClockMode { vm.setI2SClockMode(base.i2sClockMode) }
+                // Clock-pin mode: restore the slave pair first (a dormant store,
+                // accepted any time) so re-entering SPLIT finds it valid.
+                if vm.i2sClockPinModeSupported {
+                    if vm.i2sBckPinSlave != base.i2sBckPinSlave {
+                        _ = vm.setI2SBckPin(base.i2sBckPinSlave, role: I2S_BCK_ROLE_SLAVE)
+                    }
+                    if vm.i2sClockPinMode != base.i2sClockPinMode {
+                        _ = vm.setI2SClockPinMode(base.i2sClockPinMode)
+                    }
+                }
                 // ADAT: restore the data pin first (re-routes under a muted
                 // restart if enabled), then the enable state to match baseline.
                 if vm.adatSupported {
@@ -4165,6 +4179,69 @@ struct HardwareSettingsTab: View {
         }
     }
 
+    /// Change the I2S clock-pin mode (unified/split) via 0xFE, marking the
+    /// output config dirty and mapping the PIN_CONFIG_* status into the status
+    /// row.  On rejection we re-GET so the picker snaps back to the live mode.
+    private func setI2SClockPinMode(_ mode: UInt8) {
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setI2SClockPinMode(mode)
+            DispatchQueue.main.async {
+                switch status {
+                case PIN_CONFIG_SUCCESS:
+                    statusMessage = mode == I2S_CLOCK_PIN_MODE_SPLIT
+                        ? "Separate clock pins - slave uses GPIO \(vm.i2sBckPinSlave)/\(vm.i2sBckPinSlave &+ 1)"
+                        : "Shared clock pins for master and slave"
+                    statusIsError = false
+                case PIN_CONFIG_PIN_IN_USE:
+                    statusMessage = "Slave clock pair GPIO \(vm.i2sBckPinSlave)/\(vm.i2sBckPinSlave &+ 1) conflicts with another function - move it first"
+                    statusIsError = true
+                    vm.fetchI2SClockPinMode()
+                case PIN_CONFIG_OUTPUT_ACTIVE:
+                    statusMessage = "Switch I2S output slots to S/PDIF before changing clock pins"
+                    statusIsError = true
+                    vm.fetchI2SClockPinMode()
+                default:
+                    statusMessage = "Failed to change clock pins"
+                    statusIsError = true
+                    vm.fetchI2SClockPinMode()
+                }
+            }
+        }
+    }
+
+    /// Move the slave-mode BCK pair via 0xC2 role 1, marking the output config
+    /// dirty and mapping the PIN_CONFIG_* status into the status row.
+    private func setI2SSlaveBckPin(_ pin: UInt8) {
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setI2SBckPin(pin, role: I2S_BCK_ROLE_SLAVE)
+            DispatchQueue.main.async {
+                switch status {
+                case PIN_CONFIG_SUCCESS:
+                    statusMessage = "Slave BCK pin set to GPIO \(pin), LRCLK = GPIO \(pin &+ 1)"
+                    statusIsError = false
+                case PIN_CONFIG_PIN_IN_USE:
+                    statusMessage = "GPIO \(pin) or \(pin &+ 1) is already in use"
+                    statusIsError = true
+                    vm.fetchI2SBckPin(role: I2S_BCK_ROLE_SLAVE)
+                case PIN_CONFIG_OUTPUT_ACTIVE:
+                    statusMessage = "Can't move the slave clock pins while an I2S output is active"
+                    statusIsError = true
+                    vm.fetchI2SBckPin(role: I2S_BCK_ROLE_SLAVE)
+                case PIN_CONFIG_INVALID_PIN:
+                    statusMessage = "GPIO \(pin) isn't available on this device"
+                    statusIsError = true
+                    vm.fetchI2SBckPin(role: I2S_BCK_ROLE_SLAVE)
+                default:
+                    statusMessage = "Failed to set slave BCK pin"
+                    statusIsError = true
+                    vm.fetchI2SBckPin(role: I2S_BCK_ROLE_SLAVE)
+                }
+            }
+        }
+    }
+
     /// GPIO options for the ADAT data pin: the standard valid pins plus the
     /// platform default (GPIO 12, which the shared list omits), de-duplicated
     /// and sorted.  Pins owned by another consumer are filtered out, but the
@@ -4302,6 +4379,7 @@ struct HardwareSettingsTab: View {
                     vm.fetchOutputSlotType(slot: slot)
                 }
                 vm.fetchI2SBckPin()
+                vm.fetchI2SClockPinMode()
                 vm.fetchMckEnable()
                 vm.fetchMckPin()
                 vm.fetchMckMultiplier()
@@ -4382,6 +4460,74 @@ struct HardwareSettingsTab: View {
                     .labelsHidden()
                     .fixedSize()
                     .disabled(vm.anySlotIsI2S)
+                }
+
+                // Clock-pin mode (unified/split) - clock_pins_spec.md.  Shared
+                // uses the BCK pair above for both master and slave clocking;
+                // Separate routes slave clocking to its own pair (below), so a
+                // board can wire both roles at once.  Hidden on firmware that
+                // predates the feature.
+                if vm.i2sClockPinModeSupported {
+                    HStack {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Clock Pins")
+                                .font(.body)
+                            Text("Shared: master and slave clocking use the BCK pair above. Separate: slave clocking uses its own pair.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.i2sClockPinMode },
+                            set: { setI2SClockPinMode($0) }
+                        )) {
+                            Text("Shared").tag(I2S_CLOCK_PIN_MODE_UNIFIED)
+                            Text("Separate").tag(I2S_CLOCK_PIN_MODE_SPLIT)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
+
+                    // Slave-pair BCK picker.  Editable only in SPLIT; shown as
+                    // stored-but-inactive in UNIFIED (spec §7).  Candidates need
+                    // both BCK and LRCLK (pin+1) free, and the current selection
+                    // is always kept so the picker renders it.
+                    HStack {
+                        Image(systemName: "waveform.path.badge.plus")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Slave BCK Pin")
+                                .font(.body)
+                            Text(vm.i2sClockPinMode == I2S_CLOCK_PIN_MODE_SPLIT
+                                 ? "LRCK: GPIO \(vm.i2sBckPinSlave &+ 1) (BCK + 1)"
+                                 : "Stored but inactive while clock pins are shared.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.i2sBckPinSlave },
+                            set: { setI2SSlaveBckPin($0) }
+                        )) {
+                            ForEach(Self.validPins.filter { p in
+                                p == vm.i2sBckPinSlave ||
+                                (pinInUseBy(p, excluding: .i2sBckSlave) == nil
+                                 && pinInUseBy(p &+ 1, excluding: .i2sBckSlave) == nil)
+                            }, id: \.self) { pin in
+                                Text("GPIO \(pin)").tag(pin)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .disabled(vm.i2sClockPinMode != I2S_CLOCK_PIN_MODE_SPLIT)
+                    }
                 }
 
                 //Divider()

@@ -76,8 +76,13 @@ let REQ_GET_PLATFORM: UInt8        = 0x7F
 // I2S output configuration request codes
 let REQ_SET_OUTPUT_TYPE: UInt8     = 0xC0
 let REQ_GET_OUTPUT_TYPE: UInt8     = 0xC1
-let REQ_SET_I2S_BCK_PIN: UInt8    = 0xC2
-let REQ_GET_I2S_BCK_PIN: UInt8    = 0xC3
+let REQ_SET_I2S_BCK_PIN: UInt8    = 0xC2   // IN: wValue = (role<<8)|GPIO, returns PIN_CONFIG_*
+let REQ_GET_I2S_BCK_PIN: UInt8    = 0xC3   // IN 1 byte: wValue = role (0=master/1=slave pair)
+
+/// Role byte carried in the REQ_SET/GET_I2S_BCK_PIN wValue high byte
+/// (clock_pins_spec.md §3).  Legacy hosts send a bare GPIO (role 0 implicit).
+let I2S_BCK_ROLE_MASTER: UInt8    = 0      // master/unified clock pair
+let I2S_BCK_ROLE_SLAVE: UInt8     = 1      // slave clock pair (SPLIT mode only)
 let REQ_SET_MCK_ENABLE: UInt8     = 0xC4
 let REQ_GET_MCK_ENABLE: UInt8     = 0xC5
 let REQ_SET_MCK_PIN: UInt8        = 0xC6
@@ -172,6 +177,11 @@ let BULK_PINS_OFFSET: Int               = 816
 let BULK_EQ_OFFSET: Int                 = 824   // eq[17][12]
 let BULK_CHANNEL_NAMES_OFFSET: Int      = 4088  // names[17][32]
 let BULK_I2S_OFFSET: Int                = 4632
+/// Byte +8 within WireI2SConfig: clock_pin_mode_p1 (+1 encoded: 0=absent,
+/// 1=unified, 2=split).  Claims a former reserved byte; wire version unchanged.
+let BULK_I2S_CLOCK_PIN_MODE_OFFSET: Int = 4640
+/// Byte +9 within WireI2SConfig: bck_pin_slave GPIO (0=absent; LRCLK = +1).
+let BULK_I2S_BCK_PIN_SLAVE_OFFSET: Int  = 4641
 let BULK_LEVELLER_OFFSET: Int           = 4648  // WireLevellerConfig, 20 bytes (V18: +detector/apply masks at +16/+17)
 let BULK_PREAMP_OFFSET: Int             = 4668  // preamp_db[8]
 let BULK_MASTER_VOLUME_OFFSET: Int      = 4700
@@ -320,6 +330,18 @@ let REQ_GET_I2S_SLAVE_STATUS: UInt8 = 0x8A   // IN 16 bytes: I2sSlaveStatusPacke
 
 let I2S_CLOCK_MODE_MASTER: UInt8    = 0
 let I2S_CLOCK_MODE_SLAVE: UInt8     = 1
+
+// I2S clock-pin mode (firmware clock_pins_spec.md).  UNIFIED (default, legacy)
+// shares one BCK/LRCLK pair for both master and slave clocking; SPLIT routes
+// the slave role to its own pair (`i2sBckPinSlave`), so a board can wire both
+// roles to separate connectors.  The slave pair is dormant (constrains nothing)
+// in UNIFIED mode; in SPLIT both pairs are reserved.  Set/read via 0xFE/0xFF;
+// the slave pair GPIO is set/read via REQ_SET/GET_I2S_BCK_PIN with role 1.
+let REQ_SET_I2S_CLOCK_PIN_MODE: UInt8 = 0xFE  // IN 1 byte: wValue 0=unified/1=split, returns PIN_CONFIG_*
+let REQ_GET_I2S_CLOCK_PIN_MODE: UInt8 = 0xFF  // IN 1 byte: live mode (0/1)
+
+let I2S_CLOCK_PIN_MODE_UNIFIED: UInt8 = 0
+let I2S_CLOCK_PIN_MODE_SPLIT: UInt8   = 1
 
 // DAC hardware-mute request codes (firmware V10+ wire format).  SET takes
 // a 16-byte DacHwMuteConfig OUT payload; GET returns 16 bytes; TEST is a
