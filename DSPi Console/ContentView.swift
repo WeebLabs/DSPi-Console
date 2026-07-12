@@ -15,7 +15,11 @@ enum SidebarSelection: Hashable {
 /// confirmed support.  The first-order all-pass (wire V13) and first-order
 /// shelves (wire V14) are gated on the bulk wire-format version, since the
 /// firmware release version did not advance with them.
-fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
+///
+/// `includeLinkwitz` is false for input channels: the Linkwitz Transform is a
+/// driver/sealed-box bass-extension tool that only makes sense on the outputs
+/// feeding physical speakers, so it's hidden from input EQ banks entirely.
+fileprivate func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = true) -> [FilterType] {
     var filters: [FilterType] = FilterType.allCases.filter { !$0.isCrossover }
 
     if vm.firmwareSupportsNotch == false {
@@ -34,7 +38,7 @@ fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
         filters = filters.filter { $0 != .lowShelf1 && $0 != .highShelf1 }
     }
 
-    if vm.firmwareSupportsLinkwitzTransform == false {
+    if vm.firmwareSupportsLinkwitzTransform == false || includeLinkwitz == false {
         filters = filters.filter { $0 != .linkwitzTransform }
     }
     return filters
@@ -739,7 +743,7 @@ struct ContentView: View {
                             FilterListView(
                                 bands: vm.channelData[ch] ?? [],
                                 channelId: ch,
-                                availableTypes: availableFilterTypes(vm: vm),
+                                availableTypes: availableFilterTypes(vm: vm, includeLinkwitz: false),
                                 bypassSupported: vm.firmwareSupportsBandBypass,
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: ch, band: band, p: params)
