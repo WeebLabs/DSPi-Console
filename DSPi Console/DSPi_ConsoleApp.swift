@@ -4476,7 +4476,10 @@ struct HardwareSettingsTab: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("Clock Pins")
                                 .font(.body)
-                            Text("Shared: master and slave clocking use the BCK pair above. Separate: slave clocking uses its own pair.")
+                            Text("Unified: Master and Slave modes share pins.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text("Split: Different pins for Master and Slave modes.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
@@ -4485,8 +4488,8 @@ struct HardwareSettingsTab: View {
                             get: { vm.i2sClockPinMode },
                             set: { setI2SClockPinMode($0) }
                         )) {
-                            Text("Shared").tag(I2S_CLOCK_PIN_MODE_UNIFIED)
-                            Text("Separate").tag(I2S_CLOCK_PIN_MODE_SPLIT)
+                            Text("Unified").tag(I2S_CLOCK_PIN_MODE_UNIFIED)
+                            Text("Split").tag(I2S_CLOCK_PIN_MODE_SPLIT)
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
@@ -4804,9 +4807,29 @@ struct HardwareSettingsTab: View {
                             Picker("", selection: Binding(
                                 get: { vm.i2sClockMode },
                                 set: { newMode in
-                                    SettingsSaveCoordinator.shared.beginOutputEdit()
-                                    DispatchQueue.global(qos: .userInitiated).async {
-                                        vm.setI2SClockMode(newMode)
+                                    guard newMode != vm.i2sClockMode else { return }
+                                    let apply = {
+                                        SettingsSaveCoordinator.shared.beginOutputEdit()
+                                        DispatchQueue.global(qos: .userInitiated).async {
+                                            vm.setI2SClockMode(newMode)
+                                        }
+                                    }
+                                    // Switching the input clock role restarts the I2S
+                                    // clocking, which can momentarily glitch a connected
+                                    // I2S DAC.  Warn before doing so while any output slot
+                                    // is driving an I2S DAC.
+                                    if vm.anySlotIsI2S {
+                                        let alert = NSAlert()
+                                        alert.messageText = "Change I2S clock mode?"
+                                        alert.informativeText = "One or more I2S outputs are active. Switching between Master and Slave modes may cause sustained loud noises to be emitted by the connected I2S DAC if wiring has not been adjusted."
+                                        alert.alertStyle = .critical
+                                        alert.addButton(withTitle: "Change Clock Mode")
+                                        alert.addButton(withTitle: "Cancel")
+                                        if alert.runModal() == .alertFirstButtonReturn {
+                                            apply()
+                                        }
+                                    } else {
+                                        apply()
                                     }
                                 }
                             )) {
