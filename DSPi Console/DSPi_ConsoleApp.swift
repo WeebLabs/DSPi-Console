@@ -4479,7 +4479,7 @@ struct HardwareSettingsTab: View {
                             Text("Unified: Master and Slave modes share pins.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
-                            Text("Split: Different pins for Master and Slave modes.")
+                            Text("Split: Separate pins for Master and Slave modes.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
