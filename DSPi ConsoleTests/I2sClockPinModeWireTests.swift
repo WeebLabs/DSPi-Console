@@ -24,7 +24,9 @@ final class I2sClockPinModeWireTests: XCTestCase {
     /// (+8 mode, +9 slave BCK); the wire version and total size are unchanged
     /// (spec §5).
     func testWireOffsets() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 21)
+        // V22 (Linkwitz Transform) reuses WireBandParams reserved bytes as qp;
+        // this section's offsets and the total size are unchanged from V21.
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 22)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
         XCTAssertEqual(BULK_I2S_CLOCK_PIN_MODE_OFFSET, BULK_I2S_OFFSET + 8)
         XCTAssertEqual(BULK_I2S_BCK_PIN_SLAVE_OFFSET, BULK_I2S_OFFSET + 9)

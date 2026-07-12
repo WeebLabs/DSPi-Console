@@ -9,6 +9,10 @@ struct SnapshotFilterParams: Equatable {
     let q: Float
     let gain: Float
     let bypass: Bool
+    // Linkwitz Transform target Q; captured so an LT qp edit marks the preset
+    // dirty.  Normalized to 0 for non-LT bands so two bands that differ only in
+    // an ignored qp compare equal.
+    let qp: Float
 
     init(from fp: FilterParams) {
         self.type = fp.type
@@ -16,6 +20,7 @@ struct SnapshotFilterParams: Equatable {
         self.q = fp.q
         self.gain = fp.gain
         self.bypass = fp.bypass
+        self.qp = fp.type == .linkwitzTransform ? fp.qp : 0
     }
 }
 

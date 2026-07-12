@@ -1436,6 +1436,12 @@ struct FilterRowView: View {
     /// always wire this when bypassSupported is true.
     var onBypassToggle: ((Bool) -> Void)? = nil
 
+    /// Presentation state for the Linkwitz Transform parameter popover.  LT has
+    /// four parameters (f0, Q0, fp, Qp) that don't fit the shared 3-column row,
+    /// so they live in a popover opened from a compact button instead of
+    /// widening the table.
+    @State private var showLinkwitzPanel = false
+
     var isActive: Bool { params.type != .flat }
     var isBypassed: Bool { params.bypass }
 
@@ -1487,6 +1493,60 @@ struct FilterRowView: View {
         // shapes with multiple orders (shelves, all-pass) open a submenu of
         // their order variants (e.g. "Low Shelf" ▸ "6 dB" / "12 dB").  The
         // button face shows the full name of the selected type.
+        // Type name picker (left-click opens the shape menu).
+        typeNameMenu
+
+        // Controls
+        if isActive {
+            if params.type.isLinkwitzTransform {
+                linkwitzControls
+                    .opacity(isBypassed ? 0.45 : 1.0)
+            } else {
+                HStack(spacing: 12) {
+                    // Freq
+                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
+                        var p = params; p.freq = $0; onChange(p)
+                    }
+
+                    // Gain
+                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf
+                        || params.type == .lowShelf1 || params.type == .highShelf1 {
+                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
+                            var p = params; p.gain = $0; onChange(p)
+                        }
+                    } else {
+                        Spacer().frame(width: 60 + 24) // Placeholder
+                    }
+
+                    // Q (hidden for crossover and first-order PEQ types — firmware
+                    // ignores Q on those).
+                    if params.type.isCrossover || params.type.isFirstOrderPEQ {
+                        Spacer().frame(width: 50 + 24)
+                    } else {
+                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
+                            var p = params; p.q = $0; onChange(p)
+                        }
+                    }
+                }
+                .opacity(isBypassed ? 0.45 : 1.0)
+            }
+        }
+    }
+
+    /// Implied DC boost of the Linkwitz Transform, `40 x log10(f0/fp)` dB.
+    /// Positive when fp < f0 (bass extension).  Real low-frequency gain that
+    /// consumes driver excursion and amp headroom - surfaced so the user can
+    /// apply a matching preamp cut.  See peq_filters.md §3.3.
+    private var linkwitzDCBoostDB: Float {
+        guard params.gain > 0, params.freq > 0 else { return 0 }
+        return 40 * log10(params.freq / params.gain)
+    }
+
+    /// The filter-type name picker (a hierarchical Menu).  Extracted so the
+    /// Linkwitz Transform row can hang a right-click gesture and popover off it
+    /// without duplicating the styling.
+    @ViewBuilder
+    private var typeNameMenu: some View {
         Menu {
             peqTypeMenuItems
         } label: {
@@ -1513,36 +1573,103 @@ struct FilterRowView: View {
         }
         .padding(.leading, -15)
         .opacity(isBypassed || !isActive ? 0.45 : 1.0)
+    }
 
-        // Controls
-        if isActive {
-            HStack(spacing: 12) {
-                // Freq
-                ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
-                    var p = params; p.freq = $0; onChange(p)
-                }
+    /// LT row controls: a single config icon in the Freq column that opens the
+    /// parameter popover.  No numeric columns, so the table stays clean.
+    @ViewBuilder
+    private var linkwitzControls: some View {
+        HStack(spacing: 12) {
+            Button {
+                showLinkwitzPanel = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(width: 80 + 24, alignment: .center)
+            .help("Edit Linkwitz Transform parameters (f0, Q0, fp, Qp)")
+            .popover(isPresented: $showLinkwitzPanel, arrowEdge: .bottom) {
+                linkwitzPopover
+            }
+        }
+    }
 
-                // Gain
-                if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf
-                    || params.type == .lowShelf1 || params.type == .highShelf1 {
-                    ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
-                        var p = params; p.gain = $0; onChange(p)
+    /// The Linkwitz Transform parameter panel: driver alignment (f0, Q0) mapped
+    /// to a target alignment (fp, Qp), with the implied DC boost called out.
+    @ViewBuilder
+    private var linkwitzPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Linkwitz Transform")
+                    .font(.headline)
+                Text("Re-align a sealed woofer's rolloff from the driver's (f0, Q0) to a target (fp, Qp).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Driver").font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                    linkwitzField(label: "f0", unit: "Hz", value: params.freq, width: 64, scrollStep: 1, minValue: 10, decimals: 1) {
+                        var p = params; p.freq = $0; onChange(p)
                     }
-                } else {
-                    Spacer().frame(width: 60 + 24) // Placeholder
-                }
-
-                // Q (hidden for crossover and first-order PEQ types — firmware
-                // ignores Q on those).
-                if params.type.isCrossover || params.type.isFirstOrderPEQ {
-                    Spacer().frame(width: 50 + 24)
-                } else {
-                    ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
+                    linkwitzField(label: "Q0", unit: "", value: params.q, width: 56, scrollStep: 0.01, minValue: 0.1, decimals: 3) {
                         var p = params; p.q = $0; onChange(p)
                     }
                 }
+                GridRow {
+                    Text("Target").font(.caption.weight(.semibold)).foregroundColor(.secondary)
+                    linkwitzField(label: "fp", unit: "Hz", value: params.gain, width: 64, scrollStep: 1, minValue: 10, decimals: 1) {
+                        var p = params; p.gain = $0; onChange(p)
+                    }
+                    linkwitzField(label: "Qp", unit: "", value: params.qp, width: 56, scrollStep: 0.01, minValue: 0.1, decimals: 3) {
+                        var p = params; p.qp = $0; onChange(p)
+                    }
+                }
             }
-            .opacity(isBypassed ? 0.45 : 1.0)
+
+            Divider()
+
+            let boost = linkwitzDCBoostDB
+            HStack(spacing: 6) {
+                Text("DC boost")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(String(format: "%+.1f dB", boost))
+                    .font(.callout.monospacedDigit().weight(.semibold))
+                    .foregroundColor(boost > 15 ? .orange : .primary)
+                if boost > 15 {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+            }
+            Text("Real low-frequency gain (40 x log10(f0/fp)). It uses driver excursion and amp headroom - reduce preamp or master volume to match.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 300)
+    }
+
+    /// A labelled numeric field for the LT popover: caption label, the value
+    /// field, then an optional unit - fixed widths so the two rows align.
+    @ViewBuilder
+    private func linkwitzField(label: String, unit: String, value: Float, width: CGFloat,
+                               scrollStep: Float, minValue: Float, decimals: Int,
+                               onCommit: @escaping (Float) -> Void) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.caption.monospacedDigit())
+                .foregroundColor(.secondary)
+                .frame(width: 20, alignment: .leading)
+            ValueField(label: unit, value: value, width: width, scrollStep: scrollStep,
+                       minValue: minValue, maxDecimals: decimals, stripTrailingZeros: true, onCommit: onCommit)
         }
     }
 
@@ -1560,6 +1687,7 @@ struct FilterRowView: View {
         PEQMenuGroup(name: "Low Cut",    variants: [.highPass]),
         PEQMenuGroup(name: "Notch",      variants: [.notch]),
         PEQMenuGroup(name: "All Pass",   variants: [.allPass1, .allPass]),
+        PEQMenuGroup(name: "Linkwitz Transform", variants: [.linkwitzTransform]),
     ]
 
     @ViewBuilder
@@ -1583,7 +1711,20 @@ struct FilterRowView: View {
     @ViewBuilder
     private func peqTypeButton(_ type: FilterType, title: String) -> some View {
         Button {
-            var p = params; p.type = type; onChange(p)
+            var p = params
+            let wasLT = p.type.isLinkwitzTransform
+            p.type = type
+            // The Linkwitz Transform repurposes the gain field as fp (Hz).
+            // Seed it on entry so the band starts neutral (fp = f0 => 0 dB DC
+            // boost) rather than flat (fp <= 0) or with a leftover dB value;
+            // reset it to 0 dB on exit so a stale fp isn't read as gain.
+            if type.isLinkwitzTransform && !wasLT {
+                if p.gain <= 0 { p.gain = p.freq }
+                p.qp = FilterParams.defaultQp
+            } else if !type.isLinkwitzTransform && wasLT {
+                p.gain = 0
+            }
+            onChange(p)
         } label: {
             if params.type == type {
                 Label(title, systemImage: "checkmark")

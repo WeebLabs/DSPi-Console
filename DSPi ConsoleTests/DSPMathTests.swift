@@ -85,4 +85,53 @@ final class DSPMathTests: XCTestCase {
         XCTAssertGreaterThan(abs(phase(lr4, 1000)), 90,
                              "LR4 LP must contribute real (non-flat) phase at fc")
     }
+
+    // MARK: Linkwitz Transform (type 11)
+
+    /// LT with fp < f0 boosts the low end: DC gain approaches 40*log10(f0/fp)
+    /// and the response returns to unity above the driver corner.  freq = f0,
+    /// gain = fp (Hz), qp = Qp.
+    func testLinkwitzTransformDCBoostAndUnityAbove() {
+        var lt = FilterParams(type: .linkwitzTransform, freq: 55, q: 1.1)
+        lt.gain = 25          // fp in Hz
+        lt.qp = 0.55
+        let boost: Float = 40 * log10(55.0 / 25.0)  // ~13.7 dB
+        XCTAssertEqual(mag([lt], 3), boost, accuracy: 0.4, "LT approaches DC boost well below fp")
+        XCTAssertEqual(mag([lt], 15000), 0, accuracy: 0.2, "LT returns to unity well above f0")
+    }
+
+    /// When the target matches the driver (fp == f0, Qp == Q0) the numerator
+    /// and denominator are identical, so the transform is transparent.
+    func testLinkwitzTransformTransparentWhenTargetEqualsDriver() {
+        var lt = FilterParams(type: .linkwitzTransform, freq: 60, q: 0.9)
+        lt.gain = 60          // fp == f0
+        lt.qp = 0.9           // Qp == Q0
+        for f: Float in [10, 50, 100, 1000, 10000] {
+            XCTAssertEqual(mag([lt], f), 0, accuracy: 0.05, "LT is flat at \(f) Hz when target == driver")
+        }
+    }
+
+    /// fp <= 0 makes the LT band flat (matches firmware clamp semantics).
+    func testLinkwitzTransformFlatWhenTargetFreqZero() {
+        var lt = FilterParams(type: .linkwitzTransform, freq: 55, q: 1.1)
+        lt.gain = 0           // fp <= 0
+        for f: Float in [10, 100, 1000] {
+            XCTAssertEqual(mag([lt], f), 0, accuracy: 1e-4, "LT with fp<=0 is flat at \(f) Hz")
+        }
+    }
+
+    /// qp round-trips through the wire encoding (Qp x 512); 0 decodes to the
+    /// 0.707 default, and non-LT bands never emit a qp.
+    func testLinkwitzQpEncodeDecode() {
+        var lt = FilterParams(type: .linkwitzTransform, freq: 55, q: 1.1)
+        lt.gain = 25
+        lt.qp = 0.55
+        XCTAssertEqual(lt.qpEncoded, 282, "round(0.55 x 512)")
+        XCTAssertEqual(FilterParams.decodeQp(282), 0.55, accuracy: 0.002)
+        XCTAssertEqual(FilterParams.decodeQp(0), FilterParams.defaultQp, accuracy: 1e-6, "0 selects the 0.707 default")
+
+        var pk = FilterParams(type: .peaking)
+        pk.qp = 1.0
+        XCTAssertEqual(pk.qpEncoded, 0, "non-LT bands never emit a qp")
+    }
 }

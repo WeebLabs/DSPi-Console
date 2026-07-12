@@ -1200,6 +1200,12 @@ class DSPViewModel: ObservableObject {
     /// hidden and the app leaves the mask alone.
     var firmwareSupportsCrossfeedMask: Bool { firmwareWireFormatVersion >= 20 }
 
+    /// Linkwitz Transform PEQ type (FilterType.linkwitzTransform) shipped in
+    /// wire format V22, which repurposes each WireBandParams' reserved bytes as
+    /// the `qp` sidecar.  Hidden from the PEQ picker until confirmed so we never
+    /// send type 11 (or an 18-byte payload) to firmware that can't parse it.
+    var firmwareSupportsLinkwitzTransform: Bool { firmwareWireFormatVersion >= 22 }
+
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
     /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
     /// Defaults to `false` when the version is unknown (pre-connection) so the

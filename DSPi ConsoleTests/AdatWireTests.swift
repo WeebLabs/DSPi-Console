@@ -24,7 +24,8 @@ final class AdatWireTests: XCTestCase {
     func testWireFormatSizing() {
         // V20 repurposes the crossfeed reserved byte as output_pair_mask; sizes
         // are unchanged from V19.  V21 reuses a WireInputConfig reserved byte.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 21)
+        // V22 (Linkwitz Transform) reuses WireBandParams reserved bytes as qp.
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 22)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
         XCTAssertEqual(BULK_ADAT_OFFSET, 5868)

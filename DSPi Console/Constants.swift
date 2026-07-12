@@ -150,8 +150,12 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V21 (unified channel model): inputs are first-class channels
-/// (PEQ + metering), outputs follow them.  V21 claims a previously-reserved byte
+/// Wire format V22 (Linkwitz Transform): each WireBandParams' 2 reserved bytes
+/// (offset 2) now carry the LT target Q as `qp_x512` when type == 11, zero
+/// otherwise.  Struct and payload sizes are unchanged from V21 - only the
+/// reserved-byte meaning changed.  V21 (unified channel model): inputs are
+/// first-class channels (PEQ + metering), outputs follow them.  V21 claims a
+/// previously-reserved byte
 /// inside WireInputConfig for `i2s_clock_mode` (0=master, 1=slave) without
 /// changing the section or total size.  V20 repurposes WireCrossfeedParams'
 /// reserved byte (BULK_CROSSFEED_OFFSET + 3) as the crossfeed output_pair_mask;
@@ -161,9 +165,9 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 21
-/// Full V21 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// Unchanged from V19/V20 - the clock-mode byte reuses reserved space.
+let WIRE_FORMAT_VERSION: Int            = 22
+/// Full V22 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Unchanged from V19/V20/V21 - the LT qp reuses WireBandParams reserved space.
 let BULK_PARAMS_SIZE: UInt16            = 5876
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 

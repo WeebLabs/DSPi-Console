@@ -207,6 +207,10 @@ extension DSPViewModel {
 
         // EqParamPacket layout: [ch, band, type, bypass, freq(4), q(4), gain(4)] = 16 bytes.
         // Per band_bypass_spec §5: write exactly 0 or 1 — never 0xFF.
+        // For the Linkwitz Transform (type 11) append the 2-byte `qp` sidecar
+        // (Qp x 512), making an 18-byte payload; the firmware then latches the
+        // target Q.  The 16-byte form preserves the stored qp, so we always send
+        // the long form for LT bands.  See peq_filters.md §4.1.
         let data = NSMutableData()
         var ch8 = UInt8(ch); data.append(&ch8, length: 1)
         var b8 = UInt8(band); data.append(&b8, length: 1)
@@ -215,6 +219,9 @@ extension DSPViewModel {
         var f32 = p.freq; data.append(&f32, length: 4)
         var q32 = p.q; data.append(&q32, length: 4)
         var g32 = p.gain; data.append(&g32, length: 4)
+        if p.type == .linkwitzTransform {
+            var qp16 = p.qpEncoded; data.append(&qp16, length: 2)
+        }
 
         usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
         recomputeMagnitudes(for: ch)
@@ -222,9 +229,10 @@ extension DSPViewModel {
     
     func fetchFilter(ch: Int, band: Int) {
         // REQ_GET_EQ_PARAM wValue: bits[15:8]=channel, bits[7:3]=band (5 bits,
-        // 0..31), bits[2:0]=param (0=type, 1=freq, 2=Q, 3=gain, 4=bypass).  The
-        // band field is 5 bits (not the original 4) so crossover bands at
-        // 20..23 stay addressable after the reserved PEQ gap widened to 10..19.
+        // 0..31), bits[2:0]=param (0=type, 1=freq, 2=Q, 3=gain, 4=bypass,
+        // 5=qp).  The band field is 5 bits (not the original 4) so crossover
+        // bands at 20..23 stay addressable after the reserved PEQ gap widened
+        // to 10..19.
         func getVal<T>(_ param: Int, defaultVal: T) -> T {
             let wVal = UInt16((ch << 8) | (band << 3) | param)
             if let d = usb.getControlRequest(request: REQ_GET_EQ_PARAM, value: wVal, index: 0, length: 4) {
@@ -242,13 +250,24 @@ extension DSPViewModel {
         let bypassRaw: UInt32 = getVal(4, defaultVal: 0)
         let bypass = (bypassRaw & 0xFF) == 1
 
-        let newParams = FilterParams(
-            type: FilterType(rawValue: Int(typeRaw)) ?? .flat,
+        let type = FilterType(rawValue: Int(typeRaw)) ?? .flat
+        // param=5 returns qp_x512 in the low 16 bits (0 for non-LT bands and on
+        // firmware that predates it, decoding to the 0.707 default).  Only read
+        // it for LT bands to avoid an extra transfer on every other type.
+        var qp = FilterParams.defaultQp
+        if type == .linkwitzTransform {
+            let qpRaw: UInt32 = getVal(5, defaultVal: 0)
+            qp = FilterParams.decodeQp(UInt16(qpRaw & 0xFFFF))
+        }
+
+        var newParams = FilterParams(
+            type: type,
             freq: freq,
             q: q,
             gain: gain,
             bypass: bypass
         )
+        newParams.qp = qp
 
         DispatchQueue.main.async {
             if self.channelData[ch]?[band] != newParams {
@@ -2142,13 +2161,21 @@ extension DSPViewModel {
                 let freq: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 4, as: Float.self) }
                 let q: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 8, as: Float.self) }
                 let gain: Float = data.withUnsafeBytes { $0.load(fromByteOffset: base + 12, as: Float.self) }
-                bands.append(FilterParams(
-                    type: FilterType(rawValue: Int(typeByte)) ?? .flat,
+                let type = FilterType(rawValue: Int(typeByte)) ?? .flat
+                var fp = FilterParams(
+                    type: type,
                     freq: freq,
                     q: q,
                     gain: gain,
                     bypass: bypassByte == 1
-                ))
+                )
+                // Reserved bytes 2-3 carry qp_x512 for LT bands (V22+), zero
+                // otherwise; little-endian u16.
+                if type == .linkwitzTransform {
+                    let qpRaw: UInt16 = data.withUnsafeBytes { $0.load(fromByteOffset: base + 2, as: UInt16.self) }
+                    fp.qp = FilterParams.decodeQp(qpRaw)
+                }
+                bands.append(fp)
             }
             channelFilters[ch] = bands
         }
@@ -2737,12 +2764,18 @@ extension DSPViewModel {
                 let freq: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
                 let q: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 8, as: Float.self) }
                 let gain: Float = payload.withUnsafeBytes { $0.load(fromByteOffset: 12, as: Float.self) }
+                let type = FilterType(rawValue: Int(typeByte)) ?? .flat
                 var fp = bands[band]
-                fp.type = FilterType(rawValue: Int(typeByte)) ?? .flat
+                fp.type = type
                 fp.freq = freq
                 fp.q = q
                 fp.gain = gain
                 fp.bypass = bypassByte == 1
+                // Reserved bytes 2-3 carry qp_x512 for LT bands (V22+).
+                if type == .linkwitzTransform {
+                    let qpRaw: UInt16 = payload.withUnsafeBytes { $0.load(fromByteOffset: 2, as: UInt16.self) }
+                    fp.qp = FilterParams.decodeQp(qpRaw)
+                }
                 if bands[band] != fp {
                     bands[band] = fp
                     self.channelData[ch] = bands

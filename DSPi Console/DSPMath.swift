@@ -22,7 +22,13 @@ enum FilterType: Int, CaseIterable, Identifiable {
     case lowShelf1 = 9         // 1st-order low shelf  (wire V14+)
     case highShelf1 = 10       // 1st-order high shelf (wire V14+)
 
-    // 11..31 reserved for future PEQ types.
+    // Linkwitz Transform (wire format V22).  Pole/zero bass-extension biquad:
+    // replaces a sealed-box woofer's (f0, Q0) rolloff with a target (fp, Qp).
+    // Reuses the wire fields: freq = f0, Q = Q0, gain_db = fp (Hz, NOT dB),
+    // plus a dedicated `qp` sidecar (Qp x 512).  See peq_filters.md §3.
+    case linkwitzTransform = 11
+
+    // 12..31 reserved for future PEQ types.
 
     // Crossover types (32..63, wire format V13+).  Each value encodes
     // (family, order, LP/HP).  Renumbered from the old 8..39 range on
@@ -74,6 +80,11 @@ enum FilterType: Int, CaseIterable, Identifiable {
         }
     }
 
+    /// True for the Linkwitz Transform, which repurposes the wire fields
+    /// (gain_db carries fp in Hz) and adds the `qp` sidecar - so it needs a
+    /// bespoke row layout and an 18-byte REQ_SET_EQ_PARAM payload.
+    var isLinkwitzTransform: Bool { self == .linkwitzTransform }
+
     /// Order/phase label for the shelf & all-pass variants - used as the
     /// submenu child title on the PEQ type picker, where the shape name is the
     /// parent menu (e.g. "Low Shelf" ▸ "6 dB/oct" / "12 dB/oct").  Spells out
@@ -102,6 +113,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .allPass1: return "All Pass (180°)"
         case .lowShelf1: return "Low Shelf (6dB)"
         case .highShelf1: return "High Shelf (6dB)"
+        case .linkwitzTransform: return "Linkwitz Transform"
         case .lr2_lp: return "LR2 Low Pass"
         case .lr2_hp: return "LR2 High Pass"
         case .lr4_lp: return "LR4 Low Pass"
@@ -151,6 +163,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .allPass1: return "AP1"
         case .lowShelf1: return "LS1"
         case .highShelf1: return "HS1"
+        case .linkwitzTransform: return "LT"
         case .lr2_lp: return "LR2 LP"
         case .lr2_hp: return "LR2 HP"
         case .lr4_lp: return "LR4 LP"
@@ -324,11 +337,35 @@ struct FilterParams: Equatable, Identifiable {
     /// band is skipped in the audio path and drawn flat in the graph.
     /// Distinct from `active` (UI-only) and from master-EQ bypass.
     var bypass: Bool = false
+    /// Linkwitz Transform target pole Q (Qp).  Only meaningful when
+    /// `type == .linkwitzTransform`; ignored by every other type.  For LT,
+    /// `freq` = f0 (driver resonance), `q` = Q0 (driver Q), and `gain`
+    /// carries fp in Hz (NOT dB).  Default 0.707 (Butterworth pole pair).
+    var qp: Float = FilterParams.defaultQp
+
+    /// Default target Q used when `qp` is unset (matches the firmware's
+    /// treatment of a zero `qp_x512` as 0.707).
+    static let defaultQp: Float = 0.707
 
     static func == (lhs: FilterParams, rhs: FilterParams) -> Bool {
         lhs.type == rhs.type && lhs.freq == rhs.freq &&
         lhs.q == rhs.q && lhs.gain == rhs.gain && lhs.active == rhs.active &&
-        lhs.bypass == rhs.bypass
+        lhs.bypass == rhs.bypass && lhs.qp == rhs.qp
+    }
+
+    /// Wire encoding of the LT target Q: `round(Qp x 512)`, clamped to the
+    /// firmware's [0.1, 20] Q range.  Returns 0 for non-LT bands (the reserved
+    /// bytes stay zero).  See peq_filters.md §3.2.
+    var qpEncoded: UInt16 {
+        guard type == .linkwitzTransform else { return 0 }
+        let clamped = min(max(Double(qp), 0.1), 20.0)
+        return UInt16((clamped * 512.0).rounded())
+    }
+
+    /// Decode a wire `qp_x512` value back to a Qp float.  `0` selects the
+    /// 0.707 default (per firmware); other values decode as `qp/512`.
+    static func decodeQp(_ raw: UInt16) -> Float {
+        raw == 0 ? defaultQp : Float(Double(raw) / 512.0)
     }
 }
 
@@ -441,6 +478,27 @@ class DSPMath {
 
     static func calculateCoefficients(p: FilterParams) -> Coeffs {
         if p.type == .flat { return Coeffs(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0) }
+
+        // Linkwitz Transform: zeros at the driver corner (f0, Q0), poles at the
+        // target (fp, Qp).  fp is carried in `gain` (Hz); fp <= 0 => flat.  Both
+        // corners are tan-prewarped so the digital response is exact at f0 & fp,
+        // matching the firmware coefficient path (peq_filters.md §6).
+        if p.type == .linkwitzTransform {
+            let f0 = Double(p.freq)
+            let fp = Double(p.gain)
+            guard fp > 0, f0 > 0 else { return Coeffs(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0) }
+            let q0 = max(Double(p.q), 0.1)
+            let qpVal = max(Double(p.qp), 0.1)
+            let g0 = tan(Double.pi * f0 / sampleRate)   // prewarped zero corner
+            let gp = tan(Double.pi * fp / sampleRate)   // prewarped pole corner
+            let nb0 = 1 + g0 / q0 + g0 * g0
+            let nb1 = 2 * (g0 * g0 - 1)
+            let nb2 = 1 - g0 / q0 + g0 * g0
+            let na0 = 1 + gp / qpVal + gp * gp
+            let na1 = 2 * (gp * gp - 1)
+            let na2 = 1 - gp / qpVal + gp * gp
+            return Coeffs(b0: nb0 / na0, b1: nb1 / na0, b2: nb2 / na0, a1: na1 / na0, a2: na2 / na0)
+        }
 
         let freq = Double(p.freq)
         let q = Double(p.q)

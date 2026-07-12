@@ -33,6 +33,10 @@ fileprivate func availableFilterTypes(vm: DSPViewModel) -> [FilterType] {
     if vm.firmwareSupportsFirstOrderShelves == false {
         filters = filters.filter { $0 != .lowShelf1 && $0 != .highShelf1 }
     }
+
+    if vm.firmwareSupportsLinkwitzTransform == false {
+        filters = filters.filter { $0 != .linkwitzTransform }
+    }
     return filters
 }
 

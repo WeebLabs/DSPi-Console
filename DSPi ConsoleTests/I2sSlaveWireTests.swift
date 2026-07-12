@@ -20,7 +20,9 @@ final class I2sSlaveWireTests: XCTestCase {
     /// the section or total size (still 5876 bytes, unchanged from V20).  Bytes
     /// +8/+9/+10 are already taken by the optional SPDIF 2/3 pins + enable mask.
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 21)
+        // V22 (Linkwitz Transform) reuses each WireBandParams' reserved bytes
+        // for qp; sizes and this section's offsets are unchanged from V21.
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 22)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
         // The clock-mode byte is byte +11 within the 16-byte WireInputConfig.
