@@ -19,6 +19,7 @@ enum PinConsumer: Equatable {
     case i2cCtrl        // I2C control interface (covers both SDA and SCL pins)
     case controlSurface(Int)  // one Control Surfaces binding slot (covers both its GPIOs)
     case adatOut        // ADAT bulk output data pin
+    case adatIn         // ADAT input RX data pin
 }
 
 // MARK: - DAC Hardware Mute Config
@@ -197,6 +198,102 @@ struct I2sSlaveStatus: Equatable {
     }
 
     /// Raw measured external rate for diagnostics; "-" when no clocks at all.
+    var measuredHzString: String {
+        guard measuredHz > 0 else { return "-" }
+        return String(format: "%.1f kHz", Double(measuredHz) / 1000.0)
+    }
+}
+
+// MARK: - ADAT Input Status Data Model
+//
+// 20-byte AdatInputStatusPacket from REQ_GET_ADAT_INPUT_STATUS (0x6E), little-
+// endian.  The lock FSM mirrors the SPDIF/I2S input receivers but for the
+// 8-channel ADAT lightpipe.  RP2040 returns all zeros.  See
+// Documentation/Features/adat_input_spec.md.  Layout:
+//   0:     state       (AdatInputState 0-4)
+//   1:     clock_mode  (live mode 0=master / 1=slave)
+//   2:     enabled     (configured enable)
+//   3:     pin         (configured RX GPIO; 0xFF = unset)
+//   4:     rate_ok     (0 while parked because the device rate is above 48 kHz)
+//   5:     lock_count  (locks since input start, saturates 255)
+//   6:     loss_count  (lock losses since input start, saturates 255)
+//   7:     slip_count  (losses caused by header-verification failure)
+//   8-9:   header_err  (u16, cumulative header mismatches; wraps)
+//   10-11: reserved
+//   12-15: detected_rate (Hz; slave: snapped wire rate, master: device rate; 0 unknown)
+//   16-19: measured_hz   (slave: raw measured wire rate; 0 in master mode)
+struct AdatInputStatus: Equatable {
+    var state: UInt8 = 0          // 0=INACTIVE,1=ACQUIRING,2=SYNCING,3=LOCKED,4=RELOCKING
+    var clockMode: UInt8 = 0      // 0=master, 1=slave (live)
+    var enabled: Bool = false
+    var pin: UInt8 = ADAT_INPUT_PIN_UNSET
+    var rateOk: Bool = false
+    var lockCount: UInt8 = 0
+    var lossCount: UInt8 = 0
+    var slipCount: UInt8 = 0
+    var headerErr: UInt16 = 0
+    var detectedRate: UInt32 = 0
+    var measuredHz: UInt32 = 0
+
+    /// Parse the 20-byte wire layout.  Returns nil if too short.
+    static func fromData(_ data: Data) -> AdatInputStatus? {
+        guard data.count >= 20 else { return nil }
+        let base = data.startIndex
+        func u16(_ off: Int) -> UInt16 {
+            UInt16(data[base + off]) | (UInt16(data[base + off + 1]) << 8)
+        }
+        func u32(_ off: Int) -> UInt32 {
+            UInt32(data[base + off]) | (UInt32(data[base + off + 1]) << 8)
+                | (UInt32(data[base + off + 2]) << 16) | (UInt32(data[base + off + 3]) << 24)
+        }
+        return AdatInputStatus(
+            state:        data[base + 0],
+            clockMode:    data[base + 1],
+            enabled:      data[base + 2] != 0,
+            pin:          data[base + 3],
+            rateOk:       data[base + 4] != 0,
+            lockCount:    data[base + 5],
+            lossCount:    data[base + 6],
+            slipCount:    data[base + 7],
+            headerErr:    u16(8),
+            detectedRate: u32(12),
+            measuredHz:   u32(16)
+        )
+    }
+
+    var isSlave: Bool { clockMode == ADAT_INPUT_CLOCK_MODE_SLAVE }
+    var isLocked: Bool { state == 3 }   // LOCKED
+
+    /// User-facing one-line state description.
+    var stateString: String {
+        switch state {
+        case 0: return "Inactive"
+        case 1: return "Acquiring"
+        case 2: return "Syncing"
+        case 3: return "Locked"
+        case 4: return "Relocking"
+        default: return "Unknown (\(state))"
+        }
+    }
+
+    /// Colored-dot tint mirroring the SPDIF / I2S input indicators.
+    var stateColor: Color {
+        switch state {
+        case 0: return .gray
+        case 1, 2: return .yellow
+        case 3: return .green
+        case 4: return .orange
+        default: return .gray
+        }
+    }
+
+    /// Locked / detected rate for display; "-" when unknown or parked.
+    var detectedRateString: String {
+        guard detectedRate > 0 else { return "-" }
+        return String(format: "%.1f kHz", Double(detectedRate) / 1000.0)
+    }
+
+    /// Raw measured wire rate (slave diagnostics); "-" when unmeasured.
     var measuredHzString: String {
         guard measuredHz > 0 else { return "-" }
         return String(format: "%.1f kHz", Double(measuredHz) / 1000.0)
@@ -902,6 +999,32 @@ class DSPViewModel: ObservableObject {
     @Published var i2sClockPinMode: UInt8 = 0                   // 0=unified, 1=split
     @Published var i2sBckPinSlave: UInt8 = 26                   // slave-mode BCK; LRCLK = +1
 
+    // ADAT input (firmware wire format V24+, RP2350 only).  A selectable
+    // 8-channel input source: one TOSLINK receiver feeds input channels 0..7.
+    // `adatInputSupported` is false on firmware that predates the feature (0x6E
+    // STALLs) or on RP2040 (the engine is compiled out; 0x6E returns zeros).
+    // There is no free default GPIO, so the pin ships unset (0xFF) and must be
+    // assigned before the input can be enabled.  Clock mode mirrors I2S: MASTER
+    // (default) makes DSPi the rate authority; SLAVE auto-detects the wire rate.
+    // Live lock state arrives via REQ_GET_ADAT_INPUT_STATUS (0x6E) and NOTIFY
+    // event 0x0B.  See adat_input_spec.md.
+    @Published var adatInputSupported: Bool = false
+    @Published var adatInputEnabled: Bool = false
+    @Published var adatInputPin: UInt8 = ADAT_INPUT_PIN_UNSET
+    @Published var adatInputClockMode: UInt8 = 0               // 0=master, 1=slave (live)
+    @Published var adatInputStatus: AdatInputStatus = AdatInputStatus()
+
+    /// True when the device is actively running the ADAT input in the clock-slave
+    /// role (mode is slave AND ADAT is the selected input source).  Gates the
+    /// slave-only lock diagnostics in the ADAT input settings UI.
+    var adatInputSlaveActive: Bool {
+        adatInputClockMode == ADAT_INPUT_CLOCK_MODE_SLAVE && inputSource == INPUT_SOURCE_ADAT
+    }
+
+    /// True when ADAT is the selected input source (drives the 8-channel matrix
+    /// layout and the live lock indicator).
+    var adatInputActive: Bool { inputSource == INPUT_SOURCE_ADAT }
+
     /// True when the device is actively running in the I2S clock-slave role
     /// (mode is slave AND I2S is the selected input source).  Gates the
     /// rate/MCK relabelling in the I2S settings UI.
@@ -976,6 +1099,12 @@ class DSPViewModel: ObservableObject {
             }
         }
         if i2sInputSupported { opts.append(INPUT_SOURCE_I2S) }
+        // ADAT is selectable only once it has been enabled with a valid pin
+        // (a disabled or pin-less ADAT source is consumed as a no-op by the
+        // firmware switch handler, so never offer it).
+        if adatInputSupported && adatInputEnabled && adatInputPin != ADAT_INPUT_PIN_UNSET {
+            opts.append(INPUT_SOURCE_ADAT)
+        }
         return opts
     }
 
@@ -987,6 +1116,7 @@ class DSPViewModel: ObservableObject {
         case INPUT_SOURCE_SPDIF2: return "S/PDIF 2"
         case INPUT_SOURCE_SPDIF3: return "S/PDIF 3"
         case INPUT_SOURCE_I2S:    return "I2S"
+        case INPUT_SOURCE_ADAT:   return "ADAT"
         default: return "Source \(source)"
         }
     }
@@ -1171,6 +1301,8 @@ class DSPViewModel: ObservableObject {
             base = BASE_MATRIX_INPUTS
         case INPUT_SOURCE_I2S:
             base = i2sInputChannels
+        case INPUT_SOURCE_ADAT:
+            base = 8   // ADAT is always 8 channels (input channels 0..7)
         default:   // USB (or firmware without input switching, which reports USB)
             base = hostConfiguredInputChannels ?? activeInputChannels
         }
@@ -1369,8 +1501,20 @@ class DSPViewModel: ObservableObject {
         }
         // ADAT owns its GPIO only while enabled (mirrors the firmware: a
         // disabled ADAT stream holds no pin, so its GPIO is free for other uses).
-        if consumer != .adatOut, adatSupported, adatEnabled, pin == adatPin {
+        // The ADAT input may deliberately share the ADAT output pin (zero-hardware
+        // loopback self-test), so an ADAT-input assignment never sees the output
+        // pin as taken - the sharing exception is one-directional (input onto
+        // output), so every other consumer still does.
+        if consumer != .adatOut, consumer != .adatIn, adatSupported, adatEnabled, pin == adatPin {
             return "ADAT Output"
+        }
+        // ADAT input owns its GPIO only while enabled (same rule as the output).
+        // Reserved against every other consumer, including the ADAT output - the
+        // loopback exception is one-directional, so an output assignment still
+        // sees the input pin as taken.
+        if consumer != .adatIn, adatInputSupported, adatInputEnabled,
+           adatInputPin != ADAT_INPUT_PIN_UNSET, pin == adatInputPin {
+            return "ADAT Input"
         }
         // External control interfaces reserve their pins only while LIVE (a
         // disabled interface, or one kept down by a boot pin-collision, holds
@@ -1509,6 +1653,19 @@ class DSPViewModel: ObservableObject {
             self.i2sSlaveStatus.state = state
             self.i2sSlaveStatus.detectedRate = detectedRate
             self.pollQueue.async { self.fetchI2SSlaveStatus() }
+        }
+
+        // ADAT input lock-state pushes (INACTIVE / ACQUIRING / SYNCING / LOCKED /
+        // RELOCKING).  The 10-byte event carries state + detected rate + live
+        // clock mode; mirror those immediately for a snappy ADAT settings-page
+        // indicator, then refresh the full 20-byte status off the main thread.
+        AppState.shared.interruptMonitor.onAdatInputState = { [weak self] state, detectedRate, clockMode in
+            guard let self = self else { return }
+            self.adatInputStatus.state = state
+            self.adatInputStatus.detectedRate = detectedRate
+            self.adatInputStatus.clockMode = clockMode
+            self.adatInputClockMode = clockMode
+            self.pollQueue.async { self.fetchAdatInputStatus() }
         }
 
         // 1. Subscribe to USB connection changes AND Trigger Fetch
@@ -1703,7 +1860,10 @@ class DSPViewModel: ObservableObject {
             i2sClockMode: i2sClockModeSupported ? i2sClockMode : nil,
             lgSoundSyncEnabled: lgSoundSyncSupported ? lgSoundSyncEnabled : nil,
             adatEnabled: adatSupported ? adatEnabled : nil,
-            adatPin: adatSupported ? adatPin : nil
+            adatPin: adatSupported ? adatPin : nil,
+            adatInputEnabled: adatInputSupported ? adatInputEnabled : nil,
+            adatInputPin: adatInputSupported ? adatInputPin : nil,
+            adatInputClockMode: adatInputSupported ? adatInputClockMode : nil
         )
     }
 

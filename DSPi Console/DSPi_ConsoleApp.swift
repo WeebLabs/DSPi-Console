@@ -4290,6 +4290,58 @@ struct HardwareSettingsTab: View {
         }
     }
 
+    /// GPIO options for the ADAT input RX pin.  No default pin is free, so the
+    /// list is just the standard valid pins minus those owned by another
+    /// consumer (the loopback exception lets it keep the ADAT output pin).  The
+    /// current selection is always kept so the picker renders it.
+    private var adatInputPinOptions: [UInt8] {
+        let current = vm.adatInputPin
+        return Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .adatIn) == nil }
+    }
+
+    /// Map an ADAT input SET status byte (enable / pin / clock mode) onto the
+    /// inline status row, re-syncing local state from the device on any rejection.
+    /// `label` is the human-readable action ("enabled" / "disabled" / "pin" /
+    /// "clock mode").
+    private func handleAdatInputStatus(_ status: UInt8, label: String, gpio: UInt8?) {
+        switch status {
+        case PIN_CONFIG_SUCCESS:
+            switch label {
+            case "pin":     statusMessage = gpio.map { "ADAT input pin set to GPIO \($0)" } ?? "ADAT input pin cleared"
+            case "enabled": statusMessage = "ADAT input enabled"
+            case "disabled": statusMessage = "ADAT input disabled"
+            default:        statusMessage = "ADAT input \(label) updated"
+            }
+            statusIsError = false
+        case PIN_CONFIG_PIN_IN_USE:
+            if label == "disabled" {
+                statusMessage = "Switch to another input source before disabling ADAT input"
+            } else if let g = gpio, let owner = pinInUseBy(g, excluding: .adatIn) {
+                statusMessage = "GPIO \(g) is already assigned to \(owner)"
+            } else {
+                statusMessage = "That pin is already in use"
+            }
+            statusIsError = true
+            vm.fetchAdatInputConfig()
+        case PIN_CONFIG_INVALID_PIN:
+            if label == "enabled" {
+                statusMessage = "Assign a valid data pin before enabling ADAT input"
+            } else {
+                statusMessage = gpio.map { "GPIO \($0) isn't available on this device" } ?? "Invalid ADAT input pin"
+            }
+            statusIsError = true
+            vm.fetchAdatInputConfig()
+        case PIN_CONFIG_INVALID_OUTPUT:
+            statusMessage = "ADAT input isn't supported on this device"
+            statusIsError = true
+            vm.fetchAdatInputConfig()
+        default:
+            statusMessage = "Failed to set ADAT input \(label)"
+            statusIsError = true
+            vm.fetchAdatInputConfig()
+        }
+    }
+
     private func setPinForOutput(_ outputIndex: Int, pin: UInt8) {
         guard vm.isDeviceConnected else {
             statusMessage = "Device not connected"
@@ -4390,6 +4442,7 @@ struct HardwareSettingsTab: View {
                 }
                 DispatchQueue.global(qos: .userInitiated).async {
                     vm.fetchAdatConfig()
+                    vm.fetchAdatInputConfig()
                 }
             }
         }
@@ -4951,6 +5004,165 @@ struct HardwareSettingsTab: View {
                     Text(vm.i2sMaxPairs > 1
                          ? "Wire one ADC serial-data line per stereo pair to the GPIOs above; the shared bit clock and sample rate live in I2S Configuration. DSPi is the clock master and the pairs are sample-aligned. Save a preset to keep this wiring."
                          : "Wire the ADC's serial-data line to the GPIO above. The bit clock and sample rate live in I2S Configuration; DSPi is the clock master, so the source must follow.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // MARK: ADAT Input
+            if section == .spdif && vm.adatInputSupported {
+                Section {
+                    // Enable toggle.  There is no free default GPIO, so a data
+                    // pin must be assigned first; the firmware rejects an enable
+                    // with no pin (INVALID_PIN).  Disabling is refused while ADAT
+                    // is the active source - switch away first.
+                    Toggle(isOn: Binding(
+                        get: { vm.adatInputEnabled },
+                        set: { en in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
+                            let pin = vm.adatInputPin
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setAdatInputEnable(en)
+                                DispatchQueue.main.async {
+                                    handleAdatInputStatus(status, label: en ? "enabled" : "disabled",
+                                                          gpio: pin == ADAT_INPUT_PIN_UNSET ? nil : pin)
+                                }
+                            }
+                        }
+                    )) {
+                        HStack {
+                            Image(systemName: "fibrechannel")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enable ADAT Input")
+                                    .font(.body)
+                                Text("Receive 8 channels of 24-bit audio (44.1/48 kHz) from one TOSLINK optical input into input channels 1-8. Assign a data pin below, then select ADAT as the input source.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    // Can't turn on without a pin; can always turn off.
+                    .disabled(!vm.adatInputEnabled && vm.adatInputPin == ADAT_INPUT_PIN_UNSET)
+                    .padding(.vertical, 4)
+
+                    // Serial Data (RX) GPIO — no default; may equal the ADAT
+                    // output pin for a zero-hardware loopback self-test.  May be
+                    // changed while ADAT is live (the firmware re-routes under a
+                    // brief muted restart).
+                    HStack {
+                        Image(systemName: "cable.connector")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Serial Data")
+                                .font(.body)
+                            Text("GPIO receiving the ADAT optical input. No default - assign a spare pin (it may match the ADAT output pin for a loopback self-test).")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.adatInputPin },
+                            set: { newPin in
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let status = vm.setAdatInputPin(newPin)
+                                    DispatchQueue.main.async {
+                                        handleAdatInputStatus(status, label: "pin", gpio: newPin)
+                                    }
+                                }
+                            }
+                        )) {
+                            // Placeholder while unset so the picker has a valid tag.
+                            if vm.adatInputPin == ADAT_INPUT_PIN_UNSET {
+                                Text("Not set").tag(ADAT_INPUT_PIN_UNSET)
+                            }
+                            ForEach(adatInputPinOptions, id: \.self) { pin in
+                                Text("GPIO \(pin)").tag(pin)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+
+                    // Clock mode — MASTER (DSPi owns the rate, the returning
+                    // stream is already in its clock domain) or SLAVE (external
+                    // gear owns the clock and the rate is auto-detected).  Applied
+                    // at the next switch into ADAT when it isn't the live source.
+                    HStack {
+                        Image(systemName: "clock.arrow.2.circlepath")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Clock Mode")
+                                .font(.body)
+                            Text("Master: DSPi owns the sample rate (set in I2S Configuration) and the source syncs to the ADAT output. Slave: an external master owns the clock and the rate is auto-detected.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.adatInputClockMode },
+                            set: { newMode in
+                                guard newMode != vm.adatInputClockMode else { return }
+                                SettingsSaveCoordinator.shared.beginOutputEdit()
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let status = vm.setAdatInputClockMode(newMode)
+                                    DispatchQueue.main.async {
+                                        handleAdatInputStatus(status, label: "clock mode", gpio: nil)
+                                    }
+                                }
+                            }
+                        )) {
+                            Text("Master").tag(ADAT_INPUT_CLOCK_MODE_MASTER)
+                            Text("Slave").tag(ADAT_INPUT_CLOCK_MODE_SLAVE)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
+
+                    // Live lock indicator, shown while ADAT is the active source.
+                    // The receiver locks in both clock modes (master decodes the
+                    // returning stream), so this appears whenever ADAT is selected.
+                    if vm.adatInputActive {
+                        HStack {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Lock Status")
+                                    .font(.body)
+                                Text(vm.adatInputStatus.isLocked
+                                     ? "Locked and decoding at \(vm.adatInputStatus.detectedRateString)."
+                                     : (vm.adatInputSlaveActive
+                                        ? "Waiting for external clock (measured \(vm.adatInputStatus.measuredHzString))."
+                                        : "Waiting for a valid ADAT signal on the data pin."))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(vm.adatInputStatus.stateColor)
+                                    .frame(width: 6, height: 6)
+                                Text(vm.adatInputStatus.stateString)
+                                    .font(.body)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Label("ADAT Input", systemImage: "fibrechannel")
+                } footer: {
+                    Text("Pairs with an outboard ADC (for example a Behringer ADA8200) to turn DSPi into an analog-in processor. In master mode, wire DSPi's ADAT output to the box's ADAT input and the box's ADAT output back to the data pin here. The 8 channels arrive as input channels 1-8 with full per-input EQ and metering. Save a preset to keep this wiring.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }

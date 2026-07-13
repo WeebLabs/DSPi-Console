@@ -99,6 +99,9 @@ struct PresetSnapshot: Equatable {
     let lgSoundSyncEnabled: Bool?  // nil when firmware doesn't support LG Sound Sync
     let adatEnabled: Bool?  // ADAT bulk output enable; nil when unsupported (RP2040 / old fw)
     let adatPin: UInt8?     // ADAT data GPIO; nil when unsupported
+    var adatInputEnabled: Bool? = nil    // ADAT input enable; nil when unsupported (RP2040 / pre-V24)
+    var adatInputPin: UInt8? = nil       // ADAT input RX GPIO (0xFF = unset); nil when unsupported
+    var adatInputClockMode: UInt8? = nil // ADAT input clock mode (0=master, 1=slave); nil when unsupported
 }
 
 // MARK: - Diff
@@ -405,6 +408,17 @@ extension PresetSnapshot {
             if let oldPin = old.adatPin, let newPin = new.adatPin, oldPin != newPin {
                 changes.append(.init(category: "ADAT", description: "ADAT pin: GPIO \(oldPin) → GPIO \(newPin)"))
             }
+            if let oldEn = old.adatInputEnabled, let newEn = new.adatInputEnabled, oldEn != newEn {
+                changes.append(.init(category: "ADAT Input", description: "ADAT input: \(newEn ? "enabled" : "disabled")"))
+            }
+            if let oldPin = old.adatInputPin, let newPin = new.adatInputPin, oldPin != newPin {
+                let name: (UInt8) -> String = { $0 == ADAT_INPUT_PIN_UNSET ? "unset" : "GPIO \($0)" }
+                changes.append(.init(category: "ADAT Input", description: "ADAT input pin: \(name(oldPin)) → \(name(newPin))"))
+            }
+            if let oldMode = old.adatInputClockMode, let newMode = new.adatInputClockMode, oldMode != newMode {
+                let name: (UInt8) -> String = { $0 == ADAT_INPUT_CLOCK_MODE_SLAVE ? "Slave" : "Master" }
+                changes.append(.init(category: "ADAT Input", description: "ADAT input clock mode: \(name(oldMode)) → \(name(newMode))"))
+            }
         }
 
         // Input source
@@ -414,6 +428,7 @@ extension PresetSnapshot {
                 case 0: return "USB"
                 case 1: return "S/PDIF 1"
                 case 2: return "I2S"
+                case 3: return "ADAT"
                 case 4: return "S/PDIF 2"
                 case 5: return "S/PDIF 3"
                 default: return "\(s)"

@@ -42,6 +42,7 @@ private let NOTIFY_EVT_INPUT_FORMAT: UInt8 = 0x05
 private let NOTIFY_EVT_SIGGEN_STATE: UInt8 = 0x07
 private let NOTIFY_EVT_ADAT_STATE: UInt8 = 0x08
 private let NOTIFY_EVT_I2S_SLAVE_STATE: UInt8 = 0x09
+private let NOTIFY_EVT_ADAT_INPUT_STATE: UInt8 = 0x0B
 
 // Source tags (from ParamSource enum in firmware notify.h)
 private func sourceLabel(_ src: UInt8) -> String {
@@ -175,6 +176,17 @@ struct InterruptEvent: Identifiable {
             let state = Int(bytes[4]) < states.count ? states[Int(bytes[4])] : "state=\(bytes[4])"
             let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
             return "\(seqStr) v2.I2sSlaveState              \(state) rate=\(rate)"
+
+        case NOTIFY_EVT_ADAT_INPUT_STATE:
+            // 10 bytes: [ver, evt, flags, seq, state, rate_LE(4), clock_mode].
+            guard bytes.count >= 10 else {
+                return "\(seqStr) v2.AdatInputState (short: \(bytes.count) bytes)"
+            }
+            let states = ["INACTIVE", "ACQUIRING", "SYNCING", "LOCKED", "RELOCKING"]
+            let state = Int(bytes[4]) < states.count ? states[Int(bytes[4])] : "state=\(bytes[4])"
+            let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
+            let mode = bytes[9] == 1 ? "slave" : "master"
+            return "\(seqStr) v2.AdatInputState             \(state) rate=\(rate) mode=\(mode)"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -383,6 +395,20 @@ private enum ParamOffsetDecoder {
             let hz = raw < 3 ? ["44100", "48000", "96000"][Int(raw)] : "?"
             return ("input_config.i2s_input_rate", "\(raw) (\(hz) Hz)")
         }
+        if off == BULK_INPUT_ADAT_PIN_OFFSET && sz == 1 {
+            let v = payload.first ?? 0
+            return ("input_config.adat_input_pin", v == 0 ? "unset" : "GPIO \(v)")
+        }
+        if off == BULK_INPUT_ADAT_ENABLED_P1_OFFSET && sz == 1 {
+            let v = payload.first ?? 0
+            let label = v == 0 ? "absent" : (v == 2 ? "enabled" : "disabled")
+            return ("input_config.adat_input_enabled_p1", "\(v) (\(label))")
+        }
+        if off == BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET && sz == 1 {
+            let v = payload.first ?? 0
+            let label = v == 0 ? "absent" : (v == 2 ? "slave" : "master")
+            return ("input_config.adat_clock_mode_p1", "\(v) (\(label))")
+        }
 
         // LG Sound Sync (4728..) — first 4 bytes are meaningful; rest reserved.
         if off == BULK_LG_OFFSET && sz == 1 { return ("lg_sound_sync.enabled", fmtBool(payload)) }
@@ -499,6 +525,12 @@ class InterruptMonitor: ObservableObject {
     /// (NOTIFY_EVT_I2S_SLAVE_STATE: ACQUIRING / RELOCKING / INACTIVE / LOCKED).
     /// Carries the I2sSlaveState and the detected rate in Hz (0 unless LOCKED).
     var onI2sSlaveState: ((_ state: UInt8, _ detectedRate: UInt32) -> Void)?
+
+    /// Fires on the main thread for every ADAT input lock-state push
+    /// (NOTIFY_EVT_ADAT_INPUT_STATE: INACTIVE / ACQUIRING / SYNCING / LOCKED /
+    /// RELOCKING).  Carries the AdatInputState, the detected rate in Hz (0 unless
+    /// LOCKED), and the live clock mode (0 master / 1 slave).
+    var onAdatInputState: ((_ state: UInt8, _ detectedRate: UInt32, _ clockMode: UInt8) -> Void)?
 
     private let usb: USBDevice
     private var interfacePtr: USBDevice.InterfaceInterfacePtr?
@@ -692,6 +724,21 @@ class InterruptMonitor: ObservableObject {
             let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
             DispatchQueue.main.async {
                 handler(state, rate)
+            }
+        }
+
+        // Dispatch ADAT input lock-state pushes so the ADAT settings-page
+        // indicator reacts to lock/loss/rate-change without polling lag.  This
+        // event is 10 bytes: [ver, evt, flags, seq, state, rate_LE(4), clock_mode].
+        if let handler = onAdatInputState,
+           bytes.count >= 10,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_ADAT_INPUT_STATE {
+            let state = bytes[4]
+            let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
+            let mode = bytes[9]
+            DispatchQueue.main.async {
+                handler(state, rate, mode)
             }
         }
 

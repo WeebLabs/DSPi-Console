@@ -23,6 +23,7 @@ extension DSPViewModel {
         fetchControlSurfaces()
         fetchSiggen()
         fetchAdatConfig()
+        fetchAdatInputConfig()
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -1462,6 +1463,110 @@ extension DSPViewModel {
         return 0xFF
     }
 
+    // MARK: - ADAT Input Commands
+    //
+    // RP2350-only selectable 8-channel ADAT input (INPUT_SOURCE_ADAT = 3).  See
+    // adat_input_spec.md.  Both SETs are IN-direction transfers carrying the value
+    // in wValue and returning a PIN_CONFIG_* status byte; on RP2040 0x68/0x6A
+    // return INVALID_OUTPUT and 0x6E returns zeros (the config GETs round-trip).
+
+    /// Probe + refresh live ADAT input state via REQ_GET_ADAT_INPUT_STATUS (0x6E).
+    /// A STALL (nil) means the firmware predates ADAT input; combined with the
+    /// RP2350 gate this sets `adatInputSupported`.  Called from `fetchAll`.
+    func fetchAdatInputConfig() {
+        guard let data = usb.getControlRequest(request: REQ_GET_ADAT_INPUT_STATUS, value: 0, index: 2, length: 20),
+              let status = AdatInputStatus.fromData(data) else {
+            DispatchQueue.main.async { self.adatInputSupported = false }
+            return
+        }
+        DispatchQueue.main.async {
+            // The engine is compiled out on RP2040 (status all-zero); gate the UI
+            // on platform so a zeroed RP2040 response never shows the section.
+            self.adatInputSupported = (self.platformName == "RP2350")
+            self.adatInputStatus = status
+            self.adatInputEnabled = status.enabled
+            self.adatInputClockMode = status.clockMode
+            self.adatInputPin = status.pin
+        }
+    }
+
+    /// Refresh only the live 20-byte AdatInputStatusPacket (lock state, counts,
+    /// detected/measured rate) for the settings lock indicator.  Also re-syncs the
+    /// configured enable / pin / clock mode the packet carries.
+    func fetchAdatInputStatus() {
+        guard let d = usb.getControlRequest(request: REQ_GET_ADAT_INPUT_STATUS, value: 0, index: 2, length: 20),
+              let status = AdatInputStatus.fromData(d) else { return }
+        DispatchQueue.main.async {
+            self.adatInputStatus = status
+            self.adatInputClockMode = status.clockMode
+            self.adatInputEnabled = status.enabled
+            self.adatInputPin = status.pin
+        }
+    }
+
+    /// Enable or disable the ADAT input.  Enabling validates the configured pin
+    /// first (INVALID_PIN when unset/invalid, PIN_IN_USE on conflict); disabling
+    /// is refused (PIN_IN_USE) while ADAT is the active source.  Returns the
+    /// firmware PIN_CONFIG_* status byte (0xFF on transfer failure).
+    @discardableResult
+    func setAdatInputEnable(_ enabled: Bool) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_ADAT_INPUT_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async {
+                    self.adatInputEnabled = enabled
+                    self.adatInputStatus.enabled = enabled
+                }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    /// Set the ADAT input RX GPIO (or 0xFF to clear, allowed only while disabled).
+    /// The pin MAY equal the ADAT output pin (loopback self-test).  May be issued
+    /// while ADAT is the live source; the firmware re-routes under a muted restart.
+    /// Returns the firmware PIN_CONFIG_* status byte.
+    @discardableResult
+    func setAdatInputPin(_ pin: UInt8) -> UInt8 {
+        if let d = usb.getControlRequest(request: REQ_SET_ADAT_INPUT_PIN, value: UInt16(pin), index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async {
+                    self.adatInputPin = pin
+                    self.adatInputStatus.pin = pin
+                }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
+    /// Select the ADAT input clock mode (0=master, 1=slave) via 0x6C.  Deferred:
+    /// the firmware applies it in its main loop (instantly when ADAT is not the
+    /// active source, otherwise under a muted receiver restart).  Returns the
+    /// PIN_CONFIG_* status byte; the live mode is confirmed via the
+    /// adat_clock_mode_p1 PARAM_CHANGED (or the next NOTIFY 0x0B).  Part of the
+    /// output-config block, so callers must mark it dirty (beginOutputEdit).
+    @discardableResult
+    func setAdatInputClockMode(_ mode: UInt8) -> UInt8 {
+        let clamped: UInt8 = mode == ADAT_INPUT_CLOCK_MODE_SLAVE ? ADAT_INPUT_CLOCK_MODE_SLAVE : ADAT_INPUT_CLOCK_MODE_MASTER
+        if let d = usb.getControlRequest(request: REQ_SET_ADAT_INPUT_CLOCK_MODE, value: UInt16(clamped), index: 2, length: 1),
+           d.count >= 1 {
+            let status = d[0]
+            if status == PIN_CONFIG_SUCCESS {
+                DispatchQueue.main.async {
+                    self.adatInputClockMode = clamped
+                    self.adatInputStatus.clockMode = clamped
+                }
+            }
+            return status
+        }
+        return 0xFF
+    }
+
     // MARK: - Input Source Commands
 
     /// Probes GET_INPUT_SOURCE. If the device STALLs (nil), the feature is unsupported.
@@ -2367,6 +2472,12 @@ extension DSPViewModel {
         let bulkSpdifEnabledExtP1 = data[BULK_INPUT_CONFIG_OFFSET + 10]
         // V21+ I2S clock mode at +11 (0=master, 1=slave).
         let bulkI2SClockMode = data[BULK_INPUT_I2S_CLOCK_MODE_OFFSET]
+        // V24+ ADAT input at +12/+13/+14 (RP2350).  Pin: 0 = unset (0xFF never on
+        // the wire).  Enable / clock mode are +1 encoded (0 = absent/keep live).
+        let bulkAdatInputPinRaw = data[BULK_INPUT_ADAT_PIN_OFFSET]
+        let bulkAdatInputPin: UInt8 = bulkAdatInputPinRaw == 0 ? ADAT_INPUT_PIN_UNSET : bulkAdatInputPinRaw
+        let bulkAdatInputEnabledP1 = data[BULK_INPUT_ADAT_ENABLED_P1_OFFSET]
+        let bulkAdatInputClockModeP1 = data[BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET]
 
 
         // --- LG Sound Sync (offset 4728) — only `enabled` honoured on SET ---
@@ -2528,6 +2639,24 @@ extension DSPViewModel {
             self.adatPin = bulkAdatPin
             self.adatStatus.enabled = bulkAdatEnabled
             self.adatStatus.pin = bulkAdatPin
+
+            // ADAT input (V24+): same RP2350 gate as the bulk output.  The +1
+            // encoded enable / clock-mode fields decode as absent (keep live) when
+            // zero; fetchAdatInputConfig() refines this with the live lock status
+            // right after the bulk fetch.
+            self.adatInputSupported = (platform == "RP2350")
+            self.adatInputPin = bulkAdatInputPin
+            self.adatInputStatus.pin = bulkAdatInputPin
+            if bulkAdatInputEnabledP1 != 0 {
+                let en = bulkAdatInputEnabledP1 == 2
+                self.adatInputEnabled = en
+                self.adatInputStatus.enabled = en
+            }
+            if bulkAdatInputClockModeP1 != 0 {
+                let mode = bulkAdatInputClockModeP1 == 2 ? ADAT_INPUT_CLOCK_MODE_SLAVE : ADAT_INPUT_CLOCK_MODE_MASTER
+                self.adatInputClockMode = mode
+                self.adatInputStatus.clockMode = mode
+            }
 
             self.firmwareWireFormatVersion = Int(formatVersion)
 
@@ -3088,6 +3217,38 @@ extension DSPViewModel {
             self.i2sSlaveStatus.clockMode = mode
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.fetchI2SSlaveStatus()
+            }
+            return
+        }
+
+        // input_config.adat_input_pin (offset 4728, 1 byte: raw GPIO, 0 = unset).
+        // Fires when 0x6A re-routes the RX pin, on bulk apply, and on preset load.
+        if off == BULK_INPUT_ADAT_PIN_OFFSET && sz == 1 && payload.count >= 1 {
+            let pin = payload[0] == 0 ? ADAT_INPUT_PIN_UNSET : payload[0]
+            if self.adatInputPin != pin { self.adatInputPin = pin }
+            self.adatInputStatus.pin = pin
+            return
+        }
+
+        // input_config.adat_input_enabled_p1 (offset 4729, +1 encoded: 1=disabled,
+        // 2=enabled).  Fires when 0x68 toggles the input, on bulk, and on preset.
+        if off == BULK_INPUT_ADAT_ENABLED_P1_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            let en = payload[0] == 2
+            if self.adatInputEnabled != en { self.adatInputEnabled = en }
+            self.adatInputStatus.enabled = en
+            return
+        }
+
+        // input_config.adat_clock_mode_p1 (offset 4730, +1 encoded: 1=master,
+        // 2=slave).  Fired at the tail of the firmware's deferred clock-mode apply
+        // (the "mode is now live" confirmation); a NOTIFY 0x0B follows, so refresh
+        // the full status.
+        if off == BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            let mode = payload[0] == 2 ? ADAT_INPUT_CLOCK_MODE_SLAVE : ADAT_INPUT_CLOCK_MODE_MASTER
+            if self.adatInputClockMode != mode { self.adatInputClockMode = mode }
+            self.adatInputStatus.clockMode = mode
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.fetchAdatInputStatus()
             }
             return
         }

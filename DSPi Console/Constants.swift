@@ -130,6 +130,32 @@ let REQ_GET_ADAT_STATUS: UInt8    = 0xCE   // IN 8 bytes: AdatStatus
 /// "unset, use this default".
 let ADAT_PIN_DEFAULT: UInt8       = 12
 
+// ADAT input request codes (RP2350 only).  A selectable 8-channel input source
+// (INPUT_SOURCE_ADAT = 3): one TOSLINK receiver feeds 8 channels of 24-bit audio
+// into input channels 0..7 of the unified channel model.  See
+// Documentation/Features/adat_input_spec.md.  SETs carry the value in wValue and
+// return a PIN_CONFIG_* status byte; on RP2040 0x68/0x6A return INVALID_OUTPUT
+// and 0x6E returns 20 zero bytes (the config GETs still round-trip).  There is no
+// free default GPIO: the pin ships unset (0xFF) and must be assigned before
+// enable.  Order matters - set the pin (0x6A) before enabling (0x68).
+let REQ_SET_ADAT_INPUT_ENABLE: UInt8     = 0x68   // IN: wValue = 0/1, returns status
+let REQ_GET_ADAT_INPUT_ENABLE: UInt8     = 0x69   // IN 1 byte: configured enable (0/1)
+let REQ_SET_ADAT_INPUT_PIN: UInt8        = 0x6A   // IN: wValue = GPIO (0xFF clears), returns status
+let REQ_GET_ADAT_INPUT_PIN: UInt8        = 0x6B   // IN 1 byte: configured GPIO (0xFF = unset)
+let REQ_SET_ADAT_INPUT_CLOCK_MODE: UInt8 = 0x6C   // IN: wValue = 0/1, deferred, returns status
+let REQ_GET_ADAT_INPUT_CLOCK_MODE: UInt8 = 0x6D   // IN 1 byte: live mode (0/1)
+let REQ_GET_ADAT_INPUT_STATUS: UInt8     = 0x6E   // IN 20 bytes: AdatInputStatusPacket
+
+/// ADAT input RX GPIO sentinel meaning "unset" (no default pin is free).
+let ADAT_INPUT_PIN_UNSET: UInt8   = 0xFF
+
+// ADAT input clock mode (REQ_SET/GET_ADAT_INPUT_CLOCK_MODE).  MASTER (default):
+// DSPi owns the sample rate via REQ_SET_INPUT_RATE and the returning ADAT stream
+// is already in DSPi's clock domain (no servo).  SLAVE: external gear owns the
+// clock, the wire rate is auto-detected, and every output is servo rate-matched.
+let ADAT_INPUT_CLOCK_MODE_MASTER: UInt8 = 0
+let ADAT_INPUT_CLOCK_MODE_SLAVE: UInt8  = 1
+
 // Clip detection request codes
 let REQ_CLEAR_CLIPS: UInt8            = 0x83
 
@@ -173,7 +199,11 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V23 (Psychoacoustic Bass): appends a 24-byte WirePsybassParams
+/// Wire format V24 (ADAT input): claims three previously-reserved bytes of
+/// WireInputConfig for the ADAT input pin / enable / clock mode (all with the
+/// 0 = "absent, keep live" convention), so the struct and total size are
+/// unchanged from V23.
+/// V23 (Psychoacoustic Bass): appends a 24-byte WirePsybassParams
 /// section at offset 5876, growing the flat layout from 5876 to 5900 bytes.
 /// V22 (Linkwitz Transform): each WireBandParams' 2 reserved bytes
 /// (offset 2) now carry the LT target Q as `qp_x512` when type == 11, zero
@@ -190,9 +220,9 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 23
-/// Full V23 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// V23 appends WirePsybassParams (24 bytes) after the crossover block.
+let WIRE_FORMAT_VERSION: Int            = 24
+/// Full V24 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Unchanged from V23 - the ADAT input fields reuse WireInputConfig reserved bytes.
 let BULK_PARAMS_SIZE: UInt16            = 5900
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
@@ -218,6 +248,13 @@ let BULK_INPUT_CONFIG_OFFSET: Int       = 4716  // input_source, spdif_rx_pin, i
 /// Byte +11 within WireInputConfig: i2s_clock_mode (0=master, 1=slave; V21+).
 /// Bytes +8/+9/+10 are the optional SPDIF 2/3 pins and enable mask.
 let BULK_INPUT_I2S_CLOCK_MODE_OFFSET: Int = 4727
+/// ADAT input (V24+), claimed from WireInputConfig reserved bytes +12/+13/+14.
+/// All use the 0 = "absent, keep live" convention; enable/clock-mode are +1
+/// encoded (0=absent, 1=disabled/master, 2=enabled/slave) and the pin is a raw
+/// GPIO with 0 = unset (0xFF never appears on the wire).
+let BULK_INPUT_ADAT_PIN_OFFSET: Int          = 4728
+let BULK_INPUT_ADAT_ENABLED_P1_OFFSET: Int   = 4729
+let BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET: Int = 4730
 let BULK_LG_OFFSET: Int                 = 4732
 let BULK_USER_VOLUME_OFFSET: Int        = 4748  // user_volume_db, user_mute
 let BULK_DAC_HW_MUTE_OFFSET: Int        = 4764
@@ -307,11 +344,12 @@ let REQ_SET_SPDIF_INPUT_ENABLE: UInt8 = 0xE9   // IN: wValue = (index<<8)|enable
 let REQ_GET_SPDIF_INPUT_CONFIG: UInt8 = 0xEF   // IN 5 bytes: count, enable_mask, pin[0..2]
 
 // Input source enum values (payload of 0xE0 / response of 0xE1, and
-// WireInputConfig byte 0).  Values 4/5 are the two optional S/PDIF inputs;
-// value 3 is a reserved gap for a future ADAT input.
+// WireInputConfig byte 0).  Value 3 is the 8-channel ADAT input (RP2350 only);
+// values 4/5 are the two optional S/PDIF inputs.
 let INPUT_SOURCE_USB: Int    = 0
 let INPUT_SOURCE_SPDIF: Int  = 1
 let INPUT_SOURCE_I2S: Int    = 2
+let INPUT_SOURCE_ADAT: Int   = 3
 let INPUT_SOURCE_SPDIF2: Int = 4
 let INPUT_SOURCE_SPDIF3: Int = 5
 
