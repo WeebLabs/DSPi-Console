@@ -137,7 +137,7 @@ struct PsychoacousticBassView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Psychoacoustic Bass")
                     .font(.system(size: 14, weight: .semibold))
-                Text("Missing-fundamental bass enhancement")
+                Text("Phantom fundamental bass enhancement")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
