@@ -49,6 +49,29 @@ let REQ_GET_CROSSFEED_OUTPUTS: UInt8   = 0xFD
 /// Factory-default crossfeed output-pair mask (pair 1 only, i.e. outputs 0/1).
 let CROSSFEED_DEFAULT_OUTPUT_MASK: UInt8 = 0x01
 
+// Psychoacoustic Bass ("psybass", V23): missing-fundamental bass enhancement.
+// One global parameter set applied per output channel selected by a 16-bit mask,
+// exactly like loudness.  Value SETs take a 4-byte LE float; enable is 1 byte and
+// the mask is 2 bytes LE uint16.  The firmware clamps every value to its range.
+let REQ_SET_PSYBASS: UInt8            = 0x30
+let REQ_GET_PSYBASS: UInt8            = 0x31
+let REQ_SET_PSYBASS_CUTOFF: UInt8     = 0x32
+let REQ_GET_PSYBASS_CUTOFF: UInt8     = 0x33
+let REQ_SET_PSYBASS_HARMONICS: UInt8  = 0x34
+let REQ_GET_PSYBASS_HARMONICS: UInt8  = 0x35
+let REQ_SET_PSYBASS_DRIVE: UInt8      = 0x36
+let REQ_GET_PSYBASS_DRIVE: UInt8      = 0x37
+let REQ_SET_PSYBASS_CHARACTER: UInt8  = 0x38
+let REQ_GET_PSYBASS_CHARACTER: UInt8  = 0x39
+let REQ_SET_PSYBASS_ORIGINAL: UInt8   = 0x3A
+let REQ_GET_PSYBASS_ORIGINAL: UInt8   = 0x3B
+let REQ_SET_PSYBASS_MASK: UInt8       = 0x3C
+let REQ_GET_PSYBASS_MASK: UInt8       = 0x3D
+/// Factory-default psybass output mask (all outputs).  A typical setup masks off
+/// the PDM sub and any full-range outputs, since synthesizing harmonics on a
+/// channel that can reproduce real bass is counterproductive.
+let PSYBASS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
+
 // Matrix mixer request codes
 let REQ_SET_MATRIX_ROUTE: UInt8    = 0x70
 let REQ_GET_MATRIX_ROUTE: UInt8    = 0x71
@@ -150,7 +173,9 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
-/// Wire format V22 (Linkwitz Transform): each WireBandParams' 2 reserved bytes
+/// Wire format V23 (Psychoacoustic Bass): appends a 24-byte WirePsybassParams
+/// section at offset 5876, growing the flat layout from 5876 to 5900 bytes.
+/// V22 (Linkwitz Transform): each WireBandParams' 2 reserved bytes
 /// (offset 2) now carry the LT target Q as `qp_x512` when type == 11, zero
 /// otherwise.  Struct and payload sizes are unchanged from V21 - only the
 /// reserved-byte meaning changed.  V21 (unified channel model): inputs are
@@ -165,10 +190,10 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 22
-/// Full V22 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// Unchanged from V19/V20/V21 - the LT qp reuses WireBandParams reserved space.
-let BULK_PARAMS_SIZE: UInt16            = 5876
+let WIRE_FORMAT_VERSION: Int            = 23
+/// Full V23 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// V23 appends WirePsybassParams (24 bytes) after the crossover block.
+let BULK_PARAMS_SIZE: UInt16            = 5900
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
@@ -198,6 +223,9 @@ let BULK_USER_VOLUME_OFFSET: Int        = 4748  // user_volume_db, user_mute
 let BULK_DAC_HW_MUTE_OFFSET: Int        = 4764
 let BULK_CROSSOVER_OFFSET: Int          = 4780  // crossovers[17][4]
 let BULK_ADAT_OFFSET: Int               = 5868  // WireAdatConfig (enabled, pin, reserved[6])
+/// WirePsybassParams (V23): enabled+reserved, output_mask u16 (+2), then five
+/// floats cutoff/harmonics/drive/character/original (+4/+8/+12/+16/+20).
+let BULK_PSYBASS_OFFSET: Int            = 5876
 
 /// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
 let WIRE_CROSSPOINT_SIZE: Int           = 8

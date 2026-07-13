@@ -26,8 +26,10 @@ final class I2sClockPinModeWireTests: XCTestCase {
     func testWireOffsets() {
         // V22 (Linkwitz Transform) reuses WireBandParams reserved bytes as qp;
         // this section's offsets and the total size are unchanged from V21.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 22)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
+        // V23 (Psychoacoustic Bass) appends a 24-byte section, growing the flat
+        // layout 5876 -> 5900; this section's offsets are unchanged.
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 23)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 5900)
         XCTAssertEqual(BULK_I2S_CLOCK_PIN_MODE_OFFSET, BULK_I2S_OFFSET + 8)
         XCTAssertEqual(BULK_I2S_BCK_PIN_SLAVE_OFFSET, BULK_I2S_OFFSET + 9)
         // Both stay inside the 16-byte I2S config section (before the next one).

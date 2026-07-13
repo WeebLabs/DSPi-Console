@@ -54,6 +54,13 @@ struct PresetSnapshot: Equatable {
     let crossfeedFeed: Float
     let crossfeedITD: Bool
     let crossfeedOutputMask: UInt8
+    let psybassEnabled: Bool
+    let psybassOutputMask: UInt16
+    let psybassCutoffHz: Float
+    let psybassHarmonicsDB: Float
+    let psybassDriveDB: Float
+    let psybassCharacterPct: Float
+    let psybassOriginalDB: Float
     let levellerEnabled: Bool
     let levellerAmount: Float
     let levellerSpeed: Int
@@ -179,6 +186,29 @@ extension PresetSnapshot {
         }
         if old.crossfeedOutputMask != new.crossfeedOutputMask {
             changes.append(.init(category: "Crossfeed", description: "Crossfeed output pairs: \(String(format: "0x%02X", old.crossfeedOutputMask)) → \(String(format: "0x%02X", new.crossfeedOutputMask))"))
+        }
+
+        // Psychoacoustic Bass
+        if old.psybassEnabled != new.psybassEnabled {
+            changes.append(.init(category: "Psybass", description: "Psychoacoustic Bass: \(new.psybassEnabled ? "enabled" : "disabled")"))
+        }
+        if old.psybassOutputMask != new.psybassOutputMask {
+            changes.append(.init(category: "Psybass", description: "Psybass outputs: \(String(format: "0x%04X", old.psybassOutputMask)) → \(String(format: "0x%04X", new.psybassOutputMask))"))
+        }
+        if old.psybassCutoffHz != new.psybassCutoffHz {
+            changes.append(.init(category: "Psybass", description: "Psybass cutoff: \(formatVal(old.psybassCutoffHz)) → \(formatVal(new.psybassCutoffHz)) Hz"))
+        }
+        if old.psybassHarmonicsDB != new.psybassHarmonicsDB {
+            changes.append(.init(category: "Psybass", description: "Psybass harmonics: \(formatVal(old.psybassHarmonicsDB)) dB → \(formatVal(new.psybassHarmonicsDB)) dB"))
+        }
+        if old.psybassDriveDB != new.psybassDriveDB {
+            changes.append(.init(category: "Psybass", description: "Psybass drive: \(formatVal(old.psybassDriveDB)) dB → \(formatVal(new.psybassDriveDB)) dB"))
+        }
+        if old.psybassCharacterPct != new.psybassCharacterPct {
+            changes.append(.init(category: "Psybass", description: "Psybass character: \(formatVal(old.psybassCharacterPct))% → \(formatVal(new.psybassCharacterPct))%"))
+        }
+        if old.psybassOriginalDB != new.psybassOriginalDB {
+            changes.append(.init(category: "Psybass", description: "Psybass original bass: \(formatVal(old.psybassOriginalDB)) dB → \(formatVal(new.psybassOriginalDB)) dB"))
         }
 
         // Volume Leveller

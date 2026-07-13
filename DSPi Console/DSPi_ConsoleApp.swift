@@ -6502,6 +6502,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var statsWindowController = StatsWindowController()
     @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
+    @StateObject private var psybassWindowController = PsychoacousticBassWindowController()
     @StateObject private var levellerWindowController = VolumeLevellerWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
@@ -6516,6 +6517,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(matrixMixerWindowController)
                 .environmentObject(loudnessWindowController)
                 .environmentObject(crossfeedWindowController)
+                .environmentObject(psybassWindowController)
                 .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
                 .environmentObject(graphWindowController)
@@ -6656,6 +6658,11 @@ struct DSPi_ConsoleApp: App {
                     crossfeedWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("X", modifiers: [.command, .shift])
+
+                Button("Psychoacoustic Bass...") {
+                    psybassWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("P", modifiers: [.command, .shift])
 
                 Button("Volume Leveller...") {
                     levellerWindowController.show(vm: AppState.shared.viewModel)

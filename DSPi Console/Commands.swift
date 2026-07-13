@@ -867,6 +867,126 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Psychoacoustic Bass
+
+    func setPsybass(_ enabled: Bool) {
+        self.psybassEnabled = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_PSYBASS, value: 0, index: 0, data: data)
+    }
+
+    func fetchPsybass() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS, value: 0, index: 0, length: 1), !d.isEmpty {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.psybassEnabled = val }
+        }
+    }
+
+    func setPsybassCutoff(_ hz: Float) {
+        self.psybassCutoffHz = hz
+        var val = hz
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: data)
+    }
+
+    func fetchPsybassCutoff() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.psybassCutoffHz - val) > 0.01 { self.psybassCutoffHz = val }
+            }
+        }
+    }
+
+    func setPsybassHarmonics(_ db: Float) {
+        self.psybassHarmonicsDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_PSYBASS_HARMONICS, value: 0, index: 0, data: data)
+    }
+
+    func fetchPsybassHarmonics() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_HARMONICS, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.psybassHarmonicsDB - val) > 0.01 { self.psybassHarmonicsDB = val }
+            }
+        }
+    }
+
+    func setPsybassDrive(_ db: Float) {
+        self.psybassDriveDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_PSYBASS_DRIVE, value: 0, index: 0, data: data)
+    }
+
+    func fetchPsybassDrive() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_DRIVE, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.psybassDriveDB - val) > 0.01 { self.psybassDriveDB = val }
+            }
+        }
+    }
+
+    func setPsybassCharacter(_ pct: Float) {
+        self.psybassCharacterPct = pct
+        var val = pct
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_PSYBASS_CHARACTER, value: 0, index: 0, data: data)
+    }
+
+    func fetchPsybassCharacter() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_CHARACTER, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.psybassCharacterPct - val) > 0.01 { self.psybassCharacterPct = val }
+            }
+        }
+    }
+
+    func setPsybassOriginal(_ db: Float) {
+        self.psybassOriginalDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_PSYBASS_ORIGINAL, value: 0, index: 0, data: data)
+    }
+
+    func fetchPsybassOriginal() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_ORIGINAL, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.psybassOriginalDB - val) > 0.01 { self.psybassOriginalDB = val }
+            }
+        }
+    }
+
+    /// Sets the per-output psybass mask.  Bit k processes output channel k; sent
+    /// as a 2-byte little-endian uint16.  The firmware switches masks glitch-free
+    /// from the next packet (no recompute) and clears skipped outputs' state.
+    func setPsybassMask(_ mask: UInt16) {
+        self.psybassOutputMask = mask
+        let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
+        usb.sendControlRequest(request: REQ_SET_PSYBASS_MASK, value: 0, index: 0, data: data)
+    }
+
+    /// Toggles a single output channel's bit in the psybass mask and pushes it.
+    func setPsybassOutputChannel(_ output: Int, enabled: Bool) {
+        guard output >= 0, output < 16 else { return }
+        var mask = psybassOutputMask
+        if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
+        setPsybassMask(mask)
+    }
+
+    func fetchPsybassMask() {
+        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
+            let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
+            DispatchQueue.main.async { self.psybassOutputMask = val }
+        }
+    }
+
     // MARK: - Volume Leveller
 
     func setLeveller(_ enabled: Bool) {
@@ -2066,11 +2186,12 @@ extension DSPViewModel {
             }
             return false
         }
-        // V18 is all-or-nothing: only the full, current layout is accepted.
+        // V23 is all-or-nothing: only the full, current layout is accepted.
         // A short or wrong-version payload means incompatible firmware - the
         // device is still connected, so don't disconnect (avoids a reconnect
-        // loop); just record the version so the UI can react.
-        guard data.count >= WIRE_BULK_PARAMS_V19_SIZE, Int(data[0]) == WIRE_FORMAT_VERSION else {
+        // loop); just record the version so the UI can react.  Require the full
+        // V23 size so the psybass section (offset 5876..5899) is always in range.
+        guard data.count >= Int(BULK_PARAMS_SIZE), Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
         }
@@ -2288,6 +2409,15 @@ extension DSPViewModel {
         let bulkAdatPinRaw = data[BULK_ADAT_OFFSET + 1]
         let bulkAdatPin = bulkAdatPinRaw == 0 ? ADAT_PIN_DEFAULT : bulkAdatPinRaw
 
+        // --- Psychoacoustic Bass (offset 5876, WirePsybassParams 24 bytes) ---
+        let pbEnabled = data[BULK_PSYBASS_OFFSET] != 0
+        let pbOutputMask = UInt16(data[BULK_PSYBASS_OFFSET + 2]) | (UInt16(data[BULK_PSYBASS_OFFSET + 3]) << 8)
+        let pbCutoff: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 4, as: Float.self) }
+        let pbHarmonics: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 8, as: Float.self) }
+        let pbDrive: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 12, as: Float.self) }
+        let pbCharacter: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 16, as: Float.self) }
+        let pbOriginal: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 20, as: Float.self) }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -2308,6 +2438,14 @@ extension DSPViewModel {
             self.crossfeedFreq = cfFreq
             self.crossfeedFeed = cfFeed
             self.crossfeedOutputMask = cfOutputMask
+
+            self.psybassEnabled = pbEnabled
+            self.psybassOutputMask = pbOutputMask
+            self.psybassCutoffHz = pbCutoff
+            self.psybassHarmonicsDB = pbHarmonics
+            self.psybassDriveDB = pbDrive
+            self.psybassCharacterPct = pbCharacter
+            self.psybassOriginalDB = pbOriginal
 
             self.channelDelays = delays
 

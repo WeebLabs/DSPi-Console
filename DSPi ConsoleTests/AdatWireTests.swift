@@ -25,12 +25,15 @@ final class AdatWireTests: XCTestCase {
         // V20 repurposes the crossfeed reserved byte as output_pair_mask; sizes
         // are unchanged from V19.  V21 reuses a WireInputConfig reserved byte.
         // V22 (Linkwitz Transform) reuses WireBandParams reserved bytes as qp.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 22)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5876)
+        // V23 (Psychoacoustic Bass) appends WirePsybassParams (24 bytes), growing
+        // the flat layout 5876 -> 5900; the ADAT section is no longer the last.
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 23)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 5900)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
         XCTAssertEqual(BULK_ADAT_OFFSET, 5868)
-        // The ADAT section is the final member: offset + 8 == total size.
+        // ADAT ends at 5876 - where the V23 psybass section now begins.
         XCTAssertEqual(BULK_ADAT_OFFSET + 8, WIRE_BULK_PARAMS_V19_SIZE)
+        XCTAssertEqual(BULK_ADAT_OFFSET + 8, BULK_PSYBASS_OFFSET)
         // It sits immediately after the crossover section (crossovers[17][4]).
         XCTAssertEqual(BULK_CROSSOVER_OFFSET + WIRE_MAX_CHANNELS * WIRE_MAX_XOVER_BANDS * WIRE_BAND_PARAMS_SIZE,
                        BULK_ADAT_OFFSET)

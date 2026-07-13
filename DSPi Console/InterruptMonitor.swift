@@ -410,6 +410,20 @@ private enum ParamOffsetDecoder {
             return ("adat_config.pin", v == 0 ? "default" : "GPIO \(v)")
         }
 
+        // Psychoacoustic Bass (5876..5899) — WirePsybassParams
+        if off >= BULK_PSYBASS_OFFSET && off < BULK_PSYBASS_OFFSET + 24 {
+            switch off - BULK_PSYBASS_OFFSET {
+            case 0:  return ("psybass.enabled", fmtBool(payload))
+            case 2:  return ("psybass.output_mask", fmtHex(payload))
+            case 4:  return ("psybass.cutoff_hz", fmtFloat(payload, suffix: " Hz"))
+            case 8:  return ("psybass.harmonics_db", fmtFloat(payload, suffix: " dB"))
+            case 12: return ("psybass.drive_db", fmtFloat(payload, suffix: " dB"))
+            case 16: return ("psybass.character_pct", fmtFloat(payload, suffix: "%"))
+            case 20: return ("psybass.original_db", fmtFloat(payload, suffix: " dB"))
+            default: break
+            }
+        }
+
         // Fallback — unknown offset
         return (String(format: "offset=0x%04X size=%d", off, sz), fmtHex(payload))
     }

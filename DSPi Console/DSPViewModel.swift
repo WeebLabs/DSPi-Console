@@ -806,6 +806,20 @@ class DSPViewModel: ObservableObject {
     /// settings stay global; the mask only selects which pairs are crossfed.
     @Published var crossfeedOutputMask: UInt8 = CROSSFEED_DEFAULT_OUTPUT_MASK
 
+    // Psychoacoustic Bass (V23): one global parameter set applied per output
+    // channel selected by `psybassOutputMask`, exactly like loudness.  The
+    // firmware clamps each value to the range shown; the app enforces the same
+    // ranges so its state stays identical without a read-back.
+    @Published var psybassEnabled: Bool = false
+    @Published var psybassCutoffHz: Float = 80.0      // 30..300 Hz
+    @Published var psybassHarmonicsDB: Float = 0.0    // -24..+12 dB
+    @Published var psybassDriveDB: Float = 6.0        // 0..18 dB
+    @Published var psybassCharacterPct: Float = 50.0  // 0..100 % (warm..aggressive)
+    @Published var psybassOriginalDB: Float = 0.0     // -60..0 dB (speaker protection)
+    /// Per-output psybass mask: bit k processes output channel k (PDM sub = bit 8
+    /// on RP2350 / bit 4 on RP2040).  Default 0xFFFF = every output.
+    @Published var psybassOutputMask: UInt16 = PSYBASS_DEFAULT_OUTPUT_MASK
+
     // Matrix mixer state (up to 8 inputs x 9 outputs).  Backing arrays are
     // always MAX_MATRIX_INPUTS rows so crosspoint bindings for inputs 2-7 are
     // always valid; the UI renders only `numMatrixInputs` of them.  Rows 2-7
@@ -1205,6 +1219,11 @@ class DSPViewModel: ObservableObject {
     /// the `qp` sidecar.  Hidden from the PEQ picker until confirmed so we never
     /// send type 11 (or an 18-byte payload) to firmware that can't parse it.
     var firmwareSupportsLinkwitzTransform: Bool { firmwareWireFormatVersion >= 22 }
+
+    /// Psychoacoustic Bass (cmds 0x30-0x3D) shipped in wire format V23, which
+    /// appends WirePsybassParams to the bulk layout.  The whole feature (window
+    /// contents + output mask) is gated on this so older firmware never sees it.
+    var firmwareSupportsPsybass: Bool { firmwareWireFormatVersion >= 23 }
 
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
     /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
@@ -1639,6 +1658,13 @@ class DSPViewModel: ObservableObject {
             crossfeedFeed: crossfeedFeed,
             crossfeedITD: crossfeedITD,
             crossfeedOutputMask: crossfeedOutputMask,
+            psybassEnabled: psybassEnabled,
+            psybassOutputMask: psybassOutputMask,
+            psybassCutoffHz: psybassCutoffHz,
+            psybassHarmonicsDB: psybassHarmonicsDB,
+            psybassDriveDB: psybassDriveDB,
+            psybassCharacterPct: psybassCharacterPct,
+            psybassOriginalDB: psybassOriginalDB,
             levellerEnabled: levellerEnabled,
             levellerAmount: levellerAmount,
             levellerSpeed: levellerSpeed,
