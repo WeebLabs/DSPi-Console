@@ -5133,24 +5133,61 @@ struct HardwareSettingsTab: View {
                     // box out->data pin).  With the ADAT output disabled there is
                     // no clock for it to lock to, so it free-runs at its own rate,
                     // asynchronous to DSPi - the sample-rate slip produces
-                    // periodic clicks and pops.
+                    // periodic clicks and pops.  The ADAT output lives on the
+                    // Outputs page, so the fix is offered inline here rather than
+                    // sending the user hunting for it.
                     if vm.adatInputEnabled
                         && vm.adatInputClockMode == ADAT_INPUT_CLOCK_MODE_MASTER
                         && !vm.adatEnabled {
-                        HStack(alignment: .top, spacing: 8) {
+                        HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.orange)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.orange)
                                 .frame(width: 16)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Clock is free-running")
-                                    .font(.body)
-                                Text("Master mode needs the ADAT output to clock the outboard ADC, but the ADAT output is disabled. The source runs on its own clock, asynchronous to DSPi, and you may hear periodic clicks or pops. Enable the ADAT output (Bulk Output) or switch this to Slave mode.")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Clock is free-running")
+                                        .font(.callout.weight(.semibold))
+                                    Text("Master mode uses the ADAT output to clock the outboard device but the ADAT output is off. The source runs on its own clock, asynchronous to DSPi, so you will hear periodic disturbances.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                HStack(spacing: 8) {
+                                    Button {
+                                        SettingsSaveCoordinator.shared.beginOutputEdit()
+                                        let pin = vm.adatPin
+                                        DispatchQueue.global(qos: .userInitiated).async {
+                                            let status = vm.setAdatEnable(true)
+                                            DispatchQueue.main.async {
+                                                handleAdatStatus(status, label: "enabled", gpio: pin)
+                                            }
+                                        }
+                                    } label: {
+                                        Text("Enable ADAT Output")
+                                    }
+                                    .controlSize(.small)
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.orange)
+                                    .disabled(!vm.isDeviceConnected)
+
+                                    Text("or switch to Slave mode above")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
                             }
-                            Spacer()
+                            Spacer(minLength: 0)
                         }
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.orange.opacity(0.10))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.orange.opacity(0.28), lineWidth: 0.5)
+                        )
+                        .padding(.vertical, 2)
                     }
 
                     // Live lock indicator, shown while ADAT is the active source.
