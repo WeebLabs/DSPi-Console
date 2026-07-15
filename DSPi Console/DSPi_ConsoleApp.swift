@@ -5128,6 +5128,31 @@ struct HardwareSettingsTab: View {
                         .fixedSize()
                     }
 
+                    // Free-running clock warning.  In master mode the outboard
+                    // ADC slaves to DSPi's ADAT output clock (wire out->box in,
+                    // box out->data pin).  With the ADAT output disabled there is
+                    // no clock for it to lock to, so it free-runs at its own rate,
+                    // asynchronous to DSPi - the sample-rate slip produces
+                    // periodic clicks and pops.
+                    if vm.adatInputEnabled
+                        && vm.adatInputClockMode == ADAT_INPUT_CLOCK_MODE_MASTER
+                        && !vm.adatEnabled {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.orange)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Clock is free-running")
+                                    .font(.body)
+                                Text("Master mode needs the ADAT output to clock the outboard ADC, but the ADAT output is disabled. The source runs on its own clock, asynchronous to DSPi, and you may hear periodic clicks or pops. Enable the ADAT output (Bulk Output) or switch this to Slave mode.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                    }
+
                     // Live lock indicator, shown while ADAT is the active source.
                     // The receiver locks in both clock modes (master decodes the
                     // returning stream), so this appears whenever ADAT is selected.
