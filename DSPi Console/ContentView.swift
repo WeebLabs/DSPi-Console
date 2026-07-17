@@ -55,6 +55,7 @@ struct ContentView: View {
     @EnvironmentObject var statsController: StatsWindowController
     @EnvironmentObject var graphWindowController: GraphWindowController
     @EnvironmentObject var levellerController: VolumeLevellerWindowController
+    @EnvironmentObject var psybassController: PsychoacousticBassWindowController
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
 
@@ -402,6 +403,17 @@ struct ContentView: View {
                             action: { vm.setLeveller(!vm.levellerEnabled) }
                         )
                         .onRightClick { levellerController.show(vm: vm) }
+
+                        SidebarIconButton(
+                            icon: "",
+                            glyph: "\u{1D122}",   // bass clef (MUSICAL SYMBOL F CLEF)
+                            glyphSize: 19,
+                            glyphYOffset: 3,       // correct Apple Symbols bottom bearing
+                            isActive: vm.psybassEnabled,
+                            tooltip: "Psychoacoustic Bass",
+                            action: { vm.setPsybass(!vm.psybassEnabled) }
+                        )
+                        .onRightClick { psybassController.show(vm: vm) }
 
                         SidebarIconButton(
                             icon: "info.circle",

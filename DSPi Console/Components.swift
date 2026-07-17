@@ -2079,6 +2079,14 @@ class ValueFieldScrollNSView: NSView {
 
 struct SidebarIconButton: View {
     let icon: String
+    /// Optional custom glyph rendered with the "Apple Symbols" font instead of
+    /// an SF Symbol. Used for glyphs SF Symbols lacks (e.g. the bass clef).
+    var glyph: String? = nil
+    /// Point size for the custom `glyph` (SF Symbols use a fixed 14).
+    var glyphSize: CGFloat = 16
+    /// Vertical nudge for the custom `glyph`, to correct fonts with uneven
+    /// bearings (positive moves down).
+    var glyphYOffset: CGFloat = 0
     let isActive: Bool
     let tooltip: String
     let action: () -> Void
@@ -2086,10 +2094,18 @@ struct SidebarIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 14))
-                .foregroundColor(isActive ? .white : isHovered ? .white.opacity(0.7) : .secondary.opacity(0.6))
-                .animation(.easeInOut(duration: 0.2), value: isHovered)
+            Group {
+                if let glyph {
+                    Text(glyph)
+                        .font(.custom("Apple Symbols", size: glyphSize))
+                        .offset(y: glyphYOffset)
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: 14))
+                }
+            }
+            .foregroundColor(isActive ? .white : isHovered ? .white.opacity(0.7) : .secondary.opacity(0.6))
+            .animation(.easeInOut(duration: 0.2), value: isHovered)
         }
         .buttonStyle(.plain)
         .help(tooltip)
