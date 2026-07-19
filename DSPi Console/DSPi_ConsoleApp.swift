@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 
 // MARK: - App State (Shared USB Device and View Model)
 class AppState: ObservableObject {
@@ -5664,6 +5665,10 @@ struct HardwareSettingsTab: View {
 class MatrixMixerWindowController: NSObject, ObservableObject {
     private var window: NSWindow?
     @Published var isVisible: Bool = false
+    /// Observes the state that changes the matrix source-row count so the fixed-
+    /// size (stereo) window can shrink-to-fit when the row count drops - e.g. when
+    /// the upmixer is toggled off, removing the derived C/Ls/Rs rows.
+    private var rowCountCancellable: AnyCancellable?
 
     func toggle() {
         if isVisible {
@@ -5689,6 +5694,23 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
             window?.contentView = hostingView
             window?.isReleasedWhenClosed = false
             window?.delegate = self
+
+            // Re-fit the window whenever the source-row count can change.  Merge
+            // the upmixer state (enable + surround mode gate the derived rows) and
+            // the input-channel signals; each fires on the main thread after the
+            // published value updates, so `refitToContent` sees the new layout.
+            let vm = AppState.shared.viewModel
+            let triggers: [AnyPublisher<Void, Never>] = [
+                vm.$upmixEnabled.map { _ in () }.eraseToAnyPublisher(),
+                vm.$upmixSurroundMode.map { _ in () }.eraseToAnyPublisher(),
+                vm.$activeInputChannels.map { _ in () }.eraseToAnyPublisher(),
+                vm.$hostConfiguredInputChannels.map { _ in () }.eraseToAnyPublisher(),
+                vm.$inputSource.map { _ in () }.eraseToAnyPublisher(),
+                vm.$i2sInputChannels.map { _ in () }.eraseToAnyPublisher(),
+            ]
+            rowCountCancellable = Publishers.MergeMany(triggers)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] in self?.refitToContent() }
         }
 
         // Re-evaluate sizing/resizability each time: the 8-channel matrix (8×9)
@@ -5709,6 +5731,33 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         isVisible = true
+    }
+
+    /// Resize the window to fit its current SwiftUI content.  Called when the
+    /// matrix source-row count changes while the window is open so it never leaves
+    /// dead space, nor clips into scrollbars, as rows appear/disappear (e.g. the
+    /// upmixer's derived C/Ls/Rs rows).  Mirrors the sizing rule in `show()`: the
+    /// 8-channel-capable window is clamped to the screen (and still scrolls when a
+    /// genuine 8-row matrix is taller than the display); the stereo window fits
+    /// exactly.
+    private func refitToContent() {
+        guard isVisible, let window = window, let hostingView = window.contentView else { return }
+        // Let SwiftUI relayout the hosting view before measuring its fitting size.
+        DispatchQueue.main.async {
+            hostingView.layoutSubtreeIfNeeded()
+            let fitting = hostingView.fittingSize
+            guard fitting.width > 0, fitting.height > 0 else { return }
+            let eightCh = AppState.shared.viewModel.supports8chInput
+            let target = eightCh ? Self.clampToScreen(fitting) : fitting
+            let current = window.contentRect(forFrameRect: window.frame).size
+            guard abs(target.width - current.width) > 0.5 || abs(target.height - current.height) > 0.5 else { return }
+            // Convert the target content size to a full frame and anchor the
+            // window's top-left corner so only the bottom edge moves.
+            var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: target))
+            frame.origin.x = window.frame.origin.x
+            frame.origin.y = window.frame.maxY - frame.height
+            window.setFrame(frame, display: true, animate: true)
+        }
     }
 
     /// Clamp a desired content size to ~90% of the active screen's visible frame
@@ -6777,6 +6826,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var psybassWindowController = PsychoacousticBassWindowController()
+    @StateObject private var upmixerWindowController = UpmixerWindowController()
     @StateObject private var levellerWindowController = VolumeLevellerWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
     @StateObject private var matrixMixerWindowController = MatrixMixerWindowController()
@@ -6792,6 +6842,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(loudnessWindowController)
                 .environmentObject(crossfeedWindowController)
                 .environmentObject(psybassWindowController)
+                .environmentObject(upmixerWindowController)
                 .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
                 .environmentObject(graphWindowController)
@@ -6937,6 +6988,11 @@ struct DSPi_ConsoleApp: App {
                     psybassWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("P", modifiers: [.command, .shift])
+
+                Button("Stereo Upmixer...") {
+                    upmixerWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("U", modifiers: [.command, .shift])
 
                 Button("Volume Leveller...") {
                     levellerWindowController.show(vm: AppState.shared.viewModel)

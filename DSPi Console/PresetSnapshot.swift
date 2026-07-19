@@ -61,6 +61,20 @@ struct PresetSnapshot: Equatable {
     let psybassDriveDB: Float
     let psybassCharacterPct: Float
     let psybassOriginalDB: Float
+    let upmixEnabled: Bool
+    let upmixCenterMode: Int
+    let upmixSurroundMode: Int
+    let upmixStrengthPct: Float
+    let upmixCenterWidthPct: Float
+    let upmixThresholdPct: Float
+    let upmixAttackMs: Float
+    let upmixReleaseMs: Float
+    let upmixDetectorHpfHz: Float
+    let upmixSurroundDelayMs: Float
+    let upmixSurroundHpfHz: Float
+    let upmixSurroundLpfHz: Float
+    let upmixDecorrPct: Float
+    let upmixPresenceDB: Float
     let levellerEnabled: Bool
     let levellerAmount: Float
     let levellerSpeed: Int
@@ -212,6 +226,56 @@ extension PresetSnapshot {
         }
         if old.psybassOriginalDB != new.psybassOriginalDB {
             changes.append(.init(category: "Psybass", description: "Psybass original bass: \(formatVal(old.psybassOriginalDB)) dB → \(formatVal(new.psybassOriginalDB)) dB"))
+        }
+
+        // Stereo Upmixer
+        if old.upmixEnabled != new.upmixEnabled {
+            changes.append(.init(category: "Upmix", description: "Stereo Upmixer: \(new.upmixEnabled ? "enabled" : "disabled")"))
+        }
+        if old.upmixCenterMode != new.upmixCenterMode {
+            let names = ["Sinner", "Logic"]
+            let o = old.upmixCenterMode < names.count ? names[old.upmixCenterMode] : "\(old.upmixCenterMode)"
+            let n = new.upmixCenterMode < names.count ? names[new.upmixCenterMode] : "\(new.upmixCenterMode)"
+            changes.append(.init(category: "Upmix", description: "Centre mode: \(o) → \(n)"))
+        }
+        if old.upmixSurroundMode != new.upmixSurroundMode {
+            let names = ["Off", "Sinner", "Logic"]
+            let o = old.upmixSurroundMode < names.count ? names[old.upmixSurroundMode] : "\(old.upmixSurroundMode)"
+            let n = new.upmixSurroundMode < names.count ? names[new.upmixSurroundMode] : "\(new.upmixSurroundMode)"
+            changes.append(.init(category: "Upmix", description: "Surround mode: \(o) → \(n)"))
+        }
+        if old.upmixStrengthPct != new.upmixStrengthPct {
+            changes.append(.init(category: "Upmix", description: "Centre strength: \(formatVal(old.upmixStrengthPct))% → \(formatVal(new.upmixStrengthPct))%"))
+        }
+        if old.upmixCenterWidthPct != new.upmixCenterWidthPct {
+            changes.append(.init(category: "Upmix", description: "Centre width: \(formatVal(old.upmixCenterWidthPct))% → \(formatVal(new.upmixCenterWidthPct))%"))
+        }
+        if old.upmixThresholdPct != new.upmixThresholdPct {
+            changes.append(.init(category: "Upmix", description: "Correlation threshold: \(formatVal(old.upmixThresholdPct))% → \(formatVal(new.upmixThresholdPct))%"))
+        }
+        if old.upmixAttackMs != new.upmixAttackMs {
+            changes.append(.init(category: "Upmix", description: "Centre attack: \(formatVal(old.upmixAttackMs)) ms → \(formatVal(new.upmixAttackMs)) ms"))
+        }
+        if old.upmixReleaseMs != new.upmixReleaseMs {
+            changes.append(.init(category: "Upmix", description: "Centre release: \(formatVal(old.upmixReleaseMs)) ms → \(formatVal(new.upmixReleaseMs)) ms"))
+        }
+        if old.upmixDetectorHpfHz != new.upmixDetectorHpfHz {
+            changes.append(.init(category: "Upmix", description: "Detector HPF: \(formatVal(old.upmixDetectorHpfHz)) Hz → \(formatVal(new.upmixDetectorHpfHz)) Hz"))
+        }
+        if old.upmixSurroundDelayMs != new.upmixSurroundDelayMs {
+            changes.append(.init(category: "Upmix", description: "Surround delay: \(formatVal(old.upmixSurroundDelayMs)) ms → \(formatVal(new.upmixSurroundDelayMs)) ms"))
+        }
+        if old.upmixSurroundHpfHz != new.upmixSurroundHpfHz {
+            changes.append(.init(category: "Upmix", description: "Surround HPF: \(formatVal(old.upmixSurroundHpfHz)) Hz → \(formatVal(new.upmixSurroundHpfHz)) Hz"))
+        }
+        if old.upmixSurroundLpfHz != new.upmixSurroundLpfHz {
+            changes.append(.init(category: "Upmix", description: "Surround LPF: \(formatVal(old.upmixSurroundLpfHz)) Hz → \(formatVal(new.upmixSurroundLpfHz)) Hz"))
+        }
+        if old.upmixDecorrPct != new.upmixDecorrPct {
+            changes.append(.init(category: "Upmix", description: "Decorrelation: \(formatVal(old.upmixDecorrPct))% → \(formatVal(new.upmixDecorrPct))%"))
+        }
+        if old.upmixPresenceDB != new.upmixPresenceDB {
+            changes.append(.init(category: "Upmix", description: "Centre presence: \(formatVal(old.upmixPresenceDB)) dB → \(formatVal(new.upmixPresenceDB)) dB"))
         }
 
         // Volume Leveller

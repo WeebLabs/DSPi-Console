@@ -72,6 +72,56 @@ let REQ_GET_PSYBASS_MASK: UInt8       = 0x3D
 /// channel that can reproduce real bass is counterproductive.
 let PSYBASS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
 
+// Stereo Upmixer (V25): derives Centre + Left/Right Surround as ordinary matrix
+// source rows (2 = C, 3 = Ls, 4 = Rs) from a plain stereo input.  RP2350 only;
+// on RP2040 the SETs STALL and the GETs return all-zero payloads.  See
+// Documentation/Features/upmixer_spec.md.  Live single-parameter SETs carry the
+// param id in wValue and a 4-byte LE float payload (including enable/modes, which
+// the firmware rounds).  SET_CONFIG applies a whole 44-byte packet atomically.
+let REQ_UPMIX_SET_CONFIG: UInt8   = 0x4A   // OUT: UpmixConfigPacket, exactly 44 bytes
+let REQ_UPMIX_GET_CONFIG: UInt8   = 0x4B   // IN 44 bytes: UpmixConfigPacket
+let REQ_UPMIX_SET_PARAM:  UInt8   = 0x4C   // OUT: wValue = param id (0-12), 4-byte float
+let REQ_UPMIX_GET_PARAM:  UInt8   = 0x4D   // IN 4 bytes: wValue = param id (0-12)
+let REQ_UPMIX_GET_STATUS: UInt8   = 0x4E   // IN 16 bytes: UpmixStatus telemetry
+
+// Upmix parameter ids (wValue of REQ_UPMIX_SET/GET_PARAM; spec §4 table).
+let UPMIX_PARAM_ENABLED:       UInt16 = 0
+let UPMIX_PARAM_CENTER_MODE:   UInt16 = 1
+let UPMIX_PARAM_SURROUND_MODE: UInt16 = 2
+let UPMIX_PARAM_STRENGTH:      UInt16 = 3
+let UPMIX_PARAM_CENTER_WIDTH:  UInt16 = 4
+let UPMIX_PARAM_THRESHOLD:     UInt16 = 5
+let UPMIX_PARAM_ATTACK:        UInt16 = 6
+let UPMIX_PARAM_RELEASE:       UInt16 = 7
+let UPMIX_PARAM_DET_HPF:       UInt16 = 8
+let UPMIX_PARAM_SUR_DELAY:     UInt16 = 9
+let UPMIX_PARAM_SUR_HPF:       UInt16 = 10
+let UPMIX_PARAM_SUR_LPF:       UInt16 = 11
+let UPMIX_PARAM_DECORR:        UInt16 = 12
+// Presence (V26+): centre presence bell gain at a fixed 3 kHz / Q 0.6.  Via
+// SET/GET_PARAM the value is a plain float dB (-12..+12); in the config packet
+// and presets it is packed into config byte 3 as `presence_q1` (i8 = dB x 2).
+let UPMIX_PARAM_PRESENCE:      UInt16 = 13
+
+// Centre engine modes (UPMIX_PARAM_CENTER_MODE).
+let UPMIX_CENTER_MODE_PASSIVE:  Int = 0
+let UPMIX_CENTER_MODE_ADAPTIVE: Int = 1
+// Surround engine modes (UPMIX_PARAM_SURROUND_MODE).
+let UPMIX_SURROUND_MODE_OFF:      Int = 0
+let UPMIX_SURROUND_MODE_PASSIVE:  Int = 1
+let UPMIX_SURROUND_MODE_ADAPTIVE: Int = 2
+
+// UpmixStatus.parked_reason (spec §6.3).
+let UPMIX_PARKED_ACTIVE:        UInt8 = 0
+let UPMIX_PARKED_DISABLED:      UInt8 = 1
+let UPMIX_PARKED_NOT_STEREO:    UInt8 = 2
+let UPMIX_PARKED_RATE_TOO_HIGH: UInt8 = 3
+
+/// Exact byte length of UpmixConfigPacket / WireUpmixParams (spec §6.1).
+let UPMIX_CONFIG_PACKET_SIZE: Int    = 44
+/// Byte length of the UpmixStatus telemetry response (spec §6.3).
+let UPMIX_STATUS_SIZE: UInt16        = 16
+
 // Matrix mixer request codes
 let REQ_SET_MATRIX_ROUTE: UInt8    = 0x70
 let REQ_GET_MATRIX_ROUTE: UInt8    = 0x71
@@ -199,6 +249,14 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
+/// Wire format V26 (Upmixer presence): claims the WireUpmixParams reserved byte
+/// at offset +3 for `presence_q1` (i8 = dB x 2), so the section and total size are
+/// unchanged from V25.  Version discipline is strict - a V26 client's bulk image
+/// must carry format_version 26.
+/// Wire format V25 (Stereo Upmixer): appends a 44-byte WireUpmixParams section
+/// at offset 5900 (byte-identical to UpmixConfigPacket), growing the flat layout
+/// from 5900 to 5944 bytes.  Present on both platforms for layout uniformity;
+/// zero on GET and ignored on SET on RP2040.
 /// Wire format V24 (ADAT input): claims three previously-reserved bytes of
 /// WireInputConfig for the ADAT input pin / enable / clock mode (all with the
 /// 0 = "absent, keep live" convention), so the struct and total size are
@@ -220,10 +278,10 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 24
-/// Full V24 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// Unchanged from V23 - the ADAT input fields reuse WireInputConfig reserved bytes.
-let BULK_PARAMS_SIZE: UInt16            = 5900
+let WIRE_FORMAT_VERSION: Int            = 26
+/// Full V26 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Unchanged from V25 - the presence byte reuses a WireUpmixParams reserved byte.
+let BULK_PARAMS_SIZE: UInt16            = 5944
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
@@ -263,6 +321,10 @@ let BULK_ADAT_OFFSET: Int               = 5868  // WireAdatConfig (enabled, pin,
 /// WirePsybassParams (V23): enabled+reserved, output_mask u16 (+2), then five
 /// floats cutoff/harmonics/drive/character/original (+4/+8/+12/+16/+20).
 let BULK_PSYBASS_OFFSET: Int            = 5876
+/// WireUpmixParams: byte-identical to UpmixConfigPacket (spec §6.1) -
+/// enabled/center_mode/surround_mode (+0..2), presence_q1 i8 (+3, V26+), then ten
+/// f32 params (+4..+40).
+let BULK_UPMIX_OFFSET: Int              = 5900
 
 /// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
 let WIRE_CROSSPOINT_SIZE: Int           = 8

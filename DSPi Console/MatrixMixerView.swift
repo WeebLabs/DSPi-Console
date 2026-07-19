@@ -141,7 +141,11 @@ struct MatrixMixerView: View {
     private var is8ch: Bool { vm.supports8chInput }
 
     private var matrixInputs: [MatrixInput] {
-        MatrixInput.inputs(count: vm.numMatrixInputs)
+        // In stereo + upmix mode the row count exceeds the plain input count and
+        // rows 2-4 carry contextual Upmix C / Ls / Rs labels (spec §3).
+        (0..<max(vm.matrixSourceRowCount, 1)).map { i in
+            MatrixInput(index: i, name: vm.matrixRowShortName(i), color: MatrixInput.color(for: i))
+        }
     }
 
     private func commitRename() {
@@ -165,7 +169,9 @@ struct MatrixMixerView: View {
         Group {
             if is8ch {
                 // 8 input rows make a tall/wide table; let the (resizable) window
-                // scroll it rather than forcing an oversized fixed size.
+                // scroll it rather than forcing an oversized fixed size.  The
+                // stereo + upmixer matrix (up to 5 rows) stays fixed-size so the
+                // window can shrink-to-fit when the upmixer is toggled off.
                 ScrollView([.vertical, .horizontal]) {
                     VStack(spacing: 0) { unifiedSection }
                         .padding()
@@ -483,6 +489,7 @@ struct MatrixMixerView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(input.color)
                 .frame(width: labelWidth, alignment: .center)
+                .help(vm.matrixRowFullName(input.index))
         }
     }
 

@@ -988,6 +988,146 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Stereo Upmixer (V25, cmds 0x4A-0x4E)
+
+    /// Sends one upmix parameter as a 4-byte LE float via REQ_UPMIX_SET_PARAM
+    /// (spec §6.2).  Preferred for live sliders: no read-modify-write race with
+    /// other controllers.  The firmware clamps out-of-range values.
+    private func sendUpmixParam(_ paramId: UInt16, _ value: Float) {
+        var v = value
+        let data = Data(bytes: &v, count: 4)
+        usb.sendControlRequest(request: REQ_UPMIX_SET_PARAM, value: paramId, index: 0, data: data)
+    }
+
+    func setUpmixEnabled(_ enabled: Bool) {
+        self.upmixEnabled = enabled
+        sendUpmixParam(UPMIX_PARAM_ENABLED, enabled ? 1.0 : 0.0)
+    }
+
+    func setUpmixCenterMode(_ mode: Int) {
+        self.upmixCenterMode = mode
+        sendUpmixParam(UPMIX_PARAM_CENTER_MODE, Float(mode))
+    }
+
+    func setUpmixSurroundMode(_ mode: Int) {
+        self.upmixSurroundMode = mode
+        sendUpmixParam(UPMIX_PARAM_SURROUND_MODE, Float(mode))
+    }
+
+    func setUpmixStrength(_ pct: Float) {
+        self.upmixStrengthPct = pct
+        sendUpmixParam(UPMIX_PARAM_STRENGTH, pct)
+    }
+
+    func setUpmixCenterWidth(_ pct: Float) {
+        self.upmixCenterWidthPct = pct
+        sendUpmixParam(UPMIX_PARAM_CENTER_WIDTH, pct)
+    }
+
+    func setUpmixThreshold(_ pct: Float) {
+        self.upmixThresholdPct = pct
+        sendUpmixParam(UPMIX_PARAM_THRESHOLD, pct)
+    }
+
+    func setUpmixAttack(_ ms: Float) {
+        self.upmixAttackMs = ms
+        sendUpmixParam(UPMIX_PARAM_ATTACK, ms)
+    }
+
+    func setUpmixRelease(_ ms: Float) {
+        self.upmixReleaseMs = ms
+        sendUpmixParam(UPMIX_PARAM_RELEASE, ms)
+    }
+
+    func setUpmixDetectorHpf(_ hz: Float) {
+        self.upmixDetectorHpfHz = hz
+        sendUpmixParam(UPMIX_PARAM_DET_HPF, hz)
+    }
+
+    func setUpmixSurroundDelay(_ ms: Float) {
+        self.upmixSurroundDelayMs = ms
+        sendUpmixParam(UPMIX_PARAM_SUR_DELAY, ms)
+    }
+
+    func setUpmixSurroundHpf(_ hz: Float) {
+        self.upmixSurroundHpfHz = hz
+        sendUpmixParam(UPMIX_PARAM_SUR_HPF, hz)
+    }
+
+    func setUpmixSurroundLpf(_ hz: Float) {
+        self.upmixSurroundLpfHz = hz
+        sendUpmixParam(UPMIX_PARAM_SUR_LPF, hz)
+    }
+
+    func setUpmixDecorr(_ pct: Float) {
+        self.upmixDecorrPct = pct
+        sendUpmixParam(UPMIX_PARAM_DECORR, pct)
+    }
+
+    /// Centre presence bell gain (dB).  SET_PARAM carries a plain float dB (the
+    /// firmware quantizes to 0.5 dB steps when it packs the config packet).
+    func setUpmixPresence(_ db: Float) {
+        self.upmixPresenceDB = db
+        sendUpmixParam(UPMIX_PARAM_PRESENCE, db)
+    }
+
+    /// Reads the whole 44-byte UpmixConfigPacket in one transfer and publishes it
+    /// (spec §6.1).  Called after a preset load / bulk SET; the bulk parse also
+    /// keeps these fields current.  On RP2040 the GET returns zeros (feature off).
+    func fetchUpmixConfig() {
+        guard let d = usb.getControlRequest(request: REQ_UPMIX_GET_CONFIG, value: 0, index: 0,
+                                            length: UInt16(UPMIX_CONFIG_PACKET_SIZE)),
+              d.count >= UPMIX_CONFIG_PACKET_SIZE else { return }
+        let enabled = d[0] != 0
+        let centerMode = Int(d[1])
+        let surroundMode = Int(d[2])
+        // Byte 3 = presence_q1 (signed i8, 0.5 dB steps); V25 firmware wrote 0 here.
+        let presence = Float(Int8(bitPattern: d[3])) / 2.0
+        func f(_ off: Int) -> Float { d.withUnsafeBytes { $0.load(fromByteOffset: off, as: Float.self) } }
+        let strength = f(4), width = f(8), threshold = f(12), attack = f(16), release = f(20)
+        let detHpf = f(24), surDelay = f(28), surHpf = f(32), surLpf = f(36), decorr = f(40)
+        DispatchQueue.main.async {
+            self.upmixEnabled = enabled
+            self.upmixCenterMode = centerMode
+            self.upmixSurroundMode = surroundMode
+            self.upmixPresenceDB = presence
+            self.upmixStrengthPct = strength
+            self.upmixCenterWidthPct = width
+            self.upmixThresholdPct = threshold
+            self.upmixAttackMs = attack
+            self.upmixReleaseMs = release
+            self.upmixDetectorHpfHz = detHpf
+            self.upmixSurroundDelayMs = surDelay
+            self.upmixSurroundHpfHz = surHpf
+            self.upmixSurroundLpfHz = surLpf
+            self.upmixDecorrPct = decorr
+        }
+    }
+
+    /// Polls the 16-byte UpmixStatus telemetry (spec §6.3).  Called from the
+    /// shared poll timer only while the upmixer window is open.
+    func fetchUpmixStatus() {
+        guard let d = usb.getControlRequest(request: REQ_UPMIX_GET_STATUS, value: 0, index: 0,
+                                            length: UPMIX_STATUS_SIZE),
+              d.count >= 16 else { return }
+        let active = d[0] != 0
+        let parked = d[1]
+        let corr = d.withUnsafeBytes { $0.load(fromByteOffset: 2, as: Int16.self) }
+        let balance = d.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt16.self) }
+        let centerGain = d.withUnsafeBytes { $0.load(fromByteOffset: 6, as: UInt16.self) }
+        let lsGain = d.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt16.self) }
+        let rsGain = d.withUnsafeBytes { $0.load(fromByteOffset: 10, as: UInt16.self) }
+        DispatchQueue.main.async {
+            self.upmixActive = active
+            self.upmixParkedReason = parked
+            self.upmixCorr = Float(corr) / 16384.0        // Q14, [-1, +1]
+            self.upmixBalance = Float(balance) / 16384.0  // Q14, 0..1
+            self.upmixCenterGain = Float(centerGain) / 32767.0  // Q15, 0..1
+            self.upmixLsGain = Float(lsGain) / 32767.0
+            self.upmixRsGain = Float(rsGain) / 32767.0
+        }
+    }
+
     // MARK: - Volume Leveller
 
     func setLeveller(_ enabled: Bool) {
@@ -2529,6 +2669,15 @@ extension DSPViewModel {
         let pbCharacter: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 16, as: Float.self) }
         let pbOriginal: Float = data.withUnsafeBytes { $0.load(fromByteOffset: BULK_PSYBASS_OFFSET + 20, as: Float.self) }
 
+        // --- Stereo Upmixer (offset 5900, WireUpmixParams 44 bytes) ---
+        let umEnabled = data[BULK_UPMIX_OFFSET] != 0
+        let umCenterMode = Int(data[BULK_UPMIX_OFFSET + 1])
+        let umSurroundMode = Int(data[BULK_UPMIX_OFFSET + 2])
+        let umPresence = Float(Int8(bitPattern: data[BULK_UPMIX_OFFSET + 3])) / 2.0  // presence_q1 -> dB
+        func umF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: BULK_UPMIX_OFFSET + off, as: Float.self) } }
+        let umStrength = umF(4), umWidth = umF(8), umThreshold = umF(12), umAttack = umF(16), umRelease = umF(20)
+        let umDetHpf = umF(24), umSurDelay = umF(28), umSurHpf = umF(32), umSurLpf = umF(36), umDecorr = umF(40)
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -2557,6 +2706,21 @@ extension DSPViewModel {
             self.psybassDriveDB = pbDrive
             self.psybassCharacterPct = pbCharacter
             self.psybassOriginalDB = pbOriginal
+
+            self.upmixEnabled = umEnabled
+            self.upmixCenterMode = umCenterMode
+            self.upmixSurroundMode = umSurroundMode
+            self.upmixPresenceDB = umPresence
+            self.upmixStrengthPct = umStrength
+            self.upmixCenterWidthPct = umWidth
+            self.upmixThresholdPct = umThreshold
+            self.upmixAttackMs = umAttack
+            self.upmixReleaseMs = umRelease
+            self.upmixDetectorHpfHz = umDetHpf
+            self.upmixSurroundDelayMs = umSurDelay
+            self.upmixSurroundHpfHz = umSurHpf
+            self.upmixSurroundLpfHz = umSurLpf
+            self.upmixDecorrPct = umDecorr
 
             self.channelDelays = delays
 

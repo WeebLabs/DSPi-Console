@@ -917,6 +917,41 @@ class DSPViewModel: ObservableObject {
     /// on RP2350 / bit 4 on RP2040).  Default 0xFFFF = every output.
     @Published var psybassOutputMask: UInt16 = PSYBASS_DEFAULT_OUTPUT_MASK
 
+    // Stereo Upmixer (V25): derives Centre + Ls/Rs matrix source rows from a
+    // stereo input.  These mirror UpmixConfigPacket (spec §6.1); defaults match
+    // the firmware factory defaults so a fresh device and the app agree before
+    // the first fetch.  The firmware clamps every float to its documented range;
+    // the app enforces the same ranges on commit so state stays identical.
+    @Published var upmixEnabled: Bool = false
+    @Published var upmixCenterMode: Int = UPMIX_CENTER_MODE_ADAPTIVE       // 0/1
+    @Published var upmixSurroundMode: Int = UPMIX_SURROUND_MODE_ADAPTIVE   // 0/1/2
+    @Published var upmixStrengthPct: Float = 100.0        // 0..100 %
+    @Published var upmixCenterWidthPct: Float = 25.0      // 0..100 %
+    @Published var upmixThresholdPct: Float = 30.0        // 0..95 %
+    @Published var upmixAttackMs: Float = 10.0            // 1..500 ms
+    @Published var upmixReleaseMs: Float = 100.0          // 5..2000 ms
+    @Published var upmixDetectorHpfHz: Float = 200.0      // 20..1000 Hz
+    @Published var upmixSurroundDelayMs: Float = 12.0     // 0..20 ms
+    @Published var upmixSurroundHpfHz: Float = 300.0      // 20..2000 Hz
+    @Published var upmixSurroundLpfHz: Float = 7000.0     // 1000..20000 Hz
+    @Published var upmixDecorrPct: Float = 90.0           // 0..100 %
+    /// Centre presence bell gain at 3 kHz / Q 0.6 (V26+).  Stored on the device in
+    /// 0.5 dB steps (config byte presence_q1 = dB x 2); the app keeps the dB value.
+    @Published var upmixPresenceDB: Float = 0.0           // -12..+12 dB
+
+    // Upmix live telemetry (REQ_UPMIX_GET_STATUS, spec §6.3).  Polled only while
+    // the upmixer window is open (`upmixStatusPolling`).
+    @Published var upmixActive: Bool = false
+    @Published var upmixParkedReason: UInt8 = UPMIX_PARKED_DISABLED
+    @Published var upmixCorr: Float = 0.0          // smoothed L/R correlation, -1..+1
+    @Published var upmixBalance: Float = 0.0       // level balance, 0 (centred)..1
+    @Published var upmixCenterGain: Float = 0.0    // live centre extraction gain, 0..1
+    @Published var upmixLsGain: Float = 0.0        // live Ls steering gain, 0..1
+    @Published var upmixRsGain: Float = 0.0        // live Rs steering gain, 0..1
+    /// Set by the upmixer window while visible so the shared poll timer fetches
+    /// UpmixStatus (~16 Hz); left false everywhere else to avoid the extra I/O.
+    @Published var upmixStatusPolling: Bool = false
+
     // Matrix mixer state (up to 8 inputs x 9 outputs).  Backing arrays are
     // always MAX_MATRIX_INPUTS rows so crosspoint bindings for inputs 2-7 are
     // always valid; the UI renders only `numMatrixInputs` of them.  Rows 2-7
@@ -1357,6 +1392,59 @@ class DSPViewModel: ObservableObject {
     /// contents + output mask) is gated on this so older firmware never sees it.
     var firmwareSupportsPsybass: Bool { firmwareWireFormatVersion >= 23 }
 
+    /// Stereo Upmixer (cmds 0x4A-0x4E) shipped in wire format V25 and gained the
+    /// presence control in V26; the app is a V26 client (strict version match on
+    /// the bulk image), so the whole feature is gated on V26.  RP2350 only: on
+    /// RP2040 the SETs STALL
+    /// and the GETs return zeros, so the window is hidden there.  Gating on both
+    /// the wire version and the platform keeps the feature out of sight on any
+    /// device that cannot run it.
+    var firmwareSupportsUpmixer: Bool {
+        firmwareWireFormatVersion >= 26 && platformName == "RP2350"
+    }
+
+    /// True when the upmixer is deriving matrix source rows: it is enabled and
+    /// the active input is a plain stereo pair.  Drives the contextual row labels
+    /// in the matrix mixer (rows 2-4 become Upmix C / Ls / Rs, spec §3).  Based on
+    /// config (not the live parked state) so routing can be set up while parked.
+    var upmixDerivesRows: Bool {
+        firmwareSupportsUpmixer && upmixEnabled && effectiveInputChannels == BASE_MATRIX_INPUTS
+    }
+
+    /// Number of matrix source rows to display.  In stereo + upmix mode this
+    /// exceeds the plain input count to expose the derived rows: 3 (L/R + C) when
+    /// the surround engine is OFF, 5 (L/R + C + Ls + Rs) otherwise.
+    var matrixSourceRowCount: Int {
+        guard upmixDerivesRows else { return numMatrixInputs }
+        return upmixSurroundMode == UPMIX_SURROUND_MODE_OFF ? 3 : 5
+    }
+
+    /// Short label for matrix source `row`, contextual on the upmixer state.
+    func matrixRowShortName(_ row: Int) -> String {
+        if upmixDerivesRows {
+            switch row {
+            case 2: return "C"
+            case 3: return "Ls"
+            case 4: return "Rs"
+            default: break
+            }
+        }
+        return MatrixInput.shortName(for: row, count: numMatrixInputs)
+    }
+
+    /// Full/tooltip label for matrix source `row`, contextual on the upmixer state.
+    func matrixRowFullName(_ row: Int) -> String {
+        if upmixDerivesRows {
+            switch row {
+            case 2: return "Upmix Centre"
+            case 3: return "Upmix Left Surround"
+            case 4: return "Upmix Right Surround"
+            default: break
+            }
+        }
+        return MatrixInput.fullName(for: row, count: numMatrixInputs)
+    }
+
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
     /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
     /// Defaults to `false` when the version is unknown (pre-connection) so the
@@ -1708,6 +1796,11 @@ class DSPViewModel: ObservableObject {
         timer.setEventHandler { [weak self] in
             guard let self = self, self.isDeviceConnected else { return }
             self.fetchStatus()
+            // Upmix telemetry only while its window is open (~16 Hz, within the
+            // spec's 5-20 Hz guidance); skipped everywhere else to avoid the I/O.
+            if self.upmixStatusPolling && self.firmwareSupportsUpmixer {
+                self.fetchUpmixStatus()
+            }
         }
         timer.resume()
         pollTimer = timer
@@ -1822,6 +1915,20 @@ class DSPViewModel: ObservableObject {
             psybassDriveDB: psybassDriveDB,
             psybassCharacterPct: psybassCharacterPct,
             psybassOriginalDB: psybassOriginalDB,
+            upmixEnabled: upmixEnabled,
+            upmixCenterMode: upmixCenterMode,
+            upmixSurroundMode: upmixSurroundMode,
+            upmixStrengthPct: upmixStrengthPct,
+            upmixCenterWidthPct: upmixCenterWidthPct,
+            upmixThresholdPct: upmixThresholdPct,
+            upmixAttackMs: upmixAttackMs,
+            upmixReleaseMs: upmixReleaseMs,
+            upmixDetectorHpfHz: upmixDetectorHpfHz,
+            upmixSurroundDelayMs: upmixSurroundDelayMs,
+            upmixSurroundHpfHz: upmixSurroundHpfHz,
+            upmixSurroundLpfHz: upmixSurroundLpfHz,
+            upmixDecorrPct: upmixDecorrPct,
+            upmixPresenceDB: upmixPresenceDB,
             levellerEnabled: levellerEnabled,
             levellerAmount: levellerAmount,
             levellerSpeed: levellerSpeed,

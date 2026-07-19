@@ -24,8 +24,8 @@ final class I2sSlaveWireTests: XCTestCase {
         // for qp; sizes and this section's offsets are unchanged from V21.
         // V23 (Psychoacoustic Bass) appends a 24-byte section, growing the flat
         // layout 5876 -> 5900; this section's offsets are unchanged.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 23)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5900)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 26)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
         // The clock-mode byte is byte +11 within the 16-byte WireInputConfig.
         XCTAssertEqual(BULK_INPUT_I2S_CLOCK_MODE_OFFSET, BULK_INPUT_CONFIG_OFFSET + 11)
