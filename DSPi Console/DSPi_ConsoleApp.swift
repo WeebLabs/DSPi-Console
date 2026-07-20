@@ -6833,7 +6833,12 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var graphWindowController = GraphWindowController()
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
     @StateObject private var testSignalsWindowController = TestSignalsWindowController()
-    @ObservedObject private var vm = AppState.shared.viewModel
+    // Observe only narrow, rarely-changing state here. Observing the full
+    // view model (which republishes ~16x/second for the meters) rebuilt the
+    // whole `.commands` tree on every tick, making open submenus flicker.
+    // PlatformInfo changes on connect; AutoEQManager drives the favorites menu.
+    @ObservedObject private var platform = PlatformInfo.shared
+    @ObservedObject private var autoEQ = AutoEQManager.shared
 
     var body: some Scene {
         Window("DSPi Console", id: "main") {
@@ -6959,7 +6964,7 @@ struct DSPi_ConsoleApp: App {
                 // STM32H723 firmware cannot self-reboot into a USB bootloader
                 // — there's no UF2 path on that platform, so hide the entry
                 // entirely rather than show a non-functional menu item.
-                if vm.platformName != "STM32H723" {
+                if platform.name != "STM32H723" {
                     Divider()
 
                     Button("Firmware Update...") {

@@ -863,6 +863,20 @@ struct SiggenTypeDesc: Equatable {
     }
 }
 
+// MARK: - Platform Info
+
+/// Lightweight observable holding just the connected device's platform name.
+/// `DSPViewModel` republishes ~16x/second (peak/CPU meters via fetchStatus), so
+/// any SwiftUI Scene that observed it merely to read `platformName` rebuilt its
+/// entire `.commands` menu tree on every tick - which tore down and reopened any
+/// open submenu (the "Favorite Profiles" open/close flicker). `platformName`
+/// changes only on connect, so the menu bar observes this mirror instead.
+final class PlatformInfo: ObservableObject {
+    static let shared = PlatformInfo()
+    @Published var name: String = ""
+    private init() {}
+}
+
 // MARK: - View Model
 
 class DSPViewModel: ObservableObject {
@@ -1283,7 +1297,16 @@ class DSPViewModel: ObservableObject {
     @Published var presetOutputConfigMode: Int = OUTPUT_CONFIG_MODE_WITH_PRESET
     @Published var presetMasterVolumeMode: Int = MASTER_VOLUME_MODE_INDEPENDENT
 
-    @Published var platformName: String = ""
+    // Mirror into the lightweight PlatformInfo.shared so the menu bar can
+    // observe the platform without observing this high-frequency object. Both
+    // call sites set this on the main thread, so the mirror update is safe.
+    @Published var platformName: String = "" {
+        didSet {
+            if PlatformInfo.shared.name != platformName {
+                PlatformInfo.shared.name = platformName
+            }
+        }
+    }
 
     /// Device MAX input channels, read from the bulk header (byte 4): 2 for
     /// RP2040, 8 for RP2350.  This is the capability flag and also defines the

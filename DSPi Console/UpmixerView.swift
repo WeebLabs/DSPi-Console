@@ -251,7 +251,7 @@ struct UpmixerView: View {
                     set: { vm.setUpmixCenterMode($0) }
                 )) {
                     Text("Sinner").tag(UPMIX_CENTER_MODE_PASSIVE)
-                    Text("Logic").tag(UPMIX_CENTER_MODE_ADAPTIVE)
+                    Text("Logician").tag(UPMIX_CENTER_MODE_ADAPTIVE)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -268,14 +268,14 @@ struct UpmixerView: View {
                 )) {
                     Text("Off").tag(UPMIX_SURROUND_MODE_OFF)
                     Text("Sinner").tag(UPMIX_SURROUND_MODE_PASSIVE)
-                    Text("Logic").tag(UPMIX_SURROUND_MODE_ADAPTIVE)
+                    Text("Logician").tag(UPMIX_SURROUND_MODE_ADAPTIVE)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .disabled(!vm.isDeviceConnected)
             }
 
-            Text("Logic centre gates extraction on running L/R correlation; Logic surround uses a Pro Logic II-style matrix decoder. Sinner modes are fixed (C = 0.7071(L+R), surround = L-R) - a Hafler-style passive matrix like the one in the Schiit Syn.")
+            Text("Logician centre gates extraction on running L/R correlation; Logician surround uses a Pro Logic II-style matrix decoder. Sinner modes are fixed (C = 0.7071(L+R), surround = L-R) - a Hafler-style passive matrix like the one in the Schiit Syn.")
                 .font(.system(size: 9))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -314,7 +314,7 @@ struct UpmixerView: View {
                 set: { vm.setUpmixPresence($0) }
             )
 
-            // Threshold / Attack / Release / Detector HPF drive the Logic steering
+            // Threshold / Attack / Release / Detector HPF drive the Logician steering
             // only, so they are hidden entirely in Sinner (passive) mode.
             if centreAdaptive {
                 Divider()
@@ -328,14 +328,14 @@ struct UpmixerView: View {
                 paramRow(
                     title: "Attack", unit: "ms",
                     value: vm.upmixAttackMs, range: 1...500, maxDecimals: 0, scrollStep: 1,
-                    help: "Centre gain rise time (Logic mode).",
+                    help: "Centre gain rise time (Logician mode).",
                     set: { vm.setUpmixAttack($0) }
                 )
                 Divider()
                 paramRow(
                     title: "Release", unit: "ms",
                     value: vm.upmixReleaseMs, range: 5...2000, maxDecimals: 0, scrollStep: 5,
-                    help: "Centre gain fall time (Logic mode).",
+                    help: "Centre gain fall time (Logician mode).",
                     set: { vm.setUpmixRelease($0) }
                 )
                 Divider()
@@ -349,7 +349,7 @@ struct UpmixerView: View {
         }
     }
 
-    /// Logic centre engine: the steering controls (threshold/ballistics/detector)
+    /// Logician centre engine: the steering controls (threshold/ballistics/detector)
     /// only apply here.
     private var centreAdaptive: Bool { vm.upmixCenterMode == UPMIX_CENTER_MODE_ADAPTIVE }
 
@@ -361,7 +361,7 @@ struct UpmixerView: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            // The conditioning chain applies in both Sinner and Logic surround;
+            // The conditioning chain applies in both Sinner and Logician surround;
             // when the engine is Off no rears are produced, so hide the controls
             // and show only a short explanation in their place.
             if surroundOn {
