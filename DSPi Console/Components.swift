@@ -503,7 +503,7 @@ struct OutputRow: View {
 // MARK: - Channel Settings
 
 /// Header row for the output channel page.  Layout from left to right:
-///   1. Input routing preview — one row per USB input (Master L / Master R) with
+///   1. Input routing preview — up to two USB input rows with
 ///      a connected indicator, the input's name, the per-crosspoint gain, and a
 ///      phase-invert toggle.  Clicking the indicator/name connects/disconnects
 ///      that input from the current output; gain & invert are clickable to edit.
@@ -622,17 +622,16 @@ struct ChannelSettingsView: View {
 
 // MARK: - Input Routing Panel
 
-/// Shows the matrix routing for a single output column: one row per USB input
-/// channel with a connect indicator, name, per-crosspoint gain, and invert
-/// toggle.  The whole panel is a thin wrapper over `vm.matrixRouting/Gain/Invert`
-/// for the selected output index.
+/// Shows the matrix routing for a single output column: up to two USB input rows
+/// with a connect indicator, name, per-crosspoint gain, and invert toggle. The
+/// full set of inputs remains available in the matrix mixer.
 private struct InputRoutingPanel: View {
     @ObservedObject var vm: DSPViewModel
     let outputIndex: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(0..<vm.numMatrixInputs, id: \.self) { input in
+            ForEach(0..<min(vm.numMatrixInputs, BASE_MATRIX_INPUTS), id: \.self) { input in
                 InputRoutingRow(vm: vm, input: input, output: outputIndex)
             }
         }
