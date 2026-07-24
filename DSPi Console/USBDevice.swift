@@ -139,9 +139,10 @@ class USBDevice: ObservableObject {
 
     // MARK: - Device Open/Close Helpers
 
-    /// Opens a USB device from its IOKit service. Returns true on success.
+    /// Opens a USB device from its IOKit service. Returns `kIOReturnSuccess` on
+    /// success, otherwise the failing IOKit status.
     /// Does NOT release the service — caller is responsible.
-    private func openDevice(service: io_service_t) -> Bool {
+    private func openDevice(service: io_service_t) -> IOReturn {
         var score: Int32 = 0
         var interface: UnsafeMutablePointer<UnsafeMutablePointer<IOCFPlugInInterface>?>?
 
@@ -153,7 +154,9 @@ class USBDevice: ObservableObject {
             &score
         )
 
-        guard plugInResult == kIOReturnSuccess, let interface = interface else { return false }
+        guard plugInResult == kIOReturnSuccess, let interface = interface else {
+            return plugInResult == kIOReturnSuccess ? kIOReturnNoResources : plugInResult
+        }
 
         var tempDeviceInterface: UnsafeMutableRawPointer? = nil
         let res = interface.pointee!.pointee.QueryInterface(
@@ -164,20 +167,75 @@ class USBDevice: ObservableObject {
 
         _ = interface.pointee!.pointee.Release(interface)
 
-        guard res == kIOReturnSuccess else { return false }
+        guard res == kIOReturnSuccess else { return res }
 
         let devPtr = tempDeviceInterface?.assumingMemoryBound(to: UnsafeMutablePointer<DeviceInterface>?.self)
-        guard let dev = devPtr else { return false }
+        guard let dev = devPtr else { return kIOReturnNoResources }
 
         let openRes = dev.pointee!.pointee.USBDeviceOpen(dev)
         if openRes == kIOReturnSuccess {
             self.deviceInterface = devPtr
             bumpGeneration()
-            return true
-        } else if openRes == kIOReturnExclusiveAccess {
-            DispatchQueue.main.async { self.errorMessage = "Device busy." }
+        } else {
+            // Release the handle we just created; retries build a fresh one,
+            // and leaking it here would pile up an interface per attempt.
+            _ = dev.pointee!.pointee.Release(dev)
         }
-        return false
+        return openRes
+    }
+
+    /// Delays between open attempts, in seconds. IOKit publishes the device
+    /// service before the composite driver has opened it to set the
+    /// configuration, so a device-level open right after enumeration can
+    /// transiently fail (typically `kIOReturnExclusiveAccess`). This is most
+    /// visible on the re-enumeration that follows a firmware flash, where the
+    /// device is also still initialising. Without retries that single failure
+    /// is permanent - nothing else ever attempts a connect.
+    private static let openRetryDelays: [TimeInterval] = [0.1, 0.2, 0.4, 0.8, 1.0]
+
+    /// Opens `service` on `serialQueue`, retrying with backoff, and publishes
+    /// the resulting connection state. Takes ownership of `service`: it is
+    /// released once the attempt sequence finishes.
+    /// Must be called on `serialQueue`.
+    private func openWithRetry(service: io_service_t, device: DSPiDevice, attempt: Int = 0) {
+        let result = openDevice(service: service)
+
+        if result == kIOReturnSuccess {
+            IOObjectRelease(service)
+            DispatchQueue.main.async {
+                self.selectedDevice = device
+                self.isConnected = true
+                self.errorMessage = nil
+            }
+            return
+        }
+
+        if attempt < USBDevice.openRetryDelays.count {
+            // asyncAfter rather than sleeping: serialQueue also serves the
+            // synchronous control reads, so blocking it would stall the UI.
+            serialQueue.asyncAfter(deadline: .now() + USBDevice.openRetryDelays[attempt]) { [weak self] in
+                guard let self = self else {
+                    IOObjectRelease(service)
+                    return
+                }
+                // Another path (user switch, a later match) got a device open
+                // while we were waiting - abandon rather than steal it.
+                guard self.deviceInterface == nil else {
+                    IOObjectRelease(service)
+                    return
+                }
+                self.openWithRetry(service: service, device: device, attempt: attempt + 1)
+            }
+            return
+        }
+
+        IOObjectRelease(service)
+        DispatchQueue.main.async {
+            self.isConnected = false
+            self.errorMessage = result == kIOReturnExclusiveAccess
+                ? "Device busy (another app has it open)"
+                : "Could not open device"
+        }
     }
 
     /// Closes the current device interface without updating published state.
@@ -307,33 +365,32 @@ class USBDevice: ObservableObject {
 
             // Auto-connect logic — open directly from the retained service handle
             var deviceToConnect: DSPiDevice?
-            if self.selectedDevice == nil && !self.availableDevices.isEmpty {
-                deviceToConnect = self.availableDevices[0]
+            if self.selectedDevice == nil {
+                // Connect to a device from this batch: we hold its service
+                // handle, whereas availableDevices[0] can be an older entry we
+                // have no handle for, which silently skipped the connect and
+                // left the picker showing a device we never opened.
+                deviceToConnect = newDevices.first(where: { serviceForSerial[$0.serial] != nil })
             } else if let selected = self.selectedDevice,
-                      newDevices.contains(where: { $0.serial == selected.serial }),
-                      self.deviceInterface == nil {
-                deviceToConnect = selected
+                      let rematched = newDevices.first(where: { $0.serial == selected.serial }),
+                      self.deviceInterface == nil || rematched.locationID == selected.locationID {
+                // A match is a *new* instance of the device, so any handle we
+                // still hold for it belongs to the dead one (a termination we
+                // haven't processed yet) - reopen instead of sitting on it.
+                // The locationID check keeps a same-serial unit on another
+                // port from stealing a healthy connection.
+                deviceToConnect = rematched
             }
 
             if let device = deviceToConnect, let service = serviceForSerial[device.serial] {
+                // Release every service except the one handed to openWithRetry,
+                // which owns it until its retry sequence finishes.
+                for (serial, svc) in serviceForSerial where serial != device.serial {
+                    IOObjectRelease(svc)
+                }
                 self.serialQueue.async {
                     self.closeDevice()
-                    if self.openDevice(service: service) {
-                        DispatchQueue.main.async {
-                            self.selectedDevice = device
-                            self.isConnected = true
-                            self.errorMessage = nil
-                        }
-                    } else {
-                        DispatchQueue.main.async {
-                            self.isConnected = false
-                            if self.errorMessage == nil {
-                                self.errorMessage = "Could not open device"
-                            }
-                        }
-                    }
-                    // Release all retained services
-                    for (_, svc) in serviceForSerial { IOObjectRelease(svc) }
+                    self.openWithRetry(service: service, device: device)
                 }
             } else {
                 // No auto-connect — release all retained services
@@ -466,22 +523,9 @@ class USBDevice: ObservableObject {
             }
 
             if chosen != 0 {
-                defer { IOObjectRelease(chosen) }
-
-                if self.openDevice(service: chosen) {
-                    DispatchQueue.main.async {
-                        self.selectedDevice = device
-                        self.isConnected = true
-                        self.errorMessage = nil
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.isConnected = false
-                        if self.errorMessage == nil {
-                            self.errorMessage = "Could not open device"
-                        }
-                    }
-                }
+                // openWithRetry takes ownership of `chosen` and publishes the
+                // connection state once it succeeds or exhausts its attempts.
+                self.openWithRetry(service: chosen, device: device)
                 return
             }
 

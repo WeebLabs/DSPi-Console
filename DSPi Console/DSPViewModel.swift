@@ -1513,6 +1513,9 @@ class DSPViewModel: ObservableObject {
     @Published var isDeviceConnected: Bool = false
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
+    /// Last USB connection error, mirrored from USBDevice so the status dot can
+    /// explain a red state instead of leaving the user to guess.
+    @Published var connectionError: String? = nil
 
     /// Snapshot of state at last save/load point for unsaved changes detection
     var savedSnapshot: PresetSnapshot?
@@ -1798,7 +1801,7 @@ class DSPViewModel: ObservableObject {
                         self?.updateSelection(to: nil)
                     }
                     self?.pollQueue.asyncAfter(deadline: .now() + 0.1) {
-                        self?.fetchAll()
+                        self?.fetchAll(afterConnect: true)
                     }
                 }
             }
@@ -1812,6 +1815,10 @@ class DSPViewModel: ObservableObject {
         usb.$selectedDevice
             .receive(on: RunLoop.main)
             .assign(to: &$selectedDevice)
+
+        usb.$errorMessage
+            .receive(on: RunLoop.main)
+            .assign(to: &$connectionError)
 
         // Keep the CoreAudio format monitor pinned to the selected unit so a
         // multi-device setup doesn't report another DSPi's host format.

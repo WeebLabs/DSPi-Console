@@ -153,6 +153,9 @@ struct ConnectionStatusIndicator: View {
             Circle()
                 .fill(vm.isDeviceConnected ? Color.green : Color.red)
                 .frame(width: 6, height: 6)
+                .help(vm.isDeviceConnected
+                      ? "Connected"
+                      : (vm.connectionError ?? "Not connected. Right-click the device name to retry."))
 
             if vm.availableDevices.isEmpty {
                 Text("No Devices").font(.caption).foregroundColor(.red)

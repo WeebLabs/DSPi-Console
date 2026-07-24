@@ -6,7 +6,11 @@ extension DSPViewModel {
 
     // --- USB Commands ---
 
-    func fetchAll() {
+    /// Full parameter refresh.  Pass `afterConnect: true` on the connect path,
+    /// where the device may not be ready to answer yet and the reads must be
+    /// retried instead of treated as a dead link (see `waitForDeviceReady`).
+    /// Blocking, so `afterConnect` callers must be off the main thread.
+    func fetchAll(afterConnect: Bool = false) {
         // Scope this refresh to the device that is open right now. If a
         // device switch lands mid-fetch, later reads would return the NEW
         // device's data and publish a mix of both devices' state - bail out
@@ -16,9 +20,23 @@ extension DSPViewModel {
 
         // Fetch platform/version first so capability gates (notch filter,
         // per-band bypass, etc.) are populated before the UI reads them.
-        _ = fetchPlatform()
+        // It doubles as the readiness probe on the connect path: it is the
+        // cheapest interface-recipient read, i.e. the same path the bulk
+        // transfer below uses.
+        if afterConnect {
+            guard waitForDeviceReady(generation: generation) else {
+                // Never answered - the link really is dead.
+                DispatchQueue.main.async { self.usb.isConnected = false }
+                return
+            }
+        } else {
+            _ = fetchPlatform()
+        }
 
-        guard fetchAllParams() else { return }
+        let gotParams = afterConnect
+            ? fetchAllParamsRetrying(generation: generation)
+            : fetchAllParams()
+        guard gotParams else { return }
         guard usb.generation == generation else { return }
 
         fetchInputSource()
@@ -58,6 +76,46 @@ extension DSPViewModel {
         DispatchQueue.main.async {
             SettingsSaveCoordinator.shared.refreshGlobalDraftIfClean()
         }
+    }
+
+    /// Polls a cheap vendor read until the device answers.
+    ///
+    /// A freshly enumerated device is not immediately usable: macOS publishes
+    /// the IOKit service before the configuration is set, so interface-recipient
+    /// control requests can fail for a while, and a just-flashed unit is still
+    /// initialising its stored parameters on top of that.  Every read in the
+    /// connect path is one-shot - `fetchAllParams` clears `isConnected` when it
+    /// fails and nothing retries afterwards - so wait for the device to prove
+    /// it is answering first.
+    ///
+    /// Returns false only if the device never responded, or if the connection
+    /// changed underneath us (in which case the caller must bail out silently).
+    private func waitForDeviceReady(generation: UInt64) -> Bool {
+        let backoff: [TimeInterval] = [0, 0.1, 0.2, 0.4, 0.8, 1.0]
+        for delay in backoff {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            guard usb.generation == generation else { return false }
+            if fetchPlatform() != nil { return true }
+        }
+        return false
+    }
+
+    /// `fetchAllParams` for the connect path: retries the bulk transfer a few
+    /// times before letting it mark the device disconnected.  The device can
+    /// answer the small readiness probe and still stall on the ~6 KB bulk read
+    /// while it finishes booting.
+    private func fetchAllParamsRetrying(generation: UInt64) -> Bool {
+        let backoff: [TimeInterval] = [0.15, 0.3, 0.6]
+        for delay in backoff {
+            // A short/wrong-version payload also returns false here, but the
+            // device is alive and the firmware simply incompatible; retrying
+            // costs a few reads and the final call records the version.
+            if fetchAllParams(markDisconnectedOnFailure: false) { return true }
+            guard usb.generation == generation else { return false }
+            Thread.sleep(forTimeInterval: delay)
+            guard usb.generation == generation else { return false }
+        }
+        return fetchAllParams()
     }
 
     @discardableResult

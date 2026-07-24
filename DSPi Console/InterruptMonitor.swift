@@ -591,7 +591,18 @@ class InterruptMonitor: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// Delays between attempts to claim the vendor interface.  Interfaces are
+    /// published a little after the device itself, so a start() issued the
+    /// instant we connect - especially on the re-enumeration after a firmware
+    /// flash - can find nothing to open.  Without retries the monitor would
+    /// stay silently dead until the next device switch.
+    private static let interfaceRetryDelays: [TimeInterval] = [0.1, 0.2, 0.4, 0.8]
+
     func start() {
+        start(attempt: 0)
+    }
+
+    private func start(attempt: Int) {
         // Always (re)attach to the currently open device: the connect path
         // calls start() on every successful device open, including a switch
         // to a different device, and the reader must follow it. A plain
@@ -600,7 +611,19 @@ class InterruptMonitor: ObservableObject {
         stop()
         errorMessage = nil
 
+        let generation = usb.generation
         guard let interface = usb.openVendorInterface() else {
+            if attempt < InterruptMonitor.interfaceRetryDelays.count {
+                DispatchQueue.main.asyncAfter(deadline: .now() + InterruptMonitor.interfaceRetryDelays[attempt]) { [weak self] in
+                    // Bail if the device changed or a later start() already
+                    // brought up a reader.
+                    guard let self = self,
+                          self.usb.generation == generation,
+                          self.currentSession == nil else { return }
+                    self.start(attempt: attempt + 1)
+                }
+                return
+            }
             errorMessage = "Could not open vendor interface (is the device connected?)"
             return
         }
