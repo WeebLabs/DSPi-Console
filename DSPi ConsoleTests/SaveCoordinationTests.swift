@@ -121,6 +121,86 @@ final class SaveCoordinationTests: XCTestCase {
         XCTAssertTrue(coord.hasPendingChanges)
     }
 
+    /// Control Surfaces feeds the same coordinator as the global draft and the
+    /// output config, so the Settings window shows ONE unsaved-changes bar.
+    /// Before this, the Control Surfaces page carried a second bar of its own
+    /// and a global + control edit stacked two bars at the bottom.
+    func testControlSurfacesDirtyFeedsTheSharedPendingChanges() {
+        let vm = AppState.shared.viewModel
+        let coord = SettingsSaveCoordinator.shared
+        let savedSupported = vm.controlSurfacesSupported
+        let savedStatus = vm.csStatus
+        let savedBindings = vm.csBindings
+        let savedEdited = coord.globalUserEdited
+        let savedOutput = coord.outputConfigDirty
+        defer {
+            vm.controlSurfacesSupported = savedSupported
+            vm.csStatus = savedStatus
+            vm.csBindings = savedBindings
+            coord.globalUserEdited = savedEdited
+            coord.outputConfigDirty = savedOutput
+        }
+
+        // Isolate: nothing else pending, so hasPendingChanges reflects only CS.
+        coord.globalUserEdited = false
+        coord.outputConfigDirty = false
+
+        var status = CsStatusPacket()
+        status.dirty = false
+        vm.controlSurfacesSupported = true
+        vm.csStatus = status
+        XCTAssertFalse(coord.csDirty, "a clean device config is not pending")
+        XCTAssertFalse(coord.hasPendingChanges)
+
+        // The device flags the live config as an unsaved preview (spec §3.5).
+        // The sticky flag alone isn't enough - `vm.csDirty` also wants a real
+        // diff from the last-saved baseline, which is populated whenever a
+        // device is attached - so move a binding off it too.
+        var moved = vm.csBindings
+        moved[0].type = moved[0].type == UInt8(CS_TYPE_BUTTON)
+            ? UInt8(CS_TYPE_SWITCH) : UInt8(CS_TYPE_BUTTON)
+        vm.csBindings = moved
+        status.dirty = true
+        vm.csStatus = status
+        XCTAssertTrue(coord.csDirty, "an unsaved control preview is pending")
+        XCTAssertTrue(coord.hasPendingChanges, "and it drives the ONE shared save bar")
+
+        // A device without the feature never contributes.
+        vm.controlSurfacesSupported = false
+        XCTAssertFalse(coord.csDirty)
+        XCTAssertFalse(coord.hasPendingChanges)
+    }
+
+    /// The bar's Save/Revert and the page's applies/learns share one device
+    /// status channel (spec §3.2) and serialize on `csBusy`. It counts claims
+    /// rather than latching a bool, so a page teardown can't clear a claim the
+    /// coordinator holds while it is writing flash.
+    func testCsBusyCountsClaimsSoOneOwnerCannotClearAnother() {
+        let coord = SettingsSaveCoordinator.shared
+        XCTAssertFalse(coord.csBusy, "no operation in flight to start with")
+
+        // Two owners claim the channel (e.g. a slot apply, then a learn).
+        coord.beginCsOperation()
+        XCTAssertTrue(coord.csBusy)
+        coord.beginCsOperation()
+        XCTAssertTrue(coord.csBusy)
+
+        // One finishing must NOT free the channel the other still holds.
+        coord.endCsOperation()
+        XCTAssertTrue(coord.csBusy, "the second claim still holds the channel")
+        coord.endCsOperation()
+        XCTAssertFalse(coord.csBusy, "released once every claim is done")
+
+        // Over-releasing (a stale completion after a device switch) floors at
+        // zero instead of going negative, which would strand the next claim.
+        coord.endCsOperation()
+        XCTAssertFalse(coord.csBusy)
+        coord.beginCsOperation()
+        XCTAssertTrue(coord.csBusy, "a fresh claim still registers")
+        coord.endCsOperation()
+        XCTAssertFalse(coord.csBusy)
+    }
+
     // MARK: 3. Real save() persistence round-trip (writes flash; opt-in)
 
     /// Verifies `SettingsSaveCoordinator.save()` actually pushes a global change

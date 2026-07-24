@@ -539,6 +539,20 @@ final class SettingsSaveCoordinator: ObservableObject {
     @Published var outputConfigDirty = false
     private var outputBaseline: OutputConfigSnapshot
 
+    // Category C - Control Surfaces (live preview, flash on save; spec §3.5).
+    // The device owns the dirty flag, so there is no draft to hold here.
+    /// True while any deferred Control Surfaces operation is in flight (apply,
+    /// IR learn, save, revert). They share one device status channel (spec
+    /// §3.2), so every UI that can start one serializes on this.
+    @Published private(set) var csBusy = false
+    /// Backing count for `csBusy`. A count, not a bool: the page and this
+    /// coordinator both start operations, and the page's view can be torn down
+    /// mid-flight - a bool would let that re-enable Save during a flash write.
+    private var csOpsInFlight = 0
+    /// Bumped after a Control Surfaces revert lands, so the page can re-seed its
+    /// drafts from the restored config.
+    @Published private(set) var csReloadToken = 0
+
     /// Serial of the device the pending state belongs to. When the selection
     /// moves to a *different* device, pending edits are discarded - the draft
     /// and baseline were captured from the old device and must never be
@@ -581,6 +595,9 @@ final class SettingsSaveCoordinator: ObservableObject {
     /// The re-seeded draft may briefly hold the old device's values (the new
     /// device's fetch is still in flight); fetchAll's completion refresh
     /// replaces them, and nothing is dirty in the meantime.
+    // `csBusy` is deliberately not reset here: in-flight operations release
+    // their own claim, and zeroing the count would let a late release clear a
+    // claim taken for the new device.
     private func resetForNewDevice() {
         globalUserEdited = false
         outputConfigDirty = false
@@ -616,7 +633,27 @@ final class SettingsSaveCoordinator: ObservableObject {
     var outputDirty: Bool {
         outputConfigDirty && vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT
     }
-    var hasPendingChanges: Bool { globalDirty || outputDirty }
+    /// Control Surfaces applies are live-only previews until REQ_CS_SAVE; the
+    /// device reports the unsaved state, so this is just a passthrough.
+    var csDirty: Bool { vm.controlSurfacesSupported && vm.csDirty }
+    var hasPendingChanges: Bool { globalDirty || outputDirty || csDirty }
+
+    // MARK: Control Surfaces operation gate
+
+    /// Claim the shared Control Surfaces status channel for one deferred
+    /// operation. Main thread only. Every path that ends the operation -
+    /// including the ones that abandon it (failed arm, cancel, device switch) -
+    /// must release exactly once, or the bar's Save stays disabled for good.
+    func beginCsOperation() {
+        csOpsInFlight += 1
+        csBusy = true
+    }
+
+    /// Release one claim taken by `beginCsOperation()`. Main thread only.
+    func endCsOperation() {
+        csOpsInFlight = max(0, csOpsInFlight - 1)
+        csBusy = csOpsInFlight > 0
+    }
 
     // MARK: Global draft editing
 
@@ -652,7 +689,9 @@ final class SettingsSaveCoordinator: ObservableObject {
     func save() {
         let doGlobal = globalDirty
         let doOutput = outputDirty
-        guard doGlobal || doOutput else { return }
+        let doCs = csDirty
+        guard doGlobal || doOutput || doCs else { return }
+        if doCs { beginCsOperation() }
         let pending = globalDraft
         let deviceState = GlobalSettingsDraft.from(vm)
         let vm = self.vm
@@ -661,6 +700,9 @@ final class SettingsSaveCoordinator: ObservableObject {
         // device (noteSelectedDevice has already reset the pending state).
         let generation = vm.usb.generation
         DispatchQueue.global(qos: .userInitiated).async {
+            // Every exit releases the claim, or the shared bar's buttons stay
+            // disabled after a save abandoned by a device switch.
+            defer { if doCs { DispatchQueue.main.async { self.endCsOperation() } } }
             guard vm.usb.generation == generation else { return }
             if doGlobal {
                 if pending.presetStartupMode != deviceState.presetStartupMode
@@ -681,6 +723,12 @@ final class SettingsSaveCoordinator: ObservableObject {
                 guard vm.usb.generation == generation else { return }
                 _ = vm.saveOutputConfig()
             }
+            // Control Surfaces persists its whole live config in one directory
+            // write (spec §3.5); `csDirty` clears from the device's own flag, so
+            // a failed save simply leaves the bar up for a retry.
+            if doCs, vm.usb.generation == generation {
+                _ = vm.csSave()
+            }
             DispatchQueue.main.async {
                 guard vm.usb.generation == generation else { return }
                 self.globalUserEdited = false
@@ -695,6 +743,7 @@ final class SettingsSaveCoordinator: ObservableObject {
             globalUserEdited = false
             globalDraft = GlobalSettingsDraft.from(vm)
         }
+        if csDirty { revertControlSurfaces() }
         if outputDirty {
             let base = outputBaseline
             let vm = self.vm
@@ -773,14 +822,47 @@ final class SettingsSaveCoordinator: ObservableObject {
             }
         }
     }
+
+    /// Discard the Control Surfaces live preview (REQ_CS_REVERT; spec §3.5).
+    /// The device restores the stored bindings, names, and IR commands and
+    /// clears `dirty`; `csReloadToken` then tells the page to re-seed its
+    /// drafts from what came back.
+    private func revertControlSurfaces() {
+        beginCsOperation()
+        let vm = self.vm
+        let generation = vm.usb.generation
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                DispatchQueue.main.async {
+                    self.endCsOperation()
+                    self.csReloadToken &+= 1
+                }
+            }
+            guard vm.usb.generation == generation else { return }
+            _ = vm.csRevert()
+        }
+    }
 }
 
 /// Shared save/revert bar shown at the bottom of any Settings page while there
-/// are pending changes (global draft and/or live output-config edits not yet
-/// flashed). One Save / one Revert acts on whatever is pending.
+/// are pending changes (global draft, live output-config edits, and/or the
+/// Control Surfaces live preview, none yet flashed). One Save / one Revert acts
+/// on whatever is pending, so pages never stack bars of their own.
 private struct SettingsSaveBar: View {
     @ObservedObject var coordinator = SettingsSaveCoordinator.shared
     @ObservedObject var vm = AppState.shared.viewModel
+
+    /// True when the only pending change is the Control Surfaces live preview.
+    private var csOnly: Bool {
+        coordinator.csDirty && !coordinator.globalDirty && !coordinator.outputDirty
+    }
+
+    /// Control Surfaces changes are already live, so say so when that is all
+    /// that's pending; anything else is a plain not-yet-written-to-flash edit.
+    private var subtitle: String {
+        csOnly ? "Your controls are live now; saving keeps them across a reboot."
+               : "Saving writes these settings to the device's flash."
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -792,17 +874,22 @@ private struct SettingsSaveBar: View {
                     Text("Unsaved changes")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text("Saving writes these settings to the device's flash.")
+                    Text(subtitle)
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
             }
-            Spacer()
+            Spacer(minLength: 8)
+            if coordinator.csBusy { ProgressView().controlSize(.small) }
+            // Revert stays available offline because the global draft is
+            // app-side; a Control Surfaces revert is a device operation, so
+            // offline it would silently do nothing when it's all that's pending.
             Button("Revert") { coordinator.revert() }
+                .disabled(coordinator.csBusy || (csOnly && !vm.isDeviceConnected))
             Button("Save") { coordinator.save() }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(!vm.isDeviceConnected)
+                .disabled(coordinator.csBusy || !vm.isDeviceConnected)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -1771,9 +1858,10 @@ struct ControlSurfacesSettingsTab: View {
     @State private var didMigrateLegacyNames = false
     private static let legacyNamesKey = "controlSurfaceSlotNames"
 
-    // Global Save/Revert (the Apply/Save/Revert preview model; spec §3.5):
-    // binding + IR command applies are live-only previews until saved.
-    @State private var savingConfig = false
+    // Save/Revert for the Apply/Save/Revert preview model (spec §3.5) lives on
+    // the Settings window's shared save bar; the coordinator holds the in-flight
+    // flag every deferred CS operation serializes on.
+    @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
 
     /// Number of binding slots the device exposes (falls back to the wire max).
     private var slotCount: Int {
@@ -1824,18 +1912,19 @@ struct ControlSurfacesSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        // Unsaved-changes bar pinned to the bottom of the window, matching the
-        // global Settings save bar: it appears while there are live-but-unsaved
-        // control changes and just slides away once saved or reverted.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if vm.csDirty {
-                csSaveBar.transition(.move(edge: .bottom))
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: vm.csDirty)
+        // No save bar here: the unsaved-changes bar is the Settings window's
+        // shared one (SettingsSaveBar), which folds `csDirty` in with the global
+        // and output-config edits so only ever one bar is stacked at the bottom.
         .onAppear {
             seedDrafts()
             DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
+        }
+        // A shared-bar Revert restores the stored config on the device; re-seed
+        // the drafts (and drop stale name edits / status messages) from it.
+        .onChange(of: coordinator.csReloadToken) { _ in
+            seedDrafts()
+            nameEdits.removeAll()
+            slotMessages.removeAll()
         }
         // Re-seed a slot when its live binding changes and the user has no
         // pending edits for it, so an external change never strands a draft.
@@ -1866,9 +1955,16 @@ struct ControlSurfacesSettingsTab: View {
             slotMessages = [:]
             subMessages = [:]
             nameEdits = [:]
-            learningSub = nil
+            // Drop the learn without a device round-trip - the arm belonged to
+            // the device we just left.
+            endLearn()
             learnMessage = nil
         }
+        // A learn waits for a button press with no deadline, and the shared save
+        // bar is reachable from every page - so leaving while armed would let a
+        // Save/Revert onto the same status channel (spec §3.2). Applies need no
+        // such handling: they are bounded and release their own claim.
+        .onDisappear { cancelLearn() }
     }
 
     private func seedDrafts() {
@@ -2057,76 +2153,14 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    // MARK: Save / Revert (Apply/Save/Revert preview model; spec §3.5)
+    // MARK: Apply / Save / Revert (preview model; spec §3.5)
 
-    /// Bottom-of-window "unsaved changes" bar, styled like the global Settings
-    /// save bar.  Control / name / IR-command applies are live-only previews:
-    /// they behave immediately but do not survive a reboot until saved.  Save
-    /// persists the whole live config in one flash write; Revert reloads what is
-    /// stored.  The bar is shown by `.safeAreaInset` while `vm.csDirty`, so it
-    /// simply slides away once the change is saved or reverted.
-    @ViewBuilder
-    private var csSaveBar: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundColor(.orange)
-                .font(.caption)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Unsaved changes")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Your controls are live now; saving keeps them across a reboot.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            Spacer(minLength: 8)
-            if savingConfig { ProgressView().controlSize(.small) }
-            Button("Revert") { revertConfig() }
-                .disabled(csBusy || !vm.isDeviceConnected)
-            Button("Save") { saveConfig() }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(csBusy || !vm.isDeviceConnected)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5)
-        }
-    }
-
-    /// True while any deferred Control Surfaces operation is in flight.  Because
-    /// binding, name, IR-command, save, and revert all report through one shared
-    /// status channel (spec §3.2), the UI serializes them: each op disables the
-    /// others until it resolves.
-    private var csBusy: Bool {
-        applyingSlot != nil || applyingSub != nil || savingConfig || learningSub != nil
-    }
-
-    private func saveConfig() {
-        savingConfig = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = vm.csSave()
-            // csDirty flips false on success, sliding the bar away; on failure
-            // it stays set so the bar remains for a retry.
-            DispatchQueue.main.async { savingConfig = false }
-        }
-    }
-
-    private func revertConfig() {
-        savingConfig = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = vm.csRevert()
-            DispatchQueue.main.async {
-                savingConfig = false
-                // Re-seed drafts from the restored live bindings/names.
-                seedDrafts()
-                nameEdits.removeAll()
-                slotMessages.removeAll()
-            }
-        }
-    }
+    /// True while any deferred Control Surfaces operation is in flight - they
+    /// share one status channel (spec §3.2), so each disables the others.  The
+    /// gate lives on the coordinator because Save/Revert moved to the shared
+    /// bar: this page claims it around its applies and learns, the coordinator
+    /// around the bar's save/revert.
+    private var csBusy: Bool { coordinator.csBusy }
 
     /// The "Add Control" menu: picking a component type directly creates its
     /// card, already seeded with sensible defaults.
@@ -2191,9 +2225,10 @@ struct ControlSurfacesSettingsTab: View {
             return
         }
         applyingSlot = slot
+        coordinator.beginCsOperation()
         DispatchQueue.global(qos: .userInitiated).async {
             func bail() {
-                DispatchQueue.main.async { applyingSlot = nil }
+                DispatchQueue.main.async { applyingSlot = nil; coordinator.endCsOperation() }
             }
             guard vm.usb.generation == generation else { return bail() }
             _ = vm.setCsBinding(slot: slot, binding: CsBinding())
@@ -2201,6 +2236,8 @@ struct ControlSurfacesSettingsTab: View {
             if hadName { _ = vm.setCsName(slot: slot, name: "") }
             DispatchQueue.main.async {
                 applyingSlot = nil
+                // Ahead of the guard: an abandoned remove must still release.
+                coordinator.endCsOperation()
                 guard vm.usb.generation == generation else { return }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     drafts[slot] = vm.csBindings[slot]   // now cleared on the device
@@ -2903,7 +2940,7 @@ struct ControlSurfacesSettingsTab: View {
             Button("Apply") { applySlot(slot) }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(!dirty || applying || savingConfig || !vm.isDeviceConnected)
+                .disabled(!dirty || applying || csBusy || !vm.isDeviceConnected)
         }
     }
 
@@ -2922,6 +2959,7 @@ struct ControlSurfacesSettingsTab: View {
             }
             : []
         applyingSlot = slot
+        coordinator.beginCsOperation()
         slotMessages[slot] = nil
         DispatchQueue.global(qos: .userInitiated).async {
             // Push the binding, the staged name, then each dirty remote button;
@@ -2938,6 +2976,7 @@ struct ControlSurfacesSettingsTab: View {
             }
             DispatchQueue.main.async {
                 applyingSlot = nil
+                coordinator.endCsOperation()
                 drafts[slot] = vm.csBindings[slot]
                 nameEdits[slot] = nil   // staged name is now live (or unchanged)
                 for item in irToApply {
@@ -3068,7 +3107,7 @@ struct ControlSurfacesSettingsTab: View {
                         Text(c.isConfigured ? "Re-learn" : "Learn Button")
                     }
                     .buttonStyle(.bordered).controlSize(.small)
-                    .disabled(!receiverLive || !vm.isDeviceConnected || learningSub != nil || savingConfig)
+                    .disabled(!receiverLive || !vm.isDeviceConnected || learningSub != nil || csBusy)
                 }
                 Button(role: .destructive) { removeIrCommand(sub) } label: {
                     Image(systemName: "trash").font(.system(size: 11))
@@ -3402,10 +3441,12 @@ struct ControlSurfacesSettingsTab: View {
             return
         }
         applyingSub = sub
+        coordinator.beginCsOperation()
         DispatchQueue.global(qos: .userInitiated).async {
             _ = vm.setCsIrCommand(sub: sub, command: IrCommand())
             DispatchQueue.main.async {
                 applyingSub = nil
+                coordinator.endCsOperation()
                 irDrafts[sub] = vm.csIrCommands[sub]
                 subMessages[sub] = nil
             }
@@ -3417,12 +3458,13 @@ struct ControlSurfacesSettingsTab: View {
 
     private func startLearn(_ sub: Int) {
         learningSub = sub
+        coordinator.beginCsOperation()
         learnMessage = "Point the remote at the receiver and press the button to learn."
         subMessages[sub] = nil
         DispatchQueue.global(qos: .userInitiated).async {
             guard vm.csIrLearnArm() else {
                 DispatchQueue.main.async {
-                    learningSub = nil
+                    endLearn()
                     learnMessage = nil
                     subMessages[sub] = ("No IR receiver is active - apply the receiver first.", true)
                 }
@@ -3442,9 +3484,10 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     private func finishLearn(_ sub: Int, _ result: CsIrLearnResult?) {
-        // Ignore a stale completion if the user cancelled or moved on.
+        // Ignore a stale completion if the user cancelled or moved on - that
+        // path has already released the claim, so don't release it twice.
         guard learningSub == sub else { learnMessage = nil; return }
-        learningSub = nil
+        endLearn()
         learnMessage = nil
         guard let r = result, r.isDone, r.code != 0 else {
             let timedOut = result?.isTimeout ?? false
@@ -3460,10 +3503,19 @@ struct ControlSurfacesSettingsTab: View {
 
     private func cancelLearn() {
         guard let sub = learningSub else { return }
-        learningSub = nil
+        endLearn()
         learnMessage = nil
         subMessages[sub] = ("Learn cancelled.", false)
         DispatchQueue.global(qos: .userInitiated).async { vm.csIrLearnCancel() }
+    }
+
+    /// Clear the armed learn and release its claim.  Idempotent, so the paths
+    /// that race for the same learn - Cancel, a device switch, and the poll
+    /// loop's completion - can't double-release it.
+    private func endLearn() {
+        guard learningSub != nil else { return }
+        learningSub = nil
+        coordinator.endCsOperation()
     }
 
     // MARK: Shared row helpers (mirror the Control Interfaces page)
