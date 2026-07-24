@@ -7,11 +7,19 @@ extension DSPViewModel {
     // --- USB Commands ---
 
     func fetchAll() {
+        // Scope this refresh to the device that is open right now. If a
+        // device switch lands mid-fetch, later reads would return the NEW
+        // device's data and publish a mix of both devices' state - bail out
+        // instead; the switch itself triggers a fresh fetchAll that does the
+        // full refresh.
+        let generation = usb.generation
+
         // Fetch platform/version first so capability gates (notch filter,
         // per-band bypass, etc.) are populated before the UI reads them.
         _ = fetchPlatform()
 
         guard fetchAllParams() else { return }
+        guard usb.generation == generation else { return }
 
         fetchInputSource()
         fetchCore1Mode()
@@ -21,9 +29,12 @@ extension DSPViewModel {
         fetchDacHwMuteConfig()
         fetchControlInterfaces()
         fetchControlSurfaces()
+        guard usb.generation == generation else { return }
+
         fetchSiggen()
         fetchAdatConfig()
         fetchAdatInputConfig()
+        guard usb.generation == generation else { return }
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -37,6 +48,7 @@ extension DSPViewModel {
             }
         }
         fetchPresetActive()
+        guard usb.generation == generation else { return }
 
         // All fetches above have enqueued their main-thread state updates, so
         // this runs after the published values reflect the connected device.

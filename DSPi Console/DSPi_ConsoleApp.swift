@@ -1296,6 +1296,16 @@ struct ControlInterfacesSettingsTab: View {
         .onReceive(vm.$i2cCtrlConfig) { newCfg in
             if !i2cApplying && i2cDraft == vm.i2cCtrlConfig { i2cDraft = newCfg }
         }
+        // Staged edits belong to the previously selected device - discard them
+        // on a switch so Apply can't flash one device's transport config into
+        // another. The now-clean drafts adopt the new device's values via the
+        // re-seeds above once its config is fetched.
+        .onChange(of: vm.selectedDevice) { _ in
+            uartDraft = vm.uartCtrlConfig
+            i2cDraft = vm.i2cCtrlConfig
+            uartStatus = nil
+            i2cStatus = nil
+        }
     }
 
     // MARK: UART section
@@ -1826,6 +1836,18 @@ struct ControlSurfacesSettingsTab: View {
                     irDrafts[sub] = newCmds[sub]
                 }
             }
+        }
+        // Staged edits belong to the previously selected device - discard them
+        // on a switch so Apply can't push one device's bindings, names, or IR
+        // commands onto another. The clean drafts then follow the new device's
+        // fetched state via the re-seeds above.
+        .onChange(of: vm.selectedDevice) { _ in
+            seedDrafts()
+            slotMessages = [:]
+            subMessages = [:]
+            nameEdits = [:]
+            learningSub = nil
+            learnMessage = nil
         }
     }
 

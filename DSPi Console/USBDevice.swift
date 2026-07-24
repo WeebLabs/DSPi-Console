@@ -113,6 +113,30 @@ class USBDevice: ObservableObject {
         return (cf.takeRetainedValue() as? NSNumber)?.uint32Value
     }
 
+    // MARK: - Connection Generation
+
+    /// Monotonic counter bumped on every device open and close. Control
+    /// transfers capture it when the caller invokes them and re-check it when
+    /// their block actually runs on `serialQueue`, so a command issued while
+    /// device A was selected is dropped instead of being delivered to a
+    /// different device that was opened in the meantime (e.g. the auto-switch
+    /// to a surviving device when the selected one is unplugged).
+    private var connectionGeneration: UInt64 = 0
+    private let generationLock = NSLock()
+
+    /// Current connection generation (thread-safe snapshot).
+    var generation: UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return connectionGeneration
+    }
+
+    private func bumpGeneration() {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        connectionGeneration &+= 1
+    }
+
     // MARK: - Device Open/Close Helpers
 
     /// Opens a USB device from its IOKit service. Returns true on success.
@@ -148,6 +172,7 @@ class USBDevice: ObservableObject {
         let openRes = dev.pointee!.pointee.USBDeviceOpen(dev)
         if openRes == kIOReturnSuccess {
             self.deviceInterface = devPtr
+            bumpGeneration()
             return true
         } else if openRes == kIOReturnExclusiveAccess {
             DispatchQueue.main.async { self.errorMessage = "Device busy." }
@@ -161,6 +186,7 @@ class USBDevice: ObservableObject {
             _ = dev.pointee!.pointee.USBDeviceClose(dev)
             _ = dev.pointee!.pointee.Release(dev)
             self.deviceInterface = nil
+            bumpGeneration()
         }
     }
 
@@ -412,15 +438,37 @@ class USBDevice: ObservableObject {
             }
             defer { IOObjectRelease(iterator) }
 
+            // Collect serial matches, preferring the one at the expected USB
+            // location. Serials are normally unique, but units flashed with a
+            // duplicate/default serial would otherwise collapse onto whichever
+            // service the iterator yields first.
+            var chosen: io_service_t = 0
+            var fallback: io_service_t = 0
             while case let service = IOIteratorNext(iterator), service != 0 {
-                let serial = self.readSerialNumber(from: service)
-                if serial != device.serial {
+                guard self.readSerialNumber(from: service) == device.serial else {
                     IOObjectRelease(service)
                     continue
                 }
-                defer { IOObjectRelease(service) }
+                if self.readLocationID(from: service) == device.locationID {
+                    chosen = service
+                    break
+                }
+                if fallback == 0 {
+                    fallback = service
+                } else {
+                    IOObjectRelease(service)
+                }
+            }
+            if chosen == 0 {
+                chosen = fallback
+            } else if fallback != 0 {
+                IOObjectRelease(fallback)
+            }
 
-                if self.openDevice(service: service) {
+            if chosen != 0 {
+                defer { IOObjectRelease(chosen) }
+
+                if self.openDevice(service: chosen) {
                     DispatchQueue.main.async {
                         self.selectedDevice = device
                         self.isConnected = true
@@ -465,8 +513,13 @@ class USBDevice: ObservableObject {
     // MARK: - Control Transfers
 
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
+        // Bind the command to the device that was open when the caller issued
+        // it; if a switch (close/open) intervenes before the block runs, drop
+        // the command rather than deliver it to the wrong device.
+        let expectedGeneration = generation
         serialQueue.async {
-            guard let dev = self.deviceInterface else { return }
+            guard expectedGeneration == self.generation,
+                  let dev = self.deviceInterface else { return }
 
             var requestPtr = IOUSBDevRequest(
                 bmRequestType: 0x41, // Host to Device | Vendor | Interface
@@ -483,8 +536,13 @@ class USBDevice: ObservableObject {
     }
 
     func getControlRequest(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Data? {
+        // Same device-binding as sendControlRequest: a read that was issued
+        // for the previously-open device fails (nil) instead of returning
+        // another device's data.
+        let expectedGeneration = generation
         return serialQueue.sync {
-            guard let dev = self.deviceInterface else { return nil }
+            guard expectedGeneration == self.generation,
+                  let dev = self.deviceInterface else { return nil }
 
             let buffer = UnsafeMutableRawPointer.allocate(byteCount: Int(length), alignment: 1)
             defer { buffer.deallocate() }

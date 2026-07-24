@@ -35,6 +35,12 @@ final class HostAudioFormatMonitor {
     /// is stable across an Audio-MIDI-Setup rename (which only changes the name).
     private let matchToken = "DSPi"
 
+    /// Serial number of the DSPi selected in Console.  With several units
+    /// attached, the CoreAudio device whose UID embeds this serial is
+    /// preferred; without it (or when no UID matches) the first token match
+    /// wins as before.  Confined to `queue`.
+    private var preferredSerial: String?
+
     private let queue = DispatchQueue(label: "com.foxdac.coreaudio.format")
     private var currentDevice = AudioObjectID(kAudioObjectUnknown)
     // Sentinel distinct from every real value (including nil) so the first
@@ -108,22 +114,38 @@ final class HostAudioFormatMonitor {
         DispatchQueue.main.async { callback?(count) }
     }
 
-    /// First USB output device whose UID or name contains `matchToken`.  We
-    /// require a positive output-channel count so that, if the device presents
+    /// Update the selected-device serial and re-resolve the CoreAudio device.
+    func setPreferredSerial(_ serial: String?) {
+        queue.async { [weak self] in
+            guard let self = self, self.preferredSerial != serial else { return }
+            self.preferredSerial = serial
+            if self.started { self.rescan() }
+        }
+    }
+
+    /// USB output device whose UID or name contains `matchToken`, preferring
+    /// the one whose UID embeds the selected unit's serial number.  We require
+    /// a positive output-channel count so that, if the device presents
     /// separate input and output objects, we pick the output side (the DSPi is
     /// played *to* by the host).
     private func findDSPiDevice() -> AudioObjectID? {
+        var fallback: AudioObjectID?
         for dev in Self.allDeviceIDs() {
             guard transportType(dev) == kAudioDeviceTransportTypeUSB else { continue }
             guard let channels = outputChannelCount(dev), channels > 0 else { continue }
             let uid = stringProperty(dev, kAudioDevicePropertyDeviceUID) ?? ""
             let name = stringProperty(dev, kAudioObjectPropertyName) ?? ""
-            if uid.localizedCaseInsensitiveContains(matchToken)
-                || name.localizedCaseInsensitiveContains(matchToken) {
+            guard uid.localizedCaseInsensitiveContains(matchToken)
+                || name.localizedCaseInsensitiveContains(matchToken) else { continue }
+            // CoreAudio UIDs for USB audio embed the USB serial string, so
+            // this pins the monitor to the unit selected in Console.
+            if let serial = preferredSerial, !serial.isEmpty,
+               uid.localizedCaseInsensitiveContains(serial) {
                 return dev
             }
+            if fallback == nil { fallback = dev }
         }
-        return nil
+        return fallback
     }
 
     // MARK: - Per-device listener

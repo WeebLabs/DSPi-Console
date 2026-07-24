@@ -336,6 +336,11 @@ struct TestSignalsView: View {
         .onReceive(statusTimer) { _ in
             if controlsEnabled && running { refreshStatus() }
         }
+        .onChange(of: vm.selectedDevice) { _ in
+            // A pending debounced apply belongs to the previously selected
+            // device; never deliver it to the new one.
+            applyWork?.cancel()
+        }
     }
 
     // MARK: Header
@@ -1007,7 +1012,11 @@ struct TestSignalsView: View {
     private func scheduleLiveApply() {
         applyWork?.cancel()
         guard running, controlsEnabled else { return }
+        // Capture the device this edit was made for; the onChange cancel only
+        // covers a live view, not a work item orphaned by closing the window.
+        let device = vm.selectedDevice
         let work = DispatchWorkItem {
+            guard vm.selectedDevice == device else { return }
             let cfg = vm.siggenDraft
             guard vm.siggenStatus.isRunning, startBlocker == nil else { return }
             DispatchQueue.global(qos: .userInitiated).async {

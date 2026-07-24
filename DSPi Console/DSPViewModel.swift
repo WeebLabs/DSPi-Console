@@ -1813,6 +1813,15 @@ class DSPViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .assign(to: &$selectedDevice)
 
+        // Keep the CoreAudio format monitor pinned to the selected unit so a
+        // multi-device setup doesn't report another DSPi's host format.
+        usb.$selectedDevice
+            .receive(on: RunLoop.main)
+            .sink { [weak self] device in
+                self?.hostAudioFormatMonitor.setPreferredSerial(device?.serial)
+            }
+            .store(in: &cancellables)
+
         // 2. Start Polling Timer (Every 60ms) on background queue
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
         timer.schedule(deadline: .now(), repeating: 0.06)
