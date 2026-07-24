@@ -547,12 +547,14 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 3
+// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 4
 // (spec §"Wire reference" / §11.1): v2 grew the binding 16 -> 24 bytes, the
 // noun descriptor 8 -> 12, added per-slot names; v3 adds the IR remote receiver
 // component with a learned-command table, and the Apply/Save/Revert preview
 // model.  The caps header is now 40 bytes (8 types + max_ir_commands tail) and
-// the status packet 32 bytes (byte 3 = dirty, plus the IR tail).
+// the status packet 32 bytes (byte 3 = dirty, plus the IR tail).  v4 changes no
+// structure: it adds nouns 35-48 (stereo upmixer, psychoacoustic bass,
+// per-output delay, preset reload) and the CS_UNIT_MS unit.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
@@ -588,7 +590,7 @@ let CS_MAX_BINDINGS: Int       = 16
 let CS_MAX_IR_COMMANDS: Int    = 8    // IR command sub-slots per device (spec §2.4)
 let CS_NAME_LEN: Int           = 32   // per-slot name buffer, NUL-terminated (spec §3.4)
 let CS_GPIO_UNUSED: UInt8      = 0xFF
-let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v3
+let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v4
 let CS_IR_CONFIG_VERSION: UInt8 = 1   // CsIrConfig.version (IR command table)
 let CS_CAPS_ALL: UInt16        = 0xFFFF   // wValue selecting the caps header + type table
 /// `lastSlot` sentinel for a save/revert outcome (spec §2.6).
@@ -609,9 +611,9 @@ let CS_TYPE_LED: Int      = 5
 let CS_TYPE_LED_PWM: Int  = 6   // hardware-PWM-dimmed LED (IND_LEVEL meter)
 let CS_TYPE_IR: Int       = 7   // IR remote receiver (container: one pin + learned command sub-slots)
 
-// CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns);
-// the app reads the live count and per-noun descriptors from the caps, so
-// these are only used by the display-label helpers.
+// CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns,
+// v4 = 49); the app reads the live count and per-noun descriptors from the
+// caps, so these are only used by the display-label helpers.
 let CS_NOUN_USER_VOLUME: Int       = 0
 let CS_NOUN_MASTER_VOLUME: Int     = 1
 let CS_NOUN_USER_MUTE: Int         = 2
@@ -647,6 +649,22 @@ let CS_NOUN_USB_STREAMING: Int     = 31
 let CS_NOUN_ADAT_ACTIVE: Int       = 32
 let CS_NOUN_LG_PRESENT: Int        = 33
 let CS_NOUN_LG_MUTED: Int          = 34
+// Caps v4 additions (spec §11.1).  The six upmixer nouns are RP2350-only: on
+// RP2040 their descriptor action masks read 0, like ADAT_ACTIVE.
+let CS_NOUN_UPMIX: Int             = 35
+let CS_NOUN_UPMIX_CENTER_MODE: Int = 36
+let CS_NOUN_UPMIX_SURROUND_MODE: Int = 37
+let CS_NOUN_UPMIX_STRENGTH: Int    = 38
+let CS_NOUN_UPMIX_WIDTH: Int       = 39
+let CS_NOUN_UPMIX_PRESENCE: Int    = 40
+let CS_NOUN_PSYBASS: Int           = 41
+let CS_NOUN_PSYBASS_CUTOFF: Int    = 42
+let CS_NOUN_PSYBASS_HARMONICS: Int = 43
+let CS_NOUN_PSYBASS_DRIVE: Int     = 44
+let CS_NOUN_PSYBASS_CHARACTER: Int = 45
+let CS_NOUN_PSYBASS_ORIGINAL: Int  = 46
+let CS_NOUN_OUTPUT_DELAY: Int      = 47
+let CS_NOUN_PRESET_RELOAD: Int     = 48
 
 // CsAction (operation applied).  Action bit position in the caps masks is
 // (1 << action); CS_ACT_BIT(a) below builds that mask.
@@ -690,6 +708,23 @@ let CS_UNIT_DB: UInt8      = 1   // signed 8.8 dB (1 dB = 256), linear stepping
 let CS_UNIT_HZ: UInt8      = 2   // plain integer Hz, logarithmic stepping (step = 8.8 octaves)
 let CS_UNIT_Q: UInt8       = 3   // 8.8 Q (0.707 = 181), logarithmic stepping (step = 8.8 octaves)
 let CS_UNIT_PERCENT: UInt8 = 4   // 8.8 percent (1 % = 256), linear stepping
+let CS_UNIT_MS: UInt8      = 5   // 8.8 milliseconds (1 ms = 256), linear stepping; default step 0.1 ms
+
+/// The firmware's default step for a unit when `CsBinding.step` is 0 (spec
+/// §2.1): one unit for the linear units, 1/12 octave for the log units, and
+/// 0.1 ms for delay (whole-ms detents are too coarse for alignment).
+func csDefaultStep(_ unit: UInt8) -> Float {
+    switch unit {
+    case CS_UNIT_HZ, CS_UNIT_Q: return 1.0 / 12.0
+    case CS_UNIT_MS:            return 0.1
+    default:                    return 1.0
+    }
+}
+
+/// True when a unit steps multiplicatively (its `step` operand is in octaves).
+func csUnitIsLog(_ unit: UInt8) -> Bool {
+    unit == CS_UNIT_HZ || unit == CS_UNIT_Q
+}
 
 // CsNounDesc.target_kind values (spec §4.4).
 let CS_TARGET_NONE: UInt8      = 0
@@ -748,10 +783,10 @@ private func csClampInt16(_ v: Float) -> Int16 {
     Int16(max(Float(Int16.min), min(Float(Int16.max), v.rounded())))
 }
 
-/// True when a unit encodes value/range as 8.8 fixed point (dB, Q, percent);
-/// false for the plain-integer units (none, Hz).
+/// True when a unit encodes value/range as 8.8 fixed point (dB, Q, percent,
+/// ms); false for the plain-integer units (none, Hz).
 func csUnitIsFixedPoint(_ unit: UInt8) -> Bool {
-    unit == CS_UNIT_DB || unit == CS_UNIT_Q || unit == CS_UNIT_PERCENT
+    unit == CS_UNIT_DB || unit == CS_UNIT_Q || unit == CS_UNIT_PERCENT || unit == CS_UNIT_MS
 }
 
 /// Encode a natural-unit value (dB / Hz / Q / percent / plain) to the wire
@@ -781,6 +816,7 @@ func csUnitSymbol(_ unit: UInt8) -> String {
     case CS_UNIT_HZ:      return "Hz"
     case CS_UNIT_Q:       return "Q"
     case CS_UNIT_PERCENT: return "%"
+    case CS_UNIT_MS:      return "ms"
     default:              return ""
     }
 }

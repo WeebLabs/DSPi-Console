@@ -2389,13 +2389,13 @@ struct ControlSurfacesSettingsTab: View {
                 if groups.count <= 1 {
                     // A single category: list its functions directly, no submenu.
                     ForEach(groups.first?.nouns ?? [], id: \.self) { n in
-                        nounMenuItem(slot, n, type: type, current: current)
+                        nounMenuItem(slot, n, type: type, current: current, in: nil)
                     }
                 } else {
-                    ForEach(groups, id: \.name) { group in
-                        Menu(group.name) {
+                    ForEach(groups, id: \.cat.name) { group in
+                        Menu(group.cat.name) {
                             ForEach(group.nouns, id: \.self) { n in
-                                nounMenuItem(slot, n, type: type, current: current)
+                                nounMenuItem(slot, n, type: type, current: current, in: group.cat)
                             }
                         }
                     }
@@ -2410,13 +2410,14 @@ struct ControlSurfacesSettingsTab: View {
 
     /// One selectable function inside the Controls menu, check-marked when it's
     /// the slot's current noun.
-    @ViewBuilder
-    private func nounMenuItem(_ slot: Int, _ noun: Int, type: Int, current: Int) -> some View {
-        Button { nounBinding(slot).wrappedValue = noun } label: {
+    private func nounMenuItem(_ slot: Int, _ noun: Int, type: Int, current: Int,
+                              in cat: NounCategory?) -> some View {
+        let label = nounMenuLabel(noun, forType: type, in: cat)
+        return Button { nounBinding(slot).wrappedValue = noun } label: {
             if noun == current {
-                Label(nounName(noun, forType: type), systemImage: "checkmark")
+                Label(label, systemImage: "checkmark")
             } else {
-                Text(nounName(noun, forType: type))
+                Text(label)
             }
         }
     }
@@ -2691,26 +2692,25 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// Unit-aware step field.  dB / percent step linearly in their unit; Hz / Q
-    /// step multiplicatively, so their step is expressed in octaves.
+    /// Unit-aware step field.  dB / percent / ms step linearly in their unit;
+    /// Hz / Q step multiplicatively, so their step is expressed in octaves.
     @ViewBuilder
     private func csStepRow(_ slot: Int) -> some View {
         let unit = nounUnit(slot)
-        let isLog = unit == CS_UNIT_HZ || unit == CS_UNIT_Q
-        let logStep: Float = 1.0 / 12.0
+        let isLog = csUnitIsLog(unit)
         let logMin: Float = 1.0 / 48.0
-        let dflt: Float = isLog ? logStep : 1.0
-        let cur = drafts[slot].step == 0 ? dflt : csDecodeStep(drafts[slot].step, unit: unit)
+        let minStep = isLog ? logMin : unitMinStep(unit)
+        let cur = drafts[slot].step == 0 ? csDefaultStep(unit) : csDecodeStep(drafts[slot].step, unit: unit)
         settingRow(title: "Step Size",
                    detail: isLog ? "Ratio per detent/press, in octaves." : "Amount added or removed per detent/press.",
                    icon: "plusminus") {
             ValueField(label: isLog ? "oct" : csUnitSymbol(unit),
                        value: cur, width: 64,
-                       scrollStep: isLog ? logStep : unitScrollStep(unit),
-                       minValue: isLog ? logMin : 0.1,
+                       scrollStep: isLog ? csDefaultStep(unit) : unitScrollStep(unit),
+                       minValue: minStep,
                        maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
                 var nb = drafts[slot]
-                nb.step = csEncodeStep(max(isLog ? logMin : 0.1, v), unit: unit)
+                nb.step = csEncodeStep(max(minStep, v), unit: unit)
                 drafts[slot] = nb
             }
         }
@@ -3161,11 +3161,15 @@ struct ControlSurfacesSettingsTab: View {
                    icon: "slider.horizontal.3") {
             Menu {
                 if groups.count <= 1 {
-                    ForEach(groups.first?.nouns ?? [], id: \.self) { n in irNounMenuItem(sub, n, current: current) }
+                    ForEach(groups.first?.nouns ?? [], id: \.self) { n in
+                        irNounMenuItem(sub, n, current: current, in: nil)
+                    }
                 } else {
-                    ForEach(groups, id: \.name) { group in
-                        Menu(group.name) {
-                            ForEach(group.nouns, id: \.self) { n in irNounMenuItem(sub, n, current: current) }
+                    ForEach(groups, id: \.cat.name) { group in
+                        Menu(group.cat.name) {
+                            ForEach(group.nouns, id: \.self) { n in
+                                irNounMenuItem(sub, n, current: current, in: group.cat)
+                            }
                         }
                     }
                 }
@@ -3177,12 +3181,13 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     @ViewBuilder
-    private func irNounMenuItem(_ sub: Int, _ noun: Int, current: Int) -> some View {
-        Button { setIrNoun(sub, noun) } label: {
+    private func irNounMenuItem(_ sub: Int, _ noun: Int, current: Int, in cat: NounCategory?) -> some View {
+        let label = nounMenuLabel(noun, forType: CS_TYPE_IR, in: cat)
+        return Button { setIrNoun(sub, noun) } label: {
             if noun == current {
-                Label(nounName(noun, forType: CS_TYPE_IR), systemImage: "checkmark")
+                Label(label, systemImage: "checkmark")
             } else {
-                Text(nounName(noun, forType: CS_TYPE_IR))
+                Text(label)
             }
         }
     }
@@ -3270,19 +3275,18 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func irStepRow(_ sub: Int) -> some View {
         let unit = unitFor(noun: Int(irDrafts[sub].noun))
-        let isLog = unit == CS_UNIT_HZ || unit == CS_UNIT_Q
-        let logStep: Float = 1.0 / 12.0
+        let isLog = csUnitIsLog(unit)
         let logMin: Float = 1.0 / 48.0
-        let dflt: Float = isLog ? logStep : 1.0
-        let cur = irDrafts[sub].step == 0 ? dflt : csDecodeStep(irDrafts[sub].step, unit: unit)
+        let minStep = isLog ? logMin : unitMinStep(unit)
+        let cur = irDrafts[sub].step == 0 ? csDefaultStep(unit) : csDecodeStep(irDrafts[sub].step, unit: unit)
         settingRow(title: "Step Size",
                    detail: isLog ? "Ratio per press, in octaves." : "Amount added or removed per press.",
                    icon: "plusminus") {
             ValueField(label: isLog ? "oct" : csUnitSymbol(unit), value: cur, width: 64,
-                       scrollStep: isLog ? logStep : unitScrollStep(unit),
-                       minValue: isLog ? logMin : 0.1,
+                       scrollStep: isLog ? csDefaultStep(unit) : unitScrollStep(unit),
+                       minValue: minStep,
                        maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
-                var c = irDrafts[sub]; c.step = csEncodeStep(max(isLog ? logMin : 0.1, v), unit: unit); irDrafts[sub] = c
+                var c = irDrafts[sub]; c.step = csEncodeStep(max(minStep, v), unit: unit); irDrafts[sub] = c
             }
         }
     }
@@ -3534,39 +3538,76 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// Display grouping for the 35-noun Controls picker.  Ordered categories,
-    /// each listing the nouns it contains; the menu filters these to the ones a
+    /// One submenu of the Controls picker.
+    private struct NounCategory {
+        let name: String
+        let nouns: [Int]
+        /// Name prefixes dropped from an item shown inside this submenu: the
+        /// submenu title already says it ("Crossfeed > Preset", not
+        /// "Crossfeed > Crossfeed Preset").
+        var strip: [String] = []
+        /// The family's on/off noun.  Its full name is just the family name, so
+        /// inside the submenu it reads "Enable/Disable" instead.
+        var enableNoun: Int? = nil
+    }
+
+    /// Display grouping for the Controls picker.  Ordered categories, each
+    /// listing the nouns it contains; the menu filters these to the ones a
     /// given component type can actually drive.  A noun not named here (a future
     /// firmware's addition) still appears, under "Other".
-    private static let nounCategories: [(name: String, nouns: [Int])] = [
-        ("Volume & Mute", [CS_NOUN_USER_VOLUME, CS_NOUN_MASTER_VOLUME, CS_NOUN_USER_MUTE]),
-        ("Sound", [CS_NOUN_LOUDNESS, CS_NOUN_CROSSFEED, CS_NOUN_CROSSFEED_PRESET,
-                   CS_NOUN_CROSSFEED_ITD, CS_NOUN_EQ_BYPASS, CS_NOUN_LEVELLER,
-                   CS_NOUN_LEVELLER_AMOUNT, CS_NOUN_LEVELLER_SPEED, CS_NOUN_LEVELLER_LOOKAHEAD]),
-        ("Input & Presets", [CS_NOUN_PRESET, CS_NOUN_INPUT_SOURCE, CS_NOUN_LG_SYNC]),
-        ("Channels", [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE, CS_NOUN_OUTPUT_ENABLE]),
-        ("Filters", [CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN, CS_NOUN_FILTER_Q,
-                     CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS]),
-        ("Tools", [CS_NOUN_SIGGEN, CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
-        ("Status", [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
-                    CS_NOUN_USB_STREAMING, CS_NOUN_ADAT_ACTIVE, CS_NOUN_LG_PRESENT, CS_NOUN_LG_MUTED]),
+    private static let nounCategories: [NounCategory] = [
+        NounCategory(name: "Volume & Mute",
+                     nouns: [CS_NOUN_USER_VOLUME, CS_NOUN_MASTER_VOLUME, CS_NOUN_USER_MUTE]),
+        NounCategory(name: "Sound", nouns: [CS_NOUN_LOUDNESS, CS_NOUN_EQ_BYPASS]),
+        NounCategory(name: "Crossfeed",
+                     nouns: [CS_NOUN_CROSSFEED, CS_NOUN_CROSSFEED_PRESET, CS_NOUN_CROSSFEED_ITD],
+                     strip: ["Crossfeed"], enableNoun: CS_NOUN_CROSSFEED),
+        NounCategory(name: "Volume Leveller",
+                     nouns: [CS_NOUN_LEVELLER, CS_NOUN_LEVELLER_AMOUNT,
+                             CS_NOUN_LEVELLER_SPEED, CS_NOUN_LEVELLER_LOOKAHEAD],
+                     strip: ["Leveller"], enableNoun: CS_NOUN_LEVELLER),
+        NounCategory(name: "Psychoacoustic Bass",
+                     nouns: [CS_NOUN_PSYBASS, CS_NOUN_PSYBASS_CUTOFF, CS_NOUN_PSYBASS_HARMONICS,
+                             CS_NOUN_PSYBASS_DRIVE, CS_NOUN_PSYBASS_CHARACTER,
+                             CS_NOUN_PSYBASS_ORIGINAL],
+                     strip: ["Psych Bass"], enableNoun: CS_NOUN_PSYBASS),
+        NounCategory(name: "Upmixer",
+                     nouns: [CS_NOUN_UPMIX, CS_NOUN_UPMIX_CENTER_MODE, CS_NOUN_UPMIX_SURROUND_MODE,
+                             CS_NOUN_UPMIX_STRENGTH, CS_NOUN_UPMIX_WIDTH, CS_NOUN_UPMIX_PRESENCE],
+                     strip: ["Upmixer"], enableNoun: CS_NOUN_UPMIX),
+        NounCategory(name: "Input & Presets",
+                     nouns: [CS_NOUN_PRESET, CS_NOUN_PRESET_RELOAD, CS_NOUN_INPUT_SOURCE,
+                             CS_NOUN_LG_SYNC]),
+        NounCategory(name: "Channels",
+                     nouns: [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE,
+                             CS_NOUN_OUTPUT_ENABLE, CS_NOUN_OUTPUT_DELAY]),
+        NounCategory(name: "Filters",
+                     nouns: [CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN, CS_NOUN_FILTER_Q,
+                             CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS],
+                     strip: ["Filter"]),
+        NounCategory(name: "Tools", nouns: [CS_NOUN_SIGGEN, CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
+        NounCategory(name: "Status",
+                     nouns: [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
+                             CS_NOUN_USB_STREAMING, CS_NOUN_ADAT_ACTIVE, CS_NOUN_LG_PRESENT,
+                             CS_NOUN_LG_MUTED]),
     ]
 
     /// The valid nouns for `type`, bucketed into the display categories above
-    /// (empty categories dropped, unknown nouns collected under "Other").
-    private func nounGroups(forType type: Int) -> [(name: String, nouns: [Int])] {
+    /// (empty categories dropped, unknown nouns collected under "Other").  Each
+    /// group keeps its category so the menu can shorten its item labels.
+    private func nounGroups(forType type: Int) -> [(cat: NounCategory, nouns: [Int])] {
         let valid = validNouns(forType: type)
         let validSet = Set(valid)
         var used = Set<Int>()
-        var groups: [(name: String, nouns: [Int])] = []
+        var groups: [(cat: NounCategory, nouns: [Int])] = []
         for cat in Self.nounCategories {
             let ns = cat.nouns.filter { validSet.contains($0) }
             guard !ns.isEmpty else { continue }
             ns.forEach { used.insert($0) }
-            groups.append((cat.name, ns))
+            groups.append((cat, ns))
         }
         let others = valid.filter { !used.contains($0) }
-        if !others.isEmpty { groups.append(("Other", others)) }
+        if !others.isEmpty { groups.append((NounCategory(name: "Other", nouns: others), others)) }
         return groups
     }
 
@@ -3793,12 +3834,31 @@ struct ControlSurfacesSettingsTab: View {
         type == CS_TYPE_LED || type == CS_TYPE_LED_PWM
     }
 
+    /// Label for one item of the Controls menu.  Inside a submenu the category
+    /// title carries the family, so the item drops the repeated prefix and the
+    /// family's on/off noun reads "Enable/Disable".  `cat` is nil when the menu
+    /// is flat (a single category), where the full name is what's wanted, as it
+    /// is everywhere else a noun stands alone (the menu's own label, summaries).
+    private func nounMenuLabel(_ noun: Int, forType type: Int, in cat: NounCategory?) -> String {
+        let full = nounName(noun, forType: type)
+        guard let cat else { return full }
+        if noun == cat.enableNoun {
+            // An indicator shows the state rather than changing it.
+            return isIndicatorType(type) ? "Enabled" : "Enable/Disable"
+        }
+        for p in cat.strip where full.hasPrefix(p + " ") {
+            return String(full.dropFirst(p.count + 1))
+        }
+        return full
+    }
+
     private func nounName(_ noun: Int, forType type: Int) -> String {
         // A few nouns read differently as an indicator vs. a control: an LED
         // "Clipping" shows the state, while a button's job is the clearing.
         if !isIndicatorType(type) {
             if noun == CS_NOUN_CLIP { return "Clear Clipping" }
             if noun == CS_NOUN_DAC_MUTE_TEST { return "Test DAC Mute" }
+            if noun == CS_NOUN_PRESET_RELOAD { return "Reload Preset" }
         }
         switch noun {
         case CS_NOUN_USER_VOLUME:        return "Volume"
@@ -3836,6 +3896,20 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_ADAT_ACTIVE:        return "ADAT Active"
         case CS_NOUN_LG_PRESENT:         return "LG Source Present"
         case CS_NOUN_LG_MUTED:           return "LG Muted"
+        case CS_NOUN_UPMIX:              return "Upmixer"
+        case CS_NOUN_UPMIX_CENTER_MODE:  return "Upmixer Centre Mode"
+        case CS_NOUN_UPMIX_SURROUND_MODE: return "Upmixer Surround Mode"
+        case CS_NOUN_UPMIX_STRENGTH:     return "Upmixer Strength"
+        case CS_NOUN_UPMIX_WIDTH:        return "Upmixer Width"
+        case CS_NOUN_UPMIX_PRESENCE:     return "Upmixer Presence"
+        case CS_NOUN_PSYBASS:            return "Psychoacoustic Bass"
+        case CS_NOUN_PSYBASS_CUTOFF:     return "Psych Bass Cutoff Frequency"
+        case CS_NOUN_PSYBASS_HARMONICS:  return "Psych Bass Harmonics"
+        case CS_NOUN_PSYBASS_DRIVE:      return "Psych Bass Drive"
+        case CS_NOUN_PSYBASS_CHARACTER:  return "Psych Bass Character"
+        case CS_NOUN_PSYBASS_ORIGINAL:   return "Psych Bass Original Level"
+        case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
+        case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         default:                         return "Parameter \(noun)"
         }
     }
@@ -3918,8 +3992,9 @@ struct ControlSurfacesSettingsTab: View {
             let name = (value >= 0 && value < vm.presetNames.count) ? vm.presetNames[value] : ""
             return name.isEmpty ? "Preset \(value + 1)" : "Preset \(value + 1) - \(name)"
         case CS_NOUN_INPUT_SOURCE:
-            let names = ["USB", "S/PDIF", "I2S"]
-            return (value >= 0 && value < names.count) ? names[value] : "Source \(value)"
+            // Shared with the Inputs page, so a firmware that grows the source
+            // enum (optional S/PDIF, ADAT) still reads correctly here.
+            return vm.inputSourceTitle(value)
         case CS_NOUN_SAMPLE_RATE:
             let names = ["44.1 kHz", "48 kHz", "96 kHz"]
             return (value >= 0 && value < names.count) ? names[value] : "Rate \(value)"
@@ -3929,6 +4004,12 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_CROSSFEED_PRESET:
             let names = ["Default", "Chu Moy", "Meier", "Custom"]
             return (value >= 0 && value < names.count) ? names[value] : "Preset \(value)"
+        case CS_NOUN_UPMIX_CENTER_MODE:
+            let names = ["Sinner", "Logician"]
+            return (value >= 0 && value < names.count) ? names[value] : "Mode \(value)"
+        case CS_NOUN_UPMIX_SURROUND_MODE:
+            let names = ["Off", "Sinner", "Logician"]
+            return (value >= 0 && value < names.count) ? names[value] : "Mode \(value)"
         case CS_NOUN_FILTER_TYPE:
             let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "Low Pass",
                          "High Pass", "Notch", "All Pass", "All Pass (1st)",
@@ -4006,6 +4087,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_UNIT_Q:       return String(format: "Q %.2f", v)
         case CS_UNIT_PERCENT: return String(format: "%.0f %%", v)
         case CS_UNIT_DB:      return String(format: "%.1f dB", v)
+        case CS_UNIT_MS:      return String(format: "%.2f ms", v)
         default:              return String(format: "%.0f", v)
         }
     }
@@ -4016,17 +4098,24 @@ struct ControlSurfacesSettingsTab: View {
         case CS_UNIT_HZ:      return 10
         case CS_UNIT_Q:       return 0.1
         case CS_UNIT_PERCENT: return 1
+        case CS_UNIT_MS:      return 0.1
         default:              return 0.5   // dB
         }
     }
 
-    /// Field decimal places appropriate to a unit (Hz/percent whole, Q fine).
+    /// Field decimal places appropriate to a unit (Hz/percent whole, Q/ms fine).
     private func unitDecimals(_ unit: UInt8) -> Int {
         switch unit {
         case CS_UNIT_HZ, CS_UNIT_PERCENT: return 0
-        case CS_UNIT_Q:                   return 2
+        case CS_UNIT_Q, CS_UNIT_MS:       return 2
         default:                          return 1   // dB
         }
+    }
+
+    /// Smallest step a unit's step field may carry.  The 8.8 encoding resolves
+    /// 1/256, so ms (default step 0.1) can go finer than the other units.
+    private func unitMinStep(_ unit: UInt8) -> Float {
+        unit == CS_UNIT_MS ? 0.01 : 0.1
     }
 
     /// Why a stored-but-enabled binding isn't running (from its slot health code).

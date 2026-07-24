@@ -1,13 +1,13 @@
 import XCTest
 @testable import DSPi_Console
 
-/// Pure-logic tests for the Control Surfaces wire format, capability format v3
+/// Pure-logic tests for the Control Surfaces wire format, capability format v4
 /// (control_surfaces_spec.md §2 / §8.2).  Verifies `CsBinding` / `IrCommand`
 /// serialization matches the spec's byte-exact hex examples and that every wire
-/// struct round-trips at the v3 sizes (24-byte binding, 40-byte caps header,
-/// 12-byte noun descriptor, 32-byte status packet, 16-byte IR command).  A
-/// wrong byte offset here would silently misconfigure real hardware, so these
-/// guard the encoding.  No device.
+/// struct round-trips at the v3/v4 sizes (24-byte binding, 40-byte caps header,
+/// 12-byte noun descriptor, 32-byte status packet, 16-byte IR command; v4
+/// changes no structure).  A wrong byte offset here would silently
+/// misconfigure real hardware, so these guard the encoding.  No device.
 final class ControlSurfacesWireTests: XCTestCase {
 
     private func hex(_ data: Data) -> String {
@@ -348,5 +348,120 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(REQ_CS_IR_LEARN, 0x8F)
         XCTAssertEqual(REQ_CS_SAVE, 0x9D)
         XCTAssertEqual(REQ_CS_REVERT, 0x9E)
+    }
+
+    // MARK: - Caps v4 additions (§11.1)
+
+    /// v4 appends nouns 35-48 without renumbering any earlier value, so a
+    /// mis-numbered constant would bind the wrong parameter on real hardware.
+    func testV4NounNumbering() {
+        XCTAssertEqual(CS_NOUN_LG_MUTED, 34)          // last v3 noun, unmoved
+        XCTAssertEqual(CS_NOUN_UPMIX, 35)
+        XCTAssertEqual(CS_NOUN_UPMIX_CENTER_MODE, 36)
+        XCTAssertEqual(CS_NOUN_UPMIX_SURROUND_MODE, 37)
+        XCTAssertEqual(CS_NOUN_UPMIX_STRENGTH, 38)
+        XCTAssertEqual(CS_NOUN_UPMIX_WIDTH, 39)
+        XCTAssertEqual(CS_NOUN_UPMIX_PRESENCE, 40)
+        XCTAssertEqual(CS_NOUN_PSYBASS, 41)
+        XCTAssertEqual(CS_NOUN_PSYBASS_CUTOFF, 42)
+        XCTAssertEqual(CS_NOUN_PSYBASS_HARMONICS, 43)
+        XCTAssertEqual(CS_NOUN_PSYBASS_DRIVE, 44)
+        XCTAssertEqual(CS_NOUN_PSYBASS_CHARACTER, 45)
+        XCTAssertEqual(CS_NOUN_PSYBASS_ORIGINAL, 46)
+        XCTAssertEqual(CS_NOUN_OUTPUT_DELAY, 47)
+        XCTAssertEqual(CS_NOUN_PRESET_RELOAD, 48)
+    }
+
+    /// `CS_UNIT_MS` (5) is 8.8 milliseconds, stepped linearly, with a 0.1 ms
+    /// default step rather than the one-unit default of the other linear units.
+    func testMsUnitEncoding() {
+        XCTAssertEqual(CS_UNIT_MS, 5)
+        XCTAssertTrue(csUnitIsFixedPoint(CS_UNIT_MS))
+        XCTAssertFalse(csUnitIsLog(CS_UNIT_MS))
+        XCTAssertEqual(csUnitSymbol(CS_UNIT_MS), "ms")
+
+        XCTAssertEqual(csEncodeValue(1.0, unit: CS_UNIT_MS), 256)
+        XCTAssertEqual(csEncodeValue(21.0, unit: CS_UNIT_MS), 5376)    // RP2040 max
+        XCTAssertEqual(csEncodeValue(42.0, unit: CS_UNIT_MS), 10752)   // RP2350 max
+        XCTAssertEqual(csDecodeValue(5376, unit: CS_UNIT_MS), 21.0, accuracy: 0.0001)
+        // 0.1 ms is not exactly representable in 8.8; it rounds to 26/256.
+        XCTAssertEqual(csEncodeStep(0.1, unit: CS_UNIT_MS), 26)
+        XCTAssertEqual(csDecodeStep(26, unit: CS_UNIT_MS), 0.1015625, accuracy: 0.0001)
+
+        // Unit defaults for a step field left at 0 (spec §2.1).
+        XCTAssertEqual(csDefaultStep(CS_UNIT_MS), 0.1, accuracy: 0.0001)
+        XCTAssertEqual(csDefaultStep(CS_UNIT_DB), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(csDefaultStep(CS_UNIT_PERCENT), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(csDefaultStep(CS_UNIT_NONE), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(csDefaultStep(CS_UNIT_HZ), 1.0 / 12.0, accuracy: 0.0001)
+        XCTAssertEqual(csDefaultStep(CS_UNIT_Q), 1.0 / 12.0, accuracy: 0.0001)
+        XCTAssertTrue(csUnitIsLog(CS_UNIT_HZ))
+        XCTAssertTrue(csUnitIsLog(CS_UNIT_Q))
+    }
+
+    /// A v4 caps header is byte-identical to v3 apart from the version and the
+    /// grown noun count, so the v3 parser must read it unchanged (§11.1).
+    func testCapsHeaderV4SameLayout() {
+        var d = Data([4, 16, 8, 49]) // capsVersion 4, maxBindings, typeCount, nounCount 49
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [8, 0, 0, 0])
+        XCTAssertEqual(d.count, 40)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.capsVersion, 4)
+        XCTAssertEqual(caps.nounCount, 49)
+        XCTAssertEqual(caps.typeCount, 8)
+        XCTAssertEqual(caps.maxIrCommands, 8)
+    }
+
+    /// A per-output delay binding: continuous, ms-unit, OUTPUT_CH-targeted.
+    /// Encoder stepping 0.5 ms per detent onto output 2.
+    func testOutputDelayEncoderBinding() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_ENCODER), noun: UInt8(CS_NOUN_OUTPUT_DELAY),
+            action: UInt8(CS_ACT_STEP), gpio0: 10, gpio1: 11,
+            target: 2,
+            step: csEncodeStep(0.5, unit: CS_UNIT_MS))   // 0.5 ms = 128 in 8.8
+        XCTAssertEqual(b.step, 128)
+        XCTAssertEqual(hex(b.toData()),
+                       "04 2f 01 00 0a 0b 00 02 00 00 00 00 80 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// A psychoacoustic-bass cutoff pot: Hz unit (plain integer), custom
+    /// 30..300 Hz span, on ADC GPIO 27.
+    func testPsybassCutoffPotBinding() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_POT), noun: UInt8(CS_NOUN_PSYBASS_CUTOFF),
+            action: UInt8(CS_ACT_ADJUST), gpio0: 27, gpio1: CS_GPIO_UNUSED,
+            rangeMin: csEncodeValue(30, unit: CS_UNIT_HZ),
+            rangeMax: csEncodeValue(300, unit: CS_UNIT_HZ))
+        XCTAssertEqual(b.rangeMin, 30)
+        XCTAssertEqual(b.rangeMax, 300)
+        XCTAssertEqual(hex(b.toData()),
+                       "03 2a 00 00 1b ff 00 00 00 00 00 00 00 00 1e 00 2c 01 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// `PRESET_RELOAD` is TRIGGER-only: a button that reloads the active preset.
+    func testPresetReloadTriggerBinding() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_BUTTON), noun: UInt8(CS_NOUN_PRESET_RELOAD),
+            action: UInt8(CS_ACT_TRIGGER), gpio0: 15, gpio1: CS_GPIO_UNUSED,
+            event: CS_EVENT_LONG)
+        XCTAssertEqual(hex(b.toData()),
+                       "01 30 07 00 0f ff 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// An IR command driving an upmixer mode: INC + WRAP cycles the enum.
+    func testUpmixModeIrCommand() {
+        let c = IrCommand(
+            noun: UInt8(CS_NOUN_UPMIX_SURROUND_MODE), action: UInt8(CS_ACT_INC),
+            flags: CS_FLAG_WRAP, proto: CS_IR_PROTO_NEC,
+            step: 1, code: 0xE718FF00)
+        XCTAssertEqual(c.toData().count, 16)
+        XCTAssertEqual(hex(c.toData()),
+                       "25 02 04 00 00 01 00 00 01 00 00 00 00 ff 18 e7")
+        XCTAssertEqual(IrCommand.fromData(c.toData()), c)
     }
 }
