@@ -208,6 +208,10 @@ struct ContentView: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // Scope the whole flow to the device it started on: the flash
+            // wait is long enough for a device switch to land mid-flow, and
+            // the follow-up reload must never run against the new device.
+            let generation = vm.usb.generation
             let status = vm.deletePreset(slot: slot)
             if status == PRESET_OK {
                 // Wait for the firmware's deferred delete to complete before
@@ -218,10 +222,12 @@ struct ContentView: View {
                 // slot name during preset_delete itself, so we don't need a
                 // separate setPresetName(slot, "") call.
                 _ = vm.waitForPresetDeletion(slot: slot)
-                vm.fetchPresetDirectory()
-                // If we cleared the active slot, reload it to apply factory defaults
-                if vm.activePresetSlot == slot {
-                    _ = vm.loadPreset(slot: slot)
+                if vm.usb.generation == generation {
+                    vm.fetchPresetDirectory()
+                    // If we cleared the active slot, reload it to apply factory defaults
+                    if vm.activePresetSlot == slot {
+                        _ = vm.loadPreset(slot: slot)
+                    }
                 }
             }
             DispatchQueue.main.async {
@@ -248,6 +254,10 @@ struct ContentView: View {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // Scope the whole flow to the device it started on (see the
+            // single-slot clear above) - with up to 10 slots to drain, this
+            // is the longest window for a mid-flow device switch.
+            let generation = vm.usb.generation
             // Enqueue a delete for every occupied slot — firmware accumulates
             // them all into preset_delete_mask and processes them in a single
             // main-loop pass.  Wait once for everything to drain by polling
@@ -260,6 +270,7 @@ struct ContentView: View {
             for slot in toDelete {
                 _ = vm.waitForPresetDeletion(slot: slot)
             }
+            guard vm.usb.generation == generation else { return }
             vm.fetchPresetDirectory()
             // Reload active slot to apply factory defaults.
             _ = vm.loadPreset(slot: vm.activePresetSlot)

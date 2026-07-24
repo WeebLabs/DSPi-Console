@@ -2085,9 +2085,13 @@ extension DSPViewModel {
     /// USB-only command; must be called off the main thread (it blocks).
     @discardableResult
     func setUartCtrlConfig(_ config: UartCtrlConfig) -> UInt8 {
+        let generation = usb.generation
         usb.sendControlRequest(request: REQ_SET_UART_CONFIG, value: 0, index: 2, data: config.toData())
         // Deferred apply + ~45 ms flash blackout on the device; wait before reading.
         Thread.sleep(forTimeInterval: 0.25)
+        // A device switch during the wait means the SET was dropped (or went
+        // to the old device) - don't report the new device's status as ours.
+        guard usb.generation == generation else { return 0xFF }
         fetchCtrlIfaceStatus()
         fetchUartCtrlConfig()
         if let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
@@ -2102,8 +2106,11 @@ extension DSPViewModel {
     /// byte from REQ_GET_CTRL_IFACE_STATUS.  USB-only; call off the main thread.
     @discardableResult
     func setI2cCtrlConfig(_ config: I2cCtrlConfig) -> UInt8 {
+        let generation = usb.generation
         usb.sendControlRequest(request: REQ_SET_I2C_CONFIG, value: 0, index: 2, data: config.toData())
         Thread.sleep(forTimeInterval: 0.25)
+        // Same device-scoping as setUartCtrlConfig.
+        guard usb.generation == generation else { return 0xFF }
         fetchCtrlIfaceStatus()
         fetchI2cCtrlConfig()
         if let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
@@ -2205,9 +2212,13 @@ extension DSPViewModel {
     /// ~500 ms budget (25 x 20 ms) runs out.  Returns the final status code
     /// (0xFF if no readback ever succeeded).  USB-only; blocks - call off-main.
     private func pollCsDeferred(expectedSlot: UInt8) -> UInt8 {
+        let generation = usb.generation
         var result: UInt8 = CS_STATUS_PENDING
         for _ in 0..<25 {
             Thread.sleep(forTimeInterval: 0.02)
+            // Stop polling if a device switch lands mid-wait - the new
+            // device's status says nothing about our deferred apply.
+            guard usb.generation == generation else { return 0xFF }
             guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 32),
                   let st = CsStatusPacket.fromData(d) else { continue }
             if st.lastSlot == expectedSlot && st.lastStatus != CS_STATUS_PENDING {
