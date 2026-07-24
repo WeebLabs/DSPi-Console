@@ -656,7 +656,12 @@ final class SettingsSaveCoordinator: ObservableObject {
         let pending = globalDraft
         let deviceState = GlobalSettingsDraft.from(vm)
         let vm = self.vm
+        // Scope the save to the device it was issued for; if a switch lands
+        // mid-sequence, stop rather than write the remainder to the new
+        // device (noteSelectedDevice has already reset the pending state).
+        let generation = vm.usb.generation
         DispatchQueue.global(qos: .userInitiated).async {
+            guard vm.usb.generation == generation else { return }
             if doGlobal {
                 if pending.presetStartupMode != deviceState.presetStartupMode
                     || pending.presetDefaultSlot != deviceState.presetDefaultSlot {
@@ -673,9 +678,11 @@ final class SettingsSaveCoordinator: ObservableObject {
                 }
             }
             if doOutput {
+                guard vm.usb.generation == generation else { return }
                 _ = vm.saveOutputConfig()
             }
             DispatchQueue.main.async {
+                guard vm.usb.generation == generation else { return }
                 self.globalUserEdited = false
                 self.outputConfigDirty = false
                 self.globalDraft = GlobalSettingsDraft.from(vm)
@@ -691,7 +698,13 @@ final class SettingsSaveCoordinator: ObservableObject {
         if outputDirty {
             let base = outputBaseline
             let vm = self.vm
+            // Scope the restore to the device the baseline was captured from:
+            // if a switch lands mid-sequence, the remaining pin/clock writes
+            // must not reconfigure the newly selected device.
+            let generation = vm.usb.generation
             DispatchQueue.global(qos: .userInitiated).async {
+                func stillCurrent() -> Bool { vm.usb.generation == generation }
+                guard stillCurrent() else { return }
                 // Best-effort restore of the live config to the baseline.
                 for slot in 0..<min(vm.numOutputSlots, base.outputSlotTypes.count)
                 where vm.outputSlotTypes[slot] != base.outputSlotTypes[slot] {
@@ -701,11 +714,13 @@ final class SettingsSaveCoordinator: ObservableObject {
                 where vm.outputPins[i] != base.outputPins[i] {
                     _ = vm.setOutputPin(output: i, pin: base.outputPins[i])
                 }
+                guard stillCurrent() else { return }
                 if vm.i2sBckPin != base.i2sBckPin { _ = vm.setI2SBckPin(base.i2sBckPin) }
                 if vm.mckEnabled != base.mckEnabled { _ = vm.setMckEnable(base.mckEnabled) }
                 if vm.mckPin != base.mckPin { _ = vm.setMckPin(base.mckPin) }
                 if vm.mckMultiplier != base.mckMultiplier { _ = vm.setMckMultiplier(base.mckMultiplier) }
                 if vm.spdifRxPin != base.spdifRxPin { _ = vm.setSpdifRxPin(index: 0, base.spdifRxPin) }
+                guard stillCurrent() else { return }
                 // Optional S/PDIF 2/3: restore each pin, then the enable state.
                 // Apply the pin before re-enabling so an enable validates against
                 // the restored pin; disable before repinning frees any conflict.
@@ -724,6 +739,7 @@ final class SettingsSaveCoordinator: ObservableObject {
                         }
                     }
                 }
+                guard stillCurrent() else { return }
                 // I2S input: restore the channel count first (lowering frees pairs
                 // and never fails), then each pair's data pin.
                 if vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
@@ -743,13 +759,17 @@ final class SettingsSaveCoordinator: ObservableObject {
                         _ = vm.setI2SClockPinMode(base.i2sClockPinMode)
                     }
                 }
+                guard stillCurrent() else { return }
                 // ADAT: restore the data pin first (re-routes under a muted
                 // restart if enabled), then the enable state to match baseline.
                 if vm.adatSupported {
                     if vm.adatPin != base.adatPin { _ = vm.setAdatPin(base.adatPin) }
                     if vm.adatEnabled != base.adatEnabled { _ = vm.setAdatEnable(base.adatEnabled) }
                 }
-                DispatchQueue.main.async { self.outputConfigDirty = false }
+                DispatchQueue.main.async {
+                    guard stillCurrent() else { return }
+                    self.outputConfigDirty = false
+                }
             }
         }
     }
@@ -1923,7 +1943,14 @@ struct ControlSurfacesSettingsTab: View {
         didMigrateLegacyNames = true
         guard let stored = UserDefaults.standard.dictionary(forKey: Self.legacyNamesKey) as? [String: String],
               !stored.isEmpty else { return }
+        // Bind the migration to the device that triggered it. On a mid-flow
+        // device switch, abort BEFORE retiring the local store and re-arm so
+        // a later connect retries - and never csSave() the other device.
+        let generation = vm.usb.generation
         DispatchQueue.global(qos: .userInitiated).async {
+            func abortAndRearm() {
+                DispatchQueue.main.async { didMigrateLegacyNames = false }
+            }
             // Names are now part of the live preview (spec 3.4), so a bare SET
             // no longer reaches flash.  Only persist the migration if the device
             // was clean to begin with, so we don't silently commit a prior
@@ -1932,9 +1959,11 @@ struct ControlSurfacesSettingsTab: View {
             var wrote = false
             for (key, name) in stored {
                 guard let slot = Int(key), slot >= 0, slot < CS_MAX_BINDINGS, !name.isEmpty else { continue }
+                guard vm.usb.generation == generation else { return abortAndRearm() }
                 let live = slot < vm.csNames.count ? vm.csNames[slot] : ""
                 if live.isEmpty { _ = vm.setCsName(slot: slot, name: name); wrote = true }
             }
+            guard vm.usb.generation == generation else { return abortAndRearm() }
             UserDefaults.standard.removeObject(forKey: Self.legacyNamesKey)
             // Persist the migrated names so they stick across a reboot, matching
             // the pre-preview behavior where a name SET wrote flash directly.
@@ -2144,6 +2173,9 @@ struct ControlSurfacesSettingsTab: View {
         nameEdits[slot] = nil
         expandedSlots.remove(slot)
         let hadName = slot < vm.csNames.count && !vm.csNames[slot].isEmpty
+        // Bind the removal to the device it was issued for; a switch between
+        // the individual clears must not redirect them to the new device.
+        let generation = vm.usb.generation
         guard vm.csBindings[slot].isConfigured else {
             // Never applied to the device - just drop the local draft.  A name
             // set for the slot is device state, so clear it there too.
@@ -2151,16 +2183,25 @@ struct ControlSurfacesSettingsTab: View {
                 drafts[slot] = CsBinding()
             }
             if hadName && vm.isDeviceConnected {
-                DispatchQueue.global(qos: .userInitiated).async { _ = vm.setCsName(slot: slot, name: "") }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard vm.usb.generation == generation else { return }
+                    _ = vm.setCsName(slot: slot, name: "")
+                }
             }
             return
         }
         applyingSlot = slot
         DispatchQueue.global(qos: .userInitiated).async {
+            func bail() {
+                DispatchQueue.main.async { applyingSlot = nil }
+            }
+            guard vm.usb.generation == generation else { return bail() }
             _ = vm.setCsBinding(slot: slot, binding: CsBinding())
+            guard vm.usb.generation == generation else { return bail() }
             if hadName { _ = vm.setCsName(slot: slot, name: "") }
             DispatchQueue.main.async {
                 applyingSlot = nil
+                guard vm.usb.generation == generation else { return }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     drafts[slot] = vm.csBindings[slot]   // now cleared on the device
                 }

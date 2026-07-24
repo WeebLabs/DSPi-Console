@@ -81,7 +81,12 @@ struct ContentView: View {
         guard let idx = renamingChannel else { return }
         let trimmed = renameText.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty {
+            // Bind to the device the rename was typed against: a switch
+            // landing before the block runs must not rename the new device's
+            // channel.
+            let generation = vm.usb.generation
             DispatchQueue.global(qos: .userInitiated).async {
+                guard vm.usb.generation == generation else { return }
                 vm.setChannelName(channel: idx, name: trimmed)
             }
         }
@@ -156,6 +161,9 @@ struct ContentView: View {
             preOp = .none
         }
 
+        // Scope the whole flow to the device it started on - the deferred
+        // flash saves give a device switch time to land mid-flow.
+        let generation = vm.usb.generation
         DispatchQueue.global(qos: .userInitiated).async {
             // Pre-op: align live state to source-slot semantics if needed.
             switch preOp {
@@ -170,6 +178,8 @@ struct ContentView: View {
                 break
             }
 
+            guard vm.usb.generation == generation else { return }
+
             // Default the destination's name if it has none yet, so the
             // dropdown stops showing "Empty" for it post-copy.  We don't
             // overwrite an existing destination name — the destination
@@ -183,6 +193,7 @@ struct ContentView: View {
             // writes instead of the second one overwriting the first's
             // pending slot before main-loop dispatch.
             let status = vm.copyPreset(from: sourceSlot, to: destinationSlot)
+            guard vm.usb.generation == generation else { return }
             guard status == PRESET_OK else {
                 DispatchQueue.main.async {
                     let alert = NSAlert()

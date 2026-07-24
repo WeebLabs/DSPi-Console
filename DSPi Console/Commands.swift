@@ -2974,9 +2974,14 @@ extension DSPViewModel {
     /// Returns PRESET_OK on success, an error code on failure.
     @discardableResult
     func copyPreset(from sourceSlot: Int, to destinationSlot: Int) -> UInt8 {
+        let generation = usb.generation
         let dstStatus = savePreset(slot: destinationSlot)
         guard dstStatus == PRESET_OK else { return dstStatus }
         guard waitForPresetActivation(slot: destinationSlot) else { return 0xFF }
+
+        // A device switch during the deferred wait must not let the source
+        // re-save (which also moves last_active) run against the new device.
+        guard usb.generation == generation else { return 0xFF }
 
         let srcStatus = savePreset(slot: sourceSlot)
         guard srcStatus == PRESET_OK else { return srcStatus }
