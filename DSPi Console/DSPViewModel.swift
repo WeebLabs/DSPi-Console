@@ -2020,6 +2020,20 @@ class DSPViewModel: ObservableObject {
     func switchToDevice(_ device: DSPiDevice) {
         guard device != selectedDevice else { return }
 
+        // Pending Settings changes (staged global parameters, unflashed output
+        // config) belong to the current device and are discarded on switch -
+        // SettingsSaveCoordinator resets when the selected serial changes.
+        // Warn so the user can cancel and save first.
+        if isDeviceConnected && SettingsSaveCoordinator.shared.hasPendingChanges {
+            let alert = NSAlert()
+            alert.messageText = "Unsaved Settings Changes"
+            alert.informativeText = "Settings has pending changes for the current device that have not been saved. Switching devices will discard them."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Discard and Switch")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
         if isDeviceConnected && hasUnsavedChanges {
             let diff = computeDiff()
             let action = PresetAlerts.showUnsavedChangesAlert(diff: diff)

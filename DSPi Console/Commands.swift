@@ -37,6 +37,15 @@ extension DSPViewModel {
             }
         }
         fetchPresetActive()
+
+        // All fetches above have enqueued their main-thread state updates, so
+        // this runs after the published values reflect the connected device.
+        // Re-seeds the Settings global draft (no-op if the user has staged
+        // edits) - matters after a device switch, where the draft was reset
+        // from the previous device's values.
+        DispatchQueue.main.async {
+            SettingsSaveCoordinator.shared.refreshGlobalDraftIfClean()
+        }
     }
 
     @discardableResult

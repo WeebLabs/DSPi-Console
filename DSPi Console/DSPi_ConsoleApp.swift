@@ -539,8 +539,51 @@ final class SettingsSaveCoordinator: ObservableObject {
     @Published var outputConfigDirty = false
     private var outputBaseline: OutputConfigSnapshot
 
+    /// Serial of the device the pending state belongs to. When the selection
+    /// moves to a *different* device, pending edits are discarded - the draft
+    /// and baseline were captured from the old device and must never be
+    /// saved/reverted onto the new one. A re-plug of the same unit keeps them.
+    private var lastDeviceSerial: String?
+    private var cancellables = Set<AnyCancellable>()
+
     private init() {
         let vm = AppState.shared.viewModel
+        globalDraft = GlobalSettingsDraft.from(vm)
+        outputBaseline = SettingsSaveCoordinator.snapshot(vm)
+        lastDeviceSerial = vm.selectedDevice?.serial
+
+        // Watch device identity. This also covers switches that bypass
+        // DSPViewModel.switchToDevice (e.g. the auto-switch to a surviving
+        // device when the selected one is unplugged).
+        vm.$selectedDevice
+            .receive(on: RunLoop.main)
+            .sink { [weak self] device in
+                self?.noteSelectedDevice(device)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func noteSelectedDevice(_ device: DSPiDevice?) {
+        // nil means all devices are gone; keep the last identity so a re-plug
+        // of the same unit preserves any pending edits.
+        guard let serial = device?.serial else { return }
+        guard let last = lastDeviceSerial else {
+            lastDeviceSerial = serial
+            return
+        }
+        if serial != last {
+            lastDeviceSerial = serial
+            resetForNewDevice()
+        }
+    }
+
+    /// Discard all pending state when the selection moves to another device.
+    /// The re-seeded draft may briefly hold the old device's values (the new
+    /// device's fetch is still in flight); fetchAll's completion refresh
+    /// replaces them, and nothing is dirty in the meantime.
+    private func resetForNewDevice() {
+        globalUserEdited = false
+        outputConfigDirty = false
         globalDraft = GlobalSettingsDraft.from(vm)
         outputBaseline = SettingsSaveCoordinator.snapshot(vm)
     }
