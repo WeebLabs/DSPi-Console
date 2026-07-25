@@ -949,6 +949,24 @@ struct GlobalSettingsTab: View {
             // MARK: External Mute Control (DAC Hardware Mute — firmware-gated)
             if vm.dacHwMuteSupported {
                 Section {
+                    // Changing the pin or polarity retargets/reasserts the mute
+                    // line while the DAC is running, which can drive a loud
+                    // transient straight into the amplifier.
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.orange)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Adjust only with audio stopped")
+                                .font(.callout.weight(.semibold))
+                            Text("Changing these settings while audio is playing can send a loud pop or full-level transient to your amplifier and speakers. Stop playback before making changes.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
                     Toggle(isOn: Binding(
                         get: { draft.dacHwMuteConfig.enabled },
                         set: { newVal in
