@@ -6192,21 +6192,18 @@ struct FileMenuActions {
 
             if contents.hasPrefix("# DSPi Console") {
                 // DSPi Console format - parse and show multi-channel picker
-                if let channelFilters = parseDSPiFile(contents) {
-                    showMultiChannelPicker(channelFilters: channelFilters)
+                if let parsed = parseDSPiFile(contents) {
+                    showMultiChannelPicker(file: parsed)
                 } else {
                     showError("Failed to parse DSPi Console filter file")
                 }
             } else {
                 // REW format - parse and show single-channel picker
-                if let filters = parseREWFile(contents) {
-                    if filters.isEmpty {
-                        showError("No valid filters found in file")
-                    } else {
-                        showSingleChannelPicker(filters: filters)
-                    }
+                let parsed = parseREWFile(contents)
+                if parsed.filters.isEmpty {
+                    showError("No valid filters found in file")
                 } else {
-                    showError("Failed to parse filter file")
+                    showSingleChannelPicker(parsed)
                 }
             }
         } catch {
@@ -6282,29 +6279,52 @@ struct FileMenuActions {
 
     // MARK: - Parsing
 
-    private static func parseREWFile(_ contents: String) -> [FilterParams]? {
+    struct ParsedREWFile {
         var filters: [FilterParams] = []
+        /// REW and AutoEQ lead their exports with the preamp cut that keeps the
+        /// filter set from clipping; nil when the file carries none.
+        var preamp: Float? = nil
+    }
+
+    private static func parseREWFile(_ contents: String) -> ParsedREWFile {
+        var parsed = ParsedREWFile()
 
         for line in contents.components(separatedBy: .newlines) {
+            if let preamp = FilterFile.parsePreamp(line: line) {
+                parsed.preamp = preamp
+                continue
+            }
             guard let band = FilterFile.parse(line: line) else { continue }
             // Disabled entries are dropped rather than kept as flat placeholders:
             // a REW file numbers its own slots, so packing the enabled ones is
             // what the user expects when importing into our band layout.
             guard band.enabled else { continue }
-            filters.append(band.params)
+            parsed.filters.append(band.params)
         }
 
-        return filters
+        return parsed
     }
 
     struct ParsedChannelData {
         var filters: [FilterParams]
-        var enableState: Bool? // nil = no state info (master or legacy format)
+        var enableState: Bool? // nil = no state info (input, or legacy format)
+        // nil (not merely empty) means the file carried no such section, so the
+        // import must leave the device's current values alone rather than
+        // clearing them - older files have neither.
+        var xover: [FilterParams]? = nil
+        var preamp: Float? = nil
     }
 
-    private static func parseDSPiFile(_ contents: String) -> [Int: ParsedChannelData]? {
+    struct ParsedDSPiFile {
+        var channels: [Int: ParsedChannelData]
+        /// Version stamp from the file, or 1 when it predates the stamp.
+        var formatVersion: Int
+    }
+
+    static func parseDSPiFile(_ contents: String) -> ParsedDSPiFile? {
         let vm = AppState.shared.viewModel
         var result: [Int: ParsedChannelData] = [:]
+        var formatVersion = 1
         var currentChannel: Int? = nil
 
         // Header content is keyed by channel index, never by name, so a renamed
@@ -6314,9 +6334,18 @@ struct FileMenuActions {
         let outputPattern = try? NSRegularExpression(pattern: "^Output\\s+(\\d+):.*?(?:\\s*\\((Enabled|Disabled)\\))?\\s*$")
 
         for line in contents.components(separatedBy: .newlines) {
+            if let version = FilterFile.parseFormatVersion(line: line) {
+                formatVersion = version
+                continue
+            }
+
             // Check for channel header [...]
             if line.hasPrefix("[") && line.hasSuffix("]") {
                 let headerContent = String(line.dropFirst().dropLast())
+                // A header we don't recognise ends the previous section rather
+                // than leaving it open, or its bands would land on the wrong
+                // channel.
+                currentChannel = nil
 
                 // [Input N: Name]
                 if let match = inputPattern?.firstMatch(in: headerContent, options: [], range: NSRange(headerContent.startIndex..., in: headerContent)),
@@ -6359,49 +6388,71 @@ struct FileMenuActions {
                 continue
             }
 
-            // Parse filter line.  Unlike the REW path, an OFF/unknown entry keeps
+            guard let channel = currentChannel else { continue }
+
+            if let preamp = FilterFile.parsePreamp(line: line) {
+                result[channel]?.preamp = preamp
+                continue
+            }
+
+            // Parse band line.  Unlike the REW path, an OFF/unknown entry keeps
             // its slot as a flat placeholder so band indices stay aligned with
             // the file.
-            guard let channel = currentChannel,
-                  let band = FilterFile.parse(line: line) else { continue }
+            guard let band = FilterFile.parse(line: line) else { continue }
+            let params = band.enabled ? band.params : FilterParams(type: .flat)
 
-            result[channel]?.filters.append(band.enabled ? band.params : FilterParams(type: .flat))
+            switch band.bank {
+            case .peq:
+                result[channel]?.filters.append(params)
+            case .crossover:
+                var xover = result[channel]?.xover ?? []
+                xover.append(params)
+                result[channel]?.xover = xover
+            }
         }
 
-        return result.isEmpty ? nil : result
+        return result.isEmpty ? nil : ParsedDSPiFile(channels: result, formatVersion: formatVersion)
     }
 
     // MARK: - Export
 
-    private static func generateExportString() -> String {
+    static func generateExportString() -> String {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
 
         var output = "# DSPi Console Filter Settings\n"
-        output += "# Exported: \(dateFormatter.string(from: Date()))\n\n"
+        output += "# Exported: \(dateFormatter.string(from: Date()))\n"
+        output += "# Format: \(FilterFile.formatVersion)\n\n"
 
         let vm = AppState.shared.viewModel
 
         // Input channels.  Headers are keyed by index, with the (renameable)
-        // channel name carried alongside for readability only.
-        for eqCh in 0...1 {
+        // channel name carried alongside for readability only.  Only the
+        // currently active inputs are written - the inactive ones aren't
+        // editable in the UI, so exporting their banks would be noise.
+        for eqCh in 0..<vm.numMatrixInputs {
             output += "[Input \(eqCh): \(vm.channelNames[eqCh])]\n"
-            let filters = vm.channelData[eqCh] ?? []
-            for (i, filter) in filters.enumerated() {
+            output += FilterFile.formatPreamp(vm.preampDB[eqCh])
+            for (i, filter) in (vm.channelData[eqCh] ?? []).enumerated() {
                 output += FilterFile.format(index: i + 1, band: filter)
             }
             output += "\n"
         }
 
-        // Output channels (platform-aware)
+        // Output channels (platform-aware).  Each carries its PEQ bank and, on
+        // crossover-capable firmware, its four crossover bands.
         for outputIdx in 0..<vm.numOutputChannels {
             let eqCh = vm.eqChannel(forOutput: outputIdx)
             let name = vm.channelNames[eqCh]
             let state = vm.outputEnabled[outputIdx] ? "Enabled" : "Disabled"
             output += "[Output \(outputIdx): \(name) (\(state))]\n"
-            let filters = vm.channelData[eqCh] ?? []
-            for (i, filter) in filters.enumerated() {
+            for (i, filter) in (vm.channelData[eqCh] ?? []).enumerated() {
                 output += FilterFile.format(index: i + 1, band: filter)
+            }
+            if vm.firmwareSupportsCrossover {
+                for (i, band) in (vm.xoverData[eqCh] ?? []).enumerated() {
+                    output += FilterFile.format(bank: .crossover, index: i + 1, band: band)
+                }
             }
             output += "\n"
         }
@@ -6411,10 +6462,14 @@ struct FileMenuActions {
 
     // MARK: - Dialogs
 
-    private static func showSingleChannelPicker(filters: [FilterParams]) {
+    private static func showSingleChannelPicker(_ file: ParsedREWFile) {
         let alert = NSAlert()
         alert.messageText = "Import Filters"
-        alert.informativeText = "Found \(filters.count) filter(s). Select which channel(s) to apply them to:"
+        var prompt = "Found \(file.filters.count) filter(s)"
+        if let preamp = file.preamp {
+            prompt += String(format: " and a %+.1f dB preamp", preamp)
+        }
+        alert.informativeText = prompt + ". Select which channel(s) to apply them to:"
         alert.alertStyle = .informational
 
         let accessory = NSStackView()
@@ -6425,8 +6480,8 @@ struct FileMenuActions {
         let vm = AppState.shared.viewModel
         var checkboxes: [NSButton] = []
 
-        // Master channels (checked by default)
-        for eqCh in [0, 1] {
+        // Active input channels (checked by default)
+        for eqCh in 0..<vm.numMatrixInputs {
             let checkbox = NSButton(checkboxWithTitle: vm.channelNames[eqCh], target: nil, action: nil)
             checkbox.tag = eqCh
             checkbox.state = .on
@@ -6450,19 +6505,32 @@ struct FileMenuActions {
         alert.addButton(withTitle: "Import")
         alert.addButton(withTitle: "Cancel")
 
-        if alert.runModal() == .alertFirstButtonReturn {
-            var importedCount = 0
-            for checkbox in checkboxes where checkbox.state == .on {
-                applyFilters(filters, to: checkbox.tag)
-                importedCount += 1
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var report = ImportReport()
+        var importedCount = 0
+        for checkbox in checkboxes where checkbox.state == .on {
+            let eqCh = checkbox.tag
+            report.merge(applyFilters(file.filters, to: eqCh))
+            // Preamp is an input-only trim; outputs have no equivalent, so a
+            // REW file's preamp is dropped when targeting one.
+            if let preamp = file.preamp {
+                if eqCh < vm.chOut1 {
+                    vm.setPreampChannel(channel: eqCh, db: preamp)
+                } else {
+                    report.preampDropped = true
+                }
             }
-            if importedCount > 0 {
-                showSuccess("Filters imported to \(importedCount) channel(s)")
-            }
+            importedCount += 1
+        }
+        if importedCount > 0 {
+            showSuccess("Filters imported to \(importedCount) channel(s)" + report.notes)
         }
     }
 
-    private static func showMultiChannelPicker(channelFilters: [Int: ParsedChannelData]) {
+    private static func showMultiChannelPicker(file: ParsedDSPiFile) {
+        let channelFilters = file.channels
+
         let alert = NSAlert()
         alert.messageText = "Import Filters"
         alert.informativeText = "This file contains filter settings for multiple channels. Select which channels to import:"
@@ -6494,32 +6562,121 @@ struct FileMenuActions {
         alert.addButton(withTitle: "Import")
         alert.addButton(withTitle: "Cancel")
 
-        if alert.runModal() == .alertFirstButtonReturn {
-            for checkbox in checkboxes where checkbox.state == .on {
-                let eqCh = checkbox.tag
-                if let data = channelFilters[eqCh] {
-                    applyFilters(data.filters, to: eqCh)
-                    // Restore enable/disable state for output channels
-                    if eqCh >= vm.chOut1, let enabled = data.enableState {
-                        vm.setOutputEnable(output: eqCh - vm.chOut1, enabled: enabled)
-                    }
-                }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        var report = ImportReport()
+        // A file from a newer build may carry sections this one doesn't know
+        // about, and they'd be dropped silently otherwise.
+        report.newerFormat = file.formatVersion > FilterFile.formatVersion
+
+        for checkbox in checkboxes where checkbox.state == .on {
+            let eqCh = checkbox.tag
+            guard let data = channelFilters[eqCh] else { continue }
+
+            report.merge(applyFilters(data.filters, to: eqCh))
+            if let preamp = data.preamp, eqCh < vm.chOut1 {
+                vm.setPreampChannel(channel: eqCh, db: preamp)
             }
-            showSuccess("Filters imported successfully")
+            if let xover = data.xover {
+                applyCrossover(xover, to: eqCh, report: &report)
+            }
+            // Restore enable/disable state for output channels
+            if eqCh >= vm.chOut1, let enabled = data.enableState {
+                vm.setOutputEnable(output: eqCh - vm.chOut1, enabled: enabled)
+            }
+        }
+        showSuccess("Filters imported successfully" + report.notes)
+    }
+
+    // MARK: - Applying
+
+    /// What an import couldn't carry across, so the confirmation can say so
+    /// instead of leaving the user to spot it.
+    private struct ImportReport {
+        var truncated = 0                     // filters past the channel's band count
+        var unsupported: Set<FilterType> = [] // types this firmware would reject
+        var crossoverSkipped = false
+        var preampDropped = false
+        var newerFormat = false
+
+        mutating func merge(_ other: ImportReport) {
+            truncated = max(truncated, other.truncated)
+            unsupported.formUnion(other.unsupported)
+            crossoverSkipped = crossoverSkipped || other.crossoverSkipped
+            preampDropped = preampDropped || other.preampDropped
+            newerFormat = newerFormat || other.newerFormat
+        }
+
+        var notes: String {
+            var lines: [String] = []
+            if truncated > 0 {
+                lines.append("\(truncated) filter(s) past the end of each channel's band bank were not applied.")
+            }
+            if !unsupported.isEmpty {
+                let names = unsupported.map(\.name).sorted().joined(separator: ", ")
+                lines.append("Skipped filter types the connected firmware doesn't support: \(names).")
+            }
+            if crossoverSkipped {
+                lines.append("Crossover settings were skipped - the connected firmware doesn't support crossovers.")
+            }
+            if preampDropped {
+                lines.append("The file's preamp was not applied to output channels, which have no input trim.")
+            }
+            if newerFormat {
+                lines.append("This file was written by a newer version of DSPi Console; some settings may have been ignored.")
+            }
+            return lines.isEmpty ? "" : "\n\n" + lines.joined(separator: "\n")
         }
     }
 
-    private static func applyFilters(_ filters: [FilterParams], to channelIndex: Int) {
+    @discardableResult
+    private static func applyFilters(_ filters: [FilterParams], to channelIndex: Int) -> ImportReport {
         let vm = AppState.shared.viewModel
-        let bandCount = 10
+        var report = ImportReport()
+        let bandCount = vm.channelData[channelIndex]?.count ?? 10
+        report.truncated = max(0, filters.count - bandCount)
 
-        for (i, filter) in filters.prefix(bandCount).enumerated() {
-            vm.setFilter(ch: channelIndex, band: i, p: filter)
+        for band in 0..<bandCount {
+            // Bands past the end of the file are cleared, so an import fully
+            // replaces the bank rather than leaving stale filters behind.
+            var p = band < filters.count ? filters[band] : FilterParams(type: .flat)
+            if isUnsupported(p.type, vm: vm) {
+                report.unsupported.insert(p.type)
+                p = FilterParams(type: .flat)
+            }
+            vm.setFilter(ch: channelIndex, band: band, p: p)
         }
 
-        // Clear remaining bands if imported fewer filters
-        for i in filters.count..<bandCount {
-            vm.setFilter(ch: channelIndex, band: i, p: FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
+        return report
+    }
+
+    private static func applyCrossover(_ bands: [FilterParams], to channelIndex: Int, report: inout ImportReport) {
+        let vm = AppState.shared.viewModel
+        guard channelIndex >= vm.chOut1 else { return }
+        if vm.isDeviceConnected && !vm.firmwareSupportsCrossover {
+            report.crossoverSkipped = true
+            return
+        }
+
+        for band in 0..<DSPViewModel.crossoverBandsPerChannel {
+            let p = band < bands.count ? bands[band] : FilterParams(type: .flat)
+            vm.setCrossoverBand(ch: channelIndex, localBand: band, p: p)
+        }
+    }
+
+    /// True when the connected firmware would reject this filter type.  Only
+    /// meaningful while connected: every capability flag reads false before
+    /// we've confirmed a version, and an offline import is a local edit that
+    /// gets re-validated when a device next connects.
+    private static func isUnsupported(_ type: FilterType, vm: DSPViewModel) -> Bool {
+        guard vm.isDeviceConnected else { return false }
+        switch type {
+        case .notch:                  return !vm.firmwareSupportsNotch
+        case .allPass:                return !vm.firmwareSupportsAllPass
+        case .allPass1:               return !vm.firmwareSupportsFirstOrderAllPass
+        case .lowShelf1, .highShelf1: return !vm.firmwareSupportsFirstOrderShelves
+        case .linkwitzTransform:      return !vm.firmwareSupportsLinkwitzTransform
+        default:                      return type.isCrossover && !vm.firmwareSupportsCrossover
         }
     }
 

@@ -10,31 +10,59 @@ import Foundation
 ///
 /// Line grammar (a superset of REW's, so REW files parse unchanged):
 ///
+///     Preamp -6.5 dB
 ///     Filter  3: ON  PK      Fc   100.0 Hz  Gain  +3.0 dB  Q  1.00  [Bypassed]
 ///     Filter  4: ON  LT      Fc    40.0 Hz  Q  0.70  Fp    28.0 Hz  Qp  0.71
 ///     Filter  5: OFF
+///     Xover   1: ON  LR4LP   Fc  2000.0 Hz
 ///
 /// Everything after the type token is read as label/value pairs, so units and
 /// any extra trailing text other tools emit are ignored rather than misread.
 enum FilterFile {
 
+    /// Version stamped into exported files as "# Format: N".  Bumped when the
+    /// layout gains sections older builds would silently skip; a file with no
+    /// stamp is version 1 (inputs only, PEQ bands only, no preamp).
+    ///   1 - PEQ bands per channel, name-keyed input headers.
+    ///   2 - index-keyed input headers, all input channels, per-input preamp,
+    ///       crossover bands, Linkwitz/bypass round-trip.
+    static let formatVersion = 2
+
+    /// Which bank a band line belongs to.  Crossover bands live in a separate
+    /// per-output bank (4 bands at wire indices 20..23), so they need their own
+    /// keyword rather than sharing "Filter" numbering with the PEQ bands.
+    enum Bank: String, CaseIterable {
+        case peq = "Filter"
+        case crossover = "Xover"
+    }
+
     /// One parsed line.  `enabled` is false for "OFF" lines and for shapes this
     /// build doesn't know (REW's "None", a type from newer firmware); the caller
     /// decides whether that means "skip the entry" or "leave the band flat".
     struct Band {
+        var bank: Bank
         var params: FilterParams
         var enabled: Bool
     }
 
     // MARK: - Formatting
 
-    static func format(index: Int, band: FilterParams) -> String {
+    /// `Preamp -6.5 dB`, the input trim applied ahead of the band chain.  Same
+    /// spelling REW and AutoEQ use, so their files' preamp is honoured too.
+    static func formatPreamp(_ db: Float) -> String {
+        String(format: "Preamp %+.1f dB\n", db)
+    }
+
+    static func format(bank: Bank = .peq, index: Int, band: FilterParams) -> String {
+        // Pad the keyword so "Xover" lines column-align with "Filter" ones.
+        let keyword = bank.rawValue.padding(toLength: 6, withPad: " ", startingAt: 0)
+
         guard let code = band.type.fileCode else {
-            return String(format: "Filter %2d: OFF\n", index)
+            return String(format: "%@ %2d: OFF\n", keyword, index)
         }
 
         let paddedType = code.padding(toLength: 8, withPad: " ", startingAt: 0)
-        var line = String(format: "Filter %2d: ON  %@Fc %7.1f Hz", index, paddedType, band.freq)
+        var line = String(format: "%@ %2d: ON  %@Fc %7.1f Hz", keyword, index, paddedType, band.freq)
 
         if band.type == .linkwitzTransform {
             // LT repurposes the wire fields: freq/q are the driver's (f0, Q0)
@@ -53,24 +81,38 @@ enum FilterFile {
 
     // MARK: - Parsing
 
-    /// Parses one line.  Returns nil when the line isn't a filter entry at all
-    /// (headers, comments, blank lines).
+    /// Reads a "Preamp -6.5 dB" line.  Returns nil for any other line.
+    static func parsePreamp(line rawLine: String) -> Float? {
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+        guard line.lowercased().hasPrefix("preamp") else { return nil }
+        // Tolerates both "Preamp -6.5 dB" and REW's "Preamp: -6.5 dB".
+        return line.dropFirst("preamp".count)
+            .split(whereSeparator: { $0.isWhitespace || $0 == ":" })
+            .compactMap { number(String($0)) }
+            .first
+    }
+
+    /// Parses one band line.  Returns nil when the line isn't a band entry at
+    /// all (headers, comments, preamp, blank lines).
     static func parse(line rawLine: String) -> Band? {
         let line = rawLine.trimmingCharacters(in: .whitespaces)
 
-        // "Filter <n>:" - requiring the index keeps unrelated "Filter…:" prose
-        // (e.g. a "Filters: 5" summary line) from being read as a band.
-        guard line.lowercased().hasPrefix("filter"),
+        // "<keyword> <n>:" - requiring the index keeps unrelated prose (e.g. a
+        // "Filters: 5" summary line) from being read as a band.
+        guard let bank = Bank.allCases.first(where: {
+                  line.lowercased().hasPrefix($0.rawValue.lowercased())
+              }),
               let colon = line.firstIndex(of: ":") else { return nil }
-        let indexText = line[line.index(line.startIndex, offsetBy: 6)..<colon]
-            .trimmingCharacters(in: .whitespaces)
+        let keywordEnd = line.index(line.startIndex, offsetBy: bank.rawValue.count)
+        guard keywordEnd <= colon else { return nil }
+        let indexText = line[keywordEnd..<colon].trimmingCharacters(in: .whitespaces)
         guard Int(indexText) != nil else { return nil }
 
         var tokens = line[line.index(after: colon)...]
             .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
 
-        let off = Band(params: FilterParams(type: .flat), enabled: false)
+        let off = Band(bank: bank, params: FilterParams(type: .flat), enabled: false)
         guard !tokens.isEmpty, tokens.removeFirst().uppercased() == "ON" else { return off }
         guard !tokens.isEmpty, let type = FilterType(fileCode: tokens.removeFirst()) else { return off }
 
@@ -92,7 +134,17 @@ enum FilterFile {
 
         params.bypass = line.uppercased().contains("[BYPASSED]")
 
-        return Band(params: params, enabled: true)
+        return Band(bank: bank, params: params, enabled: true)
+    }
+
+    /// Reads the "# Format: N" stamp.  Returns nil for any other line; a file
+    /// with no stamp at all is version 1.
+    static func parseFormatVersion(line rawLine: String) -> Int? {
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+        guard line.lowercased().hasPrefix("# format") else { return nil }
+        return line.split(whereSeparator: { $0.isWhitespace || $0 == ":" })
+            .compactMap { Int($0) }
+            .first
     }
 
     /// Pairs each non-numeric token with the number that follows it, skipping

@@ -71,6 +71,66 @@ final class FilterFileTests: XCTestCase {
         XCTAssertEqual(FilterFile.parse(line: FilterFile.format(index: 2, band: band))?.params.bypass, false)
     }
 
+    /// Crossover bands share the line grammar but need their own keyword, or
+    /// they'd be read back as extra PEQ bands.
+    func testCrossoverBankRoundTrips() {
+        let band = FilterParams(type: .lr4_lp, freq: 2000, q: 0.707, gain: 0)
+        let line = FilterFile.format(bank: .crossover, index: 1, band: band)
+
+        let parsed = FilterFile.parse(line: line)
+        XCTAssertEqual(parsed?.bank, .crossover)
+        XCTAssertEqual(parsed?.params.type, .lr4_lp)
+        XCTAssertEqual(parsed?.params.freq ?? 0, 2000, accuracy: 0.05)
+
+        // A PEQ line must not be mistaken for a crossover one, or vice versa.
+        XCTAssertEqual(FilterFile.parse(line: FilterFile.format(index: 1, band: band))?.bank, .peq)
+    }
+
+    /// Both banks' lines must line up in the file, and an OFF crossover band
+    /// still has to be recognised as a crossover slot.
+    func testCrossoverLinesAlignAndSurviveOff() {
+        let peq = FilterFile.format(index: 1, band: FilterParams(type: .peaking, freq: 100, q: 1, gain: 3))
+        let xover = FilterFile.format(bank: .crossover, index: 1, band: FilterParams(type: .flat))
+        XCTAssertEqual(peq.prefix(10).count, xover.prefix(10).count)
+        XCTAssertTrue(peq.hasPrefix("Filter  1:"))
+        XCTAssertTrue(xover.hasPrefix("Xover   1:"))
+
+        let parsed = FilterFile.parse(line: xover)
+        XCTAssertEqual(parsed?.bank, .crossover)
+        XCTAssertEqual(parsed?.enabled, false)
+    }
+
+    // MARK: - Preamp
+
+    func testPreampRoundTrips() {
+        XCTAssertEqual(FilterFile.formatPreamp(-6.5), "Preamp -6.5 dB\n")
+        XCTAssertEqual(FilterFile.parsePreamp(line: FilterFile.formatPreamp(-6.5)) ?? 0, -6.5, accuracy: 0.01)
+        XCTAssertEqual(FilterFile.parsePreamp(line: FilterFile.formatPreamp(0)) ?? -1, 0, accuracy: 0.01)
+    }
+
+    /// AutoEQ's ParametricEQ.txt and REW both lead with a preamp line; the
+    /// colon-separated spelling has to work too.
+    func testParsesForeignPreampSpellings() {
+        XCTAssertEqual(FilterFile.parsePreamp(line: "Preamp: -6.5 dB") ?? 0, -6.5, accuracy: 0.01)
+        XCTAssertEqual(FilterFile.parsePreamp(line: "  preamp -3 dB  ") ?? 0, -3, accuracy: 0.01)
+        XCTAssertNil(FilterFile.parsePreamp(line: "Filter  1: ON  PK  Fc 100 Hz  Gain -3.0 dB  Q 1.00"))
+        XCTAssertNil(FilterFile.parsePreamp(line: "[Input 0: USB L]"))
+    }
+
+    /// A preamp line must not also parse as a band, or it would consume a slot.
+    func testPreampIsNotABandLine() {
+        XCTAssertNil(FilterFile.parse(line: "Preamp -6.5 dB"))
+    }
+
+    // MARK: - Format version
+
+    func testFormatVersionStamp() {
+        XCTAssertEqual(FilterFile.parseFormatVersion(line: "# Format: 2"), 2)
+        XCTAssertEqual(FilterFile.parseFormatVersion(line: "# format 17"), 17)
+        XCTAssertNil(FilterFile.parseFormatVersion(line: "# Exported: 2026-07-26 02:15:00"))
+        XCTAssertNil(FilterFile.parseFormatVersion(line: "# DSPi Console Filter Settings"))
+    }
+
     func testFlatBandFormatsAsOff() {
         let line = FilterFile.format(index: 5, band: FilterParams(type: .flat))
         XCTAssertEqual(line, "Filter  5: OFF\n")
