@@ -243,6 +243,60 @@ enum FilterType: Int, CaseIterable, Identifiable {
 
     /// Theoretical attenuation slope, dB/octave (= 6 × order).
     var slopeDBPerOctave: Int { crossoverOrder * 6 }
+
+    /// True when `gain` carries a user-editable dB gain.  The Linkwitz
+    /// Transform is deliberately excluded: it reuses the field for fp in Hz and
+    /// edits it through its own panel.
+    var usesGain: Bool {
+        switch self {
+        case .peaking, .lowShelf, .highShelf, .lowShelf1, .highShelf1: return true
+        default: return false
+        }
+    }
+
+    /// True when Q is a user-editable parameter.  The firmware ignores Q on the
+    /// first-order PEQ sections and derives it internally for crossovers; the
+    /// Linkwitz Transform edits Q0/Qp in its popover instead.
+    var usesQ: Bool {
+        switch self {
+        case .flat, .linkwitzTransform: return false
+        default: return !(isCrossover || isFirstOrderPEQ)
+        }
+    }
+
+    /// Token identifying this type in exported filter files.  REW-compatible
+    /// for the shapes REW knows; crossover codes drop the space ("LR4LP") so a
+    /// re-import can't mistake them for a plain "LP".  nil for `.flat`, which is
+    /// written as "OFF" instead of a type.
+    var fileCode: String? {
+        guard self != .flat else { return nil }
+        return isCrossover ? shortLabel.replacingOccurrences(of: " ", with: "") : shortLabel
+    }
+
+    /// Resolve a filter-file token back to a type, accepting the aliases other
+    /// tools emit (REW's PEQ / LPQ / HPQ / LSC / HSC) and the "NO" notch code
+    /// written by DSPi Console builds before the codes were unified on
+    /// `shortLabel`.  Returns nil for anything unknown, including REW's "None".
+    init?(fileCode raw: String) {
+        switch raw.uppercased() {
+        case "PK", "PEQ":  self = .peaking
+        case "LS", "LSC":  self = .lowShelf
+        case "HS", "HSC":  self = .highShelf
+        case "LP", "LPQ":  self = .lowPass
+        case "HP", "HPQ":  self = .highPass
+        case "NT", "NO":   self = .notch
+        case "AP":         self = .allPass
+        case "AP1":        self = .allPass1
+        case "LS1":        self = .lowShelf1
+        case "HS1":        self = .highShelf1
+        case "LT":         self = .linkwitzTransform
+        case let code:
+            guard let xover = FilterType.allCases.first(where: {
+                $0.isCrossover && $0.fileCode == code
+            }) else { return nil }
+            self = xover
+        }
+    }
 }
 
 enum CrossoverFamily: Int, CaseIterable, Identifiable {

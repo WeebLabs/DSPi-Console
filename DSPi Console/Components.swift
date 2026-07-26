@@ -1511,8 +1511,7 @@ struct FilterRowView: View {
                     }
 
                     // Gain
-                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf
-                        || params.type == .lowShelf1 || params.type == .highShelf1 {
+                    if params.type.usesGain {
                         ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
                             var p = params; p.gain = $0; onChange(p)
                         }
@@ -1522,12 +1521,12 @@ struct FilterRowView: View {
 
                     // Q (hidden for crossover and first-order PEQ types — firmware
                     // ignores Q on those).
-                    if params.type.isCrossover || params.type.isFirstOrderPEQ {
-                        Spacer().frame(width: 50 + 24)
-                    } else {
+                    if params.type.usesQ {
                         ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
                             var p = params; p.q = $0; onChange(p)
                         }
+                    } else {
+                        Spacer().frame(width: 50 + 24)
                     }
                 }
                 .opacity(isBypassed ? 0.45 : 1.0)

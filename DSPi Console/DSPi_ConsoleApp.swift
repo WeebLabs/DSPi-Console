@@ -6286,67 +6286,12 @@ struct FileMenuActions {
         var filters: [FilterParams] = []
 
         for line in contents.components(separatedBy: .newlines) {
-            // Match lines like: "Filter  1: ON  PK       Fc    63.0 Hz  Gain  -5.0 dB  Q  4.00"
-            guard line.contains("Filter") && line.contains(":") else { continue }
-
-            let enabled = line.uppercased().contains(" ON ")
-            if !enabled { continue }
-
-            // Extract filter type
-            var filterType: FilterType = .flat
-            let upperLine = line.uppercased()
-            if upperLine.contains(" PK ") || upperLine.contains(" PEQ ") {
-                filterType = .peaking
-            } else if upperLine.contains(" LP ") || upperLine.contains(" LPQ ") {
-                filterType = .lowPass
-            } else if upperLine.contains(" HP ") || upperLine.contains(" HPQ ") {
-                filterType = .highPass
-            } else if upperLine.contains(" LS1 ") {
-                filterType = .lowShelf1
-            } else if upperLine.contains(" HS1 ") {
-                filterType = .highShelf1
-            } else if upperLine.contains(" AP1 ") {
-                filterType = .allPass1
-            } else if upperLine.contains(" LS ") || upperLine.contains(" LSC ") {
-                filterType = .lowShelf
-            } else if upperLine.contains(" HS ") || upperLine.contains(" HSC ") {
-                filterType = .highShelf
-            } else {
-                continue // Unknown filter type, skip
-            }
-
-            // Extract frequency (Fc XXX Hz)
-            var freq: Float = 1000.0
-            if let fcRange = line.range(of: "Fc", options: .caseInsensitive) {
-                let afterFc = line[fcRange.upperBound...]
-                let components = afterFc.split(whereSeparator: { $0.isWhitespace })
-                if let freqStr = components.first, let freqVal = Float(freqStr) {
-                    freq = freqVal
-                }
-            }
-
-            // Extract gain (Gain XXX dB) - optional
-            var gain: Float = 0.0
-            if let gainRange = line.range(of: "Gain", options: .caseInsensitive) {
-                let afterGain = line[gainRange.upperBound...]
-                let components = afterGain.split(whereSeparator: { $0.isWhitespace })
-                if let gainStr = components.first, let gainVal = Float(gainStr) {
-                    gain = gainVal
-                }
-            }
-
-            // Extract Q (Q XXX) - optional
-            var q: Float = 0.707
-            // Look for " Q " followed by a number (not "EQ" or other Q-containing words)
-            let qPattern = try? NSRegularExpression(pattern: "\\sQ\\s+([\\d.]+)", options: .caseInsensitive)
-            if let match = qPattern?.firstMatch(in: line, options: [], range: NSRange(line.startIndex..., in: line)),
-               let qRange = Range(match.range(at: 1), in: line),
-               let qVal = Float(line[qRange]) {
-                q = qVal
-            }
-
-            let params = FilterParams(type: filterType, freq: freq, q: q, gain: gain)
-            filters.append(params)
+            guard let band = FilterFile.parse(line: line) else { continue }
+            // Disabled entries are dropped rather than kept as flat placeholders:
+            // a REW file numbers its own slots, so packing the enabled ones is
+            // what the user expects when importing into our band layout.
+            guard band.enabled else { continue }
+            filters.append(band.params)
         }
 
         return filters
@@ -6362,30 +6307,41 @@ struct FileMenuActions {
         var result: [Int: ParsedChannelData] = [:]
         var currentChannel: Int? = nil
 
-        // Regex for new output header content: Output N: Name (Enabled) or Output N: Name (Disabled)
-        let outputPattern = try? NSRegularExpression(pattern: "^Output\\s+(\\d+):.+\\((Enabled|Disabled)\\)$")
+        // Header content is keyed by channel index, never by name, so a renamed
+        // channel still round-trips.  The output state suffix is optional so a
+        // hand-edited file still loads (the enable state is then left alone).
+        let inputPattern = try? NSRegularExpression(pattern: "^Input\\s+(\\d+):")
+        let outputPattern = try? NSRegularExpression(pattern: "^Output\\s+(\\d+):.*?(?:\\s*\\((Enabled|Disabled)\\))?\\s*$")
 
         for line in contents.components(separatedBy: .newlines) {
             // Check for channel header [...]
             if line.hasPrefix("[") && line.hasSuffix("]") {
                 let headerContent = String(line.dropFirst().dropLast())
 
-                // New format: [USB L] / [USB R]
-                if headerContent == "USB L" {
+                // [Input N: Name]
+                if let match = inputPattern?.firstMatch(in: headerContent, options: [], range: NSRange(headerContent.startIndex..., in: headerContent)),
+                   let idxRange = Range(match.range(at: 1), in: headerContent),
+                   let inputIdx = Int(headerContent[idxRange]),
+                   inputIdx >= 0 && inputIdx < vm.chOut1 {
+                    currentChannel = inputIdx
+                    result[inputIdx] = ParsedChannelData(filters: [], enableState: nil)
+                }
+                // Legacy input headers (pre-index format): [USB L] / [USB R]
+                else if headerContent == "USB L" {
                     currentChannel = 0
                     result[0] = ParsedChannelData(filters: [], enableState: nil)
                 } else if headerContent == "USB R" {
                     currentChannel = 1
                     result[1] = ParsedChannelData(filters: [], enableState: nil)
                 }
-                // New format: [Output N: Name (Enabled/Disabled)]
+                // [Output N: Name (Enabled/Disabled)]
                 else if let match = outputPattern?.firstMatch(in: headerContent, options: [], range: NSRange(headerContent.startIndex..., in: headerContent)),
                         let idxRange = Range(match.range(at: 1), in: headerContent),
-                        let stateRange = Range(match.range(at: 2), in: headerContent),
                         let outputIdx = Int(headerContent[idxRange]),
                         outputIdx >= 0 && outputIdx <= 8 {
                     let eqCh = vm.eqChannel(forOutput: outputIdx)
-                    let enabled = headerContent[stateRange] == "Enabled"
+                    let enabled = Range(match.range(at: 2), in: headerContent)
+                        .map { headerContent[$0] == "Enabled" }
                     currentChannel = eqCh
                     result[eqCh] = ParsedChannelData(filters: [], enableState: enabled)
                 }
@@ -6403,65 +6359,13 @@ struct FileMenuActions {
                 continue
             }
 
-            // Parse filter line
+            // Parse filter line.  Unlike the REW path, an OFF/unknown entry keeps
+            // its slot as a flat placeholder so band indices stay aligned with
+            // the file.
             guard let channel = currentChannel,
-                  line.contains("Filter") && line.contains(":") else { continue }
+                  let band = FilterFile.parse(line: line) else { continue }
 
-            // Check if filter is disabled (OFF or just no type)
-            if line.uppercased().contains(" OFF") || (!line.uppercased().contains(" ON ")) {
-                // Add a flat filter placeholder
-                result[channel]?.filters.append(FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
-                continue
-            }
-
-            // Parse same as REW format
-            var filterType: FilterType = .flat
-            let upperLine = line.uppercased()
-            if upperLine.contains(" PK ") || upperLine.contains(" PEQ ") {
-                filterType = .peaking
-            } else if upperLine.contains(" LP ") || upperLine.contains(" LPQ ") {
-                filterType = .lowPass
-            } else if upperLine.contains(" HP ") || upperLine.contains(" HPQ ") {
-                filterType = .highPass
-            } else if upperLine.contains(" LS1 ") {
-                filterType = .lowShelf1
-            } else if upperLine.contains(" HS1 ") {
-                filterType = .highShelf1
-            } else if upperLine.contains(" AP1 ") {
-                filterType = .allPass1
-            } else if upperLine.contains(" LS ") || upperLine.contains(" LSC ") {
-                filterType = .lowShelf
-            } else if upperLine.contains(" HS ") || upperLine.contains(" HSC ") {
-                filterType = .highShelf
-            }
-
-            var freq: Float = 1000.0
-            if let fcRange = line.range(of: "Fc", options: .caseInsensitive) {
-                let afterFc = line[fcRange.upperBound...]
-                let components = afterFc.split(whereSeparator: { $0.isWhitespace })
-                if let freqStr = components.first, let freqVal = Float(freqStr) {
-                    freq = freqVal
-                }
-            }
-
-            var gain: Float = 0.0
-            if let gainRange = line.range(of: "Gain", options: .caseInsensitive) {
-                let afterGain = line[gainRange.upperBound...]
-                let components = afterGain.split(whereSeparator: { $0.isWhitespace })
-                if let gainStr = components.first, let gainVal = Float(gainStr) {
-                    gain = gainVal
-                }
-            }
-
-            var q: Float = 0.707
-            let qPattern = try? NSRegularExpression(pattern: "\\sQ\\s+([\\d.]+)", options: .caseInsensitive)
-            if let match = qPattern?.firstMatch(in: line, options: [], range: NSRange(line.startIndex..., in: line)),
-               let qRange = Range(match.range(at: 1), in: line),
-               let qVal = Float(line[qRange]) {
-                q = qVal
-            }
-
-            result[channel]?.filters.append(FilterParams(type: filterType, freq: freq, q: q, gain: gain))
+            result[channel]?.filters.append(band.enabled ? band.params : FilterParams(type: .flat))
         }
 
         return result.isEmpty ? nil : result
@@ -6478,13 +6382,13 @@ struct FileMenuActions {
 
         let vm = AppState.shared.viewModel
 
-        // Master channels (EQ 0, 1)
+        // Input channels.  Headers are keyed by index, with the (renameable)
+        // channel name carried alongside for readability only.
         for eqCh in 0...1 {
-            let name = vm.channelNames[eqCh]
-            output += "[\(name)]\n"
+            output += "[Input \(eqCh): \(vm.channelNames[eqCh])]\n"
             let filters = vm.channelData[eqCh] ?? []
             for (i, filter) in filters.enumerated() {
-                output += formatFilter(index: i + 1, filter: filter)
+                output += FilterFile.format(index: i + 1, band: filter)
             }
             output += "\n"
         }
@@ -6497,49 +6401,12 @@ struct FileMenuActions {
             output += "[Output \(outputIdx): \(name) (\(state))]\n"
             let filters = vm.channelData[eqCh] ?? []
             for (i, filter) in filters.enumerated() {
-                output += formatFilter(index: i + 1, filter: filter)
+                output += FilterFile.format(index: i + 1, band: filter)
             }
             output += "\n"
         }
 
         return output
-    }
-
-    private static func formatFilter(index: Int, filter: FilterParams) -> String {
-        let typeCode: String
-        switch filter.type {
-        case .flat: return String(format: "Filter %2d: OFF\n", index)
-        case .peaking: typeCode = "PK"
-        case .lowPass: typeCode = "LP"
-        case .highPass: typeCode = "HP"
-        case .lowShelf: typeCode = "LS"
-        case .highShelf: typeCode = "HS"
-        case .notch: typeCode = "NO"
-        case .allPass: typeCode = "AP"
-        case .allPass1: typeCode = "AP1"
-        case .lowShelf1: typeCode = "LS1"
-        case .highShelf1: typeCode = "HS1"
-        default:
-            // Crossover types live in xoverData, not channelData; this REW-style
-            // export only covers PEQ bands.
-            typeCode = filter.type.shortLabel
-        }
-
-        let paddedType = typeCode.padding(toLength: 8, withPad: " ", startingAt: 0)
-        var line = String(format: "Filter %2d: ON  %@Fc %7.1f Hz", index, paddedType, filter.freq)
-
-        // Add gain for types that use it
-        if filter.type == .peaking || filter.type == .lowShelf || filter.type == .highShelf
-            || filter.type == .lowShelf1 || filter.type == .highShelf1 {
-            line += String(format: "  Gain %+5.1f dB", filter.gain)
-        }
-
-        // Add Q for peaking and allpass filters
-        if filter.type == .peaking || filter.type == .allPass {
-            line += String(format: "  Q %5.2f", filter.q)
-        }
-
-        return line + "\n"
     }
 
     // MARK: - Dialogs

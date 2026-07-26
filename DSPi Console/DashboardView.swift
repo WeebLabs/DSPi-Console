@@ -359,7 +359,7 @@ struct DashboardRow: View {
 
                     Spacer().frame(width: 4)
 
-                    if params.type == .peaking || params.type == .lowShelf || params.type == .highShelf {
+                    if params.type.usesGain {
                         Text(formatTrimmed(Double(params.gain), decimals: 2, signed: true))
                             .foregroundColor(.primary.opacity(0.8))
                         Text("dB").foregroundColor(.secondary.opacity(0.7)).font(.system(size: 8))
