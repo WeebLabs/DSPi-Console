@@ -2090,6 +2090,8 @@ class DSPViewModel: ObservableObject {
 
     struct ChannelClipboard {
         let filters: [FilterParams]
+        /// Crossover bank, nil when the source was an input (inputs have none).
+        let crossover: [FilterParams]?
         let outputGainDB: Float?
         let outputDelayMS: Float?
         let outputMuted: Bool?
@@ -2104,6 +2106,7 @@ class DSPViewModel: ObservableObject {
             let outIdx = eqChannel - chOut1
             channelClipboard = ChannelClipboard(
                 filters: filters,
+                crossover: xoverData[eqChannel] ?? [],
                 outputGainDB: outputGainDB[outIdx],
                 outputDelayMS: outputDelayMS[outIdx],
                 outputMuted: outputMuted[outIdx],
@@ -2111,7 +2114,7 @@ class DSPViewModel: ObservableObject {
             )
         } else {
             channelClipboard = ChannelClipboard(
-                filters: filters,
+                filters: filters, crossover: nil,
                 outputGainDB: nil, outputDelayMS: nil, outputMuted: nil,
                 sourceName: name
             )
@@ -2134,6 +2137,14 @@ class DSPViewModel: ObservableObject {
         }
         if eqChannel >= chOut1 {
             let outIdx = eqChannel - chOut1
+            // Crossover is output-only, so it travels only between outputs.
+            // A clipboard taken from an input carries none, and the
+            // destination's bank is left alone rather than cleared.
+            if let xover = cb.crossover {
+                for (i, band) in xover.prefix(DSPViewModel.crossoverBandsPerChannel).enumerated() {
+                    setCrossoverBand(ch: eqChannel, localBand: i, p: band)
+                }
+            }
             if let gain = cb.outputGainDB { setOutputGain(output: outIdx, db: gain) }
             if let delay = cb.outputDelayMS { setOutputDelay(output: outIdx, ms: delay) }
             if let muted = cb.outputMuted { setOutputMute(output: outIdx, muted: muted) }
