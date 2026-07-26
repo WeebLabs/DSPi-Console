@@ -7107,6 +7107,58 @@ private struct SettingsCommand: Commands {
     }
 }
 
+/// Cmd+C / Cmd+V on the channel selected in the sidebar - the keyboard route to
+/// the rows' existing "Copy/Paste Parameters" context-menu items, calling the
+/// same view-model methods on `activeEqChannel`.
+///
+/// SwiftUI cannot add a key equivalent that competes with a system menu item:
+/// commands added `after: .pasteboard` get their menu entry, but the system
+/// Copy/Paste keep Cmd+C/Cmd+V and the custom items never fire. There is also
+/// no way to inject into a system group, so the whole `.pasteboard` group is
+/// replaced and its items re-supplied here.
+///
+/// Each item first offers the keystroke to the responder chain, so a focused
+/// text field (channel rename, gain/delay fields) cuts, copies and pastes text
+/// exactly as before; the channel clipboard only takes over when no responder
+/// handles it. `Delete` deliberately carries no key equivalent, matching the
+/// standard item - binding it to Backspace would route ordinary typing in text
+/// fields through `delete:`, which erases the selection rather than the
+/// preceding character.
+private struct ChannelClipboardCommands: Commands {
+    /// Returns true when a responder (a focused field editor) handled it.
+    private func forwardToResponder(_ selector: Selector) -> Bool {
+        NSApp.sendAction(selector, to: nil, from: nil)
+    }
+
+    var body: some Commands {
+        CommandGroup(replacing: .pasteboard) {
+            Button("Cut") { _ = forwardToResponder(#selector(NSText.cut(_:))) }
+                .keyboardShortcut("x", modifiers: .command)
+
+            Button("Copy") {
+                if forwardToResponder(#selector(NSText.copy(_:))) { return }
+                let vm = AppState.shared.viewModel
+                guard let ch = vm.activeEqChannel, ch < vm.channelNames.count else { return }
+                vm.copyChannelParams(eqChannel: ch, name: vm.channelNames[ch])
+            }
+            .keyboardShortcut("c", modifiers: .command)
+
+            Button("Paste") {
+                if forwardToResponder(#selector(NSText.paste(_:))) { return }
+                let vm = AppState.shared.viewModel
+                guard let ch = vm.activeEqChannel else { return }
+                vm.pasteChannelParams(eqChannel: ch)
+            }
+            .keyboardShortcut("v", modifiers: .command)
+
+            Button("Delete") { _ = forwardToResponder(#selector(NSText.delete(_:))) }
+
+            Button("Select All") { _ = forwardToResponder(#selector(NSText.selectAll(_:))) }
+                .keyboardShortcut("a", modifiers: .command)
+        }
+    }
+}
+
 // MARK: - App
 @main
 struct DSPi_ConsoleApp: App {
@@ -7152,6 +7204,10 @@ struct DSPi_ConsoleApp: App {
             // Restore the standard "Settings..." item (Cmd+,); the plain
             // `Window` Settings scene no longer provides it automatically.
             SettingsCommand()
+
+            // Edit menu: standard pasteboard items, with Cmd+C / Cmd+V falling
+            // through to the selected channel when no text field has focus.
+            ChannelClipboardCommands()
 
             // Customize the standard "About DSPi Console" window. The panel
             // renders the bundle's name + version (CFBundleShortVersionString =

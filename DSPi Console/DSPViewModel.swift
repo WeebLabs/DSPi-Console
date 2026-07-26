@@ -2120,11 +2120,17 @@ class DSPViewModel: ObservableObject {
 
     func pasteChannelParams(eqChannel: Int) {
         guard let cb = channelClipboard else { return }
+        // Link L/R mirrors every other filter edit across the stereo input pair
+        // (the FilterListView callbacks do it per band), so a paste has to
+        // mirror too or the two channels drift apart.
+        let mirror: Int? = (preampLinked && eqChannel < BASE_MATRIX_INPUTS) ? (1 - eqChannel) : nil
         for (i, filter) in cb.filters.prefix(10).enumerated() {
             setFilter(ch: eqChannel, band: i, p: filter)
+            if let m = mirror { setFilter(ch: m, band: i, p: filter) }
         }
         for i in cb.filters.count..<10 {
             setFilter(ch: eqChannel, band: i, p: FilterParams())
+            if let m = mirror { setFilter(ch: m, band: i, p: FilterParams()) }
         }
         if eqChannel >= chOut1 {
             let outIdx = eqChannel - chOut1
