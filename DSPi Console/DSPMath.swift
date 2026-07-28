@@ -530,7 +530,16 @@ class DSPMath {
         let b0, b1, b2, a1, a2: Double
     }
 
-    static func calculateCoefficients(p: FilterParams) -> Coeffs {
+    /// Biquad coefficients for a band.
+    ///
+    /// `rate` defaults to the device's usual 48 kHz, but is a parameter because
+    /// the firmware designs coefficients at whatever rate it is actually
+    /// running (`dsp_pipeline.c:248`), and anything predicting or analyzing at
+    /// a different rate than the signal it is looking at gets a subtly wrong
+    /// answer that grows toward Nyquist.  See section 4.2 of
+    /// `Documentation/automated_room_correction_spec.md`.
+    static func calculateCoefficients(p: FilterParams, rate: Double = sampleRate) -> Coeffs {
+        let sampleRate = rate
         if p.type == .flat { return Coeffs(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0) }
 
         // Linkwitz Transform: zeros at the driver corner (f0, Q0), poles at the
