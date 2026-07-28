@@ -40,7 +40,7 @@ is a symlink into `build/` so clangd resolves headers.
 | sweep synthesis and inverse filter | done |
 | FFT abstraction | done |
 | deconvolution and IR windowing | done |
-| calibration parsing | pending |
+| calibration parsing | done |
 | smoothing and spatial statistics | pending |
 | target construction | pending |
 | constrained PEQ optimizer | pending |
