@@ -135,6 +135,13 @@ final class RoomCorrectionModel: ObservableObject {
     @Published var plannedPositions: Int = 5
     @Published var sweepSeconds: Double = 8
 
+    /// Outputs whose crossover the user has chosen to bypass while measuring.
+    ///
+    /// Empty by default and never populated automatically: bypassing is only
+    /// ever the user's decision, because it is the one action here that can
+    /// destroy a driver.  See room_correction_measurement_modes.md.
+    @Published var bypassCrossoverOutputs: Set<Int> = []
+
     let vm: DSPViewModel
 
     /// `catalog` is injectable so tests can pass one that is not listening for
@@ -154,6 +161,14 @@ final class RoomCorrectionModel: ObservableObject {
     /// the wrong channels.
     func modeChanged() {
         selectedTargets = Set(plan.targets.map(\.index))
+        // A bypass choice is made against a specific speaker.  Carrying one
+        // into a different mode, or onto a target that is no longer selected,
+        // would silently bypass a crossover nobody agreed to bypass.
+        bypassCrossoverOutputs = []
+    }
+
+    func targetsChanged() {
+        bypassCrossoverOutputs.formIntersection(selectedTargets)
     }
 
     // MARK: Routing
@@ -183,6 +198,74 @@ final class RoomCorrectionModel: ObservableObject {
         { [vm] index in
             let name = vm.channelNames[index] ?? ""
             return name.isEmpty ? "Input \(index + 1)" : name
+        }
+    }
+
+    // MARK: Crossovers
+
+    /// Where the sweep starts, for the warning about unprotected drivers.
+    ///
+    /// Sub targets sweep lower than full-range ones, so the figure quoted is
+    /// the lowest any selected target will actually reach.
+    var sweepStartHz: Double {
+        let roles = selectedTargets.map { targetRoles[$0] ?? .fullRange }
+        return roles.contains(.subwoofer) ? 10 : 20
+    }
+
+    /// Crossovers standing between the sweep and the selected outputs.
+    ///
+    /// Output mode only.  Input mode measures the system as configured, so
+    /// there the crossovers are part of what is being corrected rather than
+    /// something in the way.
+    var crossoverDisclosures: [CrossoverDisclosure] {
+        guard mode == .outputChannels else { return [] }
+        let banks = Dictionary(uniqueKeysWithValues: selectedTargets.map { output in
+            (output, vm.xoverData[vm.eqChannel(forOutput: output)] ?? [])
+        })
+        return RoutingValidator.crossoverDisclosures(forOutputs: Array(selectedTargets),
+                                                     crossoverBands: banks)
+    }
+
+    /// Outputs measured without their crossover, for the results screen to
+    /// carry forward.  Only ever a subset of what was actually disclosed.
+    var bypassedForMeasurement: [CrossoverDisclosure] {
+        crossoverDisclosures.filter { bypassCrossoverOutputs.contains($0.outputIndex) }
+    }
+
+    // MARK: Plan
+
+    /// Turns the setup choices into the sweeps the session will run.
+    ///
+    /// This is where the crossover decision stops being a UI state and becomes
+    /// something the device is told to do, so a target the user did not opt in
+    /// for cannot pick up a bypass.
+    func speakerPlans() throws -> [MeasurementSession.SpeakerPlan] {
+        let rate = vm.sampleRateHz > 0 ? Double(vm.sampleRateHz) : 48000
+        let validator = routing
+
+        return try selectedTargets.sorted().map { index in
+            let role = targetRoles[index] ?? .fullRange
+            var sweep = try RoomCorrectionCore.SweepSpec(sampleRateHz: rate, role: role)
+            sweep.durationSeconds = sweepSeconds
+
+            switch mode {
+            case .inputChannels:
+                // The channel is measured exactly as it plays, crossovers and
+                // all, so there is nothing to force.
+                return MeasurementSession.SpeakerPlan(speakerIndex: index,
+                                                      playbackChannel: index,
+                                                      sweep: sweep,
+                                                      role: role)
+            case .outputChannels:
+                let path = validator.forcedPath(
+                    forOutput: index,
+                    bypassCrossovers: bypassCrossoverOutputs.contains(index))
+                return MeasurementSession.SpeakerPlan(speakerIndex: index,
+                                                      playbackChannel: path.driveInput,
+                                                      sweep: sweep,
+                                                      role: role,
+                                                      forcedPath: path)
+            }
         }
     }
 
@@ -389,6 +472,10 @@ struct RoomCorrectionSetupView: View {
                     calibrationSection
                     Divider()
                     targetSection
+                    if !model.crossoverDisclosures.isEmpty {
+                        Divider()
+                        crossoverSection
+                    }
                     Divider()
                     planSection
                 }
@@ -559,6 +646,7 @@ struct RoomCorrectionSetupView: View {
                         set: { isOn in
                             if isOn { model.selectedTargets.insert(index) }
                             else { model.selectedTargets.remove(index) }
+                            model.targetsChanged()
                         })) {
                         Text(model.targetName(index))
                             .frame(width: 130, alignment: .leading)
@@ -608,8 +696,77 @@ struct RoomCorrectionSetupView: View {
 
             note("Room correction replaces all ten PEQ bands on each "
                  + (model.mode == .inputChannels ? "input" : "output")
-                 + " it writes to. Crossovers are preserved, and the original bands are "
-                 + "restored unless you apply the result.")
+                 + " it writes to. The original bands are restored unless you apply "
+                 + "the result."
+                 + (model.mode == .inputChannels
+                    ? " Crossovers are never touched."
+                    : " Crossovers stay on unless you turn one off below."))
+        }
+    }
+
+    /// Asks about crossovers rather than deciding.
+    ///
+    /// Bypassing one is the only action in this window that can destroy
+    /// hardware, and leaving one on is the only one that can produce a
+    /// correction demanding output in a band the crossover removes.  Neither is
+    /// safe to assume, so both are put to the user with their consequences.
+    @ViewBuilder
+    private var crossoverSection: some View {
+        let disclosures = model.crossoverDisclosures
+        if !disclosures.isEmpty {
+            formSection("CROSSOVERS ON THE SPEAKERS YOU SELECTED") {
+                note("Measuring an output drives it directly, so whatever crossover is "
+                     + "on it shapes the sweep. Leave it on to measure the speaker as "
+                     + "it plays, or turn it off to measure the driver alone.")
+
+                ForEach(disclosures) { disclosure in
+                    let bypassing = model.bypassCrossoverOutputs.contains(disclosure.outputIndex)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 10) {
+                            Text(model.speakerName(disclosure.outputIndex))
+                                .frame(width: 130, alignment: .leading)
+                            Text(disclosure.description)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 210, alignment: .leading)
+                            Picker("", selection: Binding(
+                                get: { bypassing },
+                                set: { shouldBypass in
+                                    if shouldBypass {
+                                        model.bypassCrossoverOutputs.insert(disclosure.outputIndex)
+                                    } else {
+                                        model.bypassCrossoverOutputs.remove(disclosure.outputIndex)
+                                    }
+                                })) {
+                                Text("Keep it on").tag(false)
+                                Text("Turn it off").tag(true)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 190)
+                            Spacer()
+                        }
+                        .font(.system(size: 12))
+
+                        if bypassing {
+                            ForEach(disclosure.bypassConsequences(
+                                sweepStartHz: model.sweepStartHz), id: \.self) { consequence in
+                                if disclosure.isHighPass {
+                                    warning(consequence)
+                                } else {
+                                    note(consequence)
+                                }
+                            }
+                            .padding(.leading, 140)
+                        }
+                    }
+                }
+
+                if model.bypassCrossoverOutputs.isEmpty {
+                    note("Keeping a crossover on is the safe default. The correction then "
+                         + "describes the speaker as you actually listen to it.")
+                }
+            }
         }
     }
 

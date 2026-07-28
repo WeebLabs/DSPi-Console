@@ -151,6 +151,42 @@ final class RoomCorrectionRenderTests: XCTestCase {
         try assertHasContent(image, "Input domain")
     }
 
+    func testCrossoverPromptRendersBothAnswers() throws {
+        // On its own view model: the prompt keys off live crossover data, and
+        // writing that into the shared one would make every other render in
+        // this class depend on test order.
+        for bypassing in [false, true] {
+            let vm = DSPViewModel(usb: USBDevice(autoConnect: false, monitor: false))
+            // Five outputs rather than nine, so the prompt lands inside the
+            // visible area of a realistic window instead of below the fold,
+            // where nothing about it would actually be drawn.
+            vm.platformName = "RP2040"
+            vm.outputEnabled = Array(repeating: true, count: 9)
+            vm.matrixRouting = Array(repeating: Array(repeating: false, count: 9),
+                                     count: MAX_MATRIX_INPUTS)
+            for input in 0..<2 { vm.matrixRouting[input][input] = true }
+
+            var highPass = FilterParams()
+            highPass.type = .lr4_hp
+            highPass.freq = 80
+            let channel = vm.eqChannel(forOutput: 0)
+            vm.xoverData[channel] = Array(repeating: FilterParams(), count: 4)
+            vm.xoverData[channel]?[0] = highPass
+
+            let model = RoomCorrectionModel(vm: vm, catalog: Self.sharedModel.catalog)
+            model.mode = .outputChannels
+            model.selectedTargets = [0, 1]
+            // The expanded state is the one that matters: it is several lines
+            // of warning inside a row, and it is where a layout gives out.
+            if bypassing { model.bypassCrossoverOutputs = [0] }
+
+            let image = try render(RoomCorrectionView(model: model),
+                                   size: NSSize(width: 1080, height: 1000),
+                                   name: "setup-crossover-\(bypassing ? "off" : "on")")
+            try assertHasContent(image, "Crossover prompt (bypassing: \(bypassing))")
+        }
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()

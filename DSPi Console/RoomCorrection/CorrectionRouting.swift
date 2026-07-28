@@ -310,6 +310,43 @@ struct CrossoverDisclosure: Identifiable, Equatable {
 
     var id: Int { outputIndex }
 
+    /// Reads one output's crossover bank.
+    ///
+    /// Returns nil when there is nothing to disclose: no crossover bands, or
+    /// every one of them already bypassed by the user.  Only the active bands
+    /// count, since a bypassed crossover neither shapes the sweep nor protects
+    /// a driver, and mentioning it would be noise.
+    static func read(outputIndex: Int, bands: [FilterParams]) -> CrossoverDisclosure? {
+        let active = bands.filter { $0.type.isCrossover && !$0.bypass }
+        guard !active.isEmpty else { return nil }
+
+        // The high-pass is the one that matters most: it is what removes a
+        // driver's protection when bypassed, so it sets both the flag and the
+        // quoted corner.  A band-pass output has both, and names both.
+        let highPasses = active.filter { $0.type.crossoverIsLowPass == false }
+        let governing = highPasses.max { $0.freq < $1.freq } ?? active[0]
+
+        let described = active
+            .sorted { $0.freq < $1.freq }
+            .map(describe)
+            .joined(separator: " and ")
+
+        return CrossoverDisclosure(outputIndex: outputIndex,
+                                   description: described,
+                                   isHighPass: !highPasses.isEmpty,
+                                   cornerHz: Double(governing.freq))
+    }
+
+    /// e.g. "LR4 high-pass at 80 Hz".
+    private static func describe(_ band: FilterParams) -> String {
+        let family = band.type.crossoverFamily?.shortName ?? ""
+        let shape = band.type.crossoverIsLowPass == true ? "low-pass" : "high-pass"
+        let corner = band.freq >= 1000
+            ? String(format: "%.2f kHz", band.freq / 1000)
+            : String(format: "%.0f Hz", band.freq)
+        return "\(family)\(band.type.crossoverOrder) \(shape) at \(corner)"
+    }
+
     /// What bypassing this one would mean, stated so the user can decide.
     func bypassConsequences(sweepStartHz: Double) -> [String] {
         var consequences: [String] = []
@@ -323,5 +360,22 @@ struct CrossoverDisclosure: Identifiable, Equatable {
                             + "its crossover. Once the crossover is switched back on, "
                             + "the corrected response will differ from what was measured.")
         return consequences
+    }
+}
+
+
+extension RoutingValidator {
+    /// Every crossover the user should be told about before an output-mode run.
+    ///
+    /// Input mode never calls this: it measures the system as configured, so
+    /// the crossovers are part of what is being corrected rather than something
+    /// standing in the way.
+    static func crossoverDisclosures(forOutputs outputs: [Int],
+                                     crossoverBands: [Int: [FilterParams]])
+    -> [CrossoverDisclosure] {
+        outputs.sorted().compactMap { output in
+            CrossoverDisclosure.read(outputIndex: output,
+                                     bands: crossoverBands[output] ?? [])
+        }
     }
 }

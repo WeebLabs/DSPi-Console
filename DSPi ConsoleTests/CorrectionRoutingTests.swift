@@ -346,4 +346,114 @@ extension CorrectionRoutingTests {
         XCTAssertEqual(consequences.count, 1)
         XCTAssertTrue(consequences[0].lowercased().contains("differ"))
     }
+
+    // MARK: - Reading a crossover bank
+
+    private func crossover(_ type: FilterType, _ hz: Float,
+                           bypass: Bool = false) -> FilterParams {
+        var band = FilterParams()
+        band.type = type
+        band.freq = hz
+        band.bypass = bypass
+        return band
+    }
+
+    func testAnOutputWithNoCrossoverDisclosesNothing() {
+        XCTAssertNil(CrossoverDisclosure.read(outputIndex: 0, bands: []))
+
+        var peq = FilterParams()
+        peq.type = .peaking
+        XCTAssertNil(CrossoverDisclosure.read(outputIndex: 0, bands: [peq]),
+                     "a PEQ band is not a crossover")
+    }
+
+    func testABypassedCrossoverDisclosesNothing() {
+        // It neither shapes the sweep nor protects the driver, so raising it
+        // would be a prompt with no decision behind it.
+        let bands = [crossover(.lr4_hp, 80, bypass: true)]
+        XCTAssertNil(CrossoverDisclosure.read(outputIndex: 2, bands: bands))
+    }
+
+    func testAHighPassIsFlaggedAsProtective() {
+        let disclosure = CrossoverDisclosure.read(outputIndex: 1,
+                                                  bands: [crossover(.lr4_hp, 80)])
+        XCTAssertEqual(disclosure?.isHighPass, true)
+        XCTAssertEqual(disclosure?.cornerHz, 80)
+        XCTAssertEqual(disclosure?.description, "LR4 high-pass at 80 Hz")
+        XCTAssertEqual(disclosure?.bypassConsequences(sweepStartHz: 20).count, 2,
+                       "the driver warning and the re-enable warning")
+    }
+
+    func testALowPassIsNotFlaggedAsProtective() {
+        // Bypassing a subwoofer's low-pass exposes it to the whole sweep, but
+        // the driver is not being protected from content below its range, so
+        // the loud warning belongs to the high-pass case alone.
+        let disclosure = CrossoverDisclosure.read(outputIndex: 8,
+                                                  bands: [crossover(.bw2_lp, 100)])
+        XCTAssertEqual(disclosure?.isHighPass, false)
+        XCTAssertEqual(disclosure?.description, "BW2 low-pass at 100 Hz")
+        XCTAssertEqual(disclosure?.bypassConsequences(sweepStartHz: 20).count, 1,
+                       "only the high-pass case adds the driver warning")
+    }
+
+    func testABandPassOutputNamesBothCornersAndQuotesTheHighPass() {
+        // A midrange between two crossovers. The corner that matters for the
+        // warning is the high-pass, since that is what is protecting it.
+        let disclosure = CrossoverDisclosure.read(
+            outputIndex: 4,
+            bands: [crossover(.lr4_lp, 2500), crossover(.lr4_hp, 300)])
+
+        XCTAssertEqual(disclosure?.description,
+                       "LR4 high-pass at 300 Hz and LR4 low-pass at 2.50 kHz",
+                       "both corners named, lowest first")
+        XCTAssertEqual(disclosure?.isHighPass, true)
+        XCTAssertEqual(disclosure?.cornerHz, 300)
+        XCTAssertEqual(disclosure?.bypassConsequences(sweepStartHz: 20).count, 2)
+    }
+
+    func testTheHighestHighPassGovernsTheWarning() {
+        // Cascaded high-passes: the highest corner is the one whose removal
+        // exposes the driver to the most content.
+        let disclosure = CrossoverDisclosure.read(
+            outputIndex: 3,
+            bands: [crossover(.bw2_hp, 40), crossover(.lr4_hp, 120)])
+        XCTAssertEqual(disclosure?.cornerHz, 120)
+    }
+
+    func testOnlyOutputsWithActiveCrossoversAreDisclosed() {
+        let banks: [Int: [FilterParams]] = [
+            0: [crossover(.lr4_hp, 80)],
+            1: [],                                        // nothing on it
+            2: [crossover(.lr4_hp, 80, bypass: true)],    // already off
+            3: [crossover(.lr2_lp, 90)],
+        ]
+        let disclosures = RoutingValidator.crossoverDisclosures(
+            forOutputs: [3, 2, 1, 0], crossoverBands: banks)
+
+        XCTAssertEqual(disclosures.map(\.outputIndex), [0, 3],
+                       "sorted, and only the outputs with something to say")
+    }
+
+    func testAnUnselectedOutputIsNeverDisclosed() {
+        // The prompt is about what is being measured; a crossover elsewhere in
+        // the system is not the user's problem here.
+        let banks: [Int: [FilterParams]] = [0: [crossover(.lr4_hp, 80)],
+                                            5: [crossover(.lr4_hp, 80)]]
+        let disclosures = RoutingValidator.crossoverDisclosures(
+            forOutputs: [0], crossoverBands: banks)
+        XCTAssertEqual(disclosures.map(\.outputIndex), [0])
+    }
+
+    func testBypassingIsOptInThroughTheForcedPath() {
+        // The routing layer must not decide this on the user's behalf.
+        let validator = RoutingValidator(routing: [[true, false], [false, true]],
+                                         activeInputCount: 2,
+                                         outputCount: 2,
+                                         outputEnabled: [true, true],
+                                         upmixerActive: false)
+        XCTAssertTrue(validator.forcedPath(forOutput: 0).bypassCrossoversOn.isEmpty,
+                      "the default must never bypass a crossover")
+        XCTAssertEqual(validator.forcedPath(forOutput: 0,
+                                            bypassCrossovers: true).bypassCrossoversOn, [0])
+    }
 }
