@@ -281,7 +281,11 @@ extension DSPViewModel {
 
     func setFilter(ch: Int, band: Int, p: FilterParams) {
         var p = p
-        p.gain = (p.gain * 10).rounded() / 10
+        // No 0.1 dB grid here.  `EqParamPacket` carries gain as float32, so the
+        // grid was a host convention, not a wire limit - and it cost up to
+        // 0.36 dB of response error on shelf-bearing room-correction results.
+        // Callers that want a tidy user-facing step (sliders, typed fields)
+        // round before calling; generated filters pass full precision through.
         if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
 

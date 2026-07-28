@@ -25,8 +25,10 @@ struct SnapshotFilterParams: Equatable {
 }
 
 /// Captures all preset-relevant DSP state at a point in time.
-/// Uses compiler-synthesized Equatable — exact Float equality is safe because
-/// values are quantized at the USB protocol level (single-precision, rounded to 0.1 dB).
+/// Uses compiler-synthesized Equatable - exact Float equality is safe because
+/// every value round-trips as IEEE-754 float32 over the wire, so what we send
+/// is bit-identical to what we read back.  (This does not depend on any 0.1 dB
+/// host grid; PEQ band gains deliberately carry full float32 precision.)
 struct PresetSnapshot: Equatable {
     let preampDB: [Float]
     // Always captured — the diff function gates the comparison on `masterVolumeMode`
