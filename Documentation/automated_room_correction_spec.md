@@ -18,8 +18,7 @@ The implementation should not be a direct Swift port of a Python algorithm. Meas
 
 - Let the user select any available input device and input channel.
 - Accept an optional REW-compatible microphone calibration file, including UMIK-1/UMIK-2 files.
-- Let the user select the DSPi **output channels** (physical speakers) to measure.
-- Let the user choose whether the resulting filters land on the **input** PEQ banks or the **output** PEQ banks, and validate that the chosen destination is reachable through the current matrix routing. See section 4.3.
+- Let the user choose a **measurement domain**: input channels, for surround layouts where bass management lives on the outputs, or output channels, for per-driver work. This determines both what is measured and where the filters go; the two cannot be chosen independently. See section 4.3.
 - Play a host-generated logarithmic sweep through the DSPi as a CoreAudio output device, one channel at a time.
 - Support an intended measurement count selected up front while allowing **Finish Measurements** after any complete position.
 - Keep every individual channel/position measurement and show measurement quality immediately.
@@ -90,28 +89,27 @@ Required behavior:
 
 ### 4.3 Measurement path and correction destination
 
-**Measurement is always per physical output.** A speaker is a physical output, and its in-room response is what the microphone hears. This is fixed by the hardware and is independent of where the correction eventually lands.
+**Host playback can only drive inputs.** The DSPi presents itself to CoreAudio as an output device whose channels are the DSPi's USB *inputs*, so a sweep always enters at an input and emerges wherever the matrix, crossovers and bass management send it. Everything below follows from that one fact.
 
-**The correction destination is a separate, user-chosen setting**, because the right answer depends on the system:
+An earlier draft of this section had measurement fixed to physical outputs with a separately chosen destination. That was wrong, and wrong in a way that blocked the main multichannel use case: it treated an input feeding several outputs as a disqualifier, when for a bass-managed system that is the normal and correct topology. It also could not be implemented as written, since a nine-output device cannot be addressed through an eight-channel playback path.
 
-- *Speakers on one output pair, headphones on another.* The correction must land on the **output** bank driving the speakers. An input-side correction would leak onto the headphone output, which is exactly wrong.
-- *A 7.1 input layout with bass management and crossovers on the outputs.* The correction belongs on the **input** banks, upstream of the bass management, so the output banks stay free for the crossover and per-driver work they already do.
+There are two genuinely different things a user can ask for, and the choice of what to measure and where the filters go is **one decision, not two**:
 
-Correction math is identical either way. For a one-to-one path the input bank sits upstream of a linear matrix and crossover, so the same magnitude inverse produces the same acoustic result. Only routing validity, trim placement, and bypass bookkeeping differ.
+**Input domain.** Drive one input channel and measure the complete acoustic result of that program channel, across however many drivers reproduce it. Correct that input's PEQ bank.
 
-**Playback path.** The host generates the sweep and plays it through the DSPi as a CoreAudio output device, placing it in the channel slot that feeds the speaker being measured. This traverses the complete signal path, which is the only path worth measuring, and it is what makes verification of an input-side correction possible at all.
+This is what 3.1, 5.1 and 7.1 need. Bass management splits front left into a high-passed L speaker and a low-passed subwoofer; driving input L and measuring what the room produces captures both, which is exactly the response that channel's correction should be built from. Fan-out is the point, not an obstacle. An input is measurable whenever it reaches something audible.
 
-Console already resolves the DSPi's CoreAudio device and tracks its configured channel count via `HostAudioFormatMonitor`. **Room Correction treats the configured CoreAudio mode as the user's deliberate choice and never changes it.** It reads the mode, authors the sweep to match, and uses the channel map that mode implies. If the configured mode cannot address a channel the user asked to measure, say so and point at Audio MIDI Setup; do not silently reconfigure the device, and do not force a rate.
+**Output domain.** Drive an input that reaches one output and nothing else, measure that driver alone, and correct that output's PEQ bank.
 
-**Routing validation is a gate, not a warning.** An input-destination correction is only well-posed when the chosen input reaches the measured output injectively. Three routings break it:
+This is what per-driver work needs, and the case where different outputs feed different things: speakers on one pair, headphones on another, where an input-side correction would leak across both. It requires an isolating path, and where none exists the reason is reported rather than the feature silently failing.
 
-- *One input feeding several outputs.* Bass management splits L into L-high plus Sub, so correcting input L also alters what the sub receives, while the correction was derived from the L speaker alone. Note that the 7.1 case above is precisely this shape once bass management is active, so it is the common case rather than an edge case.
-- *Several inputs feeding one output.* A downmix makes the measured response unattributable to any single input.
-- *The upmixer*, which sits downstream of input EQ, so correcting L/R also changes the derived Centre/Ls/Rs.
+**Validation therefore differs by domain rather than being a single list of obstacles.** In the input domain, an input that reaches nothing is the only hard failure. In the output domain, an output that no input reaches alone cannot be measured; the message names the outputs it is tied to and points at the input domain, because a bass-managed system is not broken, it is simply not a per-driver system.
 
-The app must read the live matrix, confirm a clean one-to-one mapping for every selected channel, and offer the input destination only when that holds. Otherwise default to the output destination and explain which routing disqualified the alternative. Record the resolved mapping in the project so a later recalculation cannot silently assume a different one.
+Two constraints apply to both. Outputs disabled in the matrix render silence and are excluded from fan-out, which can make an otherwise shared driver isolatable again. And only channels the configured CoreAudio mode can address are drivable: a device configured for stereo cannot be measured as 7.1 however the matrix is wired.
 
-Crossovers, output routing, speaker amplifiers, and the room remain part of the measured system regardless of destination.
+The upmixer is a warning rather than a refusal in either domain. It derives channels downstream of the input EQ, so a correction on one input also changes what is derived from it - worth saying, but not a reason to refuse a legitimate setup.
+
+Crossovers, output routing, speaker amplifiers, and the room remain part of the measured system in both domains.
 
 ## 5. User experience
 

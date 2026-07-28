@@ -1,149 +1,170 @@
 import Foundation
 
-/// Where a room correction's filters are written.
+/// What a measurement session measures, and where its filters go.
 ///
-/// Measurement is always per physical output, because that is where the
-/// speakers are and it is fixed by the hardware. The destination is a separate
-/// choice, because the right answer depends on the system: speakers on one
-/// output pair and headphones on another need an output-side correction, or it
-/// would leak onto the headphones; a surround layout with bass management on
-/// the outputs needs an input-side one, so the output banks stay free for the
-/// crossover work they already do.
+/// Everything here follows from one fact about the signal path: **host playback
+/// can only drive inputs.** The DSPi presents itself to CoreAudio as an output
+/// device whose channels are the DSPi's USB *inputs*, so a sweep always enters
+/// at an input and comes out wherever the matrix, crossovers and bass
+/// management send it.
+///
+/// That leaves two genuinely different things a user can want, and the
+/// difference is not cosmetic.
 ///
 /// See `Documentation/automated_room_correction_spec.md` section 4.3.
-enum CorrectionDestination: String, CaseIterable, Codable {
-    case outputs
+enum MeasurementDomain: String, CaseIterable, Codable {
+    /// Drive one input channel and measure the complete acoustic result of
+    /// that program channel, across however many drivers reproduce it.
+    ///
+    /// This is what a 5.1, 7.1 or 3.1 system needs. Bass management splits the
+    /// front left channel into a high-passed L speaker and a low-passed
+    /// subwoofer; driving input L and measuring what the room produces
+    /// captures both, which is exactly the response that channel's correction
+    /// should be built from. Fan-out is the normal case here, not a problem.
     case inputs
+
+    /// Drive an input that reaches only one output, and measure that driver
+    /// alone.
+    ///
+    /// This is what per-driver work needs: correcting one speaker without
+    /// touching another fed from the same source, or a system where different
+    /// outputs feed different things - speakers on one pair, headphones on
+    /// another. It requires a path that isolates the output, which is what the
+    /// validator checks.
+    case outputs
 
     var displayName: String {
         switch self {
-        case .outputs: return "Output channels"
         case .inputs: return "Input channels"
+        case .outputs: return "Output channels"
         }
     }
 
-    var explanation: String {
+    var summary: String {
         switch self {
-        case .outputs:
-            return "Filters are written to each measured speaker's own output bank. "
-                 + "Use this when different outputs feed different things, such as "
-                 + "speakers on one pair and headphones on another."
         case .inputs:
-            return "Filters are written to the input channels feeding the measured "
-                 + "speakers, upstream of the matrix. Use this when bass management "
-                 + "or crossovers live on the outputs and should stay there."
+            return "Measure each program channel through your whole speaker system, "
+                 + "including bass management, and correct the input. Use this for "
+                 + "surround layouts where crossovers live on the outputs."
+        case .outputs:
+            return "Measure each speaker on its own and correct that output. Use this "
+                 + "when outputs feed different things, such as speakers on one pair "
+                 + "and headphones on another."
         }
     }
 }
 
-/// Why an input-side correction is not available for a given selection.
-///
-/// These are refusals rather than warnings. An input-side correction is only
-/// well posed when the chosen input reaches the measured output injectively;
-/// where it is not, the correction derived from one speaker would be applied to
-/// a signal feeding something else as well.
+/// One thing the session will measure.
+struct MeasurementTarget: Identifiable, Equatable {
+    /// Index in the domain's own numbering: an input index, or an output index.
+    let index: Int
+    /// The USB input channel a sweep must be played into to excite it.
+    let driveInput: Int
+    /// Outputs that will actually make sound. More than one is normal in the
+    /// input domain and means bass management is doing its job.
+    let excitedOutputs: [Int]
+
+    var id: Int { index }
+}
+
+/// Why a target cannot be measured.
 enum RoutingObstacle: Equatable {
-    /// One input drives several outputs. Bass management is the common case:
-    /// L splits into L-high plus Sub, so correcting input L also alters what
-    /// the subwoofer receives, while the correction came from the L speaker
-    /// alone.
-    case inputFeedsMultipleOutputs(inputIndex: Int, outputIndices: [Int])
+    /// Nothing is routed from this input, so driving it would be silent.
+    case inputReachesNothing(inputIndex: Int)
 
-    /// Several inputs are summed into one output, so its measured response
-    /// cannot be attributed to any single input.
-    case outputFedByMultipleInputs(outputIndex: Int, inputIndices: [Int])
-
-    /// No input reaches this output at all, so there is nothing upstream to
-    /// correct.
+    /// No input reaches this output at all.
     case outputHasNoInput(outputIndex: Int)
 
-    /// The upmixer derives centre and surround channels from stereo and sits
-    /// downstream of input EQ, so correcting L/R would also change the derived
-    /// channels.
+    /// Every input that feeds this output also feeds others, so the output
+    /// cannot be excited on its own. Bass management produces this, and it is
+    /// the signal that the input domain is the right choice rather than a
+    /// reason to give up.
+    case outputCannotBeIsolated(outputIndex: Int, sharedWith: [Int])
+
+    /// The upmixer derives channels downstream of the input EQ, so a
+    /// correction on one input also changes the channels derived from it.
     case upmixerActive
 
     func describe(outputName: (Int) -> String, inputName: (Int) -> String) -> String {
         switch self {
-        case .inputFeedsMultipleOutputs(let input, let outputs):
-            let names = outputs.map(outputName).joined(separator: ", ")
-            return "\(inputName(input)) feeds more than one output (\(names)), so a "
-                 + "correction on it would also change the others."
-        case .outputFedByMultipleInputs(let output, let inputs):
-            let names = inputs.map(inputName).joined(separator: ", ")
-            return "\(outputName(output)) is fed by more than one input (\(names)), so its "
-                 + "measured response cannot be attributed to a single input."
+        case .inputReachesNothing(let input):
+            return "\(inputName(input)) is not routed to any enabled output, so it "
+                 + "would play silence."
         case .outputHasNoInput(let output):
             return "\(outputName(output)) has no input routed to it."
+        case .outputCannotBeIsolated(let output, let sharedWith):
+            let names = sharedWith.map(outputName).joined(separator: ", ")
+            return "\(outputName(output)) cannot be measured on its own: every input "
+                 + "that feeds it also feeds \(names). This is what bass management "
+                 + "looks like - measure input channels instead."
         case .upmixerActive:
-            return "The stereo upmixer is active and derives channels downstream of the "
-                 + "input EQ, so correcting an input would also change the channels "
-                 + "derived from it."
+            return "The stereo upmixer derives channels downstream of the input EQ, so "
+                 + "correcting an input also changes the channels derived from it."
         }
     }
 }
 
-/// The resolved mapping for a set of measured outputs.
-struct RoutingResolution: Equatable {
-    /// Measured output index to the single input feeding it, when one-to-one.
-    let inputForOutput: [Int: Int]
-    /// Everything preventing an input-side correction. Empty means it is
-    /// available.
-    let obstacles: [RoutingObstacle]
+/// What can be measured in a given domain, and what cannot.
+struct RoutingPlan: Equatable {
+    let domain: MeasurementDomain
+    let targets: [MeasurementTarget]
+    /// Keyed by the domain's index.
+    let obstacles: [Int: RoutingObstacle]
+    /// Applies to the whole plan rather than one target.
+    let warnings: [RoutingObstacle]
 
-    var allowsInputDestination: Bool { obstacles.isEmpty && !inputForOutput.isEmpty }
+    var isUsable: Bool { !targets.isEmpty }
 
-    /// The destination to offer by default. Outputs always work, so they are
-    /// the fallback whenever inputs are not available.
-    var defaultDestination: CorrectionDestination {
-        allowsInputDestination ? .inputs : .outputs
+    func target(at index: Int) -> MeasurementTarget? {
+        targets.first { $0.index == index }
     }
+
+    func obstacle(at index: Int) -> RoutingObstacle? { obstacles[index] }
 }
 
-/// Reads the live matrix and decides which destinations are usable.
+/// Reads the live matrix and works out what each domain can measure.
 ///
-/// Pure logic over a snapshot rather than a view model, so it is testable
-/// without a device and so a saved project can re-validate the routing it was
-/// calculated against before anything is written back.
+/// Pure logic over a snapshot rather than the view model, so it tests without a
+/// device and so a saved project can re-validate the routing it was calculated
+/// against before anything is written back.
 struct RoutingValidator {
     /// `routing[input][output]`, as `DSPViewModel.matrixRouting` holds it.
     let routing: [[Bool]]
     let activeInputCount: Int
     let outputCount: Int
-    /// Outputs that are disabled in the matrix produce silence, so they cannot
-    /// be measured at all.
+    /// Outputs disabled in the matrix produce silence and cannot be measured.
     let outputEnabled: [Bool]
     let upmixerActive: Bool
+    /// Channels the host can actually address on the playback device. Fewer
+    /// than the matrix has means the configured CoreAudio mode is the limit.
+    let addressableInputs: Int
 
     init(routing: [[Bool]],
          activeInputCount: Int,
          outputCount: Int,
          outputEnabled: [Bool],
-         upmixerActive: Bool) {
+         upmixerActive: Bool,
+         addressableInputs: Int? = nil) {
         self.routing = routing
         self.activeInputCount = activeInputCount
         self.outputCount = outputCount
         self.outputEnabled = outputEnabled
         self.upmixerActive = upmixerActive
+        self.addressableInputs = addressableInputs ?? activeInputCount
     }
 
-    /// Outputs that can be measured at all.
-    func measurableOutputs() -> [Int] {
-        (0..<outputCount).filter { output in
-            guard output < outputEnabled.count, outputEnabled[output] else { return false }
-            return inputsFeeding(output).isEmpty == false
-        }
+    // MARK: Matrix queries
+
+    func isOutputUsable(_ output: Int) -> Bool {
+        output >= 0 && output < outputCount
+            && output < outputEnabled.count && outputEnabled[output]
     }
 
-    /// Why an output cannot be measured, if it cannot.
-    func unmeasurableReason(for output: Int) -> String? {
-        guard output < outputCount else { return "Not present on this device." }
-        if output >= outputEnabled.count || !outputEnabled[output] {
-            return "Disabled in the matrix mixer, so it would render silence."
-        }
-        if inputsFeeding(output).isEmpty {
-            return "No input is routed to it, so nothing would play."
-        }
-        return nil
+    /// Outputs an input feeds, ignoring ones that are switched off.
+    func outputsFedBy(_ input: Int) -> [Int] {
+        guard input >= 0, input < routing.count else { return [] }
+        return (0..<min(outputCount, routing[input].count))
+            .filter { routing[input][$0] && isOutputUsable($0) }
     }
 
     func inputsFeeding(_ output: Int) -> [Int] {
@@ -152,61 +173,114 @@ struct RoutingValidator {
         }
     }
 
-    func outputsFedBy(_ input: Int) -> [Int] {
-        guard input < routing.count else { return [] }
-        return (0..<min(outputCount, routing[input].count)).filter { routing[input][$0] }
+    // MARK: Plans
+
+    /// What the input domain can measure.
+    ///
+    /// Nearly everything: an input is measurable as long as it reaches
+    /// something audible. Fan-out across several drivers is the point rather
+    /// than an obstacle.
+    func inputPlan() -> RoutingPlan {
+        var targets: [MeasurementTarget] = []
+        var obstacles: [Int: RoutingObstacle] = [:]
+
+        for input in 0..<min(activeInputCount, addressableInputs) {
+            let outputs = outputsFedBy(input)
+            if outputs.isEmpty {
+                obstacles[input] = .inputReachesNothing(inputIndex: input)
+                continue
+            }
+            targets.append(MeasurementTarget(index: input,
+                                             driveInput: input,
+                                             excitedOutputs: outputs))
+        }
+
+        return RoutingPlan(domain: .inputs,
+                           targets: targets,
+                           obstacles: obstacles,
+                           warnings: upmixerActive ? [.upmixerActive] : [])
     }
 
-    /// Resolve the mapping for the outputs the user chose to measure.
+    /// What the output domain can measure.
     ///
-    /// Note that `outputsFedBy` is evaluated against the whole matrix, not just
-    /// the selected outputs: an input that also feeds a subwoofer the user did
-    /// not select still disqualifies an input-side correction, because applying
-    /// it would change the subwoofer too.
-    func resolve(measuredOutputs: [Int]) -> RoutingResolution {
-        var mapping: [Int: Int] = [:]
-        var obstacles: [RoutingObstacle] = []
+    /// An output is only measurable on its own if some input reaches it and
+    /// nothing else. Where that fails, the obstacle names the outputs it is
+    /// tied to and points at the input domain, because a system with bass
+    /// management is not broken - it is just not a per-driver system.
+    func outputPlan() -> RoutingPlan {
+        var targets: [MeasurementTarget] = []
+        var obstacles: [Int: RoutingObstacle] = [:]
 
-        if upmixerActive {
-            obstacles.append(.upmixerActive)
+        for output in 0..<outputCount {
+            guard isOutputUsable(output) else {
+                obstacles[output] = .outputHasNoInput(outputIndex: output)
+                continue
+            }
+
+            let feeders = inputsFeeding(output).filter { $0 < addressableInputs }
+            if feeders.isEmpty {
+                obstacles[output] = .outputHasNoInput(outputIndex: output)
+                continue
+            }
+
+            // An input that reaches this output and nothing else lets us excite
+            // it alone.
+            if let isolating = feeders.first(where: { outputsFedBy($0) == [output] }) {
+                targets.append(MeasurementTarget(index: output,
+                                                 driveInput: isolating,
+                                                 excitedOutputs: [output]))
+            } else {
+                let shared = Set(feeders.flatMap { outputsFedBy($0) })
+                    .subtracting([output]).sorted()
+                obstacles[output] = .outputCannotBeIsolated(outputIndex: output,
+                                                            sharedWith: shared)
+            }
         }
 
-        for output in measuredOutputs {
-            let inputs = inputsFeeding(output)
-            if inputs.isEmpty {
-                obstacles.append(.outputHasNoInput(outputIndex: output))
-                continue
-            }
-            if inputs.count > 1 {
-                obstacles.append(.outputFedByMultipleInputs(outputIndex: output,
-                                                            inputIndices: inputs))
-                continue
-            }
+        return RoutingPlan(domain: .outputs,
+                           targets: targets,
+                           obstacles: obstacles,
+                           warnings: upmixerActive ? [.upmixerActive] : [])
+    }
 
-            let input = inputs[0]
-            let fanout = outputsFedBy(input)
-            if fanout.count > 1 {
-                obstacles.append(.inputFeedsMultipleOutputs(inputIndex: input,
-                                                            outputIndices: fanout))
-                continue
-            }
-            mapping[output] = input
+    func plan(for domain: MeasurementDomain) -> RoutingPlan {
+        domain == .inputs ? inputPlan() : outputPlan()
+    }
+
+    /// Which domain to offer first.
+    ///
+    /// The input domain whenever a system looks bass-managed or multichannel,
+    /// because that is the case the output domain cannot serve at all. A plain
+    /// one-to-one stereo pair can use either, and the output domain is the more
+    /// familiar mental model there, so it wins.
+    func suggestedDomain() -> MeasurementDomain {
+        let outputs = outputPlan()
+        let inputs = inputPlan()
+        if !outputs.isUsable { return .inputs }
+        // Anything the output domain cannot isolate means drivers are shared,
+        // which is bass management or similar.
+        let hasSharedDrivers = outputs.obstacles.values.contains {
+            if case .outputCannotBeIsolated = $0 { return true }
+            return false
         }
-
-        return RoutingResolution(inputForOutput: mapping, obstacles: obstacles)
+        if hasSharedDrivers { return .inputs }
+        return inputs.targets.count > 2 ? .inputs : .outputs
     }
 }
 
 extension RoutingValidator {
     /// Build from the live view model.
     ///
-    /// Kept as a separate initializer so the validator itself stays free of the
-    /// view model and remains testable without a device.
-    init(viewModel: DSPViewModel) {
+    /// `addressableInputs` comes from the configured CoreAudio mode: the
+    /// session can only drive channels the host can actually send to, and a
+    /// device configured for stereo cannot be measured as 7.1 however the
+    /// matrix is wired.
+    init(viewModel: DSPViewModel, addressableInputs: Int? = nil) {
         self.init(routing: viewModel.matrixRouting,
                   activeInputCount: viewModel.numMatrixInputs,
                   outputCount: viewModel.numOutputChannels,
                   outputEnabled: viewModel.outputEnabled,
-                  upmixerActive: viewModel.upmixActive)
+                  upmixerActive: viewModel.upmixActive,
+                  addressableInputs: addressableInputs)
     }
 }

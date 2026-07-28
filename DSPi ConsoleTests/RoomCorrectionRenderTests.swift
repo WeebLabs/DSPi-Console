@@ -107,7 +107,7 @@ final class RoomCorrectionRenderTests: XCTestCase {
         // picker and the calibration summary, none of which appear in the
         // empty state.
         let model = makeModel()
-        model.selectedSpeakers = [0, 1]
+        model.selectedTargets = [0, 1]
         model.calibration = try? RoomCorrectionCore.Calibration(
             contents: "\"Sens Factor =-1.6dB, SERNO: 7012345\"\n20 0.0\n1000 1.5\n20000 -2.0\n")
         model.calibrationName = "UMIK-1_90deg.txt"
@@ -124,7 +124,7 @@ final class RoomCorrectionRenderTests: XCTestCase {
         // cheapest place to catch white-on-white.
         for appearance in [NSAppearance.Name.darkAqua, .aqua] {
             let model = makeModel()
-            model.selectedSpeakers = [0, 1]
+            model.selectedTargets = [0, 1]
             let image = try render(RoomCorrectionView(model: model),
                                    size: NSSize(width: 1080, height: 720),
                                    name: "setup-theme",
@@ -133,10 +133,23 @@ final class RoomCorrectionRenderTests: XCTestCase {
         }
     }
 
+    func testInputDomainRendersBassManagedFanout() throws {
+        // The 5.1 case: several program channels, each playing through its own
+        // speaker and the subwoofer. The row has to make that visible rather
+        // than leaving the user to infer it.
+        let model = makeModel()
+        model.domain = .inputs
+        model.selectedTargets = [0, 1, 2]
+        let image = try render(RoomCorrectionView(model: model),
+                               size: NSSize(width: 1080, height: 720),
+                               name: "setup-input-domain")
+        try assertHasContent(image, "Input domain")
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()
-        model.selectedSpeakers = [0, 1, 2]
+        model.selectedTargets = [0, 1, 2]
         let image = try render(RoomCorrectionView(model: model),
                                size: NSSize(width: 900, height: 620),
                                name: "setup-minimum")

@@ -86,7 +86,7 @@ enum RoomCorrectionStep: Int, CaseIterable, Identifiable {
 
     var caption: String {
         switch self {
-        case .setup: return "Microphone, speakers, destination"
+        case .setup: return "Microphone, channels, plan"
         case .levelCheck: return "Noise floor and level"
         case .measurements: return "Capture positions"
         case .target: return "Design the house curve"
@@ -119,10 +119,17 @@ final class RoomCorrectionModel: ObservableObject {
     @Published var calibrationName: String?
     @Published var calibrationError: String?
 
-    // Speakers and destination
-    @Published var selectedSpeakers: Set<Int> = []
-    @Published var speakerRoles: [Int: RoomCorrectionCore.SpeakerRole] = [:]
-    @Published var destination: CorrectionDestination = .outputs
+    // What to measure, and therefore what to correct.
+    //
+    // These are one choice, not two. Host playback can only drive inputs, so
+    // measuring a program channel means measuring everything that reproduces
+    // it - and the filters belong on that input. Measuring one driver means
+    // finding a path that excites it alone, and the filters belong on that
+    // output. Splitting them into independent pickers would let a user ask for
+    // combinations that cannot exist.
+    @Published var domain: MeasurementDomain = .inputs
+    @Published var selectedTargets: Set<Int> = []
+    @Published var targetRoles: [Int: RoomCorrectionCore.SpeakerRole] = [:]
 
     // Plan
     @Published var plannedPositions: Int = 5
@@ -136,11 +143,17 @@ final class RoomCorrectionModel: ObservableObject {
     init(vm: DSPViewModel, catalog: AudioDeviceCatalog = AudioDeviceCatalog()) {
         self.vm = vm
         self.deviceCatalog = catalog
-        // Default to every measurable speaker: the common case is "correct
-        // what I have", and unticking is easier than hunting for the ones that
-        // are usable.
-        selectedSpeakers = Set(routing.measurableOutputs())
-        refreshDestination()
+        domain = routing.suggestedDomain()
+        // Default to everything measurable: the common case is "correct what I
+        // have", and unticking is easier than hunting for what is usable.
+        selectedTargets = Set(routing.plan(for: domain).targets.map(\.index))
+    }
+
+    /// Re-pick targets when the domain changes: indices mean different things
+    /// in each domain, so carrying a selection across would silently select
+    /// the wrong channels.
+    func domainChanged() {
+        selectedTargets = Set(plan.targets.map(\.index))
     }
 
     // MARK: Routing
@@ -149,18 +162,12 @@ final class RoomCorrectionModel: ObservableObject {
 
     var isDeviceConnected: Bool { vm.selectedDevice != nil }
 
-    var routingResolution: RoutingResolution {
-        routing.resolve(measuredOutputs: selectedSpeakers.sorted())
-    }
+    var plan: RoutingPlan { routing.plan(for: domain) }
 
-    /// Re-pick the destination when the selection changes.
-    ///
-    /// Only ever downgrades to outputs, which always work. Silently promoting
-    /// a user who chose outputs back to inputs would change where their
-    /// filters land without them asking.
-    func refreshDestination() {
-        if destination == .inputs && !routingResolution.allowsInputDestination {
-            destination = .outputs
+    /// Name of a target in the current domain.
+    var targetName: (Int) -> String {
+        { [self] index in
+            domain == .inputs ? inputName(index) : speakerName(index)
         }
     }
 
@@ -234,8 +241,10 @@ final class RoomCorrectionModel: ObservableObject {
         if playbackDevice == nil {
             reasons.append("The DSPi is not available as an audio output device.")
         }
-        if selectedSpeakers.isEmpty {
-            reasons.append("Select at least one speaker to measure.")
+        if selectedTargets.isEmpty {
+            reasons.append(domain == .inputs
+                           ? "Select at least one input channel to measure."
+                           : "Select at least one speaker to measure.")
         }
         return reasons
     }
@@ -248,7 +257,7 @@ final class RoomCorrectionModel: ObservableObject {
     /// proposition from a five-position stereo session, and the user should be
     /// told which one they have chosen.
     var estimatedMinutes: Double {
-        let sweeps = Double(selectedSpeakers.count * plannedPositions)
+        let sweeps = Double(selectedTargets.count * plannedPositions)
         let perSweep = sweepSeconds + 2.5          // gap, analysis, settling
         let perPositionMove = 25.0
         let seconds = sweeps * perSweep + Double(plannedPositions) * perPositionMove
@@ -379,9 +388,7 @@ struct RoomCorrectionSetupView: View {
                     Divider()
                     calibrationSection
                     Divider()
-                    speakerSection
-                    Divider()
-                    destinationSection
+                    targetSection
                     Divider()
                     planSection
                 }
@@ -515,95 +522,93 @@ struct RoomCorrectionSetupView: View {
         }
     }
 
-    private var speakerSection: some View {
-        formSection("SPEAKERS TO MEASURE") {
-            let validator = model.routing
+    private var targetSection: some View {
+        let plan = model.plan
+        return formSection(model.domain == .inputs ? "INPUT CHANNELS TO MEASURE"
+                                                   : "SPEAKERS TO MEASURE") {
+            Picker("", selection: Binding(
+                get: { model.domain },
+                set: { model.domain = $0; model.domainChanged() })) {
+                ForEach(MeasurementDomain.allCases, id: \.self) { domain in
+                    Text(domain.displayName).tag(domain)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 320)
 
-            // With no device attached every output reports the same matrix
-            // reason, which is both misleading - the real cause is that there
-            // is no device - and repeated once per speaker until it drowns out
-            // everything else on the screen. Say it once instead.
+            Text(model.domain.summary)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             if !model.isDeviceConnected {
-                note("Connect a DSPi to choose which speakers to measure. "
-                     + "The list below shows the channels this platform provides.")
+                note("Connect a DSPi to choose what to measure.")
             }
 
-            ForEach(0..<model.vm.numOutputChannels, id: \.self) { output in
-                let reason = model.isDeviceConnected
-                    ? validator.unmeasurableReason(for: output)
-                    : nil
-                let disabled = reason != nil || !model.isDeviceConnected
+            let count = model.domain == .inputs
+                ? model.vm.numMatrixInputs
+                : model.vm.numOutputChannels
+
+            ForEach(0..<count, id: \.self) { index in
+                let target = plan.target(at: index)
+                let obstacle = plan.obstacle(at: index)
+                let disabled = target == nil || !model.isDeviceConnected
+
                 HStack(spacing: 10) {
                     Toggle(isOn: Binding(
-                        get: { model.selectedSpeakers.contains(output) },
+                        get: { model.selectedTargets.contains(index) },
                         set: { isOn in
-                            if isOn { model.selectedSpeakers.insert(output) }
-                            else { model.selectedSpeakers.remove(output) }
-                            model.refreshDestination()
+                            if isOn { model.selectedTargets.insert(index) }
+                            else { model.selectedTargets.remove(index) }
                         })) {
-                        Text(model.speakerName(output))
-                            .frame(width: 150, alignment: .leading)
+                        Text(model.targetName(index))
+                            .frame(width: 130, alignment: .leading)
                     }
                     .disabled(disabled)
 
                     Picker("", selection: Binding(
-                        get: { model.speakerRoles[output] ?? .fullRange },
-                        set: { model.speakerRoles[output] = $0 })) {
+                        get: { model.targetRoles[index] ?? .fullRange },
+                        set: { model.targetRoles[index] = $0 })) {
                         Text("Full range").tag(RoomCorrectionCore.SpeakerRole.fullRange)
                         Text("Bass limited").tag(RoomCorrectionCore.SpeakerRole.bassLimited)
                         Text("Subwoofer").tag(RoomCorrectionCore.SpeakerRole.subwoofer)
                     }
                     .labelsHidden()
-                    .frame(width: 130)
+                    .frame(width: 120)
                     .disabled(disabled)
 
-                    // Mapping a correction to the wrong speaker is a silent
+                    // Mapping a correction to the wrong channel is a silent
                     // failure, and this is the cheap defence against it.
-                    Button("Identify") { model.vm.identifyOutput(output) }
-                        .disabled(disabled)
+                    if model.domain == .outputs {
+                        Button("Identify") { model.vm.identifyOutput(index) }
+                            .disabled(disabled)
+                    }
 
-                    if let reason {
-                        Text(reason)
+                    if let target, model.domain == .inputs, target.excitedOutputs.count > 1 {
+                        // Naming the drivers makes bass management visible
+                        // rather than something the user has to infer.
+                        Text("plays through "
+                             + target.excitedOutputs.map(model.speakerName).joined(separator: ", "))
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
+                    } else if let obstacle, model.isDeviceConnected {
+                        Text(obstacle.describe(outputName: model.speakerName,
+                                               inputName: model.inputName))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
                 }
             }
-        }
-    }
 
-    private var destinationSection: some View {
-        let resolution = model.routingResolution
-        return formSection("CORRECTION DESTINATION") {
-            Picker("", selection: $model.destination) {
-                ForEach(CorrectionDestination.allCases, id: \.self) { destination in
-                    Text(destination.displayName).tag(destination)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 320)
-            .disabled(!resolution.allowsInputDestination)
-
-            Text(model.destination.explanation)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if resolution.allowsInputDestination {
-                let pairs = resolution.inputForOutput.sorted { $0.key < $1.key }
-                    .map { "\(model.inputName($0.value)) to \(model.speakerName($0.key))" }
-                note("Routing is one to one: " + pairs.joined(separator: ", ") + ".")
-            } else if !model.selectedSpeakers.isEmpty {
-                ForEach(Array(resolution.obstacles.enumerated()), id: \.offset) { _, obstacle in
-                    note("Input correction unavailable. "
-                         + obstacle.describe(outputName: model.speakerName,
-                                             inputName: model.inputName))
-                }
+            ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warningItem in
+                note(warningItem.describe(outputName: model.speakerName,
+                                          inputName: model.inputName))
             }
 
             note("Room correction replaces all ten PEQ bands on each "
-                 + (model.destination == .inputs ? "input" : "output")
+                 + (model.domain == .inputs ? "input" : "output")
                  + " it writes to. Crossovers are preserved, and the original bands are "
                  + "restored unless you apply the result.")
         }
