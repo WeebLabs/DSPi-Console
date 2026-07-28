@@ -187,6 +187,62 @@ final class RoomCorrectionRenderTests: XCTestCase {
         }
     }
 
+    func testLevelCheckRendersThroughItsWholeSequence() throws {
+        // Each stage shows a different set of controls, and the interesting one
+        // is the last: readings, warnings and a suggestion all at once.
+        let states: [(String, (LevelCheckController) -> Void)] = [
+            ("fresh", { _ in }),
+            ("floor-measured", { controller in
+                controller.stubNoiseFloor(-68)
+            }),
+            ("level-good", { controller in
+                controller.stubNoiseFloor(-68)
+                controller.stubResult(LevelCheckResult(noiseFloorDbfs: -68, peakDbfs: -9,
+                                                       rmsDbfs: -24, estimatedSnrDb: 44,
+                                                       clipped: false))
+            }),
+            ("level-clipping", { controller in
+                controller.stubNoiseFloor(-42)
+                controller.stubResult(LevelCheckResult(noiseFloorDbfs: -42, peakDbfs: 0,
+                                                       rmsDbfs: -8, estimatedSnrDb: 34,
+                                                       clipped: true))
+            }),
+        ]
+
+        for (name, configure) in states {
+            let controller = LevelCheckController(capture: SilentCapture(),
+                                                  playback: SilentPlayback())
+            configure(controller)
+            let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                            catalog: Self.sharedModel.catalog,
+                                            levelCheck: controller)
+            model.step = .levelCheck
+            model.selectedTargets = [0, 1]
+
+            let image = try render(RoomCorrectionView(model: model),
+                                   size: NSSize(width: 1080, height: 720),
+                                   name: "levelcheck-\(name)")
+            try assertHasContent(image, "Level check (\(name))")
+        }
+    }
+
+    private final class SilentCapture: AudioCaptureBackend {
+        var isRunning = false
+        var sampleRate: Double = 48000
+        var overloadCount = 0
+        func start(device: AudioDeviceInfo, channelIndex: Int) throws {}
+        func stop() -> [Float] { [] }
+        func peakAndReset() -> Float { 0 }
+    }
+
+    private final class SilentPlayback: AudioPlaybackBackend {
+        var isRunning = false
+        var underrunCount = 0
+        func play(samples: [Float], device: AudioDeviceInfo, channelIndex: Int,
+                  completion: @escaping (Result<Void, Error>) -> Void) throws {}
+        func stop() {}
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()

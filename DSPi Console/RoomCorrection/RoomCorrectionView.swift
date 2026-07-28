@@ -144,12 +144,19 @@ final class RoomCorrectionModel: ObservableObject {
 
     let vm: DSPViewModel
 
-    /// `catalog` is injectable so tests can pass one that is not listening for
-    /// hot-plug: every live catalog installs a CoreAudio listener, and a test
-    /// that creates several leaves them running.
-    init(vm: DSPViewModel, catalog: AudioDeviceCatalog = AudioDeviceCatalog()) {
+    /// Owns the level check, so its findings survive stepping away and back.
+    let levelCheck: LevelCheckController
+
+    /// `catalog` and `levelCheck` are injectable so tests can pass ones that
+    /// touch no hardware: every live catalog installs a CoreAudio listener, and
+    /// a test that creates several leaves them running.
+    init(vm: DSPViewModel,
+         catalog: AudioDeviceCatalog = AudioDeviceCatalog(),
+         levelCheck: LevelCheckController? = nil) {
         self.vm = vm
         self.deviceCatalog = catalog
+        self.levelCheck = levelCheck ?? LevelCheckController(capture: HALCaptureBackend(),
+                                                             playback: HALPlaybackBackend())
         mode = routing.suggestedMode()
         // Default to everything measurable: the common case is "correct what I
         // have", and unticking is easier than hunting for what is usable.
@@ -436,6 +443,8 @@ struct RoomCorrectionView: View {
         switch model.step {
         case .setup:
             RoomCorrectionSetupView(model: model)
+        case .levelCheck:
+            RoomCorrectionLevelCheckView(model: model)
         default:
             notYetBuilt
         }
