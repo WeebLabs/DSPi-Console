@@ -352,6 +352,86 @@ double magnitudeDb(const std::vector<RealizedSection>& sections,
     return 20.0 * std::log10(magnitude);
 }
 
+ResponseCache ResponseCache::forGrid(const FrequencyGrid& grid, double sampleRateHz) {
+    ResponseCache cache;
+    const std::size_t n = grid.size();
+    cache.cosW.resize(n); cache.sinW.resize(n);
+    cache.cos2W.resize(n); cache.sin2W.resize(n);
+    cache.tanHalfW.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double w = 2.0 * M_PI * grid.hz[i] / sampleRateHz;
+        cache.cosW[i] = std::cos(w);
+        cache.sinW[i] = std::sin(w);
+        cache.cos2W[i] = std::cos(2.0 * w);
+        cache.sin2W[i] = std::sin(2.0 * w);
+        cache.tanHalfW[i] = std::tan(w / 2.0);
+    }
+    return cache;
+}
+
+void magnitudeDbInto(const std::vector<RealizedSection>& sections,
+                     const ResponseCache& cache,
+                     std::vector<double>& out) {
+    const std::size_t n = cache.size();
+    out.assign(n, 0.0);
+
+    for (const RealizedSection& s : sections) {
+        switch (s.kind) {
+            case RealizedSection::Kind::Bypass:
+                break;
+
+            case RealizedSection::Kind::Biquad:
+                for (std::size_t i = 0; i < n; ++i) {
+                    // z^-1 = cos(w) - j sin(w); z^-2 = cos(2w) - j sin(2w).
+                    const double nr = s.b0 + s.b1 * cache.cosW[i] + s.b2 * cache.cos2W[i];
+                    const double ni = -(s.b1 * cache.sinW[i] + s.b2 * cache.sin2W[i]);
+                    const double dr = 1.0 + s.a1 * cache.cosW[i] + s.a2 * cache.cos2W[i];
+                    const double di = -(s.a1 * cache.sinW[i] + s.a2 * cache.sin2W[i]);
+                    const double den = dr * dr + di * di;
+                    if (den < 1e-60) continue;
+                    const double magnitudeSquared = (nr * nr + ni * ni) / den;
+                    out[i] += 10.0 * std::log10(std::max(magnitudeSquared, 1e-60));
+                }
+                break;
+
+            case RealizedSection::Kind::Svf:
+                for (std::size_t i = 0; i < n; ++i) {
+                    // u = j*t, so u^2 = -t^2 and the algebra stays real/imag split.
+                    const double t = cache.tanHalfW[i];
+                    const double dr = -(t * t) + s.g * s.g;
+                    const double di = s.k * s.g * t;
+                    const double nr = s.m2 * s.g * s.g;
+                    const double ni = s.m1 * s.g * t;
+                    const double den = dr * dr + di * di;
+                    if (den < 1e-60) continue;
+                    const double qr = (nr * dr + ni * di) / den;
+                    const double qi = (ni * dr - nr * di) / den;
+                    const double hr = s.m0 + qr;
+                    const double magnitudeSquared = hr * hr + qi * qi;
+                    out[i] += 10.0 * std::log10(std::max(magnitudeSquared, 1e-60));
+                }
+                break;
+
+            case RealizedSection::Kind::SvfFirst:
+                for (std::size_t i = 0; i < n; ++i) {
+                    const double t = cache.tanHalfW[i];
+                    const double dr = s.g;
+                    const double di = t;
+                    const double nr = s.m1 * s.g;
+                    const double ni = s.m2 * t;
+                    const double den = dr * dr + di * di;
+                    if (den < 1e-60) continue;
+                    const double qr = (nr * dr + ni * di) / den;
+                    const double qi = (ni * dr - nr * di) / den;
+                    const double hr = s.m0 + qr;
+                    const double magnitudeSquared = hr * hr + qi * qi;
+                    out[i] += 10.0 * std::log10(std::max(magnitudeSquared, 1e-60));
+                }
+                break;
+        }
+    }
+}
+
 std::vector<double> magnitudeDb(const std::vector<RealizedSection>& sections,
                                 const FrequencyGrid& grid,
                                 double sampleRateHz) {

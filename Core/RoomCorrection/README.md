@@ -43,7 +43,7 @@ is a symlink into `build/` so clangd resolves headers.
 | calibration parsing | done |
 | smoothing and spatial statistics | done |
 | target construction | done |
-| constrained PEQ optimizer | pending |
+| constrained PEQ optimizer | done |
 | C ABI and CLI harness | pending |
 
 ## The filter model is a model of *this* hardware

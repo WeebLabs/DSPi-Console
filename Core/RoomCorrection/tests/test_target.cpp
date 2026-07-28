@@ -207,13 +207,15 @@ TEST_CASE(native_bandwidth_survives_a_tiny_grid) {
 // Level placement
 // ---------------------------------------------------------------------------
 
-TEST_CASE(auto_level_sits_near_the_upper_envelope_not_the_mean) {
-    // With a cut-only policy the correction is pinned by its highest point, so
-    // placing the target at the mean would discard several dB of level for no
-    // benefit.
+TEST_CASE(auto_level_sits_near_the_lower_envelope_so_cuts_suffice) {
+    // The direction matters and is easy to get backwards.  Correction is
+    // `target - measured`, so a target *above* the measurement demands boost.
+    // Under a cut-only policy the target must sit low enough that the band can
+    // be brought down to it; placing it at the upper envelope would need boost
+    // everywhere and come out worse than no correction.
     const FrequencyGrid grid = grid48();
     std::vector<double> measured(grid.size(), 70.0);
-    // A broad region 6 dB hot.
+    // A broad region 6 dB hot, which is what should be cut away.
     for (std::size_t i = 0; i < grid.size(); ++i) {
         if (grid.hz[i] > 80.0 && grid.hz[i] < 300.0) measured[i] = 76.0;
     }
@@ -223,10 +225,18 @@ TEST_CASE(auto_level_sits_near_the_upper_envelope_not_the_mean) {
     native.highHz = 20000.0;
 
     const double level = chooseAutoLevel(grid, measured, presetFlat(), native);
-    // The mean is around 71 dB; the upper envelope is 76.  Auto level should
-    // land well above the mean.
-    CHECK(level > 71.5);
-    CHECK(level <= 76.5);
+    // Near the 70 dB floor, not the 76 dB peak and not the ~71 dB mean.
+    CHECK_NEAR(level, 70.0, 0.5);
+
+    // And the resulting correction is cuts only.
+    const std::vector<double> target = [&] {
+        TargetSpec spec = presetFlat();
+        spec.levelDb = level;
+        return buildTarget(grid, spec);
+    }();
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        CHECK(target[i] - measured[i] <= 0.5);
+    }
 }
 
 TEST_CASE(auto_level_ignores_frequencies_outside_the_correctable_band) {

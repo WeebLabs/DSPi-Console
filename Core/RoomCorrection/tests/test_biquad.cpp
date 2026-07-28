@@ -481,3 +481,46 @@ TEST_CASE(grid_rejects_nonsense) {
     CHECK(FrequencyGrid::logSpaced(20000.0, 20.0, 96).empty());
     CHECK(FrequencyGrid::logSpaced(20.0, 20000.0, 0).empty());
 }
+
+// ---------------------------------------------------------------------------
+// Cached response path
+// ---------------------------------------------------------------------------
+
+TEST_CASE(cached_response_matches_the_reference_path) {
+    // The optimizer evaluates through the cached path tens of thousands of
+    // times per fit.  If it drifted from the reference, every fitted result
+    // would be subtly wrong while every direct-evaluation test still passed.
+    const FrequencyGrid grid = FrequencyGrid::logSpaced(20.0, 20000.0, 24);
+
+    for (double fs : {kFs44, kFs48, kFs96}) {
+        FilterBank bank;
+        bank.push_back(band(FilterType::Peaking, 45.0f, 6.0f, -9.0f));    // SVF
+        bank.push_back(band(FilterType::LowShelf, 120.0f, 0.707f, 4.0f)); // SVF
+        bank.push_back(band(FilterType::Peaking, 9000.0f, 3.0f, 5.0f));   // biquad
+        bank.push_back(band(FilterType::LowShelf1, 80.0f, 0.707f, 3.0f)); // 1st-order SVF
+        bank.push_back(band(FilterType::HighShelf, 6000.0f, 0.707f, -3.0f));
+
+        for (Platform platform : {Platform::RP2350, Platform::RP2040}) {
+            const auto sections = realizeBank(bank, fs, platform);
+            const std::vector<double> reference = magnitudeDb(sections, grid, fs);
+
+            const ResponseCache cache = ResponseCache::forGrid(grid, fs);
+            std::vector<double> cached;
+            magnitudeDbInto(sections, cache, cached);
+
+            CHECK(cached.size() == reference.size());
+            for (std::size_t i = 0; i < reference.size(); ++i) {
+                CHECK_NEAR(cached[i], reference[i], 1e-9);
+            }
+        }
+    }
+}
+
+TEST_CASE(cached_response_of_an_empty_cascade_is_flat) {
+    const FrequencyGrid grid = FrequencyGrid::logSpaced(20.0, 20000.0, 12);
+    const ResponseCache cache = ResponseCache::forGrid(grid, kFs48);
+    std::vector<double> out;
+    magnitudeDbInto({}, cache, out);
+    CHECK(out.size() == grid.size());
+    for (double v : out) CHECK_NEAR(v, 0.0, 1e-12);
+}

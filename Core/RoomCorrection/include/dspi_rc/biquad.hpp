@@ -86,6 +86,26 @@ std::vector<RealizedSection> realizeBank(const FilterBank& bank,
 // Response
 // ---------------------------------------------------------------------------
 
+// Per-frequency trigonometry, precomputed once for a grid.
+//
+// The optimizer evaluates a cascade tens of thousands of times on the same
+// grid, and the only things that change between evaluations are the section
+// coefficients.  Recomputing sin/cos per section per grid point made that the
+// dominant cost of a fit; caching it is a large win for no loss of accuracy,
+// since these are exactly the same values the uncached path computes.
+struct ResponseCache {
+    std::vector<double> cosW, sinW, cos2W, sin2W;   // biquad path
+    std::vector<double> tanHalfW;                   // SVF path: u = j*tan(w/2)
+
+    static ResponseCache forGrid(const FrequencyGrid& grid, double sampleRateHz);
+    std::size_t size() const { return cosW.size(); }
+};
+
+// Magnitude in dB across a cached grid, written into `out` without allocating.
+void magnitudeDbInto(const std::vector<RealizedSection>& sections,
+                     const ResponseCache& cache,
+                     std::vector<double>& out);
+
 // Magnitude in dB of a realized cascade at one frequency.
 double magnitudeDb(const std::vector<RealizedSection>& sections,
                    double freqHz,

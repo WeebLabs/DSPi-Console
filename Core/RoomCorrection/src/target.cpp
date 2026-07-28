@@ -216,14 +216,22 @@ double chooseAutoLevel(const FrequencyGrid& grid,
     }
     if (deltas.empty()) return 0.0;
 
-    // Place the target near the upper envelope of the measurement rather than
-    // its mean.  With a cut-only policy the correction is pinned by its
-    // highest point, so sitting at the mean would throw away several dB of
-    // level for no benefit.  A high percentile rather than the maximum keeps
-    // one isolated peak from setting the level for the whole channel.
+    // Place the target near the *lower* envelope of the measurement.
+    //
+    // The direction matters and is easy to get backwards.  The correction is
+    // `target - measured`, so a target above the measurement demands boost and
+    // a target below it demands cuts.  Under a cut-only policy the target must
+    // therefore sit low enough that almost the whole band can be brought down
+    // to it; a target at the upper envelope would need boost everywhere and
+    // the fit would come out worse than no correction at all.
+    //
+    // Not the minimum, though: a single deep null would drag the level down
+    // and force the whole channel to be cut to match a hole nobody sits in.  A
+    // low percentile leaves the dips alone (the boost mask declines to fill
+    // them anyway) while the peaks get cut.
     std::sort(deltas.begin(), deltas.end());
     const auto index = static_cast<std::size_t>(
-        clampd(std::round(0.85 * static_cast<double>(deltas.size() - 1)), 0.0,
+        clampd(std::round(0.20 * static_cast<double>(deltas.size() - 1)), 0.0,
                static_cast<double>(deltas.size() - 1)));
     return deltas[index];
 }
@@ -253,6 +261,14 @@ CorrectionMask buildCorrectionMask(const FrequencyGrid& grid,
         if (belowLow > 0.0) weight *= clampd(1.0 - belowLow / taper, 0.0, 1.0);
         const double aboveHigh = std::log2(f / spec.highCurtainHz);
         if (aboveHigh > 0.0) weight *= clampd(1.0 - aboveHigh / taper, 0.0, 1.0);
+
+        // Taper outside the speaker's own passband as well.  Without this the
+        // optimizer scores error in the roll-off, where the "error" is just the
+        // speaker running out, and spends filters chasing it.
+        const double belowNative = std::log2(native.lowHz / f);
+        if (belowNative > 0.0) weight *= clampd(1.0 - belowNative / taper, 0.0, 1.0);
+        const double aboveNative = std::log2(f / native.highHz);
+        if (aboveNative > 0.0) weight *= clampd(1.0 - aboveNative / taper, 0.0, 1.0);
 
         const double reliabilityHere =
             i < reliability.size() ? clampd(reliability[i], 0.0, 1.0) : 1.0;
