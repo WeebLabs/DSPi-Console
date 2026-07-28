@@ -69,6 +69,7 @@ final class MeasurementSession: ObservableObject {
 
     private var cancelled = false
     private var prepared = false
+    private(set) var mode: MeasurementMode = .inputChannels
 
     init(capture: AudioCaptureBackend,
          playback: AudioPlaybackBackend,
@@ -87,12 +88,14 @@ final class MeasurementSession: ObservableObject {
     /// Nothing is measured until this succeeds, because a measurement taken
     /// through live dynamics or a live input bank describes something other
     /// than the room.
-    func begin() async throws {
+    func begin(mode: MeasurementMode = .inputChannels,
+               correctedChannels: [Int] = []) async throws {
         guard !state.isBusy else { return }
         cancelled = false
+        self.mode = mode
         state = .preparingDevice
         do {
-            try await preparation.prepare()
+            try await preparation.prepare(mode: mode, correctedChannels: correctedChannels)
             prepared = true
             state = .readyToMeasure
         } catch {
@@ -129,11 +132,28 @@ final class MeasurementSession: ObservableObject {
     // MARK: - Measuring
 
     struct SpeakerPlan {
+        /// Index in the current mode's numbering: an input, or an output.
         let speakerIndex: Int
-        /// Output channel slot on the playback device.
+        /// USB input channel to play the sweep into. Host playback can only
+        /// drive inputs, so this is always an input index whichever mode is
+        /// running.
         let playbackChannel: Int
         let sweep: RoomCorrectionCore.SweepSpec
         let role: RoomCorrectionCore.SpeakerRole
+        /// The temporary configuration this sweep needs. Output mode only.
+        let forcedPath: ForcedPath?
+
+        init(speakerIndex: Int,
+             playbackChannel: Int,
+             sweep: RoomCorrectionCore.SweepSpec,
+             role: RoomCorrectionCore.SpeakerRole,
+             forcedPath: ForcedPath? = nil) {
+            self.speakerIndex = speakerIndex
+            self.playbackChannel = playbackChannel
+            self.sweep = sweep
+            self.role = role
+            self.forcedPath = forcedPath
+        }
     }
 
     enum SessionError: LocalizedError {
@@ -283,6 +303,18 @@ final class MeasurementSession: ObservableObject {
                              playbackDevice: AudioDeviceInfo) async throws -> [Float] {
         let samples = try plan.sweep.render()
 
+        // Output mode measures through a path it builds. Taking it down again
+        // is unconditional, including on failure, or the next sweep measures
+        // through the previous speaker's configuration.
+        if let path = plan.forcedPath {
+            try await preparation.configure(path: path)
+        }
+        defer {
+            if plan.forcedPath != nil {
+                Task { await preparation.releasePath() }
+            }
+        }
+
         // Capture first, always. Starting playback first would race the capture
         // and could clip the beginning of the sweep, and the pre-roll silence
         // is also where the noise floor is measured.
@@ -352,11 +384,41 @@ final class MeasurementSession: ObservableObject {
 /// A protocol so the session can be tested without USB, and so the rules about
 /// what must be switched off live in one implementation rather than being
 /// scattered through the flow.
+///
+/// Two levels, because output mode needs both. The session-wide pair snapshots
+/// and disables the things that hold for the whole run - dynamics, the upmixer,
+/// the input banks being corrected. The per-sweep pair forces the temporary
+/// path that output mode measures through, and takes it down again, once per
+/// speaker. Input mode uses only the session-wide pair, since it measures the
+/// system exactly as the user has it.
+///
+/// See `Documentation/room_correction_measurement_modes.md`.
 protocol DevicePreparing {
-    /// Snapshot to the recovery journal, then flatten and disable everything
-    /// that would make the measurement describe something other than the room.
-    func prepare() async throws
+    /// Snapshot to the recovery journal, then disable everything that would
+    /// make the measurement describe something other than the room.
+    func prepare(mode: MeasurementMode, correctedChannels: [Int]) async throws
+
+    /// Force the temporary path for one output-mode sweep: one input to one
+    /// output at unity gain, non-inverted, nothing else routed, with the driven
+    /// input's and target output's PEQ bypassed.
+    ///
+    /// Not called in input mode.
+    func configure(path: ForcedPath) async throws
+
+    /// Undo one forced path, before the next is applied.
+    ///
+    /// Routing is restored first, because anything that depends on it is
+    /// meaningless until it is back.
+    func releasePath() async
+
     /// Restore the snapshot and clear the journal, but only once the device is
     /// verified back.
     func restore() async
+}
+
+extension DevicePreparing {
+    /// Input mode needs no forced path, so these default to nothing rather
+    /// than forcing every implementation to write two empty methods.
+    func configure(path: ForcedPath) async throws {}
+    func releasePath() async {}
 }

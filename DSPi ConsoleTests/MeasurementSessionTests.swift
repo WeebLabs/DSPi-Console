@@ -103,12 +103,26 @@ final class MeasurementSessionTests: XCTestCase {
     private final class FakePreparation: DevicePreparing {
         var prepareCount = 0
         var restoreCount = 0
+        var configureCount = 0
+        var releaseCount = 0
+        var configuredPaths: [ForcedPath] = []
         var prepareError: Error?
+        var configureError: Error?
+        var lastMode: MeasurementMode?
 
-        func prepare() async throws {
+        func prepare(mode: MeasurementMode, correctedChannels: [Int]) async throws {
             if let prepareError { throw prepareError }
+            lastMode = mode
             prepareCount += 1
         }
+
+        func configure(path: ForcedPath) async throws {
+            if let configureError { throw configureError }
+            configureCount += 1
+            configuredPaths.append(path)
+        }
+
+        func releasePath() async { releaseCount += 1 }
 
         func restore() async { restoreCount += 1 }
     }
@@ -406,6 +420,86 @@ final class MeasurementSessionTests: XCTestCase {
         try fit.setTarget(RoomCorrectionCore.Target(preset: .natural))
         try fit.fit()
         XCTAssertFalse(try fit.filters.isEmpty)
+    }
+
+    // MARK: - Output mode forced paths
+
+    private func outputPlan(speaker: Int, drive: Int) throws -> MeasurementSession.SpeakerPlan {
+        var sweep = try RoomCorrectionCore.SweepSpec(sampleRateHz: 48000, role: .fullRange)
+        sweep.durationSeconds = 1.0
+        capture.sweep = sweep
+        return MeasurementSession.SpeakerPlan(
+            speakerIndex: speaker,
+            playbackChannel: drive,
+            sweep: sweep,
+            role: .fullRange,
+            forcedPath: ForcedPath(driveInput: drive,
+                                   targetOutput: speaker,
+                                   bypassInputBank: drive,
+                                   bypassOutputBank: speaker,
+                                   bypassCrossoversOn: []))
+    }
+
+    func testOutputModeForcesAPathPerSweepAndTakesItDown() async throws {
+        // The path must come down between speakers, or the next sweep measures
+        // through the previous speaker's configuration.
+        try await session.begin(mode: .outputChannels, correctedChannels: [0, 1])
+        XCTAssertEqual(preparation.lastMode, .outputChannels)
+
+        _ = try await session.measurePosition(
+            name: "Main", weight: 2.0,
+            plans: [try outputPlan(speaker: 0, drive: 0),
+                    try outputPlan(speaker: 1, drive: 1)],
+            microphone: microphone, microphoneChannel: 0, playbackDevice: speakers)
+
+        XCTAssertEqual(preparation.configureCount, 2)
+        XCTAssertEqual(preparation.configuredPaths.map(\.targetOutput), [0, 1])
+        XCTAssertEqual(preparation.configuredPaths.map(\.bypassOutputBank), [0, 1])
+        XCTAssertTrue(preparation.configuredPaths.allSatisfy { $0.bypassCrossoversOn.isEmpty },
+                      "crossovers are never bypassed unless the user opted in")
+    }
+
+    func testInputModeForcesNoPath() async throws {
+        // Input mode measures the system exactly as configured, so touching the
+        // matrix at all would defeat it.
+        try await session.begin(mode: .inputChannels, correctedChannels: [0])
+        _ = try await measureOnePosition()
+
+        XCTAssertEqual(preparation.configureCount, 0)
+        XCTAssertEqual(preparation.releaseCount, 0)
+        XCTAssertEqual(preparation.lastMode, .inputChannels)
+    }
+
+    func testAFailedSweepStillReleasesTheForcedPath() async throws {
+        // Otherwise the matrix stays rewired and every later measurement is
+        // taken through the wrong configuration.
+        try await session.begin(mode: .outputChannels, correctedChannels: [0])
+        playback.failWith = TestError(errorDescription: "device vanished")
+
+        _ = try? await session.measurePosition(
+            name: "Main", weight: 2.0,
+            plans: [try outputPlan(speaker: 0, drive: 0)],
+            microphone: microphone, microphoneChannel: 0, playbackDevice: speakers)
+
+        XCTAssertEqual(preparation.configureCount, 1)
+        // The release is scheduled as the sweep unwinds; let it run.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(preparation.releaseCount, 1)
+    }
+
+    func testAPathThatCannotBeConfiguredFailsTheSweep() async throws {
+        try await session.begin(mode: .outputChannels, correctedChannels: [0])
+        preparation.configureError = TestError(errorDescription: "matrix write failed")
+
+        do {
+            _ = try await session.measurePosition(
+                name: "Main", weight: 2.0,
+                plans: [try outputPlan(speaker: 0, drive: 0)],
+                microphone: microphone, microphoneChannel: 0, playbackDevice: speakers)
+            XCTFail("a failed path configuration should propagate")
+        } catch {
+            XCTAssertEqual(playback.playCount, 0, "nothing should have been played")
+        }
     }
 
     func testStateIsBusyOnlyWhileWorking() {

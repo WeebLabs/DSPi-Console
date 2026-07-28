@@ -138,7 +138,7 @@ final class RoomCorrectionRenderTests: XCTestCase {
         // speaker and the subwoofer. The row has to make that visible rather
         // than leaving the user to infer it.
         let model = makeModel()
-        model.domain = .inputs
+        model.mode = .inputChannels
         model.selectedTargets = [0, 1, 2]
         let image = try render(RoomCorrectionView(model: model),
                                size: NSSize(width: 1080, height: 720),

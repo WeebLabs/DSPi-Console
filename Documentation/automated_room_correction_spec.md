@@ -89,27 +89,23 @@ Required behavior:
 
 ### 4.3 Measurement path and correction destination
 
-**Host playback can only drive inputs.** The DSPi presents itself to CoreAudio as an output device whose channels are the DSPi's USB *inputs*, so a sweep always enters at an input and emerges wherever the matrix, crossovers and bass management send it. Everything below follows from that one fact.
+**Host playback can only drive inputs.** The DSPi presents itself to CoreAudio as an output device whose channels are the DSPi's USB *inputs*, so a sweep always enters at an input and emerges wherever the matrix, crossovers and bass management send it. Everything below follows from that.
 
-An earlier draft of this section had measurement fixed to physical outputs with a separately chosen destination. That was wrong, and wrong in a way that blocked the main multichannel use case: it treated an input feeding several outputs as a disqualifier, when for a bass-managed system that is the normal and correct topology. It also could not be implemented as written, since a nine-output device cannot be addressed through an eight-channel playback path.
+What is measured and where the filters go are **one decision, not two**. The full design, including the reasoning behind each choice, is in `room_correction_measurement_modes.md`; that file is authoritative if the two disagree. In summary:
 
-There are two genuinely different things a user can ask for, and the choice of what to measure and where the filters go is **one decision, not two**:
+**Input mode** drives one input channel and measures the complete acoustic result of that program channel, across however many drivers reproduce it, then corrects that input. This is what 3.1, 5.1 and 7.1 need, and what a multi-way speaker needs. Bass-management fan-out is the point rather than an obstacle. Only the driven input's PEQ is bypassed; the matrix, output PEQ, crossovers, trim and delay are left exactly as the user has them, because the correction lands upstream of all of them and they will still be there when the user listens.
 
-**Input domain.** Drive one input channel and measure the complete acoustic result of that program channel, across however many drivers reproduce it. Correct that input's PEQ bank.
+**Output mode** forces a known path from one input to one target output at unity gain, non-inverted, with nothing else routed, and measures that speaker alone. It bypasses the driven input's PEQ and the target output's PEQ, and steps through outputs one at a time. This is for individual speakers, and for systems where outputs feed different things, such as speakers on one pair and headphones on another.
 
-This is what 3.1, 5.1 and 7.1 need. Bass management splits front left into a high-passed L speaker and a low-passed subwoofer; driving input L and measuring what the room produces captures both, which is exactly the response that channel's correction should be built from. Fan-out is the point, not an obstacle. An input is measurable whenever it reaches something audible.
+The two modes treat output PEQ differently for a reason worth stating: **we replace the output PEQ, we do not replace the crossover.** Bypassing the PEQ bank in output mode is consistent because the correction overwrites that bank. A crossover is restored untouched afterwards, so measuring without one would describe a response the speaker never produces.
 
-**Output domain.** Drive an input that reaches one output and nothing else, measure that driver alone, and correct that output's PEQ bank.
+Crossovers are therefore **never bypassed automatically**. An automatic bypass would be inert exactly when it is justified, since a user measuring genuinely full-range speakers has no crossovers to bypass, and consequential exactly when it is not: it can destroy a tweeter behind an eighth-order high-pass, or produce a correction that demands output in a band the crossover removes. Where a selected output has an active crossover, Setup names it and offers the choice, defaulting to keeping it.
 
-This is what per-driver work needs, and the case where different outputs feed different things: speakers on one pair, headphones on another, where an input-side correction would leak across both. It requires an isolating path, and where none exists the reason is reported rather than the feature silently failing.
+Two constraints apply to both modes. Outputs disabled in the matrix render silence. And only channels the configured CoreAudio mode can address are drivable, so a device configured for stereo cannot be measured as 7.1 however the matrix is wired.
 
-**Validation therefore differs by domain rather than being a single list of obstacles.** In the input domain, an input that reaches nothing is the only hard failure. In the output domain, an output that no input reaches alone cannot be measured; the message names the outputs it is tied to and points at the input domain, because a bass-managed system is not broken, it is simply not a per-driver system.
+The upmixer is a warning rather than a refusal in either mode. It derives channels downstream of the input EQ, so a correction on one input also changes what is derived from it.
 
-Two constraints apply to both. Outputs disabled in the matrix render silence and are excluded from fan-out, which can make an otherwise shared driver isolatable again. And only channels the configured CoreAudio mode can address are drivable: a device configured for stereo cannot be measured as 7.1 however the matrix is wired.
-
-The upmixer is a warning rather than a refusal in either domain. It derives channels downstream of the input EQ, so a correction on one input also changes what is derived from it - worth saying, but not a reason to refuse a legitimate setup.
-
-Crossovers, output routing, speaker amplifiers, and the room remain part of the measured system in both domains.
+Crossovers, output routing, speaker amplifiers, and the room remain part of the measured system in both modes.
 
 ## 5. User experience
 

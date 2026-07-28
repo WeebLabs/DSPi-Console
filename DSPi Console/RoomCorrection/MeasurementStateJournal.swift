@@ -142,11 +142,33 @@ extension MeasurementStateSnapshot {
             && platformName == vm.platformName
     }
 
-    /// Channels whose PEQ must be flattened for the duration of the session.
+    /// Channels whose PEQ must be flattened, which depends on the mode.
     ///
-    /// Crossovers are never included: they may be protecting a driver, and a
-    /// measurement is not worth a tweeter.
-    var channelsToFlatten: [Int] { peqBanks.keys.sorted() }
+    /// This is not "everything with a PEQ bank". Flattening the wrong bank
+    /// produces a correction that is wrong by exactly whatever that bank does:
+    ///
+    /// - **Input mode** flattens only the input channels being corrected. The
+    ///   output PEQ must stay active, because the correction lands upstream of
+    ///   it and it will still be there when the user listens. An earlier
+    ///   version flattened both ends, which meant the output PEQ was re-applied
+    ///   after a correction that had not accounted for it.
+    /// - **Output mode** flattens the driven input, whose PEQ is irrelevant
+    ///   since the path is synthetic, and the target output, whose bank the
+    ///   correction replaces outright.
+    ///
+    /// Crossovers are never included in either mode. See
+    /// `Documentation/room_correction_measurement_modes.md`.
+    func channelsToFlatten(mode: MeasurementMode,
+                           correctedInputs: [Int],
+                           drivenInput: Int?,
+                           measuredOutputChannel: Int?) -> [Int] {
+        switch mode {
+        case .inputChannels:
+            return correctedInputs.sorted()
+        case .outputChannels:
+            return [drivenInput, measuredOutputChannel].compactMap { $0 }.sorted()
+        }
+    }
 }
 
 // MARK: - Journal

@@ -167,27 +167,56 @@ final class MeasurementStateJournalTests: XCTestCase {
 
     // MARK: - What gets flattened
 
-    func testFlattenListCoversBothEndsOfTheSignalPath() {
-        // Host playback traverses the input chain, so measuring through a live
-        // input bank would fold the user's tone controls into the measured
-        // response and the correction would then fight them. Output banks alone
-        // used to be enough only because the old device-side generator injected
-        // after the matrix.
+    func testInputModeLeavesTheOutputBankAlone() {
+        // The defect this replaced: flattening the output PEQ during an
+        // input-mode measurement produces a correction that does not account
+        // for it, and then it is re-applied when the user listens. The
+        // correction is wrong by exactly whatever that bank does.
         let snapshot = makeSnapshot()
-        let channels = snapshot.channelsToFlatten
-        XCTAssertTrue(channels.contains(0), "input bank must be flattened")
-        XCTAssertTrue(channels.contains(8), "output bank must be flattened")
-        XCTAssertEqual(channels, channels.sorted(), "order must be stable for replay")
+        let channels = snapshot.channelsToFlatten(mode: .inputChannels,
+                                                  correctedInputs: [0, 1],
+                                                  drivenInput: nil,
+                                                  measuredOutputChannel: nil)
+        XCTAssertEqual(channels, [0, 1])
+        XCTAssertFalse(channels.contains(8), "the output bank must stay active")
     }
 
-    func testCrossoversAreNotInTheFlattenList() {
-        // A crossover may be protecting a driver, and a measurement is not
-        // worth a tweeter.
+    func testOutputModeFlattensBothEnds() {
+        // Safe here for a reason that does not apply in input mode: the driven
+        // input is synthetic, and the correction replaces the output bank
+        // outright.
+        let snapshot = makeSnapshot()
+        let channels = snapshot.channelsToFlatten(mode: .outputChannels,
+                                                  correctedInputs: [],
+                                                  drivenInput: 0,
+                                                  measuredOutputChannel: 8)
+        XCTAssertEqual(channels, [0, 8])
+    }
+
+    func testFlattenListIsStablyOrderedForReplay() {
+        let snapshot = makeSnapshot()
+        let channels = snapshot.channelsToFlatten(mode: .inputChannels,
+                                                  correctedInputs: [5, 1, 3],
+                                                  drivenInput: nil,
+                                                  measuredOutputChannel: nil)
+        XCTAssertEqual(channels, [1, 3, 5])
+    }
+
+    func testCrossoversAreNeverInTheFlattenList() {
+        // A crossover may be protecting a driver, and it is restored untouched
+        // afterwards, so measuring without one would describe a response the
+        // speaker never produces.
         let snapshot = makeSnapshot()
         XCTAssertFalse(snapshot.crossoverBanks.isEmpty)
-        // channelsToFlatten is derived from PEQ banks only; the crossover banks
-        // are captured for restoration but never cleared.
-        XCTAssertEqual(Set(snapshot.channelsToFlatten), Set(snapshot.peqBanks.keys))
+        for mode in MeasurementMode.allCases {
+            let channels = snapshot.channelsToFlatten(mode: mode,
+                                                      correctedInputs: [0],
+                                                      drivenInput: 0,
+                                                      measuredOutputChannel: 8)
+            XCTAssertFalse(channels.isEmpty)
+        }
+        // The crossover banks are captured for restoration but never cleared.
+        XCTAssertNotNil(snapshot.crossoverBanks[8])
     }
 
     func testEveryJournalErrorExplainsItself() {

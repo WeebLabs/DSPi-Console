@@ -66,25 +66,52 @@ final class CorrectionRoutingTests: XCTestCase {
         XCTAssertEqual(plan.target(at: 5)?.excitedOutputs, [8])
     }
 
-    func testBassManagedSurroundCannotBeMeasuredPerDriver() {
-        // The counterpart: no input reaches the L speaker alone, so per-driver
-        // measurement genuinely cannot isolate it. The obstacle has to say so
-        // in a way that points somewhere useful.
+    func testBassManagedSurroundCanNowBeMeasuredPerSpeakerToo() {
+        // The earlier design refused this, because no input reaches the L
+        // speaker alone. Output mode no longer hunts for an isolating path, it
+        // forces one, so every enabled output is measurable.
         let plan = bassManagedFiveOne().outputPlan()
 
-        guard case .outputCannotBeIsolated(_, let sharedWith)? = plan.obstacle(at: 0) else {
-            return XCTFail("expected an isolation obstacle, got \(String(describing: plan.obstacle(at: 0)))")
-        }
-        XCTAssertTrue(sharedWith.contains(8), "should name the subwoofer it is tied to")
+        XCTAssertEqual(plan.targets.count, 9, "every enabled output is reachable")
+        XCTAssertTrue(plan.obstacles.isEmpty)
 
-        let text = plan.obstacle(at: 0)!.describe(outputName: { "Out \($0 + 1)" },
-                                                  inputName: { "In \($0 + 1)" })
-        XCTAssertTrue(text.lowercased().contains("bass management"), text)
-        XCTAssertTrue(text.lowercased().contains("input channels"), text)
+        // Only the target output is excited: the forced path routes nothing else.
+        XCTAssertEqual(plan.target(at: 0)?.excitedOutputs, [0])
+        XCTAssertEqual(plan.target(at: 8)?.excitedOutputs, [8])
     }
 
-    func testBassManagedSystemDefaultsToTheInputDomain() {
-        XCTAssertEqual(bassManagedFiveOne().suggestedDomain(), .inputs)
+    func testForcedPathBypassesBothEndsButNotTheCrossover() {
+        // The asymmetry that matters: the correction replaces the output PEQ,
+        // so bypassing it is consistent. It does not replace the crossover, so
+        // bypassing that would describe a response the speaker never produces.
+        let path = bassManagedFiveOne().forcedPath(forOutput: 2)
+
+        XCTAssertEqual(path.targetOutput, 2)
+        XCTAssertEqual(path.bypassInputBank, path.driveInput)
+        XCTAssertEqual(path.bypassOutputBank, 2)
+        XCTAssertTrue(path.bypassCrossoversOn.isEmpty, "never bypassed by default")
+    }
+
+    func testCrossoverBypassIsOnlyEverOptIn() {
+        let path = bassManagedFiveOne().forcedPath(forOutput: 2, bypassCrossovers: true)
+        XCTAssertEqual(path.bypassCrossoversOn, [2])
+    }
+
+    func testForcedPathPrefersAnInputAlreadyWiredToTheOutput() {
+        // Purely so the temporary configuration differs as little as possible
+        // from what the user had.
+        let subject = validator(matrix([(0, 0), (1, 1), (2, 2)]), activeInputs: 3)
+        XCTAssertEqual(subject.forcedPath(forOutput: 2).driveInput, 2)
+
+        // Where nothing is wired to it, fall back to an input that exists.
+        let unwired = validator(matrix([(0, 0)]), activeInputs: 2)
+        XCTAssertEqual(unwired.forcedPath(forOutput: 5).driveInput, 0)
+    }
+
+    func testBassManagedSystemDefaultsToInputMode() {
+        // Both modes work now, but a bass-managed system is a system, and
+        // measuring it as one is what the user almost certainly wants.
+        XCTAssertEqual(bassManagedFiveOne().suggestedMode(), .inputChannels)
     }
 
     func testSevenOneIsFullyMeasurableByInput() {
@@ -112,59 +139,37 @@ final class CorrectionRoutingTests: XCTestCase {
     // MARK: - The per-driver case
 
     func testOneToOneStereoCanBeMeasuredEitherWay() {
-        let subject = validator(matrix([(0, 0), (1, 1)]))
+        // Two outputs on a two-output platform, so the counts are unambiguous.
+        let subject = validator(matrix(inputs: 2, outputs: 2, [(0, 0), (1, 1)]), outputs: 2)
 
         let outputs = subject.outputPlan()
         XCTAssertEqual(outputs.targets.count, 2)
         XCTAssertEqual(outputs.target(at: 0)?.driveInput, 0,
-                       "measuring output 0 means driving the input that reaches it")
+                       "the forced path prefers the input already wired to it")
         XCTAssertEqual(outputs.target(at: 1)?.driveInput, 1)
 
         let inputs = subject.inputPlan()
         XCTAssertEqual(inputs.targets.count, 2)
 
-        // A plain stereo pair is the familiar per-driver mental model.
-        XCTAssertEqual(subject.suggestedDomain(), .outputs)
+        // A plain stereo pair is the familiar per-speaker mental model.
+        XCTAssertEqual(subject.suggestedMode(), .outputChannels)
     }
-
-    func testSpeakersAndHeadphonesOnSeparateOutputsStayPerDriver() {
-        // Inputs 0/1 to the speakers, inputs 2/3 to the headphone pair. Each
-        // output has its own feed, so all four isolate.
-        let subject = validator(matrix([(0, 0), (1, 1), (2, 2), (3, 3)]), activeInputs: 4)
-        let plan = subject.outputPlan()
-        XCTAssertEqual(plan.targets.map(\.index), [0, 1, 2, 3])
-
-        // The platform has nine outputs and only four are wired, so the rest
-        // legitimately carry an obstacle. What matters is that it is the
-        // honest one - nothing feeds them - rather than an isolation failure.
-        for output in 4..<9 {
-            guard case .outputHasNoInput? = plan.obstacle(at: output) else {
-                return XCTFail("output \(output) should report having no input")
-            }
-        }
-    }
-
-    func testAnOutputSharedByADownmixCannotBeIsolated() {
-        // Two inputs both feeding output 0 and nothing else: driving either
-        // excites only output 0, so it *can* be isolated.
-        let shared = validator(matrix([(0, 0), (1, 0)])).outputPlan()
-        XCTAssertEqual(shared.targets.count, 1)
-        XCTAssertEqual(shared.target(at: 0)?.excitedOutputs, [0])
-
-        // But an input that also feeds elsewhere cannot isolate it.
-        let spread = validator(matrix([(0, 0), (0, 1)]), activeInputs: 1).outputPlan()
-        guard case .outputCannotBeIsolated? = spread.obstacle(at: 0) else {
-            return XCTFail("expected an isolation obstacle")
-        }
-    }
-
-    // MARK: - Unroutable and disabled
 
     func testAnInputThatReachesNothingIsNotMeasurable() {
         let plan = validator(matrix([(0, 0)]), activeInputs: 2).inputPlan()
         XCTAssertEqual(plan.targets.count, 1)
         guard case .inputReachesNothing? = plan.obstacle(at: 1) else {
             return XCTFail("expected a reaches-nothing obstacle")
+        }
+    }
+
+    func testEverySpeakerIsMeasurableWhenOutputsFeedDifferentThings() {
+        // Speakers on outputs 0/1, headphones on 2/3. All four measurable, and
+        // each excites only itself.
+        let plan = validator(matrix([(0, 0), (1, 1), (2, 2), (3, 3)]),
+                             activeInputs: 4).outputPlan()
+        for output in 0..<4 {
+            XCTAssertEqual(plan.target(at: output)?.excitedOutputs, [output])
         }
     }
 
@@ -179,7 +184,10 @@ final class CorrectionRoutingTests: XCTestCase {
         guard case .inputReachesNothing? = subject.inputPlan().obstacle(at: 0) else {
             return XCTFail("an input feeding only a disabled output reaches nothing")
         }
-        XCTAssertEqual(subject.outputPlan().targets.map(\.index), [1])
+        // Output mode refuses it too, for the honest reason.
+        guard case .outputDisabled? = subject.outputPlan().obstacle(at: 0) else {
+            return XCTFail("a disabled output should say it is disabled")
+        }
     }
 
     func testDisabledOutputsAreExcludedFromFanout() {
@@ -189,8 +197,17 @@ final class CorrectionRoutingTests: XCTestCase {
         enabled[8] = false
         let subject = validator(matrix([(0, 0), (0, 8), (1, 1), (1, 8)]), enabled: enabled)
 
-        XCTAssertEqual(subject.outputsFedBy(0), [0])
-        XCTAssertEqual(subject.outputPlan().targets.count, 2)
+        XCTAssertEqual(subject.outputsFedBy(0), [0],
+                       "a disabled output must not count as fan-out")
+
+        // Output mode reaches every enabled output; only the disabled one is
+        // refused, and for the honest reason.
+        let plan = subject.outputPlan()
+        XCTAssertNil(plan.target(at: 8))
+        guard case .outputDisabled? = plan.obstacle(at: 8) else {
+            return XCTFail("the disabled subwoofer should say so")
+        }
+        XCTAssertNotNil(plan.target(at: 0))
     }
 
     // MARK: - What the host can address
@@ -211,10 +228,21 @@ final class CorrectionRoutingTests: XCTestCase {
                        "only the channels the host can address are measurable")
     }
 
-    func testAddressableLimitAlsoConstrainsPerDriverMeasurement() {
+    func testOutputModeSurvivesAStereoCoreAudioMode() {
+        // Output mode drives one path at a time, so a stereo-configured device
+        // can still measure every output. This is the reason for stepping
+        // rather than wiring several paths at once.
         let subject = validator(matrix([(0, 0), (1, 1), (2, 2)]),
                                 activeInputs: 3, addressable: 2)
-        XCTAssertEqual(subject.outputPlan().targets.map(\.index), [0, 1])
+        XCTAssertEqual(subject.outputPlan().targets.count, 9)
+        // Output 2's usual feed is not addressable, so it falls back.
+        XCTAssertLessThan(subject.forcedPath(forOutput: 2).driveInput, 2)
+    }
+
+    func testNothingIsMeasurableWithNoAddressableChannels() {
+        let subject = validator(matrix([(0, 0)]), addressable: 0)
+        XCTAssertFalse(subject.outputPlan().isUsable)
+        XCTAssertFalse(subject.inputPlan().isUsable)
     }
 
     // MARK: - Upmixer
@@ -236,8 +264,8 @@ final class CorrectionRoutingTests: XCTestCase {
 
         let obstacles: [RoutingObstacle] = [
             .inputReachesNothing(inputIndex: 0),
-            .outputHasNoInput(outputIndex: 3),
-            .outputCannotBeIsolated(outputIndex: 0, sharedWith: [8]),
+            .outputDisabled(outputIndex: 3),
+            .notAddressable(index: 4, addressableInputs: 2),
             .upmixerActive
         ]
         for obstacle in obstacles {
@@ -246,33 +274,76 @@ final class CorrectionRoutingTests: XCTestCase {
             XCTAssertFalse(text.contains("index"), text)
         }
 
-        let isolation = RoutingObstacle.outputCannotBeIsolated(outputIndex: 0, sharedWith: [8])
-        XCTAssertTrue(isolation.describe(outputName: outputName, inputName: inputName)
+        let disabled = RoutingObstacle.outputDisabled(outputIndex: 8)
+        XCTAssertTrue(disabled.describe(outputName: outputName, inputName: inputName)
             .contains("Subwoofer"))
     }
 
     func testDomainsDescribeWhenToUseThem() {
-        for domain in MeasurementDomain.allCases {
+        for domain in MeasurementMode.allCases {
             XCTAssertFalse(domain.displayName.isEmpty)
             XCTAssertFalse(domain.summary.isEmpty)
         }
-        XCTAssertTrue(MeasurementDomain.inputs.summary.lowercased().contains("surround"))
+        XCTAssertTrue(MeasurementMode.inputChannels.summary.lowercased().contains("surround"))
     }
 
-    func testEmptyAndOutOfRangeInputsAreHarmless() {
+    func testAnEmptyMatrixStillAllowsOutputMode() {
+        // Nothing is wired, so no input reaches anything and input mode has
+        // nothing to measure. Output mode is unaffected: it builds the path it
+        // needs rather than relying on one existing, which is the whole point
+        // of forcing it.
         let empty = validator(matrix(inputs: 2, outputs: 2, []), activeInputs: 2, outputs: 2)
         XCTAssertFalse(empty.inputPlan().isUsable)
-        XCTAssertFalse(empty.outputPlan().isUsable)
-        XCTAssertEqual(empty.outputsFedBy(99), [])
-        XCTAssertEqual(empty.inputsFeeding(99), [])
-        XCTAssertFalse(empty.isOutputUsable(99))
-        // With nothing measurable either way, fall back rather than trap.
-        XCTAssertEqual(empty.suggestedDomain(), .inputs)
+        XCTAssertTrue(empty.outputPlan().isUsable)
+        XCTAssertEqual(empty.suggestedMode(), .outputChannels)
+    }
+
+    func testOutOfRangeQueriesAreHarmless() {
+        let subject = validator(matrix(inputs: 2, outputs: 2, [(0, 0)]),
+                                activeInputs: 2, outputs: 2)
+        XCTAssertEqual(subject.outputsFedBy(99), [])
+        XCTAssertEqual(subject.inputsFeeding(99), [])
+        XCTAssertFalse(subject.isOutputUsable(99))
+        XCTAssertEqual(subject.outputsFedBy(-1), [])
     }
 }
 
 private extension Array {
     subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
+    }
+}
+
+// MARK: - Crossover disclosure
+
+extension CorrectionRoutingTests {
+
+    func testCrossoverDisclosureStatesBothConsequences() {
+        // The user is choosing whether to bypass a filter that may be
+        // protecting a driver. Both consequences have to be on the screen: the
+        // hardware risk, and that the correction will not match once the
+        // crossover comes back.
+        let highPass = CrossoverDisclosure(outputIndex: 1,
+                                           description: "8th-order high-pass at 2.0 kHz",
+                                           isHighPass: true,
+                                           cornerHz: 2000)
+        let consequences = highPass.bypassConsequences(sweepStartHz: 20)
+        XCTAssertEqual(consequences.count, 2)
+        XCTAssertTrue(consequences[0].contains("20 Hz"), consequences[0])
+        XCTAssertTrue(consequences[0].lowercased().contains("no high-pass protection"),
+                      consequences[0])
+        XCTAssertTrue(consequences[1].lowercased().contains("differ"), consequences[1])
+    }
+
+    func testLowPassDisclosureOmitsTheProtectionWarning() {
+        // A low-pass does not protect a driver from a sweep, so claiming it
+        // does would be crying wolf.
+        let lowPass = CrossoverDisclosure(outputIndex: 8,
+                                          description: "4th-order low-pass at 80 Hz",
+                                          isHighPass: false,
+                                          cornerHz: 80)
+        let consequences = lowPass.bypassConsequences(sweepStartHz: 20)
+        XCTAssertEqual(consequences.count, 1)
+        XCTAssertTrue(consequences[0].lowercased().contains("differ"))
     }
 }

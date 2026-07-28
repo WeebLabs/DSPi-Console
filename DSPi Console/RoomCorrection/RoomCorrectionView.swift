@@ -127,7 +127,7 @@ final class RoomCorrectionModel: ObservableObject {
     // finding a path that excites it alone, and the filters belong on that
     // output. Splitting them into independent pickers would let a user ask for
     // combinations that cannot exist.
-    @Published var domain: MeasurementDomain = .inputs
+    @Published var mode: MeasurementMode = .inputChannels
     @Published var selectedTargets: Set<Int> = []
     @Published var targetRoles: [Int: RoomCorrectionCore.SpeakerRole] = [:]
 
@@ -143,16 +143,16 @@ final class RoomCorrectionModel: ObservableObject {
     init(vm: DSPViewModel, catalog: AudioDeviceCatalog = AudioDeviceCatalog()) {
         self.vm = vm
         self.deviceCatalog = catalog
-        domain = routing.suggestedDomain()
+        mode = routing.suggestedMode()
         // Default to everything measurable: the common case is "correct what I
         // have", and unticking is easier than hunting for what is usable.
-        selectedTargets = Set(routing.plan(for: domain).targets.map(\.index))
+        selectedTargets = Set(routing.plan(for: mode).targets.map(\.index))
     }
 
-    /// Re-pick targets when the domain changes: indices mean different things
-    /// in each domain, so carrying a selection across would silently select
+    /// Re-pick targets when the mode changes: indices mean different things
+    /// in each mode, so carrying a selection across would silently select
     /// the wrong channels.
-    func domainChanged() {
+    func modeChanged() {
         selectedTargets = Set(plan.targets.map(\.index))
     }
 
@@ -162,12 +162,12 @@ final class RoomCorrectionModel: ObservableObject {
 
     var isDeviceConnected: Bool { vm.selectedDevice != nil }
 
-    var plan: RoutingPlan { routing.plan(for: domain) }
+    var plan: RoutingPlan { routing.plan(for: mode) }
 
-    /// Name of a target in the current domain.
+    /// Name of a target in the current mode.
     var targetName: (Int) -> String {
         { [self] index in
-            domain == .inputs ? inputName(index) : speakerName(index)
+            mode == .inputChannels ? inputName(index) : speakerName(index)
         }
     }
 
@@ -242,7 +242,7 @@ final class RoomCorrectionModel: ObservableObject {
             reasons.append("The DSPi is not available as an audio output device.")
         }
         if selectedTargets.isEmpty {
-            reasons.append(domain == .inputs
+            reasons.append(mode == .inputChannels
                            ? "Select at least one input channel to measure."
                            : "Select at least one speaker to measure.")
         }
@@ -524,19 +524,18 @@ struct RoomCorrectionSetupView: View {
 
     private var targetSection: some View {
         let plan = model.plan
-        return formSection(model.domain == .inputs ? "INPUT CHANNELS TO MEASURE"
+        return formSection(model.mode == .inputChannels ? "INPUT CHANNELS TO MEASURE"
                                                    : "SPEAKERS TO MEASURE") {
-            Picker("", selection: Binding(
-                get: { model.domain },
-                set: { model.domain = $0; model.domainChanged() })) {
-                ForEach(MeasurementDomain.allCases, id: \.self) { domain in
-                    Text(domain.displayName).tag(domain)
+            Picker("", selection: $model.mode) {
+                ForEach(MeasurementMode.allCases, id: \.self) { option in
+                    Text(option.displayName).tag(option)
                 }
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 320)
+            .onChange(of: model.mode) { _, _ in model.modeChanged() }
 
-            Text(model.domain.summary)
+            Text(model.mode.summary)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -545,7 +544,7 @@ struct RoomCorrectionSetupView: View {
                 note("Connect a DSPi to choose what to measure.")
             }
 
-            let count = model.domain == .inputs
+            let count = model.mode == .inputChannels
                 ? model.vm.numMatrixInputs
                 : model.vm.numOutputChannels
 
@@ -579,12 +578,12 @@ struct RoomCorrectionSetupView: View {
 
                     // Mapping a correction to the wrong channel is a silent
                     // failure, and this is the cheap defence against it.
-                    if model.domain == .outputs {
+                    if model.mode == .outputChannels {
                         Button("Identify") { model.vm.identifyOutput(index) }
                             .disabled(disabled)
                     }
 
-                    if let target, model.domain == .inputs, target.excitedOutputs.count > 1 {
+                    if let target, model.mode == .inputChannels, target.excitedOutputs.count > 1 {
                         // Naming the drivers makes bass management visible
                         // rather than something the user has to infer.
                         Text("plays through "
@@ -608,7 +607,7 @@ struct RoomCorrectionSetupView: View {
             }
 
             note("Room correction replaces all ten PEQ bands on each "
-                 + (model.domain == .inputs ? "input" : "output")
+                 + (model.mode == .inputChannels ? "input" : "output")
                  + " it writes to. Crossovers are preserved, and the original bands are "
                  + "restored unless you apply the result.")
         }
