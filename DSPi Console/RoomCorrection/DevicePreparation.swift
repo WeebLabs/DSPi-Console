@@ -9,10 +9,50 @@ import Foundation
 /// a measurement of something other than what the user listens to.
 ///
 /// See `Documentation/room_correction_measurement_modes.md`.
+/// The device writes a measurement performs.
+///
+/// Narrow on purpose. Preparation reads freely from the view model, but every
+/// *write* goes through here, so a test can record the exact sequence of
+/// operations rather than inferring it from whatever state happened to change.
+/// That distinction matters: asserting on cached state proves the cache was
+/// updated, not that the right commands were issued, in the right order, and
+/// that no others were.
+@MainActor
+protocol MeasurementDeviceWriter: AnyObject {
+    func setMatrixRoute(input: Int, output: Int, enabled: Bool, gain: Float, invert: Bool)
+    func setBandBypass(channel: Int, band: Int, bypass: Bool)
+    func setCrossoverBandBypass(channel: Int, localBand: Int, bypass: Bool)
+    func setLoudnessEnabled(_ enabled: Bool)
+    func setLevellerEnabled(_ enabled: Bool)
+    func setPsybassEnabled(_ enabled: Bool)
+    func setCrossfeedEnabled(_ enabled: Bool)
+    func setUpmixerEnabled(_ enabled: Bool)
+    func setMasterEQBypassed(_ bypassed: Bool)
+}
+
+@MainActor
+extension DSPViewModel: MeasurementDeviceWriter {
+    func setBandBypass(channel: Int, band: Int, bypass: Bool) {
+        setBandBypass(ch: channel, band: band, bypass: bypass)
+    }
+    func setCrossoverBandBypass(channel: Int, localBand: Int, bypass: Bool) {
+        setCrossoverBandBypass(ch: channel, localBand: localBand, bypass: bypass)
+    }
+    func setLoudnessEnabled(_ enabled: Bool) { setLoudness(enabled) }
+    func setLevellerEnabled(_ enabled: Bool) { setLeveller(enabled) }
+    func setPsybassEnabled(_ enabled: Bool) { setPsybass(enabled) }
+    func setCrossfeedEnabled(_ enabled: Bool) { setCrossfeed(enabled) }
+    func setUpmixerEnabled(_ enabled: Bool) { setUpmixEnabled(enabled) }
+    func setMasterEQBypassed(_ bypassed: Bool) { setBypass(bypassed) }
+}
+
 @MainActor
 final class DSPiDevicePreparation: DevicePreparing {
 
     private let vm: DSPViewModel
+    /// Every write goes here. Defaults to the view model itself; tests supply a
+    /// recorder so the operation sequence can be asserted.
+    private let writer: MeasurementDeviceWriter
     private let journal: MeasurementStateJournal
 
     /// The state to put back. Held as well as journalled, so a normal restore
@@ -29,8 +69,11 @@ final class DSPiDevicePreparation: DevicePreparing {
     /// configuration. Small, but not zero.
     var settleSeconds: Double = 0.12
 
-    init(vm: DSPViewModel, journal: MeasurementStateJournal = MeasurementStateJournal()) {
+    init(vm: DSPViewModel,
+         journal: MeasurementStateJournal = MeasurementStateJournal(),
+         writer: MeasurementDeviceWriter? = nil) {
         self.vm = vm
+        self.writer = writer ?? vm
         self.journal = journal
     }
 
@@ -68,14 +111,14 @@ final class DSPiDevicePreparation: DevicePreparing {
         // Anything nonlinear, dynamic or channel-deriving makes a measurement
         // describe something other than the room. These hold for the whole
         // session in both modes.
-        if vm.loudnessEnabled { vm.setLoudness(false) }
-        if vm.levellerEnabled { vm.setLeveller(false) }
-        if vm.psybassEnabled { vm.setPsybass(false) }
-        if vm.crossfeedEnabled { vm.setCrossfeed(false) }
-        if vm.upmixEnabled { vm.setUpmixEnabled(false) }
+        if vm.loudnessEnabled { writer.setLoudnessEnabled(false) }
+        if vm.levellerEnabled { writer.setLevellerEnabled(false) }
+        if vm.psybassEnabled { writer.setPsybassEnabled(false) }
+        if vm.crossfeedEnabled { writer.setCrossfeedEnabled(false) }
+        if vm.upmixEnabled { writer.setUpmixerEnabled(false) }
         // Master EQ bypass is a global mute of the input banks; leaving it on
         // would flatten channels we are deliberately leaving alone.
-        if vm.bypass { vm.setBypass(false) }
+        if vm.bypass { writer.setMasterEQBypassed(false) }
 
         // Input mode flattens only the input banks being corrected, and leaves
         // everything downstream exactly as the user has it. Output mode does
@@ -101,22 +144,22 @@ final class DSPiDevicePreparation: DevicePreparing {
         restorePeqBanks(snapshot)
 
         if vm.loudnessEnabled != snapshot.loudnessEnabled {
-            vm.setLoudness(snapshot.loudnessEnabled)
+            writer.setLoudnessEnabled(snapshot.loudnessEnabled)
         }
         if vm.levellerEnabled != snapshot.levellerEnabled {
-            vm.setLeveller(snapshot.levellerEnabled)
+            writer.setLevellerEnabled(snapshot.levellerEnabled)
         }
         if vm.psybassEnabled != snapshot.psybassEnabled {
-            vm.setPsybass(snapshot.psybassEnabled)
+            writer.setPsybassEnabled(snapshot.psybassEnabled)
         }
         if vm.crossfeedEnabled != snapshot.crossfeedEnabled {
-            vm.setCrossfeed(snapshot.crossfeedEnabled)
+            writer.setCrossfeedEnabled(snapshot.crossfeedEnabled)
         }
         if vm.upmixEnabled != snapshot.upmixEnabled {
-            vm.setUpmixEnabled(snapshot.upmixEnabled)
+            writer.setUpmixerEnabled(snapshot.upmixEnabled)
         }
         if vm.bypass != snapshot.bypassMasterEQ {
-            vm.setBypass(snapshot.bypassMasterEQ)
+            writer.setMasterEQBypassed(snapshot.bypassMasterEQ)
         }
 
         try? await settle()
@@ -142,7 +185,7 @@ final class DSPiDevicePreparation: DevicePreparing {
         let outputCount = vm.numOutputChannels
         for output in 0..<outputCount where output < snapshot.matrixRouting[safe: path.driveInput]?.count ?? 0 {
             if snapshot.matrixRouting[path.driveInput][output] {
-                vm.setMatrixRoute(input: path.driveInput, output: output,
+                writer.setMatrixRoute(input: path.driveInput, output: output,
                                   enabled: false, gain: 0, invert: false)
             }
         }
@@ -153,7 +196,7 @@ final class DSPiDevicePreparation: DevicePreparing {
             guard input < snapshot.matrixRouting.count,
                   path.targetOutput < snapshot.matrixRouting[input].count else { continue }
             if snapshot.matrixRouting[input][path.targetOutput] {
-                vm.setMatrixRoute(input: input, output: path.targetOutput,
+                writer.setMatrixRoute(input: input, output: path.targetOutput,
                                   enabled: false, gain: 0, invert: false)
             }
         }
@@ -161,7 +204,7 @@ final class DSPiDevicePreparation: DevicePreparing {
         // Unity, non-inverted: a user's matrix trim would otherwise skew the
         // measurement, and an invert would not change magnitude but would make
         // the impulse polarity misleading in the diagnostics.
-        vm.setMatrixRoute(input: path.driveInput, output: path.targetOutput,
+        writer.setMatrixRoute(input: path.driveInput, output: path.targetOutput,
                           enabled: true, gain: 0, invert: false)
 
         // The driven input is synthetic, so whatever the user has on it is
@@ -207,14 +250,14 @@ final class DSPiDevicePreparation: DevicePreparing {
     private func setBankBypassed(_ bypassed: Bool, channel: Int) {
         guard let bands = vm.channelData[channel] else { return }
         for band in bands.indices where bands[band].type != .flat {
-            vm.setBandBypass(ch: channel, band: band, bypass: bypassed)
+            writer.setBandBypass(channel: channel, band: band, bypass: bypassed)
         }
     }
 
     private func restoreBank(_ snapshot: MeasurementStateSnapshot, channel: Int) {
         guard let saved = snapshot.peqBanks[channel] else { return }
         for (band, state) in saved.enumerated() where state.type != FilterType.flat.rawValue {
-            vm.setBandBypass(ch: channel, band: band, bypass: state.bypass)
+            writer.setBandBypass(channel: channel, band: band, bypass: state.bypass)
         }
     }
 
@@ -222,7 +265,7 @@ final class DSPiDevicePreparation: DevicePreparing {
         let channel = vm.eqChannel(forOutput: output)
         guard let bands = vm.xoverData[channel] else { return }
         for band in bands.indices where bands[band].type != .flat {
-            vm.setCrossoverBandBypass(ch: channel, localBand: band, bypass: bypassed)
+            writer.setCrossoverBandBypass(channel: channel, localBand: band, bypass: bypassed)
         }
     }
 
@@ -230,7 +273,7 @@ final class DSPiDevicePreparation: DevicePreparing {
         let channel = vm.eqChannel(forOutput: output)
         guard let saved = snapshot.crossoverBanks[channel] else { return }
         for (band, state) in saved.enumerated() where state.type != FilterType.flat.rawValue {
-            vm.setCrossoverBandBypass(ch: channel, localBand: band, bypass: state.bypass)
+            writer.setCrossoverBandBypass(channel: channel, localBand: band, bypass: state.bypass)
         }
     }
 
@@ -267,7 +310,7 @@ final class DSPiDevicePreparation: DevicePreparing {
         if vm.matrixRouting[input][output] != enabled
             || vm.matrixGain[input][output] != gain
             || vm.matrixInvert[input][output] != invert {
-            vm.setMatrixRoute(input: input, output: output,
+            writer.setMatrixRoute(input: input, output: output,
                               enabled: enabled, gain: gain, invert: invert)
         }
     }
