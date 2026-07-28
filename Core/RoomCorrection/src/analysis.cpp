@@ -124,14 +124,14 @@ std::vector<double> frequencyDependentWindowedResponse(const std::vector<double>
         // spectrum and look like real response detail.
         double realPart = 0.0;
         double imagPart = 0.0;
-        const double omega = 2.0 * M_PI * f / sampleRateHz;
+        const double omega = 2.0 * kPi * f / sampleRateHz;
         for (std::size_t n = 0; n < length; ++n) {
             const std::size_t index = start + n;
             const double distance =
                 std::fabs(static_cast<double>(index) - static_cast<double>(peakIndex));
             const double normalized = distance / static_cast<double>(halfLength);
             if (normalized >= 1.0) continue;
-            const double taper = 0.5 * (1.0 + std::cos(M_PI * normalized));
+            const double taper = 0.5 * (1.0 + std::cos(kPi * normalized));
             const double sample = impulse[index] * taper;
             const double phase = omega * static_cast<double>(index);
             realPart += sample * std::cos(phase);
@@ -185,7 +185,7 @@ std::vector<double> smoothFractionalOctave(const FrequencyGrid& grid,
         double weightSum = 0.0;
         for (std::ptrdiff_t j = first; j <= last; ++j) {
             const double offset = static_cast<double>(j - centre) / static_cast<double>(halfWidth);
-            const double weight = 0.5 * (1.0 + std::cos(M_PI * clampd(offset, -1.0, 1.0)));
+            const double weight = 0.5 * (1.0 + std::cos(kPi * clampd(offset, -1.0, 1.0)));
             sum += magnitudesDb[static_cast<std::size_t>(j)] * weight;
             weightSum += weight;
         }
@@ -224,7 +224,7 @@ std::vector<double> smoothVariable(const FrequencyGrid& grid,
         double weightSum = 0.0;
         for (std::ptrdiff_t j = first; j <= last; ++j) {
             const double offset = static_cast<double>(j - centre) / static_cast<double>(halfWidth);
-            const double weight = 0.5 * (1.0 + std::cos(M_PI * clampd(offset, -1.0, 1.0)));
+            const double weight = 0.5 * (1.0 + std::cos(kPi * clampd(offset, -1.0, 1.0)));
             sum += magnitudesDb[static_cast<std::size_t>(j)] * weight;
             weightSum += weight;
         }

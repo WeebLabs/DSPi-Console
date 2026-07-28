@@ -13,6 +13,7 @@
 
 #include "dspi_rc/fft.hpp"
 #include "dspi_rc/sweep.hpp"
+#include "dspi_rc/types.hpp"
 #include "testing.hpp"
 
 using namespace dspi_rc;
@@ -28,7 +29,7 @@ struct TestBiquad {
 
     static TestBiquad peaking(double fc, double q, double gainDb, double fs) {
         const double A = std::pow(10.0, gainDb / 40.0);
-        const double w = 2.0 * M_PI * fc / fs;
+        const double w = 2.0 * kPi * fc / fs;
         const double sn = std::sin(w), cs = std::cos(w);
         const double alpha = sn / (2.0 * q);
         const double a0 = 1 + alpha / A;
@@ -49,7 +50,7 @@ struct TestBiquad {
     }
 
     double magnitudeDbAt(double f, double fs) const {
-        const double w = 2.0 * M_PI * f / fs;
+        const double w = 2.0 * kPi * f / fs;
         const std::complex<double> z1c = std::polar(1.0, -w);
         const std::complex<double> z2c = z1c * z1c;
         return 20.0 * std::log10(std::abs((b0 + b1 * z1c + b2 * z2c) /
@@ -104,7 +105,7 @@ TEST_CASE(fft_matches_naive_dft) {
     std::vector<Complex> reference(n, Complex(0.0, 0.0));
     for (std::size_t k = 0; k < n; ++k) {
         for (std::size_t j = 0; j < n; ++j) {
-            const double angle = -2.0 * M_PI * static_cast<double>(k * j) / static_cast<double>(n);
+            const double angle = -2.0 * kPi * static_cast<double>(k * j) / static_cast<double>(n);
             reference[k] += input[j] * Complex(std::cos(angle), std::sin(angle));
         }
     }

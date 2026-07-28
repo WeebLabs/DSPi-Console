@@ -36,7 +36,7 @@ double gainAt(const FilterParams& p, double freqHz, double fs, Platform platform
 
 double phaseAt(const FilterParams& p, double freqHz, double fs, Platform platform) {
     const RealizedSection s = realize(p, fs, platform);
-    return std::arg(s.response(freqHz, fs)) * 180.0 / M_PI;
+    return std::arg(s.response(freqHz, fs)) * 180.0 / kPi;
 }
 
 // Below Fs/7.5 on RP2350 the SVF runs; above it the float biquad does.
@@ -225,7 +225,7 @@ namespace {
 
 double referenceRbjDb(FilterType type, double f, double fc, double q, double gainDb, double fs) {
     const double A = std::pow(10.0, gainDb / 40.0);
-    const double w = 2.0 * M_PI * fc / fs;
+    const double w = 2.0 * kPi * fc / fs;
     const double sn = std::sin(w);
     const double cs = std::cos(w);
     const double alpha = sn / (2.0 * q);
@@ -272,7 +272,7 @@ double referenceRbjDb(FilterType type, double f, double fc, double q, double gai
             return 0.0;
     }
 
-    const double wf = 2.0 * M_PI * f / fs;
+    const double wf = 2.0 * kPi * f / fs;
     const std::complex<double> z1 = std::polar(1.0, -wf);
     const std::complex<double> z2 = z1 * z1;
     return 20.0 * std::log10(std::abs((b0 + b1 * z1 + b2 * z2) /

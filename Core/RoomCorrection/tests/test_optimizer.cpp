@@ -58,7 +58,7 @@ void addReflection(const FrequencyGrid& grid, std::vector<double>& curve,
                    double delayMs, double amplitude) {
     for (std::size_t i = 0; i < grid.size(); ++i) {
         const std::complex<double> phasor =
-            std::polar(amplitude, -2.0 * M_PI * grid.hz[i] * delayMs / 1000.0);
+            std::polar(amplitude, -2.0 * kPi * grid.hz[i] * delayMs / 1000.0);
         const double magnitude = std::abs(std::complex<double>(1.0, 0.0) + phasor);
         curve[i] += 20.0 * std::log10(std::max(1e-6, magnitude / (1.0 + amplitude)));
     }

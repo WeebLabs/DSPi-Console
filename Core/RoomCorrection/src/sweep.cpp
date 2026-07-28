@@ -5,6 +5,7 @@
 #include <string>
 
 #include "dspi_rc/fft.hpp"
+#include "dspi_rc/types.hpp"   // kPi
 
 namespace dspi_rc {
 namespace {
@@ -18,7 +19,7 @@ std::size_t secondsToSamples(double seconds, double sampleRateHz) {
 double raisedCosineRise(std::size_t index, std::size_t length) {
     if (length == 0) return 1.0;
     const double x = static_cast<double>(index) / static_cast<double>(length);
-    return 0.5 * (1.0 - std::cos(M_PI * std::min(1.0, x)));
+    return 0.5 * (1.0 - std::cos(kPi * std::min(1.0, x)));
 }
 
 }  // namespace
@@ -70,7 +71,7 @@ std::vector<double> generateSweep(const SweepSpec& spec) {
     // Farina exponential sweep:
     //   phi(t) = 2*pi*f1*T/ln(f2/f1) * (exp(t/T * ln(f2/f1)) - 1)
     // Instantaneous frequency is f1*(f2/f1)^(t/T), by construction.
-    const double k = 2.0 * M_PI * spec.startHz * T / logRatio;
+    const double k = 2.0 * kPi * spec.startHz * T / logRatio;
 
     const std::size_t fadeIn = secondsToSamples(spec.fadeInSeconds, spec.sampleRateHz);
     const std::size_t fadeOut = secondsToSamples(spec.fadeOutSeconds, spec.sampleRateHz);

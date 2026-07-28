@@ -1,6 +1,7 @@
 #include "dspi_rc/capi.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>

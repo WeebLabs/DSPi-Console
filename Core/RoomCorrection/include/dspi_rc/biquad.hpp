@@ -3,7 +3,7 @@
 // This is not "a biquad library".  It reproduces what the connected hardware
 // will actually run, including the parts that are inconvenient:
 //
-//   * the truncated pi literal the firmware uses (3.1415926535f, not M_PI);
+//   * the truncated pi literal the firmware uses (3.1415926535f, not kPi);
 //   * single-precision coefficient design, because the firmware designs in
 //     float and a double design diverges first exactly where high-Q
 //     low-frequency filters live;
@@ -24,7 +24,7 @@
 
 namespace dspi_rc {
 
-// The firmware's pi literal.  Deliberately not M_PI: matching the constant
+// The firmware's pi literal.  Deliberately not kPi: matching the constant
 // matters more than being correct to more digits, because the goal is to
 // predict the firmware rather than to be a better implementation of it.
 inline constexpr float kFirmwarePi = 3.1415926535f;

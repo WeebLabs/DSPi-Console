@@ -5,11 +5,25 @@
 // library only, so the same sources build on macOS today and Windows later.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace dspi_rc {
+
+// Pi, owned rather than borrowed.
+//
+// `M_PI` is a POSIX extension, not standard C++.  glibc hides it under strict
+// ISO mode - which is exactly what `CMAKE_CXX_EXTENSIONS OFF` selects - and
+// MSVC only exposes it behind `_USE_MATH_DEFINES`.  libc++ happens to define
+// it unconditionally, which is why this built on macOS and nowhere else.
+// Defining it here removes the platform dance entirely.
+//
+// Distinct from `kFirmwarePi` in biquad.hpp, which is deliberately the
+// firmware's truncated literal: that one exists to reproduce the device, this
+// one to be correct.
+inline constexpr double kPi = 3.14159265358979323846;
 
 // ---------------------------------------------------------------------------
 // Filter types

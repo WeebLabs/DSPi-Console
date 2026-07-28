@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <cmath>
 
+// For kPi.  fft.hpp stays free of the core value types so it can be lifted
+// out on its own, but the implementation may use them.
+#include "dspi_rc/types.hpp"
+
 namespace dspi_rc {
 
 std::size_t nextPowerOfTwo(std::size_t n) {
@@ -27,7 +31,7 @@ void fftInPlace(std::vector<Complex>& data, bool inverse) {
 
     const double sign = inverse ? 1.0 : -1.0;
     for (std::size_t len = 2; len <= n; len <<= 1) {
-        const double theta = sign * 2.0 * M_PI / static_cast<double>(len);
+        const double theta = sign * 2.0 * kPi / static_cast<double>(len);
         const Complex step(std::cos(theta), std::sin(theta));
         for (std::size_t i = 0; i < n; i += len) {
             Complex w(1.0, 0.0);

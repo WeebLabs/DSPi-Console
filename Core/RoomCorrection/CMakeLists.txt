@@ -31,8 +31,6 @@ target_include_directories(dspi_rc PUBLIC
 
 if(MSVC)
     target_compile_options(dspi_rc PRIVATE /W4 /permissive-)
-    # M_PI is not defined by default in the MSVC headers.
-    target_compile_definitions(dspi_rc PUBLIC _USE_MATH_DEFINES)
 else()
     target_compile_options(dspi_rc PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -56,7 +54,6 @@ target_include_directories(dspi_rc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tes
 
 if(MSVC)
     target_compile_options(dspi_rc_tests PRIVATE /W4)
-    target_compile_definitions(dspi_rc_tests PRIVATE _USE_MATH_DEFINES)
 else()
     target_compile_options(dspi_rc_tests PRIVATE -Wall -Wextra)
 endif()
@@ -74,7 +71,6 @@ add_executable(dspi_rc_cli tools/cli.cpp)
 target_link_libraries(dspi_rc_cli PRIVATE dspi_rc)
 if(MSVC)
     target_compile_options(dspi_rc_cli PRIVATE /W4)
-    target_compile_definitions(dspi_rc_cli PRIVATE _USE_MATH_DEFINES)
 else()
     target_compile_options(dspi_rc_cli PRIVATE -Wall -Wextra)
 endif()

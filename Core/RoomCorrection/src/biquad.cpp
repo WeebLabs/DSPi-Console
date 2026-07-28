@@ -10,7 +10,7 @@ namespace {
 // For z = e^{jw} this is exactly j*tan(w/2), which is why the SVF's prewarped
 // g composes with it so cleanly.
 std::complex<double> bilinearU(double freqHz, double sampleRateHz) {
-    const double w = 2.0 * M_PI * freqHz / sampleRateHz;
+    const double w = 2.0 * kPi * freqHz / sampleRateHz;
     return std::complex<double>(0.0, std::tan(w / 2.0));
 }
 
@@ -69,7 +69,7 @@ std::complex<double> RealizedSection::response(double freqHz, double sampleRateH
             return std::complex<double>(1.0, 0.0);
 
         case Kind::Biquad: {
-            const double w = 2.0 * M_PI * freqHz / sampleRateHz;
+            const double w = 2.0 * kPi * freqHz / sampleRateHz;
             const std::complex<double> z1 = std::polar(1.0, -w);
             const std::complex<double> z2 = z1 * z1;
             const std::complex<double> num = b0 + b1 * z1 + b2 * z2;
@@ -359,7 +359,7 @@ ResponseCache ResponseCache::forGrid(const FrequencyGrid& grid, double sampleRat
     cache.cos2W.resize(n); cache.sin2W.resize(n);
     cache.tanHalfW.resize(n);
     for (std::size_t i = 0; i < n; ++i) {
-        const double w = 2.0 * M_PI * grid.hz[i] / sampleRateHz;
+        const double w = 2.0 * kPi * grid.hz[i] / sampleRateHz;
         cache.cosW[i] = std::cos(w);
         cache.sinW[i] = std::sin(w);
         cache.cos2W[i] = std::cos(2.0 * w);
@@ -462,7 +462,7 @@ std::vector<double> phaseDegrees(const std::vector<RealizedSection>& sections,
         for (const RealizedSection& s : sections) {
             h *= s.response(f, sampleRateHz);
         }
-        double phase = std::arg(h) * 180.0 / M_PI;
+        double phase = std::arg(h) * 180.0 / kPi;
         // Unwrap as we go so diagnostics get a continuous curve.
         double candidate = phase + offset;
         while (candidate - previous > 180.0) { offset -= 360.0; candidate -= 360.0; }

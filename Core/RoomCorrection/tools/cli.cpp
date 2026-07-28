@@ -25,6 +25,9 @@
 
 namespace {
 
+// Local copy: this tool deliberately includes only the C ABI, which does
+// not expose the core's constants.
+constexpr double kPi = 3.14159265358979323846;
 constexpr double kMinHz = 20.0;
 constexpr double kMaxHz = 20000.0;
 constexpr int kPointsPerOctave = 24;
@@ -62,7 +65,7 @@ void addRolloff(const std::vector<double>& hz, std::vector<double>& curve,
 void addReflection(const std::vector<double>& hz, std::vector<double>& curve,
                    double delayMs, double amplitude) {
     for (size_t i = 0; i < curve.size(); ++i) {
-        const double phase = -2.0 * M_PI * hz[i] * delayMs / 1000.0;
+        const double phase = -2.0 * kPi * hz[i] * delayMs / 1000.0;
         const double real = 1.0 + amplitude * std::cos(phase);
         const double imag = amplitude * std::sin(phase);
         const double magnitude = std::sqrt(real * real + imag * imag);
