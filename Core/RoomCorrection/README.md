@@ -42,7 +42,7 @@ is a symlink into `build/` so clangd resolves headers.
 | deconvolution and IR windowing | done |
 | calibration parsing | done |
 | smoothing and spatial statistics | done |
-| target construction | pending |
+| target construction | done |
 | constrained PEQ optimizer | pending |
 | C ABI and CLI harness | pending |
 
