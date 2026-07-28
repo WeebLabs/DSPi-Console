@@ -16,6 +16,8 @@ endif()
 add_library(dspi_rc STATIC
     src/types.cpp
     src/biquad.cpp
+    src/fft.cpp
+    src/sweep.cpp
 )
 
 target_include_directories(dspi_rc PUBLIC
@@ -38,6 +40,7 @@ enable_testing()
 add_executable(dspi_rc_tests
     tests/test_main.cpp
     tests/test_biquad.cpp
+    tests/test_sweep.cpp
 )
 target_link_libraries(dspi_rc_tests PRIVATE dspi_rc)
 target_include_directories(dspi_rc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)

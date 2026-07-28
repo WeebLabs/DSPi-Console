@@ -37,9 +37,9 @@ is a symlink into `build/` so clangd resolves headers.
 |---|---|
 | `types` - filter params, platform, frequency grid | done |
 | `biquad` - faithful DSPi filter model | done |
-| sweep synthesis and inverse filter | pending |
-| FFT abstraction | pending |
-| deconvolution and IR windowing | pending |
+| sweep synthesis and inverse filter | done |
+| FFT abstraction | done |
+| deconvolution and IR windowing | done |
 | calibration parsing | pending |
 | smoothing and spatial statistics | pending |
 | target construction | pending |
@@ -65,6 +65,21 @@ look like mistakes in isolation:
 Predicting anything less faithfully means the optimizer converges on a
 response the hardware does not produce. Reference: firmware
 `dsp_pipeline.c:96-318` on `release/v1.1.5` (`9776c2f`).
+
+## Two findings worth not rediscovering
+
+**The deconvolved impulse is symmetric, not causal.** The inverse filter
+compensates the sweep's phase, so energy sits on both sides of the peak. A
+pre-peak window that is too short attenuates the low end, and the result looks
+like a genuine rolloff rather than an artifact: truncating at 5 ms costs about
+1.2 dB at 50 Hz. Use `recommendedPreWindowSeconds` rather than a constant.
+
+**High-Q resonances need more pre-window than the skirt alone suggests.** A
+resonance rings for roughly `Q/(pi*f)` seconds, and convolved with the
+symmetric skirt that energy spreads before the peak too. Measured against a
+Q=8 notch at 80 Hz, a two-cycle window recovers it 0.8 dB *too deep*, which
+would make the optimizer over-correct a room mode. Four cycles brings the
+error under 0.1 dB and is the default. Both effects are pinned by tests.
 
 **Sample rate and platform are always parameters.** Never assume 48 kHz, and
 never assume an RP2350 result transfers to RP2040. Section 4.2 of the spec
