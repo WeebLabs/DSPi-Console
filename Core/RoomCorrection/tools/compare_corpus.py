@@ -4,32 +4,34 @@
 Why this is not `diff`
 ----------------------
 
-The first cross-platform CI run compared the corpus output byte for byte and
-failed: macOS arm64, Linux x64 and Windows x64 each produced slightly different
-numbers.  The differences were tiny - 0.176 versus 0.178 dB RMSE, three
-thousandths of a dB on a filter gain - but real.
+The first cross-platform CI run compared byte for byte and failed. macOS arm64,
+Linux x64 and Windows x64 each produced slightly different numbers.
 
 The cause is that C's transcendental functions are not required to be correctly
-rounded.  `log`, `exp`, `sin`, `tan` and `pow` differ in the last unit in the
-last place between glibc, Apple's libm and the MSVC runtime.  The optimizer is a
-search, so a one-ulp difference early can send it down a marginally different
-path, and the divergence surfaces at the third decimal place of the result.
+rounded: `log`, `exp`, `sin`, `tan` and `pow` differ in the last unit in the
+last place between glibc, Apple's libm and the MSVC runtime. The optimizer is a
+search, so a one-ulp difference early sends it down a marginally different path.
 
-Making the core bit-identical everywhere would mean shipping our own
-transcendental functions.  That is a large amount of work and slower code, in
-exchange for agreement in a decimal place far below anything audible,
-measurable in a room, or representable on the wire.
+The divergence is not uniform, and that turns out to matter:
 
-So the honest contract is:
+  * The *quality* metrics agree almost exactly - relRMSE 4.017 against 4.017,
+    0.379 against 0.379. The correction is as good on every platform.
+  * The values that merely identify *which* equivalent solution was found -
+    trim, maximum and minimum correction - differ by up to about 0.08 dB,
+    because the search settled on a slightly different filter set that does the
+    same job.
+
+So a single tolerance would be either too loose to catch a real regression in
+quality or too tight to accept a harmless difference in solution. The tolerances
+below are therefore per-field, tightest on the things that constitute the
+promise and on the safety gates, loosest on the incidentals.
+
+The honest contract is:
 
   * within one platform and build, the result is exactly reproducible - that is
-    what a saved project relies on, and it is enforced by the unit tests;
-  * across platforms, results agree within a tolerance far tighter than any
-    meaningful difference.
-
-This script checks the second.  It compares structure exactly, so a genuine
-algorithmic divergence - a different band count, a failed gate, a different
-scenario - still fails loudly.  Only the numbers get tolerance.
+    what a saved project relies on, and the unit tests enforce it;
+  * across platforms, quality and safety agree to within a tolerance far below
+    anything audible, and the particular filter set may differ.
 """
 
 from __future__ import annotations
@@ -37,36 +39,81 @@ from __future__ import annotations
 import re
 import sys
 
-# Absolute floor, plus a relative term so large values (frequencies, percentages)
-# are not held to an unreasonably tight absolute bound.  0.05 dB is roughly an
-# order of magnitude below audibility and two below measurement error in a room.
-ABSOLUTE_TOLERANCE = 0.05
-RELATIVE_TOLERANCE = 0.005
+# Per-field absolute tolerances, in the units the field is printed in.
+#
+# Anything not listed falls back to DEFAULT_TOLERANCE. Counts must match
+# exactly: a different number of bands or shelves is a real difference in what
+# the optimizer decided, not a rounding artifact.
+TOLERANCES = {
+    # The quality claim. These are what "the correction is as good" means.
+    "rawRMSE": 0.05,
+    "relRMSE": 0.05,
+    "relMed": 0.05,
+    "p95over": 0.05,
+    # Safety gates. A platform that boosts where another does not is a bug,
+    # not noise, so these stay tight.
+    "dispBoost": 0.05,
+    "outBoost": 0.05,
+    "boostQ": 0.05,
+    # Which of several equivalent solutions the search happened to find.
+    "maxCorr": 0.25,
+    "minCorr": 0.25,
+    # Counts: exact.
+    "bands": 0.0,
+    "shelves": 0.0,
+    "positions": 0.0,
+}
+
+DEFAULT_TOLERANCE = 0.25
+
+# Numbers in the scenario header line, which is prose rather than key=value.
+HEADER_TOLERANCES = {
+    "transition": 1.0,     # Hz; a grid bin is wider than this
+    "trim": 0.25,          # dB; follows the chosen solution
+    "improvement": 1.0,    # percent
+}
 
 NUMBER = re.compile(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?")
+FIELD = re.compile(r"(\w+)=\s*([-+]?\d+\.?\d*)")
+HEADER_FIELD = re.compile(r"(transition|trim|improvement)\s+([-+]?\d+\.?\d*)")
 
 
 def skeleton(line: str) -> str:
-    """The line with every number replaced, so structure can be compared exactly."""
-    return NUMBER.sub("#", line)
+    """Line structure with numbers removed, for an exact comparison.
+
+    Whitespace is collapsed because printf field widths shift by one column
+    when a value gains a minus sign: `maxCorr=  0.000` against
+    `maxCorr= -0.000` is the same structure, and reporting it as a structural
+    difference would bury the real ones.
+    """
+    return " ".join(NUMBER.sub("#", line).split())
 
 
-def numbers(line: str) -> list[float]:
-    return [float(match.group()) for match in NUMBER.finditer(line)]
+def tolerance_for(name: str | None, value: float, header: bool) -> float:
+    table = HEADER_TOLERANCES if header else TOLERANCES
+    if name is not None and name in table:
+        return table[name]
+    return DEFAULT_TOLERANCE
 
 
-def tolerance_for(value: float) -> float:
-    return max(ABSOLUTE_TOLERANCE, RELATIVE_TOLERANCE * abs(value))
+def named_values(line: str) -> list[tuple[str | None, float]]:
+    """Numbers with their field name where the line has one."""
+    header = "positions," in line or "improvement" in line
+    pattern = HEADER_FIELD if header else FIELD
+    named = {match.group(2): match.group(1) for match in pattern.finditer(line)}
+    return [(named.get(match.group()), float(match.group()))
+            for match in NUMBER.finditer(line)]
 
 
 def compare(reference_path: str, other_path: str) -> list[str]:
-    with open(reference_path, encoding="utf-8") as handle:
-        # Windows writes CRLF; strip it rather than reporting every line as
-        # different for a reason that has nothing to do with the maths.
-        reference = [line.rstrip("\r\n") for line in handle]
-    with open(other_path, encoding="utf-8") as handle:
-        other = [line.rstrip("\r\n") for line in handle]
+    def read(path: str) -> list[str]:
+        with open(path, encoding="utf-8") as handle:
+            # Windows writes CRLF; strip it rather than reporting every line as
+            # different for a reason unrelated to the maths.
+            return [line.rstrip("\r\n") for line in handle]
 
+    reference = read(reference_path)
+    other = read(other_path)
     problems: list[str] = []
 
     if len(reference) != len(other):
@@ -83,11 +130,16 @@ def compare(reference_path: str, other_path: str) -> list[str]:
             )
             continue
 
-        for position, (a, b) in enumerate(zip(numbers(left), numbers(right))):
-            if abs(a - b) > tolerance_for(a):
+        header = "improvement" in left
+        for position, (a, b) in enumerate(zip(named_values(left), named_values(right))):
+            name, left_value = a
+            _, right_value = b
+            allowed = tolerance_for(name, left_value, header)
+            if abs(left_value - right_value) > allowed:
+                label = name or f"value {position + 1}"
                 problems.append(
-                    f"line {index}, value {position + 1}: {a} vs {b} "
-                    f"(tolerance {tolerance_for(a):.4f})\n  {reference_path}: {left}\n"
+                    f"line {index}, {label}: {left_value} vs {right_value} "
+                    f"(tolerance {allowed})\n  {reference_path}: {left}\n"
                     f"  {other_path}: {right}"
                 )
 
