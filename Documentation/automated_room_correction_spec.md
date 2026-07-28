@@ -781,10 +781,25 @@ Exit: the harness reports neutral metrics, a fair spatial-versus-hygiene ablatio
 
 ### Milestone 1 - portable core
 
-- Remove Console's 0.1 dB host gain rounding, preserve gain precision through project/core/write paths, and add float32-versus-legacy-grid golden tests before further optimizer tuning.
-- C++ project model, calibration parser, FFT/deconvolution, smoothing, statistics, target generator, exact DSPi biquads, optimizer, C ABI, and CLI.
+**Status: complete on macOS, pending first CI run for Windows.**
 
-Exit: all core golden tests pass on macOS and Windows CI.
+- Remove Console's 0.1 dB host gain rounding, preserve gain precision through project/core/write paths, and add float32-versus-legacy-grid golden tests before further optimizer tuning. **Done.**
+- C++ project model, calibration parser, FFT/deconvolution, smoothing, statistics, target generator, exact DSPi biquads, optimizer, C ABI, and CLI. **Done** (`Core/RoomCorrection`, 133 unit cases plus the acceptance corpus, no dependencies, clean under `-Wall -Wextra -Wpedantic`).
+
+Exit: all core golden tests pass on macOS and Windows CI. **Partially met.** The suite and the corpus pass locally on macOS arm64, and `.github/workflows/ci.yml` builds and tests on macOS arm64, macOS x86_64, Windows x64 and Linux x64 then diffs the corpus output across all four. That workflow has not yet run, so the Windows half of the exit criterion is authored but unverified; treat it as open until a push proves it.
+
+Findings recorded during the milestone, each caught by a failing test or the corpus rather than by review:
+
+- The deconvolved impulse is symmetric, not causal, so a short pre-peak window attenuates the low end and looks like a genuine rolloff (1.2 dB at 50 Hz when cut at 5 ms).
+- High-Q resonances need more pre-window than the band-limited skirt implies, because ringing spreads before the peak once convolved with it. A two-cycle window reads a Q=8 notch at 80 Hz 0.8 dB *too deep*, which would make the optimizer over-correct a room mode. Four cycles is the default.
+- Sign agreement inverted where the response already met target: with nothing to dispute, a naive count marks a correct region maximally unreliable and de-weights it, licensing overshoot. Now deadbanded.
+- MAD cannot detect a single outlier position by construction, so reliability must not be built on spread alone.
+- Auto level was inverted. Correction is target minus measured, so a target at the upper envelope demands boost everywhere and a cut-only fit came out worse than no correction.
+- Absolute level was coupled into the error metric, so the optimizer fought its own trim and variant comparisons measured trim rather than tonal accuracy. Both objective and metrics now remove a single shared offset.
+- Soft penalties were outbid twice: once by boost outside the native band and in disputed regions, now enforced deterministically by the trim; once by boost filter Q reaching 2.25 against a ceiling of 2, now enforced structurally when the parameter vector is decoded.
+- The optimizer's dominant cost was recomputing per-frequency trigonometry per section per evaluation. Caching it cut the suite from 3:15 to 47 s, and a test pins the cached path against the reference to 1e-9 so it cannot drift silently.
+
+The production optimizer is an in-tree deterministic coordinate-descent minimizer rather than NLopt. It satisfies every corpus gate, so the NLopt/SLSQP decision in section 7.4 stays open rather than settled: revisit it only if a real-room corpus shows the in-tree minimizer falling short, since adding a dependency should be paid for by evidence.
 
 ### Milestone 2 - macOS measurement
 
