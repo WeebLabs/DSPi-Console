@@ -21,7 +21,11 @@ final class RoomCorrectionRenderTests: XCTestCase {
     /// alone and failed in a full run - the kind of interaction that is
     /// miserable to track down later.
     private static let sharedModel: (vm: DSPViewModel, catalog: AudioDeviceCatalog) = {
-        (DSPViewModel(), AudioDeviceCatalog(startListening: false))
+        // On its own USBDevice, not AppState.shared.usb. A view model bound to
+        // the shared device receives connect callbacks and issues a full
+        // parameter fetch - hundreds of control transfers on the same serial
+        // queue the live-device tests use.
+        (DSPViewModel(usb: USBDevice()), AudioDeviceCatalog(startListening: false))
     }()
 
     private func makeModel() -> RoomCorrectionModel {
