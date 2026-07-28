@@ -41,7 +41,7 @@ is a symlink into `build/` so clangd resolves headers.
 | FFT abstraction | done |
 | deconvolution and IR windowing | done |
 | calibration parsing | done |
-| smoothing and spatial statistics | pending |
+| smoothing and spatial statistics | done |
 | target construction | pending |
 | constrained PEQ optimizer | pending |
 | C ABI and CLI harness | pending |

@@ -19,6 +19,7 @@ add_library(dspi_rc STATIC
     src/fft.cpp
     src/sweep.cpp
     src/calibration.cpp
+    src/analysis.cpp
 )
 
 target_include_directories(dspi_rc PUBLIC
@@ -43,6 +44,7 @@ add_executable(dspi_rc_tests
     tests/test_biquad.cpp
     tests/test_sweep.cpp
     tests/test_calibration.cpp
+    tests/test_analysis.cpp
 )
 target_link_libraries(dspi_rc_tests PRIVATE dspi_rc)
 target_include_directories(dspi_rc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
