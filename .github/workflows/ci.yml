@@ -19,11 +19,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # No Intel macOS runner: GitHub is retiring them and jobs targeting
+        # macos-13 now sit queued indefinitely, which blocks the determinism
+        # comparison rather than failing it. x86_64 coverage comes from the
+        # Linux and Windows runners, which are both x86_64 and use different
+        # compilers again, so nothing is actually lost.
         include:
           - name: macos-arm64
             os: macos-14
-          - name: macos-x86_64
-            os: macos-13
           - name: windows-x64
             os: windows-2022
           - name: linux-x64
@@ -96,18 +99,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The project's DerivedData objects are compiled by a specific Xcode and
-      # linking with an older one fails, so the toolchain is pinned rather than
-      # left to the runner default.
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app || xcode-select -p
+      - name: Show available Xcode
+        run: xcodebuild -version
 
+      # No `continue-on-error` and no `xcpretty`.
+      #
+      # The first version of this job had both, and reported success in eight
+      # seconds - long enough to check out the repository and nothing else.
+      # xcpretty is not installed on the runners, so the pipeline failed
+      # immediately and `continue-on-error` painted it green. A check that
+      # always passes is worse than no check, because it is trusted.
+      #
+      # If the runner's Xcode cannot build this project, that should be a red
+      # build with a readable reason, not a silent pass.
       - name: Build and test
         run: |
+          set -o pipefail
           xcodebuild test \
             -project "DSPi Console.xcodeproj" \
             -scheme "DSPi Console" \
             -destination 'platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            | xcpretty || exit 1
-        continue-on-error: true
+            CODE_SIGNING_ALLOWED=NO
