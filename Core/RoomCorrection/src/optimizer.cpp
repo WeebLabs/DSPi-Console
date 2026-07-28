@@ -77,7 +77,22 @@ std::vector<double> encode(const FilterBank& bank) {
     return x;
 }
 
-FilterBank decode(const std::vector<double>& x, const std::vector<Slot>& slots) {
+// Q is bounded differently depending on the sign of the gain, which a box
+// constraint on the parameter vector cannot express: the same coordinate may
+// go to 10 as a cut and only to 2 as a boost.  Enforcing it structurally here,
+// rather than leaving it to the sharpness penalty, is the difference between a
+// limit and a suggestion - the CLI corpus caught the soft version being outbid
+// and producing boost filters at Q 2.25 against a stated ceiling of 2.
+void applyQLimits(FilterParams& p, double transitionHz, const FitConfig& config) {
+    double limit = cutQLimit(p.freq, transitionHz, config);
+    if (p.gainDb > 0.0) limit = std::min(limit, config.maxBoostQ);
+    limit = std::min(limit, static_cast<double>(FirmwareLimits::maxQ));
+    if (static_cast<double>(p.q) > limit) p.q = static_cast<float>(limit);
+    if (static_cast<double>(p.q) < config.minQ) p.q = static_cast<float>(config.minQ);
+}
+
+FilterBank decode(const std::vector<double>& x, const std::vector<Slot>& slots,
+                  double transitionHz, const FitConfig& config) {
     FilterBank bank;
     bank.reserve(slots.size());
     for (std::size_t i = 0; i < slots.size(); ++i) {
@@ -86,6 +101,7 @@ FilterBank decode(const std::vector<double>& x, const std::vector<Slot>& slots) 
         p.freq = static_cast<float>(std::pow(10.0, x[i * 3 + 0]));
         p.q = static_cast<float>(std::exp(x[i * 3 + 1]));
         p.gainDb = static_cast<float>(x[i * 3 + 2]);
+        applyQLimits(p, transitionHz, config);
         bank.push_back(p);
     }
     return bank;
@@ -167,7 +183,7 @@ public:
 
     double operator()(const std::vector<double>& x) const {
         ++evaluations_;
-        const FilterBank bank = decode(x, slots_);
+        const FilterBank bank = decode(x, slots_, problem_.statistics.transitionHz, config_);
         double trimDb = 0.0;
         return score(correctionScratch(bank, trimDb), bank);
     }
@@ -744,7 +760,7 @@ FitResult fitCorrection(const FitProblem& problem, const FitConfig& config) {
     // Quantize to the wire representation and re-optimize the gains only.  The
     // wire carries float32, so frequency and Q survive; gain is re-fitted
     // because rounding the others shifts the optimum slightly.
-    FilterBank quantized = decode(best, slots);
+    FilterBank quantized = decode(best, slots, problem.statistics.transitionHz, config);
     for (FilterParams& p : quantized) {
         p = clampToFirmware(p, problem.sampleRateHz);
     }
@@ -757,7 +773,7 @@ FitResult fitCorrection(const FitProblem& problem, const FitConfig& config) {
         lineSearch(objective, refined, index, bounds.lower[index], bounds.upper[index], 32);
     }
 
-    FilterBank finalBank = decode(refined, slots);
+    FilterBank finalBank = decode(refined, slots, problem.statistics.transitionHz, config);
     for (FilterParams& p : finalBank) p = clampToFirmware(p, problem.sampleRateHz);
 
     // Drop bands that ended up doing nothing, so the written bank is honest

@@ -24,7 +24,8 @@ Hard rules, enforced by review:
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-./build/dspi_rc_tests
+./build/dspi_rc_tests          # unit tests
+./build/dspi_rc_cli corpus -v  # acceptance corpus and safety gates
 ```
 
 `ctest --test-dir build` works too. The build sets
@@ -44,7 +45,7 @@ is a symlink into `build/` so clangd resolves headers.
 | smoothing and spatial statistics | done |
 | target construction | done |
 | constrained PEQ optimizer | done |
-| C ABI and CLI harness | pending |
+| C ABI and CLI harness | done |
 
 ## The filter model is a model of *this* hardware
 
@@ -85,6 +86,24 @@ error under 0.1 dB and is the default. Both effects are pinned by tests.
 never assume an RP2350 result transfers to RP2040. Section 4.2 of the spec
 explains why: the firmware designs coefficients at the live rate, and the two
 platforms run structurally different code.
+
+## The CLI is the cross-platform contract
+
+`dspi_rc_cli corpus` runs the synthetic acceptance corpus and prints neutral
+metrics plus pass/fail for each safety gate. CI runs it on macOS arm64, macOS
+x86_64, Windows x64 and Linux x64 and diffs the output: identical inputs must
+produce identical numbers, because a saved project promises the same
+recalculation everywhere.
+
+It deliberately goes through the C ABI rather than the C++ headers, so every
+invocation also exercises the boundary the application layer uses. A break in
+the ABI surfaces here rather than in Swift.
+
+It has already earned that: the first corpus run caught boost filters landing
+at Q 2.25 against a stated ceiling of 2, because the Q limit was a soft penalty
+the error term could outbid. Q limits are now structural, applied when the
+parameter vector is decoded, which a box constraint cannot express since the
+same coordinate may go to 10 as a cut and only to 2 as a boost.
 
 ## Testing convention
 

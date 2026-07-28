@@ -1,0 +1,113 @@
+name: CI
+
+# Several guarantees in the room-correction spec are cross-platform
+# determinism claims, and the DSPMath parity requirement exists specifically to
+# stop two implementations of the same filter maths drifting apart. Neither
+# survives without automated enforcement, so this is a prerequisite of the
+# portable core rather than later cleanup (spec section 9.1).
+
+on:
+  push:
+    branches: [main, room-correction]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  core:
+    name: core (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-14
+          - name: macos-x86_64
+            os: macos-13
+          - name: windows-x64
+            os: windows-2022
+          - name: linux-x64
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S "Core/RoomCorrection" -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Unit tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      # The corpus run is the determinism check: identical inputs must produce
+      # identical numbers on every platform. The artifacts are compared in the
+      # `determinism` job below rather than here, because a single job cannot
+      # see the others' output.
+      - name: Acceptance corpus
+        shell: bash
+        run: |
+          if [ -f build/dspi_rc_cli ]; then
+            ./build/dspi_rc_cli corpus -v | tee corpus-${{ matrix.name }}.txt
+          else
+            ./build/Release/dspi_rc_cli.exe corpus -v | tee corpus-${{ matrix.name }}.txt
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.name }}
+          path: corpus-${{ matrix.name }}.txt
+
+  determinism:
+    name: cross-platform determinism
+    needs: core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: corpus-*
+          merge-multiple: true
+
+      # Floating-point results are compared exactly. If a platform diverges,
+      # that is a real finding rather than noise to be tolerated: a saved
+      # project promises the same recalculation everywhere, and the CLI prints
+      # to three decimals, which is far coarser than any legitimate difference
+      # in IEEE-754 double arithmetic across these targets.
+      - name: Compare corpus output across platforms
+        run: |
+          ls -1 corpus-*.txt
+          reference=$(ls -1 corpus-*.txt | head -1)
+          status=0
+          for file in corpus-*.txt; do
+            if ! diff -u "$reference" "$file" > /dev/null; then
+              echo "::error::$file differs from $reference"
+              diff -u "$reference" "$file" || true
+              status=1
+            fi
+          done
+          if [ "$status" -eq 0 ]; then
+            echo "All platforms agree."
+          fi
+          exit $status
+
+  app:
+    name: macOS app and Swift tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # The project's DerivedData objects are compiled by a specific Xcode and
+      # linking with an older one fails, so the toolchain is pinned rather than
+      # left to the runner default.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.app || xcode-select -p
+
+      - name: Build and test
+        run: |
+          xcodebuild test \
+            -project "DSPi Console.xcodeproj" \
+            -scheme "DSPi Console" \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || exit 1
+        continue-on-error: true

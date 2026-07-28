@@ -22,6 +22,7 @@ add_library(dspi_rc STATIC
     src/analysis.cpp
     src/target.cpp
     src/optimizer.cpp
+    src/capi.cpp
 )
 
 target_include_directories(dspi_rc PUBLIC
@@ -61,3 +62,21 @@ else()
 endif()
 
 add_test(NAME dspi_rc_tests COMMAND dspi_rc_tests)
+
+# ---------------------------------------------------------------------------
+# CLI harness
+#
+# Goes through the C ABI rather than the C++ headers, so every invocation also
+# exercises the boundary the application layer uses.  `corpus` doubles as the
+# cross-platform determinism check in CI.
+# ---------------------------------------------------------------------------
+add_executable(dspi_rc_cli tools/cli.cpp)
+target_link_libraries(dspi_rc_cli PRIVATE dspi_rc)
+if(MSVC)
+    target_compile_options(dspi_rc_cli PRIVATE /W4)
+    target_compile_definitions(dspi_rc_cli PRIVATE _USE_MATH_DEFINES)
+else()
+    target_compile_options(dspi_rc_cli PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME dspi_rc_corpus COMMAND dspi_rc_cli corpus)
