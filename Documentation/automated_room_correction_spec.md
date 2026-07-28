@@ -623,13 +623,35 @@ libdspi_room_correction (portable C++17)
 - Plain value objects and spans/vectors at the C++ boundary.
 - Double precision for measurement, statistics, filter fitting, and response prediction.
 - Float conversion only at device/file boundaries.
-- Deterministic output for identical inputs and algorithm version.
+- Deterministic output for identical inputs and algorithm version **on a given platform and build**. Across platforms, results agree closely but not bit-exactly; see below.
 - Cancellation and progress callbacks accepted by long-running operations.
 - No audio-device access inside the core.
 - FFT behind an interface. A portable BSD-licensed implementation such as KissFFT is suitable; Accelerate may be used by a macOS adapter only if identical golden tests pass.
 - A standalone command-line harness must be able to load a saved project, recalculate filters, and emit metrics on macOS and Windows.
 
 Note that **the repository currently has no CI** (`.github/` contains only `FUNDING.yml`). Several of this specification's guarantees are cross-platform determinism claims, and the `DSPMath` parity requirement in section 4.2 exists specifically to stop two implementations of the same filter math from drifting apart. Neither survives without automated enforcement. Standing up CI that runs the pure-logic and core golden tests on macOS and Windows is a prerequisite of Milestone 1, not a later cleanup task.
+
+### 9.3 What cross-platform determinism actually means
+
+The first cross-platform CI run compared the acceptance corpus byte for byte and failed. This was a correction to the specification rather than a bug in the core, and the claim is restated here so it is not re-asserted later in the stronger form.
+
+C's transcendental functions are not required by the standard to be correctly rounded. `log`, `exp`, `sin`, `tan` and `pow` differ in the last unit in the last place between glibc, Apple's libm and the MSVC runtime. The optimizer is a search, so a one-ulp difference early sends it down a marginally different path, and the divergence surfaces in the result.
+
+Measured across macOS arm64, Linux x64 and Windows x64 on the same corpus, the divergence is **not uniform**, and the distinction matters:
+
+- The **quality metrics agree almost exactly**: reliability-weighted worst-position RMSE of 4.017 against 4.017, 0.379 against 0.379. The correction is as good on every platform.
+- The values that identify **which of several equivalent solutions** the search found - trim, maximum and minimum combined correction - differ by up to about 0.08 dB, because a slightly different filter set was chosen that does the same job.
+
+Making the core bit-identical everywhere would mean shipping our own transcendental functions: substantial work and slower code, bought with agreement in a decimal place far below anything audible, measurable in a room, or representable on the wire. That trade is not worth making.
+
+The contract is therefore:
+
+- **Within one platform and build, the result is exactly reproducible.** This is what a saved project relies on when it is reopened on the machine that produced it, and the unit tests enforce it.
+- **Across platforms, quality and safety agree within a tight tolerance, and the particular filter set may differ.** A user who measures on a Mac and recalculates on a PC gets an equally good correction, not an identical one.
+
+The CI gate reflects this with per-field tolerances rather than one number, because a single tolerance is either too loose to catch a real regression in quality or too tight to accept a harmless difference in solution: 0.05 dB on the quality metrics and on the safety gates, where a platform boosting when another does not would be a bug rather than noise; 0.25 dB on the incidentals; exact on counts, since a different number of bands is a real difference in what the optimizer decided. Structure is compared exactly, so a failed gate or a missing scenario still fails loudly.
+
+There is no Intel macOS runner. GitHub is retiring them and jobs targeting `macos-13` sit queued indefinitely, which would block the comparison rather than fail it. x86_64 coverage comes from the Linux and Windows runners, which are both x86_64 and use different compilers again.
 
 The existing `DSPi ConsoleTests` target already separates pure-logic tests that run anywhere from live-device tests that self-skip without hardware. The portable core's tests belong in the first tier and should follow the same convention.
 
@@ -750,7 +772,7 @@ On correctable synthetic and out-of-model responses:
 - no material boost in narrow, low-SNR, spatially disputed, or otherwise deliberately uncorrected regions;
 - raw worst-position error reported as a diagnostic, **not** used as a hard failure when its increase is the direct consequence of refusing to invert an unreliable local null;
 - RP2040 and RP2350 quantization, trim, predicted response, and all safety/quality gates evaluated independently from the same continuous solution; cross-platform recipe identity or response parity is not required;
-- convergence reproducible across macOS arm64/x86_64 and Windows x64.
+- convergence reproducible across macOS arm64, Windows x64 and Linux x64, **within the per-field tolerances described below** rather than bit-exactly.
 
 The required ablation is a 2×2 comparison: arithmetic-average versus spatial/reliability-aware fitting, each with and without ordinary EQ hygiene. Report benefit against uncorrected separately for every scenario; a corpus mean must not hide weak cancellation-dominated cases. The intended product claim must follow those neutral results. The closed Milestone 0 result supports “materially safer boost behavior, with an explicit accuracy tradeoff versus an aggressive average-curve fit and modest benefit on spatially unstable rooms”; it does not support the withdrawn “55% more accurate” claim.
 
@@ -781,12 +803,18 @@ Exit: the harness reports neutral metrics, a fair spatial-versus-hygiene ablatio
 
 ### Milestone 1 - portable core
 
-**Status: complete on macOS, pending first CI run for Windows.**
+**Status: complete. Verified on macOS arm64, Linux x64 and Windows x64 by CI.**
 
 - Remove Console's 0.1 dB host gain rounding, preserve gain precision through project/core/write paths, and add float32-versus-legacy-grid golden tests before further optimizer tuning. **Done.**
 - C++ project model, calibration parser, FFT/deconvolution, smoothing, statistics, target generator, exact DSPi biquads, optimizer, C ABI, and CLI. **Done** (`Core/RoomCorrection`, 133 unit cases plus the acceptance corpus, no dependencies, clean under `-Wall -Wextra -Wpedantic`).
 
-Exit: all core golden tests pass on macOS and Windows CI. **Partially met.** The suite and the corpus pass locally on macOS arm64, and `.github/workflows/ci.yml` builds and tests on macOS arm64, macOS x86_64, Windows x64 and Linux x64 then diffs the corpus output across all four. That workflow has not yet run, so the Windows half of the exit criterion is authored but unverified; treat it as open until a push proves it.
+Exit: all core golden tests pass on macOS and Windows CI. **Met.** The 133 core cases and the acceptance corpus pass on macOS arm64, Linux x64 and Windows x64, and the full Swift suite runs on macOS in CI as well.
+
+The first CI runs earned their place immediately, catching three things that local testing could not:
+
+- **Portability breaks that macOS hid.** `M_PI` is a POSIX extension rather than standard C++; glibc hides it under the strict ISO mode that `CMAKE_CXX_EXTENSIONS OFF` selects, and MSVC only exposes it behind `_USE_MATH_DEFINES`. libc++ defines it unconditionally, which is exactly why the core built locally and nowhere else. Three headers were also relying on transitive includes that happen to work on libc++ and are guaranteed nowhere.
+- **The determinism claim was too strong**, corrected in section 9.3.
+- **Two CI jobs that reported success without testing anything.** One targeted a runner that is being retired and sat queued rather than failing; the other piped through a tool that is not installed on the runners and had `continue-on-error` set, so it went green in eight seconds. A check that always passes is worse than no check, because it gets trusted. Removing the mask revealed the real problem, which was that the runner's Xcode could not open a project saved in a newer format.
 
 Findings recorded during the milestone, each caught by a failing test or the corpus rather than by review:
 
@@ -811,7 +839,7 @@ Exit: repeated real-device measurements agree with REW within the measurement to
 
 - Target editor with direct manipulation and numeric entry, free-form anchors, target import/export, channel grouping, calculation progress, the interactive graph and overlay manager, the editable and lockable filter table, project save/reopen, and text export.
 
-Exit: an offline saved project can be retargeted and deterministically recalculated.
+Exit: an offline saved project can be retargeted and deterministically recalculated on the platform that produced it, and recalculated to within the stated tolerances on any other.
 
 ### Milestone 4 - safe apply and verify
 

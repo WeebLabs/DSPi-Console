@@ -46,6 +46,7 @@ is a symlink into `build/` so clangd resolves headers.
 | target construction | done |
 | constrained PEQ optimizer | done |
 | C ABI and CLI harness | done |
+| cross-platform CI | done |
 
 ## The filter model is a model of *this* hardware
 
@@ -86,6 +87,22 @@ error under 0.1 dB and is the default. Both effects are pinned by tests.
 never assume an RP2350 result transfers to RP2040. Section 4.2 of the spec
 explains why: the firmware designs coefficients at the live rate, and the two
 platforms run structurally different code.
+
+## Determinism is per platform, not universal
+
+Within one platform and build the result is exactly reproducible, which is what
+a saved project relies on and what the unit tests enforce.
+
+Across platforms it is not, and cannot cheaply be. C's transcendental functions
+are not required to be correctly rounded, so `log`, `exp`, `sin`, `tan` and
+`pow` differ in the last ulp between glibc, Apple's libm and the MSVC runtime,
+and a search amplifies that. Measured on the corpus, the quality metrics agree
+almost exactly (relRMSE 4.017 against 4.017) while the values identifying which
+equivalent solution was found differ by up to about 0.08 dB.
+
+`tools/compare_corpus.py` encodes that: tight tolerances on quality and on the
+safety gates, loose on incidentals, exact on counts, structure compared exactly.
+See section 9.3 of the spec.
 
 ## The CLI is the cross-platform contract
 
