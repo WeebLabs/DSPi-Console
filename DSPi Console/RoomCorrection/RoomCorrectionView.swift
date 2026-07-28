@@ -147,16 +147,25 @@ final class RoomCorrectionModel: ObservableObject {
     /// Owns the level check, so its findings survive stepping away and back.
     let levelCheck: LevelCheckController
 
+    /// Owns the capture run, for the same reason: stepping back to Setup to
+    /// change something must not throw away the positions already measured.
+    let run: MeasurementRun
+
     /// `catalog` and `levelCheck` are injectable so tests can pass ones that
     /// touch no hardware: every live catalog installs a CoreAudio listener, and
     /// a test that creates several leaves them running.
     init(vm: DSPViewModel,
          catalog: AudioDeviceCatalog = AudioDeviceCatalog(),
-         levelCheck: LevelCheckController? = nil) {
+         levelCheck: LevelCheckController? = nil,
+         run: MeasurementRun? = nil) {
         self.vm = vm
         self.deviceCatalog = catalog
         self.levelCheck = levelCheck ?? LevelCheckController(capture: HALCaptureBackend(),
                                                              playback: HALPlaybackBackend())
+        self.run = run ?? MeasurementRun(session: MeasurementSession(
+            capture: HALCaptureBackend(),
+            playback: HALPlaybackBackend(),
+            preparation: DSPiDevicePreparation(vm: vm, journal: MeasurementStateJournal())))
         mode = routing.suggestedMode()
         // Default to everything measurable: the common case is "correct what I
         // have", and unticking is easier than hunting for what is usable.
@@ -445,6 +454,8 @@ struct RoomCorrectionView: View {
             RoomCorrectionSetupView(model: model)
         case .levelCheck:
             RoomCorrectionLevelCheckView(model: model)
+        case .measurements:
+            RoomCorrectionMeasurementsView(model: model)
         default:
             notYetBuilt
         }

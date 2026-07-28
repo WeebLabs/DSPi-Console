@@ -109,6 +109,13 @@ final class MeasurementSessionTests: XCTestCase {
         var prepareError: Error?
         var configureError: Error?
         var lastMode: MeasurementMode?
+        /// Every configure/release in the order it happened.
+        ///
+        /// Counting them is not enough: the failure worth catching is a release
+        /// that lands after the next configure, which leaves the next sweep
+        /// measuring through the previous speaker's path. That shows up in the
+        /// order and nowhere else.
+        var log: [String] = []
 
         func prepare(mode: MeasurementMode, correctedChannels: [Int]) async throws {
             if let prepareError { throw prepareError }
@@ -120,9 +127,13 @@ final class MeasurementSessionTests: XCTestCase {
             if let configureError { throw configureError }
             configureCount += 1
             configuredPaths.append(path)
+            log.append("configure \(path.targetOutput)")
         }
 
-        func releasePath() async { releaseCount += 1 }
+        func releasePath() async {
+            releaseCount += 1
+            log.append("release")
+        }
 
         func restore() async { restoreCount += 1 }
     }
@@ -452,6 +463,12 @@ final class MeasurementSessionTests: XCTestCase {
                     try outputPlan(speaker: 1, drive: 1)],
             microphone: microphone, microphoneChannel: 0, playbackDevice: speakers)
 
+        // The claim in this test's name is about ordering, and only the log
+        // can show it: a release that lands after the next configure counts the
+        // same but leaves the second sweep on the first speaker's path.
+        XCTAssertEqual(preparation.log,
+                       ["configure 0", "release", "configure 1", "release"],
+                       "each path must come down before the next goes up")
         XCTAssertEqual(preparation.configureCount, 2)
         XCTAssertEqual(preparation.configuredPaths.map(\.targetOutput), [0, 1])
         XCTAssertEqual(preparation.configuredPaths.map(\.bypassOutputBank), [0, 1])

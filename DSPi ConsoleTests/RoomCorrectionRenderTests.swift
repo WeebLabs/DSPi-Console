@@ -243,6 +243,57 @@ final class RoomCorrectionRenderTests: XCTestCase {
         func stop() {}
     }
 
+    func testMeasurementsStepRendersEmptyAndPopulated() throws {
+        // The populated state is the one worth looking at: a progress track, a
+        // captured list with a failed row and its retry, all stacked.
+        for populated in [false, true] {
+            let run = MeasurementRun(session: MeasurementSession(capture: SilentCapture(),
+                                                                 playback: SilentPlayback(),
+                                                                 preparation: NoPreparation()))
+            if populated {
+                run.session.stubPositions([
+                    .init(name: "Listening seat", measurements: [
+                        stubMeasurement(speaker: 0, usable: true),
+                        stubMeasurement(speaker: 1, usable: true),
+                    ], weight: 3),
+                    .init(name: "Left of centre", measurements: [
+                        stubMeasurement(speaker: 0, usable: true),
+                        stubMeasurement(speaker: 1, usable: false),
+                    ], weight: 2),
+                ])
+            }
+
+            let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                            catalog: Self.sharedModel.catalog,
+                                            run: run)
+            model.step = .measurements
+            model.selectedTargets = [0, 1]
+
+            let image = try render(RoomCorrectionView(model: model),
+                                   size: NSSize(width: 1080, height: 720),
+                                   name: "measurements-\(populated ? "populated" : "empty")")
+            try assertHasContent(image, "Measurements (populated: \(populated))")
+        }
+    }
+
+    private func stubMeasurement(speaker: Int,
+                                 usable: Bool) -> MeasurementSession.SpeakerMeasurement {
+        var quality = CaptureQuality()
+        quality.signalToNoiseDb = usable ? 40 : 4
+        return MeasurementSession.SpeakerMeasurement(
+            speakerIndex: speaker,
+            magnitudesDb: usable ? [Double](repeating: 0, count: 8) : [],
+            quality: quality,
+            verdict: usable ? .pass
+                            : .fail(["Too close to the noise floor to use."]),
+            latencySeconds: 0.01)
+    }
+
+    private final class NoPreparation: DevicePreparing {
+        func prepare(mode: MeasurementMode, correctedChannels: [Int]) async throws {}
+        func restore() async {}
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()

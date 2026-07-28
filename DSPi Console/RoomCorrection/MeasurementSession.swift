@@ -295,6 +295,15 @@ final class MeasurementSession: ObservableObject {
         return fit
     }
 
+    /// Seeds positions without capturing anything.
+    ///
+    /// Only for previews and render tests: `positions` is otherwise read-only
+    /// from outside precisely so nothing in the app can invent a measurement.
+    func stubPositions(_ value: [Position]) {
+        positions = value
+        prepared = true
+    }
+
     // MARK: - Internals
 
     private func recordSweep(plan: SpeakerPlan,
@@ -306,15 +315,34 @@ final class MeasurementSession: ObservableObject {
         // Output mode measures through a path it builds. Taking it down again
         // is unconditional, including on failure, or the next sweep measures
         // through the previous speaker's configuration.
+        //
+        // Released with an await rather than from a `defer`, which cannot await
+        // and so could only fire the release into a detached task - leaving the
+        // next `configure` free to run first and giving exactly the stale path
+        // this is here to prevent.
         if let path = plan.forcedPath {
             try await preparation.configure(path: path)
         }
-        defer {
-            if plan.forcedPath != nil {
-                Task { await preparation.releasePath() }
-            }
-        }
 
+        do {
+            let recording = try await playAndCapture(samples: samples,
+                                                     plan: plan,
+                                                     microphone: microphone,
+                                                     microphoneChannel: microphoneChannel,
+                                                     playbackDevice: playbackDevice)
+            if plan.forcedPath != nil { await preparation.releasePath() }
+            return recording
+        } catch {
+            if plan.forcedPath != nil { await preparation.releasePath() }
+            throw error
+        }
+    }
+
+    private func playAndCapture(samples: [Float],
+                                plan: SpeakerPlan,
+                                microphone: AudioDeviceInfo,
+                                microphoneChannel: Int,
+                                playbackDevice: AudioDeviceInfo) async throws -> [Float] {
         // Capture first, always. Starting playback first would race the capture
         // and could clip the beginning of the sweep, and the pre-roll silence
         // is also where the noise floor is measured.
