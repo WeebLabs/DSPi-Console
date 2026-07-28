@@ -1,0 +1,191 @@
+{
+  "sample_rate_hz": 48000,
+  "grid": {
+    "minimum_hz": 20.0,
+    "maximum_hz": 20000.0,
+    "points_per_octave": 96
+  },
+  "scenarios": [
+    {
+      "name": "shared_room_modes",
+      "description": "Shared modal excess represented by asymmetric log-Gaussian structure rather than fitting-model biquads.",
+      "source_model": "analytic_gaussian",
+      "seed": 100,
+      "gaussian_features": [
+        {"frequency_hz": 48.0, "width_octaves": 0.10, "gain_db": 8.0},
+        {"frequency_hz": 118.0, "width_octaves": 0.17, "gain_db": 5.0},
+        {"frequency_hz": 620.0, "width_octaves": 0.38, "gain_db": 2.5}
+      ],
+      "positions": [
+        {"gaussian_features": [{"frequency_hz": 52.0, "width_octaves": 0.07, "gain_db": 1.2}], "noise_db": 0.12, "weight": 2.0},
+        {"gaussian_features": [{"frequency_hz": 44.0, "width_octaves": 0.09, "gain_db": -1.0}], "noise_db": 0.12},
+        {"gaussian_features": [{"frequency_hz": 126.0, "width_octaves": 0.12, "gain_db": 1.0}], "noise_db": 0.12},
+        {"gaussian_features": [{"frequency_hz": 105.0, "width_octaves": 0.14, "gain_db": -1.2}], "noise_db": 0.12},
+        {"noise_db": 0.12}
+      ]
+    },
+    {
+      "name": "single_seat_local_null",
+      "description": "One deep analytic 73 Hz seat null must not cause a shared boost.",
+      "source_model": "analytic_gaussian",
+      "seed": 200,
+      "gaussian_features": [
+        {"frequency_hz": 46.0, "width_octaves": 0.14, "gain_db": 5.0},
+        {"frequency_hz": 155.0, "width_octaves": 0.25, "gain_db": 3.0}
+      ],
+      "probe_bands_hz": [[65.0, 82.0]],
+      "positions": [
+        {"noise_db": 0.08, "weight": 2.0},
+        {"noise_db": 0.08},
+        {"noise_db": 0.08},
+        {"noise_db": 0.08},
+        {"gaussian_features": [{"frequency_hz": 73.0, "width_octaves": 0.045, "gain_db": -30.0}], "noise_db": 0.08}
+      ]
+    },
+    {
+      "name": "moving_spatial_nulls",
+      "description": "Analytic cancellation notches move with position while broad shared peaks remain correctable.",
+      "source_model": "analytic_gaussian",
+      "seed": 300,
+      "gaussian_features": [
+        {"frequency_hz": 58.0, "width_octaves": 0.15, "gain_db": 6.0},
+        {"frequency_hz": 230.0, "width_octaves": 0.18, "gain_db": 3.5}
+      ],
+      "probe_bands_hz": [[70.0, 145.0]],
+      "positions": [
+        {"gaussian_features": [{"frequency_hz": 76.0, "width_octaves": 0.05, "gain_db": -18.0}], "noise_db": 0.1, "weight": 2.0},
+        {"gaussian_features": [{"frequency_hz": 88.0, "width_octaves": 0.05, "gain_db": -18.0}], "noise_db": 0.1},
+        {"gaussian_features": [{"frequency_hz": 101.0, "width_octaves": 0.05, "gain_db": -18.0}], "noise_db": 0.1},
+        {"gaussian_features": [{"frequency_hz": 118.0, "width_octaves": 0.05, "gain_db": -18.0}], "noise_db": 0.1},
+        {"gaussian_features": [{"frequency_hz": 136.0, "width_octaves": 0.05, "gain_db": -18.0}], "noise_db": 0.1}
+      ]
+    },
+    {
+      "name": "mixed_full_range",
+      "description": "Out-of-model roll-off, asymmetric modes, delayed cancellation, tilt, and noise.",
+      "source_model": "analytic_rolloff_plus_delay",
+      "seed": 400,
+      "native_band_hz": [32.0, 17500.0],
+      "rolloffs": [
+        {"side": "low", "frequency_hz": 32.0, "order": 2.0},
+        {"side": "high", "frequency_hz": 17500.0, "order": 2.0}
+      ],
+      "gaussian_features": [
+        {"frequency_hz": 39.0, "width_octaves": 0.09, "gain_db": 7.0},
+        {"frequency_hz": 92.0, "width_octaves": 0.20, "gain_db": 4.0},
+        {"frequency_hz": 760.0, "width_octaves": 0.45, "gain_db": 2.0},
+        {"frequency_hz": 4200.0, "width_octaves": 0.65, "gain_db": 1.5}
+      ],
+      "positions": [
+        {"delayed_reflections": [{"delay_milliseconds": 2.1, "amplitude_ratio": 0.30}], "tilt_db_per_octave": -0.10, "noise_db": 0.25, "weight": 2.0},
+        {"delayed_reflections": [{"delay_milliseconds": 2.8, "amplitude_ratio": 0.34}], "tilt_db_per_octave": -0.05, "noise_db": 0.25},
+        {"delayed_reflections": [{"delay_milliseconds": 3.4, "amplitude_ratio": 0.32}], "noise_db": 0.25},
+        {"delayed_reflections": [{"delay_milliseconds": 4.2, "amplitude_ratio": 0.28}], "tilt_db_per_octave": 0.05, "noise_db": 0.25},
+        {"delayed_reflections": [{"delay_milliseconds": 5.0, "amplitude_ratio": 0.30}], "tilt_db_per_octave": 0.10, "noise_db": 0.25}
+      ]
+    },
+    {
+      "name": "single_position_speaker_rolloff",
+      "description": "One-position 44.1 kHz speaker roll-off fixture tests the 200 Hz transition fallback and native-band boost curtain.",
+      "source_model": "analytic_rolloff",
+      "sample_rate_hz": 44100,
+      "seed": 500,
+      "native_band_hz": [55.0, 13500.0],
+      "rolloffs": [
+        {"side": "low", "frequency_hz": 55.0, "order": 2.0},
+        {"side": "high", "frequency_hz": 13500.0, "order": 2.0}
+      ],
+      "gaussian_features": [
+        {"frequency_hz": 82.0, "width_octaves": 0.16, "gain_db": 5.0},
+        {"frequency_hz": 310.0, "width_octaves": 0.30, "gain_db": 2.5}
+      ],
+      "positions": [
+        {"noise_db": 0.12, "weight": 2.0}
+      ]
+    },
+    {
+      "name": "three_position_house_curve",
+      "description": "Three-position 96 kHz fixture with a bass-rise and high-frequency house-curve target requiring shelves.",
+      "source_model": "analytic_gaussian_target_curve",
+      "sample_rate_hz": 96000,
+      "seed": 600,
+      "native_band_hz": [25.0, 20000.0],
+      "rolloffs": [
+        {"side": "low", "frequency_hz": 25.0, "order": 2.0}
+      ],
+      "target_low_rise": {"frequency_hz": 95.0, "gain_db": 4.0, "steepness": 4.0},
+      "target_high_fall": {"frequency_hz": 2500.0, "slope_db_per_octave": -0.45},
+      "gaussian_features": [
+        {"frequency_hz": 54.0, "width_octaves": 0.12, "gain_db": 4.5},
+        {"frequency_hz": 180.0, "width_octaves": 0.25, "gain_db": 2.0}
+      ],
+      "positions": [
+        {"gaussian_features": [{"frequency_hz": 72.0, "width_octaves": 0.08, "gain_db": -4.0}], "tilt_db_per_octave": 0.05, "noise_db": 0.12, "weight": 2.0},
+        {"gaussian_features": [{"frequency_hz": 88.0, "width_octaves": 0.09, "gain_db": -3.0}], "noise_db": 0.12},
+        {"gaussian_features": [{"frequency_hz": 110.0, "width_octaves": 0.10, "gain_db": -3.5}], "tilt_db_per_octave": -0.05, "noise_db": 0.12}
+      ]
+    },
+    {
+      "name": "nine_position_delayed_cancellation",
+      "description": "Nine positions with two-path delayed cancellations that no finite PEQ set can invert exactly.",
+      "source_model": "delayed_two_path",
+      "sample_rate_hz": 48000,
+      "seed": 700,
+      "gaussian_features": [
+        {"frequency_hz": 63.0, "width_octaves": 0.13, "gain_db": 5.5},
+        {"frequency_hz": 240.0, "width_octaves": 0.22, "gain_db": 3.0}
+      ],
+      "positions": [
+        {"delayed_reflections": [{"delay_milliseconds": 1.1, "amplitude_ratio": 0.52}], "noise_db": 0.15, "weight": 2.0},
+        {"delayed_reflections": [{"delay_milliseconds": 1.5, "amplitude_ratio": 0.48}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 1.9, "amplitude_ratio": 0.55}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 2.4, "amplitude_ratio": 0.50}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 2.9, "amplitude_ratio": 0.46}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 3.5, "amplitude_ratio": 0.53}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 4.1, "amplitude_ratio": 0.49}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 4.8, "amplitude_ratio": 0.51}], "noise_db": 0.15},
+        {"delayed_reflections": [{"delay_milliseconds": 5.6, "amplitude_ratio": 0.47}], "noise_db": 0.15}
+      ]
+    },
+    {
+      "name": "twenty_one_position_diffuse",
+      "description": "Twenty-one-position 96 kHz stress fixture with roll-off, smooth structure, delayed paths, and deterministic noise.",
+      "source_model": "analytic_rolloff_plus_delay",
+      "sample_rate_hz": 96000,
+      "seed": 800,
+      "native_band_hz": [28.0, 19000.0],
+      "rolloffs": [
+        {"side": "low", "frequency_hz": 28.0, "order": 2.0},
+        {"side": "high", "frequency_hz": 19000.0, "order": 2.0}
+      ],
+      "gaussian_features": [
+        {"frequency_hz": 42.0, "width_octaves": 0.11, "gain_db": 6.0},
+        {"frequency_hz": 135.0, "width_octaves": 0.19, "gain_db": 3.5},
+        {"frequency_hz": 980.0, "width_octaves": 0.55, "gain_db": 1.8}
+      ],
+      "positions": [
+        {"delayed_reflections": [{"delay_milliseconds": 1.0, "amplitude_ratio": 0.22}], "tilt_db_per_octave": -0.10, "noise_db": 0.18, "weight": 2.0},
+        {"delayed_reflections": [{"delay_milliseconds": 1.2, "amplitude_ratio": 0.24}], "tilt_db_per_octave": -0.09, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 1.4, "amplitude_ratio": 0.26}], "tilt_db_per_octave": -0.08, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 1.7, "amplitude_ratio": 0.28}], "tilt_db_per_octave": -0.07, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 2.0, "amplitude_ratio": 0.30}], "tilt_db_per_octave": -0.06, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 2.3, "amplitude_ratio": 0.32}], "tilt_db_per_octave": -0.05, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 2.6, "amplitude_ratio": 0.34}], "tilt_db_per_octave": -0.04, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 2.9, "amplitude_ratio": 0.36}], "tilt_db_per_octave": -0.03, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 3.2, "amplitude_ratio": 0.38}], "tilt_db_per_octave": -0.02, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 3.5, "amplitude_ratio": 0.40}], "tilt_db_per_octave": -0.01, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 3.8, "amplitude_ratio": 0.42}], "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 4.1, "amplitude_ratio": 0.40}], "tilt_db_per_octave": 0.01, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 4.4, "amplitude_ratio": 0.38}], "tilt_db_per_octave": 0.02, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 4.7, "amplitude_ratio": 0.36}], "tilt_db_per_octave": 0.03, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 5.0, "amplitude_ratio": 0.34}], "tilt_db_per_octave": 0.04, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 5.3, "amplitude_ratio": 0.32}], "tilt_db_per_octave": 0.05, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 5.6, "amplitude_ratio": 0.30}], "tilt_db_per_octave": 0.06, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 5.9, "amplitude_ratio": 0.28}], "tilt_db_per_octave": 0.07, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 6.2, "amplitude_ratio": 0.26}], "tilt_db_per_octave": 0.08, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 6.5, "amplitude_ratio": 0.24}], "tilt_db_per_octave": 0.09, "noise_db": 0.18},
+        {"delayed_reflections": [{"delay_milliseconds": 6.8, "amplitude_ratio": 0.22}], "tilt_db_per_octave": 0.10, "noise_db": 0.18}
+      ]
+    }
+  ]
+}
