@@ -12,9 +12,19 @@ import XCTest
 /// These tests exist so the grid is not quietly reintroduced.
 final class FilterGainPrecisionTests: XCTestCase {
 
+    /// A view model on an inert USB device.
+    ///
+    /// `DSPViewModel()` defaults to `AppState.shared.usb`, which auto-connects
+    /// to real hardware, so `setFilter` below wrote actual PEQ bands to the
+    /// attached DSPi - corrupting its EQ and flooding the shared serial queue
+    /// that the live-device tests depend on.
+    private func makeViewModel() -> DSPViewModel {
+        DSPViewModel(usb: USBDevice(autoConnect: false, monitor: false))
+    }
+
     /// A gain that is not on the 0.1 dB grid must survive `setFilter` exactly.
     func testSetFilterPreservesOffGridGain() {
-        let vm = DSPViewModel()
+        let vm = makeViewModel()
         let offGrid: Float = -3.14159
         var p = FilterParams()
         p.type = .peaking
@@ -34,7 +44,7 @@ final class FilterGainPrecisionTests: XCTestCase {
     /// was pulled a full half-step away.  0.05 dB is the worst-case error of a
     /// 0.1 dB grid, and it must now be zero.
     func testShelfGainIsNotPulledToGrid() {
-        let vm = DSPViewModel()
+        let vm = makeViewModel()
         let midStep: Float = 2.05
         var p = FilterParams()
         p.type = .lowShelf
@@ -55,7 +65,7 @@ final class FilterGainPrecisionTests: XCTestCase {
     /// intermediate would perturb.  This is what lets `PresetSnapshot` keep
     /// using exact Float equality.
     func testFloat32RoundTripIsExact() {
-        let vm = DSPViewModel()
+        let vm = makeViewModel()
         // Deliberately not representable on any decimal grid.
         let values: [Float] = [0.0333333, -11.987654, 5.0000005, -0.0001]
         for (index, value) in values.enumerated() {
@@ -73,7 +83,7 @@ final class FilterGainPrecisionTests: XCTestCase {
     /// rather than a precision question, and `-0.0 == 0.0` would otherwise
     /// hide a real diff behind an inconsistent textual rendering.
     func testNegativeZeroIsNormalized() {
-        let vm = DSPViewModel()
+        let vm = makeViewModel()
         var p = FilterParams()
         p.type = .peaking
         p.gain = -0.0
