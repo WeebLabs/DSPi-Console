@@ -1,0 +1,712 @@
+import AppKit
+import SwiftUI
+
+// MARK: - Window
+
+/// Room Correction lives in its own window, like the other tools, but is
+/// larger and resizable: the graph is the workspace here rather than an
+/// illustration beside the controls, so a fixed narrow column would defeat it.
+final class RoomCorrectionWindowController: NSObject, ObservableObject {
+    private var window: NSWindow?
+    @Published var isVisible: Bool = false
+
+    @MainActor
+    func show(vm: DSPViewModel) {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            isVisible = true
+            return
+        }
+
+        let model = RoomCorrectionModel(vm: vm)
+        let view = RoomCorrectionView(model: model).environmentObject(vm)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false)
+        window.title = "Room Correction"
+        window.contentView = NSHostingView(rootView: view)
+        window.contentMinSize = NSSize(width: 900, height: 620)
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+
+        self.window = window
+        isVisible = true
+    }
+
+    func hide() {
+        window?.orderOut(nil)
+        isVisible = false
+    }
+}
+
+extension RoomCorrectionWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        isVisible = false
+    }
+}
+
+// MARK: - Steps
+
+enum RoomCorrectionStep: Int, CaseIterable, Identifiable {
+    case setup
+    case levelCheck
+    case measurements
+    case target
+    case results
+    case apply
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .setup: return "Setup"
+        case .levelCheck: return "Level Check"
+        case .measurements: return "Measurements"
+        case .target: return "Target"
+        case .results: return "Results"
+        case .apply: return "Apply & Verify"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .setup: return "slider.horizontal.3"
+        case .levelCheck: return "waveform.badge.exclamationmark"
+        case .measurements: return "dot.radiowaves.left.and.right"
+        case .target: return "scribble.variable"
+        case .results: return "chart.xyaxis.line"
+        case .apply: return "checkmark.seal"
+        }
+    }
+
+    var caption: String {
+        switch self {
+        case .setup: return "Microphone, speakers, destination"
+        case .levelCheck: return "Noise floor and level"
+        case .measurements: return "Capture positions"
+        case .target: return "Design the house curve"
+        case .results: return "Review the correction"
+        case .apply: return "Write and verify"
+        }
+    }
+}
+
+// MARK: - Model
+
+/// State for one Room Correction session.
+///
+/// Deliberately separate from `DSPViewModel`: this owns only what the session
+/// needs, so opening the window cannot disturb the rest of the app, and closing
+/// it discards session state without touching device state.
+@MainActor
+final class RoomCorrectionModel: ObservableObject {
+
+    @Published var step: RoomCorrectionStep = .setup
+
+    // Devices
+    @Published var deviceCatalog: AudioDeviceCatalog
+    @Published var microphoneUID: String?
+    @Published var microphoneChannel: Int = 0
+    @Published var micPermission: MicrophoneAccess.State = MicrophoneAccess.state
+
+    // Calibration
+    @Published var calibration: RoomCorrectionCore.Calibration?
+    @Published var calibrationName: String?
+    @Published var calibrationError: String?
+
+    // Speakers and destination
+    @Published var selectedSpeakers: Set<Int> = []
+    @Published var speakerRoles: [Int: RoomCorrectionCore.SpeakerRole] = [:]
+    @Published var destination: CorrectionDestination = .outputs
+
+    // Plan
+    @Published var plannedPositions: Int = 5
+    @Published var sweepSeconds: Double = 8
+
+    let vm: DSPViewModel
+
+    /// `catalog` is injectable so tests can pass one that is not listening for
+    /// hot-plug: every live catalog installs a CoreAudio listener, and a test
+    /// that creates several leaves them running.
+    init(vm: DSPViewModel, catalog: AudioDeviceCatalog = AudioDeviceCatalog()) {
+        self.vm = vm
+        self.deviceCatalog = catalog
+        // Default to every measurable speaker: the common case is "correct
+        // what I have", and unticking is easier than hunting for the ones that
+        // are usable.
+        selectedSpeakers = Set(routing.measurableOutputs())
+        refreshDestination()
+    }
+
+    // MARK: Routing
+
+    var routing: RoutingValidator { RoutingValidator(viewModel: vm) }
+
+    var isDeviceConnected: Bool { vm.selectedDevice != nil }
+
+    var routingResolution: RoutingResolution {
+        routing.resolve(measuredOutputs: selectedSpeakers.sorted())
+    }
+
+    /// Re-pick the destination when the selection changes.
+    ///
+    /// Only ever downgrades to outputs, which always work. Silently promoting
+    /// a user who chose outputs back to inputs would change where their
+    /// filters land without them asking.
+    func refreshDestination() {
+        if destination == .inputs && !routingResolution.allowsInputDestination {
+            destination = .outputs
+        }
+    }
+
+    var speakerName: (Int) -> String {
+        { [vm] index in
+            let channel = vm.eqChannel(forOutput: index)
+            let name = vm.channelNames[channel] ?? ""
+            return name.isEmpty ? "Output \(index + 1)" : name
+        }
+    }
+
+    var inputName: (Int) -> String {
+        { [vm] index in
+            let name = vm.channelNames[index] ?? ""
+            return name.isEmpty ? "Input \(index + 1)" : name
+        }
+    }
+
+    // MARK: Microphone
+
+    var microphone: AudioDeviceInfo? {
+        guard let microphoneUID else { return nil }
+        return deviceCatalog.device(uid: microphoneUID)
+    }
+
+    /// The DSPi as CoreAudio sees it.
+    ///
+    /// Matched by name rather than assumed: the session plays through whatever
+    /// output device actually is the DSPi, and picking the wrong one would
+    /// measure someone's built-in speakers.
+    var playbackDevice: AudioDeviceInfo? {
+        deviceCatalog.outputDevices.first { $0.name.localizedCaseInsensitiveContains("dspi") }
+    }
+
+    func requestMicrophoneAccess() {
+        Task { micPermission = await MicrophoneAccess.request() }
+    }
+
+    func loadCalibration(from url: URL) {
+        do {
+            calibration = try RoomCorrectionCore.Calibration(contentsOf: url)
+            calibrationName = url.lastPathComponent
+            calibrationError = nil
+        } catch {
+            calibration = nil
+            calibrationName = nil
+            calibrationError = error.localizedDescription
+        }
+    }
+
+    func clearCalibration() {
+        calibration = nil
+        calibrationName = nil
+        calibrationError = nil
+    }
+
+    // MARK: Readiness
+
+    /// Why the session cannot start yet, in the order worth fixing.
+    var blockers: [String] {
+        var reasons: [String] = []
+        if vm.selectedDevice == nil {
+            reasons.append("No DSPi is connected.")
+        }
+        if !micPermission.canRecord, let explanation = micPermission.explanation {
+            reasons.append(explanation)
+        }
+        if microphone == nil {
+            reasons.append("Choose a microphone.")
+        }
+        if playbackDevice == nil {
+            reasons.append("The DSPi is not available as an audio output device.")
+        }
+        if selectedSpeakers.isEmpty {
+            reasons.append("Select at least one speaker to measure.")
+        }
+        return reasons
+    }
+
+    var canContinue: Bool { blockers.isEmpty }
+
+    /// Time the plan will take, so nobody discovers it partway through.
+    ///
+    /// Nine outputs at twenty-one positions is 189 sweeps: a very different
+    /// proposition from a five-position stereo session, and the user should be
+    /// told which one they have chosen.
+    var estimatedMinutes: Double {
+        let sweeps = Double(selectedSpeakers.count * plannedPositions)
+        let perSweep = sweepSeconds + 2.5          // gap, analysis, settling
+        let perPositionMove = 25.0
+        let seconds = sweeps * perSweep + Double(plannedPositions) * perPositionMove
+        return seconds / 60.0
+    }
+}
+
+// MARK: - Root view
+
+struct RoomCorrectionView: View {
+    @ObservedObject var model: RoomCorrectionModel
+
+    var body: some View {
+        HStack(spacing: 0) {
+            stepList
+            Divider()
+            content
+        }
+        .frame(minWidth: 900, minHeight: 620)
+    }
+
+    // The step list is persistent rather than a wizard's hidden breadcrumb, so
+    // the user can always see where they are and go back without losing work.
+    private var stepList: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("ROOM CORRECTION")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 18)
+                .padding(.bottom, 10)
+
+            ForEach(RoomCorrectionStep.allCases) { step in
+                stepRow(step)
+            }
+
+            Spacer()
+
+            if model.estimatedMinutes > 0 {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ESTIMATED TIME")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                    Text(durationText)
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+            }
+        }
+        .frame(width: 230)
+        .background(.regularMaterial)
+    }
+
+    private var durationText: String {
+        let minutes = model.estimatedMinutes
+        if minutes < 1 { return "under a minute" }
+        if minutes < 90 { return "about \(Int(minutes.rounded())) min" }
+        return String(format: "about %.1f hours", minutes / 60)
+    }
+
+    private func stepRow(_ step: RoomCorrectionStep) -> some View {
+        let isCurrent = model.step == step
+        return Button {
+            model.step = step
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: step.symbol)
+                    .frame(width: 18)
+                    .foregroundStyle(isCurrent ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(step.title)
+                        .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                    Text(step.caption)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isCurrent ? Color.accentColor.opacity(0.13) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch model.step {
+        case .setup:
+            RoomCorrectionSetupView(model: model)
+        default:
+            notYetBuilt
+        }
+    }
+
+    private var notYetBuilt: some View {
+        VStack(spacing: 10) {
+            Image(systemName: model.step.symbol)
+                .font(.system(size: 30))
+                .foregroundStyle(.tertiary)
+            Text(model.step.title)
+                .font(.system(size: 15, weight: .semibold))
+            Text("This step is not built yet.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Setup
+
+struct RoomCorrectionSetupView: View {
+    @ObservedObject var model: RoomCorrectionModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    deviceSection
+                    Divider()
+                    microphoneSection
+                    Divider()
+                    calibrationSection
+                    Divider()
+                    speakerSection
+                    Divider()
+                    destinationSection
+                    Divider()
+                    planSection
+                }
+                .padding(22)
+            }
+            Divider()
+            footer
+        }
+    }
+
+    // MARK: Sections
+
+    private var deviceSection: some View {
+        formSection("DEVICE") {
+            if let device = model.vm.selectedDevice {
+                labelled("Connected", "\(device.serial.isEmpty ? "DSPi" : device.serial)")
+                labelled("Platform", model.vm.platformName)
+                labelled("Sample rate",
+                         model.vm.sampleRateHz > 0
+                            ? "\(model.vm.sampleRateHz) Hz"
+                            : "unknown")
+            } else {
+                warning("No DSPi is connected.")
+            }
+
+            if let playback = model.playbackDevice {
+                // Stated as fact, not as something to change here: the
+                // configured CoreAudio mode is the user's deliberate choice.
+                labelled("Audio output", "\(playback.name) - \(playback.outputChannels) ch "
+                                         + "at \(Int(playback.nominalSampleRate)) Hz")
+            } else {
+                warning("The DSPi is not available as an audio output device. "
+                        + "Room correction plays its sweeps through it.")
+            }
+        }
+    }
+
+    private var microphoneSection: some View {
+        formSection("MICROPHONE") {
+            if !model.micPermission.canRecord {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let explanation = model.micPermission.explanation {
+                        warning(explanation)
+                    }
+                    HStack(spacing: 8) {
+                        if model.micPermission == .notDetermined {
+                            Button("Allow Microphone Access") { model.requestMicrophoneAccess() }
+                        }
+                        if model.micPermission.offersSystemSettings,
+                           let url = MicrophoneAccess.systemSettingsURL {
+                            Button("Open System Settings") { NSWorkspace.shared.open(url) }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Text("Input device")
+                    .frame(width: 130, alignment: .leading)
+                Picker("", selection: Binding(
+                    get: { model.microphoneUID ?? "" },
+                    set: { model.microphoneUID = $0.isEmpty ? nil : $0 })) {
+                    Text("Choose...").tag("")
+                    ForEach(model.deviceCatalog.inputDevices) { device in
+                        Text("\(device.name) (\(device.inputChannels) ch)").tag(device.uid)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 340)
+                Button {
+                    model.deviceCatalog.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Rescan audio devices")
+                Spacer()
+            }
+
+            if let microphone = model.microphone, microphone.inputChannels > 1 {
+                HStack {
+                    Text("Channel")
+                        .frame(width: 130, alignment: .leading)
+                    Picker("", selection: $model.microphoneChannel) {
+                        ForEach(0..<microphone.inputChannels, id: \.self) { index in
+                            Text("Channel \(index + 1)").tag(index)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    private var calibrationSection: some View {
+        formSection("MICROPHONE CALIBRATION") {
+            HStack {
+                Text("Calibration file")
+                    .frame(width: 130, alignment: .leading)
+                Button("Choose...") { chooseCalibration() }
+                if model.calibration != nil {
+                    Button("Clear") { model.clearCalibration() }
+                }
+                Text(model.calibrationName ?? "None loaded")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            if let error = model.calibrationError {
+                warning(error)
+            }
+
+            if let calibration = model.calibration {
+                let range = String(format: "%.0f Hz to %.0f Hz",
+                                   calibration.minHz, calibration.maxHz)
+                labelled("Coverage", "\(calibration.pointCount) points, \(range)")
+                if !calibration.covers(minHz: 20, maxHz: 20000) {
+                    note("Outside this range the last known value is held rather than "
+                         + "extrapolated, so the correction is less certain at the extremes.")
+                }
+                ForEach(calibration.warnings, id: \.self) { warningText in
+                    note(warningText)
+                }
+            } else {
+                note("Without a calibration file the measured tonal balance is only as "
+                     + "accurate as the microphone. Relative low-frequency correction is "
+                     + "still useful.")
+            }
+        }
+    }
+
+    private var speakerSection: some View {
+        formSection("SPEAKERS TO MEASURE") {
+            let validator = model.routing
+
+            // With no device attached every output reports the same matrix
+            // reason, which is both misleading - the real cause is that there
+            // is no device - and repeated once per speaker until it drowns out
+            // everything else on the screen. Say it once instead.
+            if !model.isDeviceConnected {
+                note("Connect a DSPi to choose which speakers to measure. "
+                     + "The list below shows the channels this platform provides.")
+            }
+
+            ForEach(0..<model.vm.numOutputChannels, id: \.self) { output in
+                let reason = model.isDeviceConnected
+                    ? validator.unmeasurableReason(for: output)
+                    : nil
+                let disabled = reason != nil || !model.isDeviceConnected
+                HStack(spacing: 10) {
+                    Toggle(isOn: Binding(
+                        get: { model.selectedSpeakers.contains(output) },
+                        set: { isOn in
+                            if isOn { model.selectedSpeakers.insert(output) }
+                            else { model.selectedSpeakers.remove(output) }
+                            model.refreshDestination()
+                        })) {
+                        Text(model.speakerName(output))
+                            .frame(width: 150, alignment: .leading)
+                    }
+                    .disabled(disabled)
+
+                    Picker("", selection: Binding(
+                        get: { model.speakerRoles[output] ?? .fullRange },
+                        set: { model.speakerRoles[output] = $0 })) {
+                        Text("Full range").tag(RoomCorrectionCore.SpeakerRole.fullRange)
+                        Text("Bass limited").tag(RoomCorrectionCore.SpeakerRole.bassLimited)
+                        Text("Subwoofer").tag(RoomCorrectionCore.SpeakerRole.subwoofer)
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                    .disabled(disabled)
+
+                    // Mapping a correction to the wrong speaker is a silent
+                    // failure, and this is the cheap defence against it.
+                    Button("Identify") { model.vm.identifyOutput(output) }
+                        .disabled(disabled)
+
+                    if let reason {
+                        Text(reason)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    private var destinationSection: some View {
+        let resolution = model.routingResolution
+        return formSection("CORRECTION DESTINATION") {
+            Picker("", selection: $model.destination) {
+                ForEach(CorrectionDestination.allCases, id: \.self) { destination in
+                    Text(destination.displayName).tag(destination)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 320)
+            .disabled(!resolution.allowsInputDestination)
+
+            Text(model.destination.explanation)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if resolution.allowsInputDestination {
+                let pairs = resolution.inputForOutput.sorted { $0.key < $1.key }
+                    .map { "\(model.inputName($0.value)) to \(model.speakerName($0.key))" }
+                note("Routing is one to one: " + pairs.joined(separator: ", ") + ".")
+            } else if !model.selectedSpeakers.isEmpty {
+                ForEach(Array(resolution.obstacles.enumerated()), id: \.offset) { _, obstacle in
+                    note("Input correction unavailable. "
+                         + obstacle.describe(outputName: model.speakerName,
+                                             inputName: model.inputName))
+                }
+            }
+
+            note("Room correction replaces all ten PEQ bands on each "
+                 + (model.destination == .inputs ? "input" : "output")
+                 + " it writes to. Crossovers are preserved, and the original bands are "
+                 + "restored unless you apply the result.")
+        }
+    }
+
+    private var planSection: some View {
+        formSection("MEASUREMENT PLAN") {
+            HStack {
+                Text("Positions")
+                    .frame(width: 130, alignment: .leading)
+                Picker("", selection: $model.plannedPositions) {
+                    Text("Quick (3)").tag(3)
+                    Text("Recommended (5)").tag(5)
+                    Text("Wide (9)").tag(9)
+                    Text("Thorough (13)").tag(13)
+                    Text("Maximum (21)").tag(21)
+                }
+                .labelsHidden()
+                .frame(width: 200)
+                Spacer()
+            }
+            HStack {
+                Text("Sweep length")
+                    .frame(width: 130, alignment: .leading)
+                Slider(value: $model.sweepSeconds, in: 3...16, step: 1)
+                    .frame(width: 200)
+                Text("\(Int(model.sweepSeconds)) s")
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 40, alignment: .leading)
+                Spacer()
+            }
+            note("You can stop after any completed position. A longer sweep improves "
+                 + "low-frequency signal to noise; a shorter one makes a large plan "
+                 + "practical.")
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(model.blockers, id: \.self) { blocker in
+                    Label(blocker, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            Button("Continue to Level Check") { model.step = .levelCheck }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!model.canContinue)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 12)
+    }
+
+    // MARK: Helpers
+
+    private func formSection<Content: View>(_ title: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Fixed label column so stacked rows line up regardless of content length.
+    private func labelled(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .frame(width: 130, alignment: .leading)
+            Text(value)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .font(.system(size: 12))
+    }
+
+    private func warning(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func chooseCalibration() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = []
+        panel.allowedFileTypes = ["txt", "cal", "csv"]
+        panel.message = "Choose a microphone calibration file"
+        if panel.runModal() == .OK, let url = panel.url {
+            model.loadCalibration(from: url)
+        }
+    }
+}

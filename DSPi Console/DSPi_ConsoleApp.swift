@@ -7174,6 +7174,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var graphWindowController = GraphWindowController()
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
     @StateObject private var testSignalsWindowController = TestSignalsWindowController()
+    @StateObject private var roomCorrectionWindowController = RoomCorrectionWindowController()
     // Observe only narrow, rarely-changing state here. Observing the full
     // view model (which republishes ~16x/second for the meters) rebuilt the
     // whole `.commands` tree on every tick, making open submenus flicker.
@@ -7348,6 +7349,11 @@ struct DSPi_ConsoleApp: App {
                     levellerWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("V", modifiers: [.command, .shift])
+
+                Button("Room Correction...") {
+                    roomCorrectionWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("R", modifiers: [.command, .shift])
 
                 Button("Test Signals...") {
                     testSignalsWindowController.show(vm: AppState.shared.viewModel)
