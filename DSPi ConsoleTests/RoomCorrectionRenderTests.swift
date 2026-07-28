@@ -25,7 +25,8 @@ final class RoomCorrectionRenderTests: XCTestCase {
         // the shared device receives connect callbacks and issues a full
         // parameter fetch - hundreds of control transfers on the same serial
         // queue the live-device tests use.
-        (DSPViewModel(usb: USBDevice()), AudioDeviceCatalog(startListening: false))
+        (DSPViewModel(usb: USBDevice(autoConnect: false, monitor: false)),
+         AudioDeviceCatalog(startListening: false))
     }()
 
     private func makeModel() -> RoomCorrectionModel {

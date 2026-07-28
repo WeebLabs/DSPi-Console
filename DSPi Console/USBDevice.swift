@@ -84,7 +84,25 @@ class USBDevice: ObservableObject {
                                                                                      0x6c, 0x0d, 0x38, 0xc3, 0xb0, 0x93, 0x4e, 0xa7,
                                                                                      0x80, 0x9b, 0x09, 0xfb, 0x5d, 0xdd, 0xac, 0x16)
 
-    init() {
+    /// Whether discovering a device should open it.
+    ///
+    /// The app wants this: plug in a DSPi and it connects. Tests emphatically
+    /// do not. A `USBDevice` created in a test would otherwise auto-open the
+    /// developer's real hardware, and any view model built on it would write to
+    /// it for real - which is exactly how a test suite ends up rewiring
+    /// somebody's matrix.
+    private let autoConnectOnDiscovery: Bool
+
+    /// Create a device that does not touch IOKit at all.
+    ///
+    /// Separate from `autoConnect` because they solve different problems.
+    /// `autoConnect: false` stops writes reaching real hardware; `monitor:
+    /// false` also stops the IOKit matching notifications, which several
+    /// instances of contend with each other and with whichever connection is
+    /// genuinely trying to open the device.
+    init(autoConnect: Bool = true, monitor: Bool = true) {
+        self.autoConnectOnDiscovery = autoConnect
+        guard monitor else { return }
         // Just setting up monitoring triggers the initial scan automatically
         setupMonitoring()
     }
@@ -365,7 +383,11 @@ class USBDevice: ObservableObject {
 
             // Auto-connect logic — open directly from the retained service handle
             var deviceToConnect: DSPiDevice?
-            if self.selectedDevice == nil {
+            if !self.autoConnectOnDiscovery {
+                // Discovery only: the device is listed but never opened, so
+                // nothing can be written to it.
+                deviceToConnect = nil
+            } else if self.selectedDevice == nil {
                 // Connect to a device from this batch: we hold its service
                 // handle, whereas availableDevices[0] can be an older entry we
                 // have no handle for, which silently skipped the connect and

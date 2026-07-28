@@ -30,14 +30,16 @@ final class DevicePreparationTests: XCTestCase {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    /// One USB device for the whole class.
+    /// One USB device for the whole class, and crucially one that never opens
+    /// the hardware.
     ///
-    /// Every `USBDevice` installs IOKit notification ports and matching
-    /// iterators. Creating one per test meant eleven of them, and while each
-    /// pair of suites passed on its own, the accumulation across a full run
-    /// broke the live-device siggen test. Sharing one keeps these tests off the
-    /// app-wide device without flooding IOKit.
-    private static let sharedUSB = USBDevice()
+    /// `USBDevice` auto-connects on discovery: with no device selected it opens
+    /// the first DSPi it finds. That is right for the app and wrong for a test.
+    /// Without `autoConnect: false` these tests opened the developer's real
+    /// device, and every `setMatrixRoute` and `setBandBypass` below went to it -
+    /// including a "restore" that wrote this class's *fabricated* matrix rather
+    /// than anything the user had configured.
+    private static let sharedUSB = USBDevice(autoConnect: false, monitor: false)
 
     /// Builds a view model with a known starting configuration.
     @MainActor
