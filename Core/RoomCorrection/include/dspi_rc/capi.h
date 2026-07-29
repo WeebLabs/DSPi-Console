@@ -179,6 +179,21 @@ typedef struct dspi_rc_target_spec {
 /* preset: 0 = flat, 1 = natural, 2 = studio, 3 = bass warm. */
 dspi_rc_status dspi_rc_target_preset(int preset, dspi_rc_target_spec* spec);
 
+/* Evaluate a target curve on a grid, with no measurement involved.
+ *
+ * Session curves require a fit, and a fit requires positions - but a house
+ * curve is chosen before anything is measured, and a design view has to be
+ * able to draw what is being chosen. `anchors` may be null when `anchor_count`
+ * is zero. */
+dspi_rc_status dspi_rc_evaluate_target(const dspi_rc_target_spec* spec,
+                                       const double* anchor_hz,
+                                       const double* anchor_db,
+                                       size_t anchor_count,
+                                       double min_hz, double max_hz,
+                                       int points_per_octave,
+                                       double* out_db, size_t capacity,
+                                       size_t* out_written);
+
 /* -------------------------------------------------------------------------- */
 /* Session                                                                    */
 /* -------------------------------------------------------------------------- */

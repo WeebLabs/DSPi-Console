@@ -326,6 +326,42 @@ extension RoomCorrectionCore {
     }
 }
 
+extension RoomCorrectionCore {
+    /// The target curve alone, with no measurement involved.
+    ///
+    /// A house curve is chosen before anything is measured, so the design view
+    /// has to be able to draw what is being chosen. Session curves cannot serve
+    /// that: they are only readable after a fit, and a fit needs positions.
+    static func evaluateTarget(_ target: Target,
+                               anchors: [(freqHz: Double, gainDb: Double)] = [],
+                               grid: Grid = .display) throws -> [Double] {
+        let count = grid.pointCount
+        guard count > 0 else { return [] }
+
+        var spec = target.spec
+        var values = [Double](repeating: 0, count: count)
+        var written = 0
+        let anchorHz = anchors.map(\.freqHz)
+        let anchorDb = anchors.map(\.gainDb)
+
+        let status = values.withUnsafeMutableBufferPointer { output in
+            anchorHz.withUnsafeBufferPointer { hz in
+                anchorDb.withUnsafeBufferPointer { db in
+                    dspi_rc_evaluate_target(&spec,
+                                            anchors.isEmpty ? nil : hz.baseAddress,
+                                            anchors.isEmpty ? nil : db.baseAddress,
+                                            anchors.count,
+                                            grid.minHz, grid.maxHz,
+                                            Int32(grid.pointsPerOctave),
+                                            output.baseAddress, count, &written)
+                }
+            }
+        }
+        try check(status, "could not evaluate the target")
+        return values
+    }
+}
+
 // MARK: - Fitting
 
 extension RoomCorrectionCore {

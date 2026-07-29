@@ -151,6 +151,9 @@ final class RoomCorrectionModel: ObservableObject {
     /// change something must not throw away the positions already measured.
     let run: MeasurementRun
 
+    /// Owns the target and the fits derived from it.
+    let design = CorrectionDesign()
+
     /// `catalog` and `levelCheck` are injectable so tests can pass ones that
     /// touch no hardware: every live catalog installs a CoreAudio listener, and
     /// a test that creates several leaves them running.
@@ -456,6 +459,8 @@ struct RoomCorrectionView: View {
             RoomCorrectionLevelCheckView(model: model)
         case .measurements:
             RoomCorrectionMeasurementsView(model: model)
+        case .target:
+            RoomCorrectionTargetView(model: model)
         default:
             notYetBuilt
         }

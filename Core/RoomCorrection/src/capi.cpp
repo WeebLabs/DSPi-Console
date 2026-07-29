@@ -303,6 +303,39 @@ dspi_rc_status dspi_rc_target_preset(int preset, dspi_rc_target_spec* spec) {
     }
 }
 
+dspi_rc_status dspi_rc_evaluate_target(const dspi_rc_target_spec* spec,
+                                       const double* anchor_hz,
+                                       const double* anchor_db,
+                                       size_t anchor_count,
+                                       double min_hz, double max_hz,
+                                       int points_per_octave,
+                                       double* out_db, size_t capacity,
+                                       size_t* out_written) {
+    if (!spec) return fail(DSPI_RC_INVALID_ARGUMENT, "spec is null");
+    if (!out_db) return fail(DSPI_RC_INVALID_ARGUMENT, "output is null");
+    if (anchor_count > 0 && (!anchor_hz || !anchor_db)) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "anchor arrays are null");
+    }
+
+    const FrequencyGrid grid = FrequencyGrid::logSpaced(min_hz, max_hz, points_per_octave);
+    if (grid.empty()) return fail(DSPI_RC_INVALID_ARGUMENT, "invalid grid");
+    if (capacity < grid.size()) return fail(DSPI_RC_INVALID_ARGUMENT, "output too small");
+
+    TargetSpec target = fromCTarget(*spec);
+    target.anchors.clear();
+    for (size_t i = 0; i < anchor_count; ++i) {
+        target.anchors.push_back(TargetAnchor{anchor_hz[i], anchor_db[i]});
+    }
+
+    const std::string problem = target.validate();
+    if (!problem.empty()) return fail(DSPI_RC_INVALID_ARGUMENT, problem.c_str());
+
+    const std::vector<double> curve = buildTarget(grid, target);
+    std::copy(curve.begin(), curve.end(), out_db);
+    if (out_written) *out_written = curve.size();
+    return DSPI_RC_OK;
+}
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------

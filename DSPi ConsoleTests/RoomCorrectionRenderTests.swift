@@ -44,9 +44,21 @@ final class RoomCorrectionRenderTests: XCTestCase {
                         size: NSSize,
                         name: String,
                         appearance: NSAppearance.Name = .darkAqua) throws -> NSImage {
+        // Backed by an opaque layer in the appearance's own window colour.
+        //
+        // Without this the bitmap has a transparent backdrop, so every
+        // semi-transparent fill flattens onto white - which made a correct
+        // 12%-grey plot background read as a white slab in dark mode and sent
+        // me looking for a bug that was not there.
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: appearance)
         hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.wantsLayer = true
+        var backdrop = NSColor.windowBackgroundColor.cgColor
+        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+            backdrop = NSColor.windowBackgroundColor.cgColor
+        }
+        hosting.layer?.backgroundColor = backdrop
         hosting.layoutSubtreeIfNeeded()
 
         let representation = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds),
@@ -292,6 +304,27 @@ final class RoomCorrectionRenderTests: XCTestCase {
     private final class NoPreparation: DevicePreparing {
         func prepare(mode: MeasurementMode, correctedChannels: [Int]) async throws {}
         func restore() async {}
+    }
+
+    func testTargetStepRendersEachPresetAndTheAdvancedControls() throws {
+        // The plot is the point of this step, so every preset gets drawn - a
+        // curve that goes off the top of its box is a layout failure that only
+        // shows up in the picture.
+        for preset in RoomCorrectionCore.TargetPreset.allCases {
+            let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                            catalog: Self.sharedModel.catalog)
+            model.step = .target
+            model.design.preset = preset
+            if preset == .bassWarm {
+                model.design.addAnchor(freqHz: 45, gainDb: 4)
+                model.design.addAnchor(freqHz: 3000, gainDb: -2)
+            }
+
+            let image = try render(RoomCorrectionView(model: model),
+                                   size: NSSize(width: 1080, height: 900),
+                                   name: "target-\(preset.displayName.lowercased())")
+            try assertHasContent(image, "Target (\(preset.displayName))")
+        }
     }
 
     func testWindowMinimumSizeStillRenders() throws {

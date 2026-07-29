@@ -3,6 +3,7 @@
 #include <cmath>
 #include <vector>
 
+#include "dspi_rc/capi.h"
 #include "dspi_rc/target.hpp"
 #include "testing.hpp"
 
@@ -367,4 +368,62 @@ TEST_CASE(default_mask_is_cut_only) {
     const std::vector<double> reliability(grid.size(), 1.0);
     const CorrectionMask mask = buildCorrectionMask(grid, presetFlat(), native, reliability);
     for (double ceiling : mask.boostCeilingDb) CHECK_NEAR(ceiling, 0.0, 1e-12);
+}
+
+// The standalone evaluator, which the design UI uses to draw a house curve
+// before any measurement exists.  Session curves cannot serve that: they are
+// only readable after a fit, and a fit needs positions.
+TEST_CASE(evaluate_target_matches_build_target) {
+    const FrequencyGrid grid = grid48();
+    const TargetSpec spec = presetNatural();
+
+    dspi_rc_target_spec c{};
+    CHECK(dspi_rc_target_preset(1, &c) == DSPI_RC_OK);
+
+    std::vector<double> viaC(grid.size(), 0.0);
+    std::size_t written = 0;
+    CHECK(dspi_rc_evaluate_target(&c, nullptr, nullptr, 0,
+                                  20.0, 20000.0, 48,
+                                  viaC.data(), viaC.size(), &written) == DSPI_RC_OK);
+    CHECK(written == grid.size());
+
+    const std::vector<double> direct = buildTarget(grid, spec);
+    CHECK(direct.size() == viaC.size());
+    for (std::size_t i = 0; i < direct.size(); ++i) CHECK_NEAR(viaC[i], direct[i], 1e-12);
+}
+
+TEST_CASE(evaluate_target_applies_anchors) {
+    dspi_rc_target_spec c{};
+    CHECK(dspi_rc_target_preset(0, &c) == DSPI_RC_OK);   // flat
+
+    const FrequencyGrid grid = grid48();
+    std::vector<double> plain(grid.size(), 0.0);
+    CHECK(dspi_rc_evaluate_target(&c, nullptr, nullptr, 0, 20.0, 20000.0, 48,
+                                  plain.data(), plain.size(), nullptr) == DSPI_RC_OK);
+
+    const double anchorHz[1] = {500.0};
+    const double anchorDb[1] = {5.0};
+    std::vector<double> anchored(grid.size(), 0.0);
+    CHECK(dspi_rc_evaluate_target(&c, anchorHz, anchorDb, 1, 20.0, 20000.0, 48,
+                                  anchored.data(), anchored.size(), nullptr) == DSPI_RC_OK);
+
+    const std::size_t bin = binNear(grid, 500.0);
+    CHECK(anchored[bin] > plain[bin] + 1.0);
+}
+
+TEST_CASE(evaluate_target_rejects_bad_arguments) {
+    dspi_rc_target_spec c{};
+    CHECK(dspi_rc_target_preset(1, &c) == DSPI_RC_OK);
+    std::vector<double> out(4096, 0.0);
+
+    CHECK(dspi_rc_evaluate_target(nullptr, nullptr, nullptr, 0, 20.0, 20000.0, 48,
+                                  out.data(), out.size(), nullptr) != DSPI_RC_OK);
+    CHECK(dspi_rc_evaluate_target(&c, nullptr, nullptr, 0, 20.0, 20000.0, 48,
+                                  nullptr, 0, nullptr) != DSPI_RC_OK);
+    // A count with no arrays would otherwise read off the end of nothing.
+    CHECK(dspi_rc_evaluate_target(&c, nullptr, nullptr, 2, 20.0, 20000.0, 48,
+                                  out.data(), out.size(), nullptr) != DSPI_RC_OK);
+    // Too small an output buffer must be refused, not truncated.
+    CHECK(dspi_rc_evaluate_target(&c, nullptr, nullptr, 0, 20.0, 20000.0, 48,
+                                  out.data(), 4, nullptr) != DSPI_RC_OK);
 }
