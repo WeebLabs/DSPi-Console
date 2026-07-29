@@ -1,3 +1,5 @@
+import AudioToolbox
+import CoreAudio
 import XCTest
 @testable import DSPi_Console
 
@@ -248,6 +250,58 @@ final class LevelCheckControllerTests: XCTestCase {
                                      sampleRate: 48000)
 
         XCTAssertGreaterThan(playback.stopCount, 0, "a tone must never be left playing")
+    }
+
+    func testAPlaybackThatEndsMidBlockIsNotADropout() {
+        // The regression that made the level check unusable: a buffer whose
+        // length is not a multiple of the hardware block size ends on a short
+        // final callback, which was counted as an underrun. Every playback ends
+        // that way, so every level check reported a dropout.
+        let backend = HALPlaybackBackend()
+        let blockSize = 512
+        // Deliberately not a multiple: two full blocks and a bit.
+        let samples = [Float](repeating: 0.1, count: blockSize * 2 + 137)
+
+        renderThrough(backend, samples: samples, blockSize: blockSize)
+
+        XCTAssertEqual(backend.underrunCount, 0,
+                       "running out of buffer at the end of playback is completion, "
+                       + "not a dropout")
+    }
+
+    func testAnExactlyBlockAlignedPlaybackIsAlsoClean() {
+        let backend = HALPlaybackBackend()
+        let blockSize = 512
+        renderThrough(backend,
+                      samples: [Float](repeating: 0.1, count: blockSize * 3),
+                      blockSize: blockSize)
+        XCTAssertEqual(backend.underrunCount, 0)
+    }
+
+    /// Drives the render callback directly, without any audio hardware.
+    ///
+    /// Renders one block past the end, which is what really happens: the unit
+    /// keeps calling until it is stopped.
+    private func renderThrough(_ backend: HALPlaybackBackend,
+                               samples: [Float], blockSize: Int) {
+        backend.prepareForRenderTest(samples: samples, channelIndex: 0, channels: 2)
+
+        var storage = [Float](repeating: 0, count: blockSize * 2)
+        let blocks = samples.count / blockSize + 2
+        for _ in 0..<blocks {
+            storage.withUnsafeMutableBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                var list = AudioBufferList.allocate(maximumBuffers: 2)
+                defer { free(list.unsafeMutablePointer) }
+                for channel in 0..<2 {
+                    list[channel] = AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(blockSize * 4),
+                        mData: UnsafeMutableRawPointer(base + channel * blockSize))
+                }
+                backend.renderForTest(into: list, frames: blockSize)
+            }
+        }
     }
 
     // MARK: - Level suggestion

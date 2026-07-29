@@ -322,6 +322,8 @@ final class HALPlaybackBackend: AudioPlaybackBackend {
     private var completion: ((Result<Void, Error>) -> Void)?
     private var underruns = 0
     private var finished = false
+    private var overloadListener: AudioObjectPropertyListenerBlock?
+    private var listeningTo: AudioDeviceID?
 
     private(set) var isRunning = false
     var underrunCount: Int { underruns }
@@ -389,8 +391,42 @@ final class HALPlaybackBackend: AudioPlaybackBackend {
                         "installing the playback callback")
 
         try AUHAL.check(AudioUnitInitialize(unit), "initializing playback")
+        startWatchingForOverloads(on: device.id)
         try AUHAL.check(AudioOutputUnitStart(unit), "starting playback")
         isRunning = true
+    }
+
+    /// The real dropout signal for output.
+    ///
+    /// CoreAudio reports an overrun of the IO cycle on the device rather than
+    /// through the render callback, so this is the only place a genuine
+    /// playback dropout can be observed.
+    private func startWatchingForOverloads(on device: AudioDeviceID) {
+        stopWatchingForOverloads()
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDeviceProcessorOverload,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.underruns += 1
+        }
+        let status = AudioObjectAddPropertyListenerBlock(device, &address, nil, listener)
+        if status == noErr {
+            overloadListener = listener
+            listeningTo = device
+        }
+    }
+
+    private func stopWatchingForOverloads() {
+        guard let overloadListener, let listeningTo else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDeviceProcessorOverload,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(listeningTo, &address, nil, overloadListener)
+        self.overloadListener = nil
+        self.listeningTo = nil
     }
 
     func stop() {
@@ -401,6 +437,7 @@ final class HALPlaybackBackend: AudioPlaybackBackend {
     }
 
     private func teardown() {
+        stopWatchingForOverloads()
         if let unit {
             if isRunning { AudioOutputUnitStop(unit) }
             AudioUnitUninitialize(unit)
@@ -414,6 +451,21 @@ final class HALPlaybackBackend: AudioPlaybackBackend {
         guard let completion else { return }
         self.completion = nil
         DispatchQueue.main.async { completion(result) }
+    }
+
+    /// Sets up the render state without opening a device, so the callback's
+    /// buffer accounting can be tested without audio hardware.
+    func prepareForRenderTest(samples: [Float], channelIndex: Int, channels: Int) {
+        self.samples = samples
+        self.position = 0
+        self.channelIndex = channelIndex
+        self.deviceChannels = channels
+        self.underruns = 0
+        self.finished = false
+    }
+
+    func renderForTest(into list: UnsafeMutableAudioBufferListPointer, frames: Int) {
+        render(into: list, frames: frames)
     }
 
     /// Real-time thread.
@@ -440,13 +492,20 @@ final class HALPlaybackBackend: AudioPlaybackBackend {
             return
         }
 
+        // A short final block is not an underrun. The buffer length is rarely
+        // a multiple of the hardware block size, so the last callback of every
+        // playback asks for more than is left - which was counted as a dropout
+        // and made the level check fail every single time.
+        //
+        // With the whole signal preloaded there is no underrun condition here
+        // at all; a genuine dropout is the IO cycle overrunning, which arrives
+        // through the processor-overload listener instead.
         let count = min(frames, remaining)
         samples.withUnsafeBufferPointer { source in
             guard let base = source.baseAddress else { return }
             destination.update(from: base + position, count: count)
         }
         position += count
-        if count < frames { underruns += 1 }
     }
 }
 
