@@ -21,12 +21,22 @@ final class RoomCorrectionWindowController: NSObject, ObservableObject {
         let model = RoomCorrectionModel(vm: vm)
         let view = RoomCorrectionView(model: model).environmentObject(vm)
 
+        // Configured at creation rather than after the fact: the main window
+        // is built this way too, and applying it later would show the default
+        // chrome for a frame before it changed.
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
-            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            styleMask: [.titled, .closable, .resizable, .miniaturizable,
+                        .fullSizeContentView],
             backing: .buffered,
             defer: false)
         window.title = "Room Correction"
+        // Content runs the full height of the window so the sidebar's material
+        // reaches the top, with the traffic lights floating over it. Matches
+        // the main window, which uses SwiftUI's `.hiddenTitleBar` for the same
+        // effect.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.contentView = NSHostingView(rootView: view)
         window.contentMinSize = NSSize(width: 900, height: 620)
         window.isReleasedWhenClosed = false
@@ -376,6 +386,7 @@ struct RoomCorrectionView: View {
         HStack(spacing: 0) {
             stepList
             Divider()
+                .ignoresSafeArea()
             content
         }
         .frame(minWidth: 900, minHeight: 620)
@@ -383,13 +394,23 @@ struct RoomCorrectionView: View {
 
     // The step list is persistent rather than a wizard's hidden breadcrumb, so
     // the user can always see where they are and go back without losing work.
+    //
+    // A stack over a sidebar-material backing rather than a sidebar-styled
+    // List. The main window uses a List because it has a long, changing set of
+    // channels; six fixed steps gain nothing from one, and a List renders
+    // nothing at all in an offscreen NSHostingView, which would cost the whole
+    // sidebar its render-test coverage.
     private var stepList: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("ROOM CORRECTION")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.top, 18)
+                // Matches the row content's leading edge below, so the header
+                // and the step icons line up on one margin.
+                .padding(.horizontal, 14)
+                // Small: the safe area already holds the content clear of the
+                // title bar, so anything more here reads as a blank gap.
+                .padding(.top, 10)
                 .padding(.bottom, 10)
 
             ForEach(RoomCorrectionStep.allCases) { step in
@@ -397,21 +418,30 @@ struct RoomCorrectionView: View {
             }
 
             Spacer()
-
-            if model.estimatedMinutes > 0 {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("ESTIMATED TIME")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                    Text(durationText)
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 16)
-            }
+            estimatedTime
         }
         .frame(width: 230)
-        .background(.regularMaterial)
+        // The material ignores the safe area while the content above respects
+        // it, so the translucency runs the full height of the window with the
+        // traffic lights floating over it, rather than stopping at the title
+        // bar and leaving a solid band across the top.
+        .background(SidebarMaterial().ignoresSafeArea())
+    }
+
+    @ViewBuilder
+    private var estimatedTime: some View {
+        if model.estimatedMinutes > 0 {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ESTIMATED TIME")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(durationText)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
+        }
     }
 
     private var durationText: String {
@@ -439,7 +469,7 @@ struct RoomCorrectionView: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 6)
@@ -447,7 +477,7 @@ struct RoomCorrectionView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
     }
 
     @ViewBuilder
@@ -897,4 +927,23 @@ struct RoomCorrectionSetupView: View {
             model.loadCalibration(from: url)
         }
     }
+}
+
+/// The system sidebar material, blended with what is behind the window.
+///
+/// SwiftUI's `.regularMaterial` blends with the window's own content, so it
+/// reads as a flat grey panel. Real sidebar translucency - the desktop showing
+/// faintly through - needs `NSVisualEffectView` with behind-window blending,
+/// which is what the system's own sidebars use.
+private struct SidebarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .sidebar
+        view.blendingMode = .behindWindow
+        // Dims with the window, as every other sidebar on the system does.
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
