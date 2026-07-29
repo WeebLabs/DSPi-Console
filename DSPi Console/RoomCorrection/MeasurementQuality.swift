@@ -94,7 +94,26 @@ struct QualityThresholds {
     /// Any less of the expected capture than this and the tail is gone.
     var minimumCompleteness: Double = 0.98
 
+    /// For a signal judged on its broadband level, with no processing gain to
+    /// come: the level check's noise burst, where what is measured is what the
+    /// analysis gets.
     static let standard = QualityThresholds()
+
+    /// For a swept sine.
+    ///
+    /// The figure recorded here is the *raw broadband* ratio, which is not the
+    /// signal to noise of the finished measurement. Deconvolution concentrates
+    /// the sweep's energy at each frequency into the impulse response while the
+    /// noise stays spread across the whole recording, so a sweep of several
+    /// seconds gains tens of decibels over the raw number. Holding a sweep to a
+    /// noise burst's threshold rejects measurements that deconvolve cleanly.
+    ///
+    /// The honest quantity would be the signal to noise of the deconvolved
+    /// response, which the core does not currently report. Until it does, these
+    /// thresholds are set where the raw figure stops being recoverable rather
+    /// than where it would need to be if there were no processing gain.
+    static let sweep = QualityThresholds(minimumSnrDb: 6,
+                                         recommendedSnrDb: 20)
 }
 
 // MARK: - Analysis
@@ -175,8 +194,10 @@ enum MeasurementQualityAnalyzer {
     /// Failures are the conditions under which the measurement does not
     /// describe the room; warnings are conditions under which it does, but less
     /// well than it could.
+    /// Defaults to the sweep thresholds, because every caller here is judging a
+    /// sweep. The level check passes `.standard` explicitly for its noise burst.
     static func verdict(for quality: CaptureQuality,
-                        thresholds: QualityThresholds = .standard) -> QualityVerdict {
+                        thresholds: QualityThresholds = .sweep) -> QualityVerdict {
         var failures: [String] = []
         var warnings: [String] = []
 
@@ -202,15 +223,17 @@ enum MeasurementQualityAnalyzer {
                             + "the response is missing.")
         }
         if quality.signalToNoiseDb < thresholds.minimumSnrDb {
-            failures.append(String(format: "Signal-to-noise is only %.0f dB, which is too close "
-                                   + "to the noise floor to measure. Raise the level or quieten "
-                                   + "the room.", quality.signalToNoiseDb))
+            failures.append(String(format: "The sweep was only %.0f dB above the noise floor, "
+                                   + "which is too little for the deconvolution to recover a "
+                                   + "clean response. Raise the level, raise the microphone "
+                                   + "gain, or quieten the room.", quality.signalToNoiseDb))
         }
 
         if failures.isEmpty {
             if quality.signalToNoiseDb < thresholds.recommendedSnrDb {
-                warnings.append(String(format: "Signal-to-noise is %.0f dB. At least %.0f dB is "
-                                       + "recommended for a reliable low-frequency measurement.",
+                warnings.append(String(format: "The sweep was %.0f dB above the noise floor. "
+                                       + "%.0f dB or more gives the deepest bass more margin, "
+                                       + "though the sweep recovers a good deal below that.",
                                        quality.signalToNoiseDb, thresholds.recommendedSnrDb))
             }
             if quality.peakDbfs > thresholds.peakWarningDbfs {

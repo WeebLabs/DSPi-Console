@@ -117,26 +117,67 @@ final class MeasurementQualityTests: XCTestCase {
     }
 
     func testLowSignalToNoiseFails() throws {
+        // Barely above the noise: nothing recovers this.
         let sweep = try sweepSpec()
-        let recording = synthesize(sweep: sweep, signalAmplitude: 0.01, noiseAmplitude: 0.008)
+        let recording = synthesize(sweep: sweep, signalAmplitude: 0.01, noiseAmplitude: 0.009)
         let quality = MeasurementQualityAnalyzer.analyze(recording: recording,
                                                          sweep: sweep,
                                                          captureSampleRate: sampleRate)
-        XCTAssertLessThan(quality.signalToNoiseDb, 15)
+        XCTAssertLessThan(quality.signalToNoiseDb, 6)
         XCTAssertFalse(MeasurementQualityAnalyzer.verdict(for: quality).isUsable)
     }
 
-    func testModerateSignalToNoiseWarnsButStaysUsable() throws {
-        // Between the 15 dB floor and the 30 dB recommendation the measurement
-        // is still worth having; refusing it would be worse than flagging it.
+    func testASweepIsNotHeldToANoiseBurstsThreshold() throws {
+        // The recorded figure is the raw broadband ratio, which is not the
+        // signal to noise of the finished measurement: deconvolution
+        // concentrates the sweep's energy at each frequency while the noise
+        // stays spread out. A sweep at 15 dB raw deconvolves cleanly, and
+        // rejecting it was rejecting good measurements.
         var quality = CaptureQuality()
-        quality.signalToNoiseDb = 22
+        quality.signalToNoiseDb = 15
+        quality.completeness = 1
+        quality.peakDbfs = -12
+
+        XCTAssertTrue(MeasurementQualityAnalyzer.verdict(for: quality).isUsable,
+                      "15 dB raw is comfortable for a sweep")
+        // The same figure through a noise burst, which gets no processing gain,
+        // is the boundary rather than comfortable.
+        XCTAssertTrue(MeasurementQualityAnalyzer.verdict(for: quality,
+                                                        thresholds: .standard).isUsable)
+        quality.signalToNoiseDb = 14
+        XCTAssertFalse(MeasurementQualityAnalyzer.verdict(for: quality,
+                                                         thresholds: .standard).isUsable,
+                       "a noise burst has no deconvolution to fall back on")
+        XCTAssertTrue(MeasurementQualityAnalyzer.verdict(for: quality).isUsable)
+    }
+
+    func testModerateSignalToNoiseWarnsButStaysUsable() throws {
+        // Between the sweep's floor and its recommendation the measurement is
+        // still worth having; refusing it would be worse than flagging it.
+        var quality = CaptureQuality()
+        quality.signalToNoiseDb = 12
         quality.completeness = 1
         quality.peakDbfs = -12
 
         let verdict = MeasurementQualityAnalyzer.verdict(for: quality)
         XCTAssertTrue(verdict.isUsable)
         if case .warn = verdict {} else { XCTFail("expected a warning, got \(verdict)") }
+    }
+
+    func testTheSnrMessageDoesNotMisdescribeTheQuantity() {
+        // It used to say the sweep was "too close to the noise floor to
+        // measure", which is a claim about the raw ratio that the deconvolution
+        // makes untrue over a wide range.
+        var quality = CaptureQuality()
+        quality.signalToNoiseDb = 3
+        quality.completeness = 1
+        quality.peakDbfs = -12
+
+        let messages = MeasurementQualityAnalyzer.verdict(for: quality).messages
+        XCTAssertTrue(messages.contains { $0.contains("deconvolution") },
+                      "the message should name what actually fell short: \(messages)")
+        XCTAssertTrue(messages.contains { $0.contains("microphone gain") },
+                      "and offer the fix that is usually the real one: \(messages)")
     }
 
     func testDropoutsAndUnderrunsAreFailuresNotWarnings() {
