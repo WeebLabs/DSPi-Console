@@ -37,6 +37,12 @@ struct FrequencyPlotScale {
         height / 2 - CGFloat((db - centre) / halfRange) * (height / 2)
     }
 
+    /// Inverse of `y`, for turning a drag into a value.
+    func db(forY y: CGFloat, in height: CGFloat) -> Double {
+        guard height > 0 else { return centre }
+        return centre + Double((height / 2 - y) / (height / 2)) * halfRange
+    }
+
     /// Clamped to the plot, so a curve running off the scale draws along the
     /// edge rather than escaping its box.
     func clampedY(forDb db: Double, in height: CGFloat) -> CGFloat {
@@ -72,6 +78,14 @@ struct FrequencyAxis {
         }
         let fraction = (log10(hz) - log10(low)) / (log10(high) - log10(low))
         return width * CGFloat(Swift.min(Swift.max(fraction, 0), 1))
+    }
+
+    /// Inverse of `x`, for turning a drag into a frequency.
+    func hz(forX x: CGFloat, in width: CGFloat) -> Double {
+        guard let low = frequencies.first, let high = frequencies.last,
+              high > low, width > 0 else { return frequencies.first ?? 20 }
+        let fraction = Swift.min(Swift.max(Double(x / width), 0), 1)
+        return pow(10, log10(low) + fraction * (log10(high) - log10(low)))
     }
 
     static func label(for hz: Double) -> String {

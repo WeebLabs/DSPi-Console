@@ -75,6 +75,69 @@ final class CorrectionDesign: ObservableObject {
         invalidate()
     }
 
+    /// The curve with no points on it: tilt and shelves alone.
+    ///
+    /// The reference a dropped point is measured against. The curve passes
+    /// exactly through each point, so a point's offset is simply where the user
+    /// put it minus where the shape already was - no iteration, and no
+    /// interaction between points to unpick.
+    func macroCurve() -> [Double] {
+        (try? RoomCorrectionCore.evaluateTarget(target, anchors: [], grid: grid)) ?? []
+    }
+
+    /// Where the shape sits at one frequency, interpolated onto the grid.
+    func macroValue(atHz hz: Double) -> Double {
+        let curve = macroCurve()
+        guard !curve.isEmpty else { return 0 }
+        let frequencies = grid.frequencies
+        guard let index = frequencies.enumerated()
+            .min(by: { abs(log($0.element / hz)) < abs(log($1.element / hz)) })?.offset
+        else { return 0 }
+        return curve[index]
+    }
+
+    /// Where a point sits on the curve, in dB, for drawing and dragging.
+    ///
+    /// The UI never shows the stored offset: setting one number and seeing a
+    /// different one is what made this control hard to reason about.
+    func curveValue(of anchor: Anchor) -> Double {
+        macroValue(atHz: anchor.freqHz) + anchor.gainDb
+    }
+
+    /// Put a point at a place on the curve.
+    func addAnchor(atHz hz: Double, curveValueDb: Double) {
+        addAnchor(freqHz: hz, gainDb: curveValueDb - macroValue(atHz: hz))
+    }
+
+    /// Move a point to a place on the curve, in one edit.
+    ///
+    /// Frequency and value together, because a drag changes both and applying
+    /// them separately would evaluate the shape twice against a half-moved
+    /// point.
+    func moveAnchor(_ anchor: Anchor, toHz hz: Double, curveValueDb: Double) {
+        let rounded = (hz * 10).rounded() / 10
+        let offset = curveValueDb - macroValue(atHz: rounded)
+
+        // A point dragged onto another is the user aiming at one place twice.
+        // Removed first, then the survivor is found again by identity: holding
+        // an index across the removal would point at the wrong element, or off
+        // the end when the collision sat earlier in the array.
+        anchors.removeAll { $0.id != anchor.id && abs(log2($0.freqHz / rounded)) < 0.02 }
+
+        guard let index = anchors.firstIndex(where: { $0.id == anchor.id }) else { return }
+        anchors[index].freqHz = rounded
+        anchors[index].gainDb = offset
+        anchors.sort { $0.freqHz < $1.freqHz }
+        invalidate()
+    }
+
+    /// Back to the preset, points and all.
+    func resetCurve() {
+        anchors.removeAll()
+        target = RoomCorrectionCore.Target(preset: preset)
+        invalidate()
+    }
+
     func removeAnchor(_ anchor: Anchor) {
         anchors.removeAll { $0.id == anchor.id }
         invalidate()

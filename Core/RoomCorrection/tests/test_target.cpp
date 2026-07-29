@@ -427,3 +427,129 @@ TEST_CASE(evaluate_target_rejects_bad_arguments) {
     CHECK(dspi_rc_evaluate_target(&c, nullptr, nullptr, 0, 20.0, 20000.0, 48,
                                   out.data(), 4, nullptr) != DSPI_RC_OK);
 }
+
+// ---------------------------------------------------------------------------
+// Anchors as points on the curve
+// ---------------------------------------------------------------------------
+
+TEST_CASE(a_single_anchor_is_a_local_edit_not_a_global_shift) {
+    // Held flat beyond the outermost anchor, one point offset the whole curve
+    // uniformly - and chooseAutoLevel absorbs exactly that, so it changed the
+    // correction not at all. This is the property that made the control
+    // useless, so it is the one worth pinning.
+    const FrequencyGrid grid = grid48();
+    TargetSpec spec = presetFlat();
+    const std::vector<double> plain = buildTarget(grid, spec);
+
+    spec.anchors.push_back(TargetAnchor{500.0, 5.0});
+    const std::vector<double> edited = buildTarget(grid, spec);
+
+    // Loose at the anchor itself: the nearest grid bin is not exactly 500 Hz,
+    // so the offset there is interpolated rather than the value as typed.
+    const std::size_t at500 = binNear(grid, 500.0);
+    CHECK_NEAR(edited[at500] - plain[at500], 5.0, 0.01);
+
+    // Two octaves away, well past the one-octave taper, nothing has moved.
+    // Exact here, because the offset is genuinely zero rather than small.
+    const std::size_t at125 = binNear(grid, 125.0);
+    const std::size_t at2k = binNear(grid, 2000.0);
+    CHECK_NEAR(edited[at125], plain[at125], 1e-9);
+    CHECK_NEAR(edited[at2k], plain[at2k], 1e-9);
+}
+
+TEST_CASE(the_taper_is_smooth_rather_than_a_kink) {
+    // A corner in the target is a feature the optimizer will spend a filter
+    // chasing, so the ease-out has no discontinuity in slope.
+    const FrequencyGrid grid = grid48();
+    TargetSpec spec = presetFlat();
+    spec.anchors.push_back(TargetAnchor{500.0, 6.0});
+    const std::vector<double> curve = buildTarget(grid, spec);
+
+    double worstSecondDifference = 0.0;
+    for (std::size_t i = 1; i + 1 < grid.size(); ++i) {
+        const double second = curve[i + 1] - 2.0 * curve[i] + curve[i - 1];
+        worstSecondDifference = std::max(worstSecondDifference, std::fabs(second));
+    }
+    // A linear taper would put a step of roughly gain/(taper*ppo) here.
+    CHECK(worstSecondDifference < 0.05);
+}
+
+TEST_CASE(the_curve_passes_through_every_anchor) {
+    // The whole promise of the interaction: drop a point, the curve goes
+    // through it. With several points that means each one exactly, not a
+    // compromise between them.
+    const FrequencyGrid grid = grid48();
+    TargetSpec spec = presetNatural();
+    spec.anchors.push_back(TargetAnchor{60.0, 4.0});
+    spec.anchors.push_back(TargetAnchor{300.0, -3.0});
+    spec.anchors.push_back(TargetAnchor{3000.0, 2.0});
+
+    TargetSpec plainSpec = spec;
+    plainSpec.anchors.clear();
+    const std::vector<double> plain = buildTarget(grid, plainSpec);
+    const std::vector<double> edited = buildTarget(grid, spec);
+
+    for (const TargetAnchor& anchor : spec.anchors) {
+        const std::size_t bin = binNear(grid, anchor.freqHz);
+        CHECK_NEAR(edited[bin] - plain[bin], anchor.gainDb, 0.05);
+    }
+}
+
+TEST_CASE(two_nearby_anchors_plateau_rather_than_summing) {
+    // Interpolation, not a sum of bumps: two points at +5 mean the curve sits
+    // at +5 between them, not +10.
+    const FrequencyGrid grid = grid48();
+    TargetSpec spec = presetFlat();
+    spec.anchors.push_back(TargetAnchor{400.0, 5.0});
+    spec.anchors.push_back(TargetAnchor{600.0, 5.0});
+
+    TargetSpec plainSpec = spec;
+    plainSpec.anchors.clear();
+    const std::vector<double> plain = buildTarget(grid, plainSpec);
+    const std::vector<double> edited = buildTarget(grid, spec);
+
+    const std::size_t between = binNear(grid, 490.0);
+    CHECK_NEAR(edited[between] - plain[between], 5.0, 0.1);
+}
+
+TEST_CASE(the_taper_width_is_configurable) {
+    const FrequencyGrid grid = grid48();
+    TargetSpec narrow = presetFlat();
+    narrow.anchors.push_back(TargetAnchor{500.0, 6.0});
+    narrow.anchorTaperOctaves = 0.5;
+
+    TargetSpec wide = narrow;
+    wide.anchorTaperOctaves = 2.0;
+
+    const std::vector<double> plain = buildTarget(grid, presetFlat());
+    const std::vector<double> narrowCurve = buildTarget(grid, narrow);
+    const std::vector<double> wideCurve = buildTarget(grid, wide);
+
+    // One octave out: the narrow taper is finished, the wide one is not.
+    const std::size_t at1k = binNear(grid, 1000.0);
+    CHECK_NEAR(narrowCurve[at1k], plain[at1k], 1e-9);
+    CHECK(wideCurve[at1k] > plain[at1k] + 1.0);
+}
+
+TEST_CASE(an_anchor_survives_auto_level) {
+    // The old behaviour's real failure: a uniform offset is exactly what
+    // chooseAutoLevel removes, so the anchor did nothing to the correction.
+    const FrequencyGrid grid = grid48();
+    std::vector<double> measured(grid.size(), 75.0);
+
+    TargetSpec plain = presetFlat();
+    NativeBandwidth native;
+    native.lowHz = 20.0;
+    native.highHz = 20000.0;
+    plain.levelDb = chooseAutoLevel(grid, measured, plain, native);
+
+    TargetSpec edited = presetFlat();
+    edited.anchors.push_back(TargetAnchor{500.0, 6.0});
+    edited.levelDb = chooseAutoLevel(grid, measured, edited, native);
+
+    const std::vector<double> plainCurve = buildTarget(grid, plain);
+    const std::vector<double> editedCurve = buildTarget(grid, edited);
+
+    const std::size_t at500 = binNear(grid, 500.0);
+    CHECK(editedCurve[at500] > plainCurve[at500] + 3.0);
+}

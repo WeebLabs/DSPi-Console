@@ -69,6 +69,111 @@ final class CorrectionDesignTests: XCTestCase {
                           "choosing a preset must actually change the curve")
     }
 
+    // MARK: - Points on the curve
+
+    func testAPointLandsWhereItWasDropped() {
+        // The whole premise of the interaction. Storing an offset and showing
+        // it is what made anchors hard to reason about: you set one number and
+        // saw a different one.
+        let design = makeDesign()
+        design.preset = .natural          // a shape with a real tilt to sit on
+
+        design.addAnchor(atHz: 500, curveValueDb: 4)
+
+        let anchor = try? XCTUnwrap(design.anchors.first)
+        guard let anchor = anchor ?? nil else { return XCTFail("no point") }
+        XCTAssertEqual(design.curveValue(of: anchor), 4, accuracy: 0.05)
+
+        // And the drawn curve really does pass through it.
+        let curve = design.previewTargetCurve()
+        guard let bin = index(ofHz: 500, in: design.grid.frequencies) else {
+            return XCTFail("no grid")
+        }
+        XCTAssertEqual(curve[bin], 4, accuracy: 0.2)
+    }
+
+    func testAPointOnASteeperShapeStillLandsWhereItWasDropped() {
+        // The offset needed depends on the shape underneath, which is exactly
+        // the arithmetic the user should never have to do.
+        let design = makeDesign()
+        design.target = RoomCorrectionCore.Target(preset: .flat)
+        design.target.tiltDbPerOctave = -1.5
+
+        design.addAnchor(atHz: 80, curveValueDb: 2)
+        design.addAnchor(atHz: 6000, curveValueDb: -3)
+
+        for anchor in design.anchors {
+            let expected: Double = anchor.freqHz < 1000 ? 2 : -3
+            XCTAssertEqual(design.curveValue(of: anchor), expected, accuracy: 0.1,
+                           "point at \(anchor.freqHz) Hz")
+        }
+    }
+
+    func testMovingAPointTakesItToTheNewPlace() {
+        let design = makeDesign()
+        design.preset = .natural
+        design.addAnchor(atHz: 200, curveValueDb: 0)
+
+        let anchor = try? XCTUnwrap(design.anchors.first)
+        guard let anchor = anchor ?? nil else { return XCTFail("no point") }
+        design.moveAnchor(anchor, toHz: 900, curveValueDb: -5)
+
+        let moved = try? XCTUnwrap(design.anchors.first)
+        guard let moved = moved ?? nil else { return XCTFail("no point") }
+        XCTAssertEqual(moved.freqHz, 900, accuracy: 0.5)
+        XCTAssertEqual(design.curveValue(of: moved), -5, accuracy: 0.1)
+    }
+
+    func testDraggingAPointOntoAnotherLeavesOne() {
+        // Two points at one frequency is not a curve anyone can mean, and the
+        // one underneath would be unreachable.
+        let design = makeDesign()
+        design.addAnchor(atHz: 300, curveValueDb: 2)
+        design.addAnchor(atHz: 900, curveValueDb: -2)
+
+        let mover = try? XCTUnwrap(design.anchors.last)
+        guard let mover = mover ?? nil else { return XCTFail("no point") }
+        design.moveAnchor(mover, toHz: 300, curveValueDb: 5)
+
+        XCTAssertEqual(design.anchors.count, 1)
+        XCTAssertEqual(design.curveValue(of: design.anchors[0]), 5, accuracy: 0.1)
+    }
+
+    func testAPointIsALocalEditRatherThanAGlobalShift() {
+        // The failure that made a single anchor useless: held flat beyond the
+        // outermost point, one point offset the whole curve, and auto-level
+        // then removed exactly that.
+        let design = makeDesign()
+        design.target = RoomCorrectionCore.Target(preset: .flat)
+        let before = design.previewTargetCurve()
+
+        design.addAnchor(atHz: 500, curveValueDb: 6)
+        let after = design.previewTargetCurve()
+
+        guard let near = index(ofHz: 500, in: design.grid.frequencies),
+              let far = index(ofHz: 60, in: design.grid.frequencies) else {
+            return XCTFail("no grid")
+        }
+        XCTAssertGreaterThan(after[near], before[near] + 3)
+        XCTAssertEqual(after[far], before[far], accuracy: 0.01,
+                       "three octaves away nothing should have moved")
+    }
+
+    func testResetClearsThePointsAndTheShape() {
+        let design = makeDesign()
+        design.preset = .studio
+        design.target.tiltDbPerOctave = -1.9
+        design.addAnchor(atHz: 100, curveValueDb: 5)
+
+        design.resetCurve()
+
+        XCTAssertTrue(design.anchors.isEmpty)
+        XCTAssertEqual(design.target.tiltDbPerOctave,
+                       RoomCorrectionCore.Target(preset: .studio).tiltDbPerOctave,
+                       accuracy: 1e-9,
+                       "reset returns to the chosen preset, not to a different one")
+    }
+
     // MARK: - Staleness
 
     func testEditingTheTargetMarksTheFitStale() {

@@ -413,6 +413,55 @@ final class RoomCorrectionRenderTests: XCTestCase {
         }
     }
 
+    func testTargetStepRendersPointsCurtainsAndMeasuredResponse() throws {
+        // The interactive plot: curtains dragged in, both shelf handles, three
+        // points on the curve, and measured responses underneath. Worth
+        // drawing - a handle off its curve or a gradient covering the plot only
+        // shows up in the picture.
+        let run = MeasurementRun(session: MeasurementSession(capture: SilentCapture(),
+                                                             playback: SilentPlayback(),
+                                                             preparation: NoPreparation()))
+        let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                        catalog: Self.sharedModel.catalog,
+                                        run: run)
+        model.step = .target
+        model.selectedTargets = [0, 1]
+
+        let grid = model.design.grid
+        run.session.stubPositions((0..<3).map { index in
+            let drift = Double(index)
+            let magnitudes = grid.frequencies.map { hz -> Double in
+                75.0 + 8.0 * exp(-pow(log2(hz / (52.0 + drift * 4)) * 10, 2))
+                     - 6.0 * exp(-pow(log2(hz / 110.0) * 8, 2))
+                     - 2.5 * log2(hz / 1000.0)
+            }
+            return .init(name: "P\(index)",
+                         measurements: [0, 1].map { speaker in
+                             MeasurementSession.SpeakerMeasurement(
+                                speakerIndex: speaker,
+                                magnitudesDb: magnitudes.map { $0 + Double(speaker) * 2 },
+                                quality: CaptureQuality(), verdict: .pass,
+                                latencySeconds: 0.01)
+                         },
+                         weight: 1)
+        })
+
+        model.design.preset = .natural
+        model.design.target.lowCurtainHz = 32
+        model.design.target.highCurtainHz = 12000
+        model.design.target.bassGainDb = 4
+        model.design.target.bassTransitionHz = 90
+        model.design.target.trebleGainDb = -2
+        model.design.target.trebleTransitionHz = 6000
+        model.design.addAnchor(atHz: 220, curveValueDb: -3)
+        model.design.addAnchor(atHz: 1200, curveValueDb: 2)
+
+        let image = try render(RoomCorrectionView(model: model),
+                               size: NSSize(width: 1080, height: 940),
+                               name: "target-interactive")
+        try assertHasContent(image, "Interactive target")
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()

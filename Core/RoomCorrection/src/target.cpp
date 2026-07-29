@@ -88,19 +88,29 @@ std::vector<double> buildTarget(const FrequencyGrid& grid, const TargetSpec& spe
     }
 
     // Anchors are additive and interpolated between, so the user's macro
-    // controls survive placing one.
+    // controls survive placing one, and eased back to zero beyond the
+    // outermost pair so a point is a local edit rather than a global shift.
     if (!spec.anchors.empty()) {
         std::vector<TargetAnchor> sorted = spec.anchors;
         std::sort(sorted.begin(), sorted.end(),
                   [](const TargetAnchor& a, const TargetAnchor& b) { return a.freqHz < b.freqHz; });
 
+        // Raised cosine rather than linear: a kink in the target is a feature
+        // the optimizer will happily spend a filter chasing.
+        const double taper = std::max(0.05, spec.anchorTaperOctaves);
+        const auto ease = [taper](double octavesBeyond) {
+            if (octavesBeyond >= taper) return 0.0;
+            return 0.5 * (1.0 + std::cos(kPi * octavesBeyond / taper));
+        };
+
         for (std::size_t i = 0; i < grid.size(); ++i) {
             const double f = grid.hz[i];
             double offset;
             if (f <= sorted.front().freqHz) {
-                offset = sorted.front().gainDb;
+                offset = sorted.front().gainDb *
+                         ease(std::log2(sorted.front().freqHz / f));
             } else if (f >= sorted.back().freqHz) {
-                offset = sorted.back().gainDb;
+                offset = sorted.back().gainDb * ease(std::log2(f / sorted.back().freqHz));
             } else {
                 const auto upper = std::lower_bound(
                     sorted.begin(), sorted.end(), f,

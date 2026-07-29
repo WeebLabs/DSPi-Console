@@ -55,8 +55,23 @@ struct TargetSpec {
     double lowCurtainHz = 20.0;
     double highCurtainHz = 20000.0;
 
-    // Additive expert points.
+    // Points the curve is pulled through.
+    //
+    // Stored as offsets from the shape above, but the UI presents them as
+    // points sitting on the curve: a user drags one to where they want the
+    // curve to go, and the app works out the offset that puts it there.
+    // Showing the offset instead means setting one number and seeing another,
+    // which is what made this control hard to reason about.
     std::vector<TargetAnchor> anchors;
+
+    // How far past the outermost anchor the offset eases back to zero.
+    //
+    // Held flat instead, a single anchor offsets the entire curve uniformly -
+    // and `chooseAutoLevel` then absorbs exactly that, so the anchor has no
+    // effect on the correction at all. Easing to zero makes one point a local
+    // edit, which is what dropping a point on a curve implies. Broad changes
+    // are the shelves' job, not a point's.
+    double anchorTaperOctaves = 1.0;
 
     std::string validate() const;
 };

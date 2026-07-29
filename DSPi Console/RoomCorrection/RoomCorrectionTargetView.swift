@@ -11,6 +11,7 @@ struct RoomCorrectionTargetView: View {
     @ObservedObject private var design: CorrectionDesign
 
     @State private var showAdvanced = false
+    @State private var selectedAnchor: UUID?
     @State private var newAnchorHz = "1000"
     @State private var newAnchorDb = "0"
 
@@ -49,31 +50,60 @@ struct RoomCorrectionTargetView: View {
 
     private var curveSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("HOUSE CURVE")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("HOUSE CURVE")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if selectedAnchor != nil {
+                    Button("Remove Point") { removeSelectedPoint() }
+                        .controlSize(.small)
+                }
+                Button("Reset Curve") {
+                    design.resetCurve()
+                    selectedAnchor = nil
+                }
+                .controlSize(.small)
+                .disabled(design.anchors.isEmpty && !design.isStale)
+            }
 
-            TargetCurvePlot(target: design.previewTargetCurve(),
-                            measured: measuredCurve,
-                            frequencies: design.grid.frequencies,
-                            anchors: design.anchors)
-                .frame(height: 200)
+            InteractiveTargetPlot(design: design,
+                                  measured: measuredCurves,
+                                  selectedAnchor: $selectedAnchor)
+                .frame(height: 240)
+                .onDeleteCommand { removeSelectedPoint() }
 
             Text(design.target.summary)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+
+            Text("Drag the shaded edges to set where correction applies, the dots on "
+                 + "the curve ends for bass and treble, and click anywhere to add a "
+                 + "point the curve is pulled through.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The measured average of the first fitted channel, for context.
+    private func removeSelectedPoint() {
+        guard let id = selectedAnchor,
+              let anchor = design.anchors.first(where: { $0.id == id }) else { return }
+        design.removeAnchor(anchor)
+        selectedAnchor = nil
+    }
+
+    /// The measured average per selected speaker.
     ///
-    /// Drawn behind the target so the user can see what they are aiming at
-    /// relative to what the room actually does, which is the difference between
-    /// choosing a curve and guessing one.
-    private var measuredCurve: [Double] {
-        guard let channel = design.fittedChannels.first else { return [] }
-        return design.curve(.powerAverage, channel: channel)
+    /// All of them, not one: a single target has to serve every speaker, so
+    /// seeing where they diverge is exactly what informs the choice. Available
+    /// before any fit exists, which is when the curve is actually chosen.
+    private var measuredCurves: [[Double]] {
+        MeasurementProgress.accumulate(positions: model.run.positions,
+                                       speakers: model.selectedTargets.sorted(),
+                                       grid: design.grid)
+            .compactMap { $0.average ?? $0.positions.first }
     }
 
     // MARK: - Presets
@@ -93,8 +123,8 @@ struct RoomCorrectionTargetView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            note("A preset replaces the shape below. Anchors you have added are your "
-                 + "own edits and are kept.")
+            note("A preset replaces the shape below. Points you have added to the curve "
+                 + "are your own edits and are kept.")
         }
     }
 
@@ -151,8 +181,6 @@ struct RoomCorrectionTargetView: View {
                 anchorControls
                 Divider()
                 limitControls
-                Divider()
-                curtainControls
             }
             .padding(.top, 12)
         } label: {
@@ -164,11 +192,12 @@ struct RoomCorrectionTargetView: View {
 
     private var anchorControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Target anchors")
+            Text("Curve points")
                 .font(.system(size: 12, weight: .medium))
-            note("Fixed points the curve is pulled through, on top of the shape above. "
-                 + "Useful for a specific room problem the macro controls cannot "
-                 + "express.")
+            note("The same points you can drag on the graph, for setting one exactly. "
+                 + "Each pulls the curve through that frequency and eases back to the "
+                 + "shape either side; use the bass and treble handles for everything "
+                 + "below or above a frequency.")
 
             ForEach(design.anchors) { anchor in
                 HStack(spacing: 10) {
@@ -244,29 +273,6 @@ struct RoomCorrectionTargetView: View {
             note("Shelves fix a broad tonal tilt with one band where peaking filters "
                  + "would need several, leaving more of the budget for the room's "
                  + "actual problems.")
-        }
-    }
-
-    private var curtainControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Correction band")
-                .font(.system(size: 12, weight: .medium))
-
-            slider("Low limit", value: Binding(
-                get: { design.target.lowCurtainHz },
-                set: { design.target.lowCurtainHz = $0 }),
-                   range: 15...80, format: "%.0f Hz",
-                   help: "Below this nothing is corrected. Chasing a null under a "
-                       + "speaker's usable range spends the whole budget on a band "
-                       + "nobody hears.")
-
-            slider("High limit", value: Binding(
-                get: { design.target.highCurtainHz },
-                set: { design.target.highCurtainHz = $0 }),
-                   range: 2000...20000, format: "%.0f Hz",
-                   help: "Above this nothing is corrected. High-frequency detail in a "
-                       + "measurement is mostly where the microphone was, not what "
-                       + "the room does.")
         }
     }
 
