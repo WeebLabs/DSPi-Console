@@ -314,118 +314,30 @@ private struct ResponseComparisonPlot: View {
     let correction: [Double]
     let frequencies: [Double]
 
+    /// Measured plus correction, rather than a separate prediction: what is
+    /// drawn is exactly what the filters do to what was measured, with no
+    /// second model that could disagree with the first.
     private var corrected: [Double] {
         guard measured.count == correction.count else { return [] }
         return zip(measured, correction).map(+)
     }
 
-    /// Fitted to the traces, so a room with a 25 dB null is not drawn as a
-    /// flat line pressed against the bottom of the box.
-    private var scale: (centre: Double, halfRange: Double) {
-        let all = measured + target + corrected
-        guard let low = all.min(), let high = all.max() else { return (0, 12) }
-        return ((low + high) / 2, max(8, (high - low) / 2 * 1.1))
-    }
-
     var body: some View {
-        let (centre, halfRange) = scale
         GeometryReader { geometry in
             let size = geometry.size
+            let axis = FrequencyAxis(frequencies: frequencies)
+            let scale = FrequencyPlotScale(fitting: measured + target + corrected,
+                                           minimumHalfRange: 8, padding: 1.1)
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.gray.opacity(0.12))
-                gridLines(in: size, centre: centre, halfRange: halfRange)
-                trace(measured, in: size, centre: centre, halfRange: halfRange)
+                FrequencyPlotBackground(axis: axis, scale: scale)
+                axis.path(measured, scale: scale, in: size)
                     .stroke(Color.secondary.opacity(0.55), lineWidth: 1)
-                trace(target, in: size, centre: centre, halfRange: halfRange)
+                axis.path(target, scale: scale, in: size)
                     .stroke(Color.accentColor.opacity(0.9),
                             style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                trace(corrected, in: size, centre: centre, halfRange: halfRange)
+                axis.path(corrected, scale: scale, in: size)
                     .stroke(Color.green, lineWidth: 2)
-                axisLabels(in: size, centre: centre, halfRange: halfRange)
             }
         }
-    }
-
-    private func gridLines(in size: CGSize, centre: Double,
-                           halfRange: Double) -> some View {
-        ZStack {
-            ForEach([20.0, 100.0, 1000.0, 10000.0], id: \.self) { hz in
-                let x = position(ofHz: hz, in: size.width)
-                Path { path in
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: size.height))
-                }
-                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-            }
-            ForEach(dbLines(centre: centre, halfRange: halfRange), id: \.self) { db in
-                let y = position(ofDb: db, in: size.height, centre: centre,
-                                 halfRange: halfRange)
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: size.width, y: y))
-                }
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            }
-        }
-    }
-
-    private func axisLabels(in size: CGSize, centre: Double,
-                            halfRange: Double) -> some View {
-        ZStack(alignment: .topLeading) {
-            ForEach([100.0, 1000.0, 10000.0], id: \.self) { hz in
-                Text(hz >= 1000 ? "\(Int(hz / 1000))k" : "\(Int(hz))")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .position(x: position(ofHz: hz, in: size.width) + 12,
-                              y: size.height - 8)
-            }
-            ForEach(dbLines(centre: centre, halfRange: halfRange), id: \.self) { db in
-                Text(String(format: "%+.0f", db - centre))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .position(x: 18, y: position(ofDb: db, in: size.height,
-                                                 centre: centre, halfRange: halfRange))
-            }
-        }
-    }
-
-    private func dbLines(centre: Double, halfRange: Double) -> [Double] {
-        let step: Double = halfRange > 15 ? 10 : 5
-        var lines = [centre]
-        var offset = step
-        while offset < halfRange {
-            lines.append(centre + offset)
-            lines.append(centre - offset)
-            offset += step
-        }
-        return lines.sorted()
-    }
-
-    private func trace(_ values: [Double], in size: CGSize,
-                       centre: Double, halfRange: Double) -> Path {
-        Path { path in
-            guard values.count == frequencies.count else { return }
-            for (index, value) in values.enumerated() {
-                let point = CGPoint(
-                    x: position(ofHz: frequencies[index], in: size.width),
-                    y: min(max(position(ofDb: value, in: size.height, centre: centre,
-                                        halfRange: halfRange), 0), size.height))
-                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
-            }
-        }
-    }
-
-    private func position(ofDb db: Double, in height: CGFloat,
-                          centre: Double, halfRange: Double) -> CGFloat {
-        height / 2 - CGFloat((db - centre) / halfRange) * (height / 2)
-    }
-
-    private func position(ofHz hz: Double, in width: CGFloat) -> CGFloat {
-        guard let low = frequencies.first, let high = frequencies.last, high > low else {
-            return 0
-        }
-        let fraction = (log10(hz) - log10(low)) / (log10(high) - log10(low))
-        return width * CGFloat(min(max(fraction, 0), 1))
     }
 }

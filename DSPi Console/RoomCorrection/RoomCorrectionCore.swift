@@ -327,6 +327,96 @@ extension RoomCorrectionCore {
 }
 
 extension RoomCorrectionCore {
+
+    /// How a curve is smoothed for display.
+    ///
+    /// Display only. The fit is deliberately not smoothed: pre-smoothing would
+    /// destroy narrow modal detail that is genuinely correctable, and the
+    /// optimizer relies on its reliability mask to decide what to trust.
+    enum Smoothing: Hashable, CaseIterable {
+        /// Fine in the modal region, broad at the top, anchored to the room's
+        /// own measured transition.
+        case variable
+        case fixed(denominator: Int)
+
+        static var allCases: [Smoothing] {
+            [.variable, .fixed(denominator: 48), .fixed(denominator: 24),
+             .fixed(denominator: 12), .fixed(denominator: 6), .fixed(denominator: 3)]
+        }
+
+        var displayName: String {
+            switch self {
+            case .variable: return "Variable"
+            case .fixed(let denominator): return "1/\(denominator) octave"
+            }
+        }
+
+        fileprivate var denominator: Double {
+            switch self {
+            case .variable: return 0
+            case .fixed(let value): return Double(value)
+            }
+        }
+    }
+
+    /// The spatial average and spread of a set of positions, with no fit.
+    ///
+    /// The same power-domain average the fit will use, so the curve a user
+    /// watches converge is the one that will be corrected against rather than
+    /// a second answer that happens to look similar.
+    ///
+    /// `spread` is the median absolute deviation across positions and needs
+    /// three or more to mean anything.
+    static func spatialStatistics(positions: [[Double]],
+                                  grid: Grid) throws -> (average: [Double],
+                                                         spread: [Double]) {
+        let points = grid.pointCount
+        guard !positions.isEmpty, points > 0 else { return ([], []) }
+        guard positions.allSatisfy({ $0.count == points }) else {
+            throw CoreError.failed("a measurement does not match the analysis grid")
+        }
+
+        let packed = positions.flatMap { $0 }
+        var average = [Double](repeating: 0, count: points)
+        var spread = [Double](repeating: 0, count: points)
+
+        let status = packed.withUnsafeBufferPointer { input in
+            average.withUnsafeMutableBufferPointer { averageOut in
+                spread.withUnsafeMutableBufferPointer { spreadOut in
+                    dspi_rc_spatial_statistics(input.baseAddress, positions.count, points,
+                                               grid.minHz, grid.maxHz,
+                                               Int32(grid.pointsPerOctave),
+                                               averageOut.baseAddress,
+                                               spreadOut.baseAddress)
+                }
+            }
+        }
+        try check(status, "could not compute the spatial average")
+        return (average, spread)
+    }
+
+    /// Smooth a curve for display.
+    static func smooth(_ magnitudesDb: [Double],
+                       grid: Grid,
+                       using smoothing: Smoothing,
+                       transitionHz: Double = 200) throws -> [Double] {
+        guard magnitudesDb.count == grid.pointCount, !magnitudesDb.isEmpty else {
+            return magnitudesDb
+        }
+        var output = [Double](repeating: 0, count: magnitudesDb.count)
+        let status = magnitudesDb.withUnsafeBufferPointer { input in
+            output.withUnsafeMutableBufferPointer { out in
+                dspi_rc_smooth_curve(input.baseAddress, magnitudesDb.count,
+                                     grid.minHz, grid.maxHz,
+                                     Int32(grid.pointsPerOctave),
+                                     smoothing.denominator, transitionHz,
+                                     out.baseAddress)
+            }
+        }
+        try check(status, "could not smooth the curve")
+        return output
+    }
+
     /// The target curve alone, with no measurement involved.
     ///
     /// A house curve is chosen before anything is measured, so the design view

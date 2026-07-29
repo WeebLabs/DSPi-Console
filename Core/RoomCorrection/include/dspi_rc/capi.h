@@ -179,6 +179,40 @@ typedef struct dspi_rc_target_spec {
 /* preset: 0 = flat, 1 = natural, 2 = studio, 3 = bass warm. */
 dspi_rc_status dspi_rc_target_preset(int preset, dspi_rc_target_spec* spec);
 
+/* The spatial average and spread of a set of positions, with no fit involved.
+ *
+ * Session curves require a fit, and a fit requires a target - but a
+ * measurement view wants to show the average accumulating while positions are
+ * still being captured and no target has been chosen. Computes the same
+ * power-domain average the fit will use, so the curve a user watches converge
+ * is the one that will actually be corrected against.
+ *
+ * `positions_db` is `position_count` contiguous rows of `points` values, one
+ * row per position, all on the grid described by the range arguments. Either
+ * output may be null if that curve is not wanted. `out_spread_db` is the
+ * median absolute deviation across positions, which needs three or more to
+ * mean anything. */
+dspi_rc_status dspi_rc_spatial_statistics(const double* positions_db,
+                                          size_t position_count,
+                                          size_t points,
+                                          double min_hz, double max_hz,
+                                          int points_per_octave,
+                                          double* out_average_db,
+                                          double* out_spread_db);
+
+/* Smooth a curve for display.
+ *
+ * `fraction_denominator` of 0 selects the variable schedule anchored to
+ * `transition_hz` - fine in the modal region, broad at the top - which is the
+ * sensible default. Any other value is a fixed fractional-octave width, for a
+ * manual selector. Display only: the fit is deliberately not smoothed. */
+dspi_rc_status dspi_rc_smooth_curve(const double* magnitudes_db, size_t points,
+                                    double min_hz, double max_hz,
+                                    int points_per_octave,
+                                    double fraction_denominator,
+                                    double transition_hz,
+                                    double* out_db);
+
 /* Evaluate a target curve on a grid, with no measurement involved.
  *
  * Session curves require a fit, and a fit requires positions - but a house

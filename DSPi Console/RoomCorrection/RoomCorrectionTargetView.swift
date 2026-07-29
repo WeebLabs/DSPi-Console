@@ -376,169 +376,46 @@ struct RoomCorrectionTargetView: View {
 // MARK: - Plot
 
 /// The target curve, over the measured average where one exists.
-///
-/// The vertical scale is fitted to what is drawn rather than fixed: a warm
-/// preset with bass lift spans well over 18 dB end to end, and a fixed window
-/// clips it flat against the top of the box.
 private struct TargetCurvePlot: View {
     let target: [Double]
     let measured: [Double]
     let frequencies: [Double]
     let anchors: [CorrectionDesign.Anchor]
 
-    /// Centre and half-range, in dB, chosen to fit what is actually drawn.
-    ///
-    /// A fixed window clips: a warm preset with bass lift covers well over 18 dB
-    /// end to end, and a curve pinned flat against the top of its box tells the
-    /// user nothing about the shape they just chose.
-    private var scale: (centre: Double, halfRange: Double) {
-        let values = target.isEmpty ? measuredCentred : target
-        guard let low = values.min(), let high = values.max() else { return (0, 9) }
-        let centre = (low + high) / 2
-        // Never tighter than +-6 dB, so a nearly flat curve does not have its
-        // own rounding blown up into a dramatic-looking wiggle.
-        let halfRange = max(6, (high - low) / 2 * 1.25)
-        return (centre, halfRange)
-    }
-
-    /// The measured curve re-referenced to its own mean, so it sits behind the
-    /// target rather than wherever its absolute level happens to be.
+    /// The measured curve re-referenced to the target's centre, so it sits
+    /// behind the target rather than wherever its absolute level happens to
+    /// be - which says nothing about shape.
     private var measuredCentred: [Double] {
-        guard !measured.isEmpty else { return [] }
+        guard !measured.isEmpty, let low = target.min(), let high = target.max() else {
+            return []
+        }
         let mean = measured.reduce(0, +) / Double(measured.count)
-        return measured.map { $0 - mean + scaleCentreForMeasured }
-    }
-
-    /// Measured content is referenced to the target's centre so both curves
-    /// share one axis.
-    private var scaleCentreForMeasured: Double {
-        guard let low = target.min(), let high = target.max() else { return 0 }
-        return (low + high) / 2
+        let targetCentre = (low + high) / 2
+        return measured.map { $0 - mean + targetCentre }
     }
 
     var body: some View {
-        let (centre, halfRange) = scale
         GeometryReader { geometry in
             let size = geometry.size
+            let axis = FrequencyAxis(frequencies: frequencies)
+            let scale = FrequencyPlotScale(fitting: target.isEmpty ? measuredCentred : target,
+                                           minimumHalfRange: 6, padding: 1.25)
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.gray.opacity(0.12))
-                grid(in: size, centre: centre, halfRange: halfRange)
-                if measured.count == frequencies.count && !measured.isEmpty {
-                    path(measuredCentred, in: size, centre: centre, halfRange: halfRange)
-                        .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
+                FrequencyPlotBackground(axis: axis, scale: scale)
+                axis.path(measuredCentred, scale: scale, in: size)
+                    .stroke(Color.secondary.opacity(0.5), lineWidth: 1)
+                axis.path(target, scale: scale, in: size)
+                    .stroke(Color.accentColor, lineWidth: 2)
+
+                ForEach(anchors) { anchor in
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 6, height: 6)
+                        .position(x: axis.x(forHz: anchor.freqHz, in: size.width),
+                                  y: scale.clampedY(forDb: scale.centre + anchor.gainDb,
+                                                    in: size.height))
                 }
-                if target.count == frequencies.count && !target.isEmpty {
-                    path(target, in: size, centre: centre, halfRange: halfRange)
-                        .stroke(Color.accentColor, lineWidth: 2)
-                }
-                anchorMarks(in: size, centre: centre, halfRange: halfRange)
-                labels(in: size, centre: centre, halfRange: halfRange)
             }
         }
-    }
-
-    // MARK: - Furniture
-
-    private func grid(in size: CGSize, centre: Double, halfRange: Double) -> some View {
-        // Decade lines and a few dB lines. A full third-octave grid behind a
-        // two-line plot is more ink than information.
-        ZStack {
-            ForEach([20.0, 100.0, 1000.0, 10000.0], id: \.self) { hz in
-                let x = position(ofHz: hz, in: size.width)
-                Path { path in
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: size.height))
-                }
-                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-            }
-            ForEach(dbLines(centre: centre, halfRange: halfRange), id: \.self) { db in
-                let y = position(ofDb: db, in: size.height, centre: centre,
-                                 halfRange: halfRange)
-                Path { path in
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: size.width, y: y))
-                }
-                .stroke(Color.primary.opacity(db == centre ? 0.18 : 0.08), lineWidth: 1)
-            }
-        }
-    }
-
-    private func labels(in size: CGSize, centre: Double, halfRange: Double) -> some View {
-        ZStack(alignment: .topLeading) {
-            ForEach([100.0, 1000.0, 10000.0], id: \.self) { hz in
-                Text(hz >= 1000 ? "\(Int(hz / 1000))k" : "\(Int(hz))")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .position(x: position(ofHz: hz, in: size.width) + 12,
-                              y: size.height - 8)
-            }
-            ForEach(dbLines(centre: centre, halfRange: halfRange), id: \.self) { db in
-                Text(String(format: "%+.0f", db - centre))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .position(x: 18,
-                              y: position(ofDb: db, in: size.height, centre: centre,
-                                          halfRange: halfRange))
-            }
-        }
-    }
-
-    /// Round dB gridlines inside the visible range, relative to its centre.
-    private func dbLines(centre: Double, halfRange: Double) -> [Double] {
-        let step: Double = halfRange > 15 ? 10 : (halfRange > 8 ? 5 : 2)
-        var lines: [Double] = [centre]
-        var offset = step
-        while offset < halfRange {
-            lines.append(centre + offset)
-            lines.append(centre - offset)
-            offset += step
-        }
-        return lines.sorted()
-    }
-
-    private func anchorMarks(in size: CGSize, centre: Double,
-                             halfRange: Double) -> some View {
-        ForEach(anchors) { anchor in
-            Circle()
-                .fill(Color.accentColor)
-                .frame(width: 6, height: 6)
-                .position(x: position(ofHz: anchor.freqHz, in: size.width),
-                          y: min(max(position(ofDb: centre + anchor.gainDb,
-                                              in: size.height, centre: centre,
-                                              halfRange: halfRange), 3),
-                                 size.height - 3))
-        }
-    }
-
-    // MARK: - Mapping
-
-    private func path(_ values: [Double], in size: CGSize,
-                      centre: Double, halfRange: Double) -> Path {
-        Path { path in
-            for (index, value) in values.enumerated() where index < frequencies.count {
-                let point = CGPoint(
-                    x: position(ofHz: frequencies[index], in: size.width),
-                    y: min(max(position(ofDb: value, in: size.height, centre: centre,
-                                        halfRange: halfRange), 0), size.height))
-                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
-            }
-        }
-    }
-
-    private func position(ofDb db: Double, in height: CGFloat,
-                          centre: Double, halfRange: Double) -> CGFloat {
-        height / 2 - CGFloat((db - centre) / halfRange) * (height / 2)
-    }
-
-    /// Log frequency, because that is how hearing works and how every other
-    /// tool in this field draws it - a linear axis would put half the picture
-    /// above 10 kHz, where almost nothing worth correcting happens.
-    private func position(ofHz hz: Double, in width: CGFloat) -> CGFloat {
-        guard let low = frequencies.first, let high = frequencies.last, high > low else {
-            return 0
-        }
-        let fraction = (log10(hz) - log10(low)) / (log10(high) - log10(low))
-        return width * CGFloat(min(max(fraction, 0), 1))
     }
 }

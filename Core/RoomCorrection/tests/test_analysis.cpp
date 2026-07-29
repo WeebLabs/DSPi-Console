@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "dspi_rc/analysis.hpp"
+#include "dspi_rc/capi.h"
 #include "dspi_rc/sweep.hpp"
 #include "testing.hpp"
 
@@ -370,4 +371,167 @@ TEST_CASE(windowing_tolerates_an_empty_impulse) {
     const std::vector<double> response =
         frequencyDependentWindowedResponse({}, 48000.0, 0, grid, {});
     CHECK(response.size() == grid.size());
+}
+
+// ---------------------------------------------------------------------------
+// The measurement view's entry points: statistics and smoothing without a fit
+// ---------------------------------------------------------------------------
+
+namespace {
+
+FrequencyGrid viewGrid() { return FrequencyGrid::logSpaced(20.0, 20000.0, 24); }
+
+std::size_t viewBinNear(const FrequencyGrid& grid, double hz) {
+    std::size_t best = 0;
+    double bestDistance = 1e30;
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        const double d = std::fabs(std::log2(grid.hz[i] / hz));
+        if (d < bestDistance) { bestDistance = d; best = i; }
+    }
+    return best;
+}
+
+}  // namespace
+
+TEST_CASE(spatial_statistics_matches_the_average_the_fit_uses) {
+    // The whole point of exposing this: the curve a user watches converge must
+    // be the one that will actually be corrected against, not a second answer.
+    const FrequencyGrid grid = viewGrid();
+    std::vector<std::vector<double>> curves;
+    for (int i = 0; i < 3; ++i) {
+        std::vector<double> curve(grid.size(), 75.0);
+        curve[viewBinNear(grid, 60.0)] += 4.0 * (i + 1);
+        curves.push_back(curve);
+    }
+
+    std::vector<PositionMeasurement> positions;
+    std::vector<double> flatPacked;
+    for (const std::vector<double>& curve : curves) {
+        PositionMeasurement p;
+        p.magnitudesDb = curve;
+        positions.push_back(p);
+        flatPacked.insert(flatPacked.end(), curve.begin(), curve.end());
+    }
+    const SpatialStatistics direct = computeSpatialStatistics(grid, positions, {});
+
+    std::vector<double> average(grid.size(), 0.0);
+    std::vector<double> spread(grid.size(), 0.0);
+    CHECK(dspi_rc_spatial_statistics(flatPacked.data(), curves.size(), grid.size(),
+                                     20.0, 20000.0, 24,
+                                     average.data(), spread.data()) == DSPI_RC_OK);
+
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        CHECK_NEAR(average[i], direct.powerAverageDb[i], 1e-12);
+        CHECK_NEAR(spread[i], direct.madDb[i], 1e-12);
+    }
+}
+
+TEST_CASE(spatial_statistics_of_one_position_is_that_position) {
+    const FrequencyGrid grid = viewGrid();
+    std::vector<double> curve(grid.size(), 70.0);
+    curve[viewBinNear(grid, 100.0)] = 82.0;
+
+    std::vector<double> average(grid.size(), 0.0);
+    std::vector<double> spread(grid.size(), 1.0);
+    CHECK(dspi_rc_spatial_statistics(curve.data(), 1, grid.size(), 20.0, 20000.0, 24,
+                                     average.data(), spread.data()) == DSPI_RC_OK);
+
+    for (std::size_t i = 0; i < grid.size(); ++i) CHECK_NEAR(average[i], curve[i], 1e-9);
+    // One position cannot disagree with itself.
+    for (double s : spread) CHECK_NEAR(s, 0.0, 1e-9);
+}
+
+TEST_CASE(a_deep_null_at_one_seat_does_not_drag_the_average_down) {
+    // The reason the average is computed in the power domain. A dB-domain mean
+    // of {75, 75, 45} is 65; the energy the listening area actually receives is
+    // far closer to 75.
+    const FrequencyGrid grid = viewGrid();
+    const std::size_t bin = viewBinNear(grid, 55.0);
+
+    std::vector<double> packed;
+    for (int i = 0; i < 3; ++i) {
+        std::vector<double> curve(grid.size(), 75.0);
+        if (i == 2) curve[bin] = 45.0;
+        packed.insert(packed.end(), curve.begin(), curve.end());
+    }
+
+    std::vector<double> average(grid.size(), 0.0);
+    CHECK(dspi_rc_spatial_statistics(packed.data(), 3, grid.size(), 20.0, 20000.0, 24,
+                                     average.data(), nullptr) == DSPI_RC_OK);
+    CHECK(average[bin] > 70.0);
+}
+
+TEST_CASE(spatial_statistics_rejects_a_mismatched_grid) {
+    std::vector<double> curve(64, 70.0);
+    std::vector<double> out(64, 0.0);
+    CHECK(dspi_rc_spatial_statistics(curve.data(), 1, 64, 20.0, 20000.0, 24,
+                                     out.data(), nullptr) != DSPI_RC_OK);
+    CHECK(dspi_rc_spatial_statistics(nullptr, 1, 64, 20.0, 20000.0, 24,
+                                     out.data(), nullptr) != DSPI_RC_OK);
+    CHECK(dspi_rc_spatial_statistics(curve.data(), 0, 64, 20.0, 20000.0, 24,
+                                     out.data(), nullptr) != DSPI_RC_OK);
+}
+
+TEST_CASE(variable_smoothing_keeps_a_narrow_mode_and_calms_the_top) {
+    // The policy argument for the variable schedule over any fixed fraction: a
+    // Q=20 mode is about 1/14 octave wide and must survive, while dense
+    // interference at the top is position-specific and not worth drawing.
+    const FrequencyGrid grid = viewGrid();
+    std::vector<double> curve(grid.size(), 75.0);
+
+    const std::size_t modeBin = viewBinNear(grid, 60.0);
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        const double octaves = std::log2(grid.hz[i] / 60.0) / (1.0 / 14.0);
+        curve[i] += 10.0 * std::exp(-octaves * octaves);
+    }
+    // Alternating comb above 5 kHz.
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        if (grid.hz[i] > 5000.0) curve[i] += (i % 2 == 0) ? 6.0 : -6.0;
+    }
+
+    std::vector<double> smoothed(grid.size(), 0.0);
+    CHECK(dspi_rc_smooth_curve(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                               0.0, 200.0, smoothed.data()) == DSPI_RC_OK);
+
+    // The mode is still clearly there.
+    CHECK(smoothed[modeBin] > 80.0);
+
+    // The comb is gone: neighbours at the top no longer swing 12 dB apart.
+    double worstSwing = 0.0;
+    for (std::size_t i = 1; i < grid.size(); ++i) {
+        if (grid.hz[i] > 6000.0 && grid.hz[i] < 15000.0) {
+            worstSwing = std::max(worstSwing, std::fabs(smoothed[i] - smoothed[i - 1]));
+        }
+    }
+    CHECK(worstSwing < 3.0);
+}
+
+TEST_CASE(a_fixed_fraction_smooths_uniformly) {
+    // The manual selector. Broad enough and the mode goes with the comb, which
+    // is exactly why the variable schedule is the default.
+    const FrequencyGrid grid = viewGrid();
+    std::vector<double> curve(grid.size(), 75.0);
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        const double octaves = std::log2(grid.hz[i] / 60.0) / (1.0 / 14.0);
+        curve[i] += 10.0 * std::exp(-octaves * octaves);
+    }
+    const std::size_t modeBin = viewBinNear(grid, 60.0);
+
+    std::vector<double> fine(grid.size(), 0.0);
+    std::vector<double> coarse(grid.size(), 0.0);
+    CHECK(dspi_rc_smooth_curve(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                               48.0, 200.0, fine.data()) == DSPI_RC_OK);
+    CHECK(dspi_rc_smooth_curve(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                               3.0, 200.0, coarse.data()) == DSPI_RC_OK);
+
+    CHECK(fine[modeBin] > coarse[modeBin] + 2.0);
+}
+
+TEST_CASE(smoothing_rejects_a_mismatched_grid) {
+    std::vector<double> curve(64, 70.0);
+    std::vector<double> out(64, 0.0);
+    CHECK(dspi_rc_smooth_curve(curve.data(), 64, 20.0, 20000.0, 24, 0.0, 200.0,
+                               out.data()) != DSPI_RC_OK);
+    CHECK(dspi_rc_smooth_curve(nullptr, 64, 20.0, 20000.0, 24, 0.0, 200.0,
+                               out.data()) != DSPI_RC_OK);
 }

@@ -11,6 +11,11 @@ struct RoomCorrectionMeasurementsView: View {
     @ObservedObject var model: RoomCorrectionModel
     @ObservedObject private var run: MeasurementRun
 
+    /// nil means "first speaker with data", so the chart populates itself
+    /// without the user having to choose before anything exists.
+    @State private var selectedSpeaker: Int?
+    @State private var smoothing: RoomCorrectionCore.Smoothing = .variable
+
     init(model: RoomCorrectionModel) {
         self.model = model
         self.run = model.run
@@ -21,6 +26,8 @@ struct RoomCorrectionMeasurementsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     progressSection
+                    Divider()
+                    chartSection
                     Divider()
                     activeSection
                     if !run.positions.isEmpty {
@@ -72,6 +79,80 @@ struct RoomCorrectionMeasurementsView: View {
                 .foregroundStyle(run.readiness.isEnough ? .secondary : .secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    // MARK: - Chart
+
+    private var accumulations: [SpeakerAccumulation] {
+        MeasurementProgress.accumulate(positions: run.positions,
+                                       speakers: model.selectedTargets.sorted(),
+                                       grid: model.design.grid,
+                                       smoothing: smoothing)
+    }
+
+    private var chartSection: some View {
+        let all = accumulations
+        let shown = all.first { $0.speakerIndex == selectedSpeaker } ?? all.first
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("RESPONSE SO FAR")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+
+                // Both pickers stay put once measuring starts, so the controls
+                // do not move under the pointer between captures.
+                if all.count > 1 {
+                    Picker("", selection: Binding(
+                        get: { shown?.speakerIndex ?? all.first?.speakerIndex ?? 0 },
+                        set: { selectedSpeaker = $0 })) {
+                        ForEach(all) { entry in
+                            Text(model.targetName(entry.speakerIndex)).tag(entry.speakerIndex)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
+
+                Picker("", selection: $smoothing) {
+                    ForEach(RoomCorrectionCore.Smoothing.allCases, id: \.self) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 130)
+                .disabled(all.isEmpty)
+            }
+
+            MeasurementProgressPlot(accumulation: shown,
+                                    frequencies: model.design.grid.frequencies)
+                .frame(height: 190)
+
+            if let shown {
+                Text(shown.statusLine)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // Per speaker, not per position: a sweep can fail for one
+                // speaker at a position the other measured fine, and a single
+                // global count would overstate whichever is behind.
+                if all.count > 1, all.map(\.positionCount).min() != all.map(\.positionCount).max() {
+                    Text(all.map { "\(model.targetName($0.speakerIndex)): "
+                                 + "\($0.positionCount)" }.joined(separator: "   "))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+            } else {
+                Text("Your first position will appear here. Smoothing affects only what "
+                     + "is drawn - the correction is calculated from the unsmoothed "
+                     + "measurements.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - The position being captured

@@ -303,6 +303,73 @@ dspi_rc_status dspi_rc_target_preset(int preset, dspi_rc_target_spec* spec) {
     }
 }
 
+dspi_rc_status dspi_rc_spatial_statistics(const double* positions_db,
+                                          size_t position_count,
+                                          size_t points,
+                                          double min_hz, double max_hz,
+                                          int points_per_octave,
+                                          double* out_average_db,
+                                          double* out_spread_db) {
+    if (!positions_db) return fail(DSPI_RC_INVALID_ARGUMENT, "positions are null");
+    if (position_count == 0) return fail(DSPI_RC_INVALID_ARGUMENT, "no positions");
+    if (!out_average_db && !out_spread_db) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "nothing to write");
+    }
+
+    const FrequencyGrid grid = FrequencyGrid::logSpaced(min_hz, max_hz, points_per_octave);
+    if (grid.empty()) return fail(DSPI_RC_INVALID_ARGUMENT, "invalid grid");
+    if (points != grid.size()) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "positions do not match the grid");
+    }
+
+    std::vector<PositionMeasurement> positions;
+    positions.reserve(position_count);
+    for (size_t i = 0; i < position_count; ++i) {
+        PositionMeasurement position;
+        position.magnitudesDb.assign(positions_db + i * points,
+                                     positions_db + (i + 1) * points);
+        positions.push_back(std::move(position));
+    }
+
+    // No target: the average and the spread are properties of the measurements
+    // alone, and the caller has not necessarily chosen a target yet.
+    const SpatialStatistics statistics =
+        computeSpatialStatistics(grid, positions, {});
+
+    if (out_average_db) {
+        std::copy(statistics.powerAverageDb.begin(), statistics.powerAverageDb.end(),
+                  out_average_db);
+    }
+    if (out_spread_db) {
+        std::copy(statistics.madDb.begin(), statistics.madDb.end(), out_spread_db);
+    }
+    return DSPI_RC_OK;
+}
+
+dspi_rc_status dspi_rc_smooth_curve(const double* magnitudes_db, size_t points,
+                                    double min_hz, double max_hz,
+                                    int points_per_octave,
+                                    double fraction_denominator,
+                                    double transition_hz,
+                                    double* out_db) {
+    if (!magnitudes_db || !out_db) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+
+    const FrequencyGrid grid = FrequencyGrid::logSpaced(min_hz, max_hz, points_per_octave);
+    if (grid.empty()) return fail(DSPI_RC_INVALID_ARGUMENT, "invalid grid");
+    if (points != grid.size()) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "curve does not match the grid");
+    }
+
+    const std::vector<double> input(magnitudes_db, magnitudes_db + points);
+    const std::vector<double> smoothed =
+        fraction_denominator > 0.0
+            ? smoothFractionalOctave(grid, input, fraction_denominator)
+            : smoothVariable(grid, input, SmoothingConfig::forTransition(transition_hz));
+
+    std::copy(smoothed.begin(), smoothed.end(), out_db);
+    return DSPI_RC_OK;
+}
+
 dspi_rc_status dspi_rc_evaluate_target(const dspi_rc_target_spec* spec,
                                        const double* anchor_hz,
                                        const double* anchor_db,

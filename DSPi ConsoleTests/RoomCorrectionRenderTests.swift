@@ -369,6 +369,50 @@ final class RoomCorrectionRenderTests: XCTestCase {
         try assertHasContent(image, "Results")
     }
 
+    func testMeasurementChartRendersAsPositionsAccumulate() throws {
+        // The point of the chart is convergence, so it is drawn at each stage:
+        // empty, one position, two (average appears), four (spread band).
+        for count in [0, 1, 2, 4] {
+            let run = MeasurementRun(session: MeasurementSession(capture: SilentCapture(),
+                                                                 playback: SilentPlayback(),
+                                                                 preparation: NoPreparation()))
+            let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                            catalog: Self.sharedModel.catalog,
+                                            run: run)
+            model.step = .measurements
+            model.selectedTargets = [0, 1]
+
+            let grid = model.design.grid
+            if count > 0 {
+                run.session.stubPositions((0..<count).map { index in
+                    let drift = Double(index)
+                    let magnitudes = grid.frequencies.map { hz -> Double in
+                        75.0
+                            + 9.0 * exp(-pow(log2(hz / (48.0 + drift * 3)) * 12, 2))
+                            - 7.0 * exp(-pow(log2(hz / (95.0 - drift * 4)) * 9, 2))
+                            - 2.0 * log2(hz / 1000.0)
+                            + drift * 0.6
+                    }
+                    return .init(name: "Position \(index + 1)",
+                                 measurements: [0, 1].map { speaker in
+                                     MeasurementSession.SpeakerMeasurement(
+                                        speakerIndex: speaker,
+                                        magnitudesDb: magnitudes.map { $0 + Double(speaker) },
+                                        quality: CaptureQuality(),
+                                        verdict: .pass,
+                                        latencySeconds: 0.01)
+                                 },
+                                 weight: index == 0 ? 3 : 1)
+                })
+            }
+
+            let image = try render(RoomCorrectionView(model: model),
+                                   size: NSSize(width: 1080, height: 900),
+                                   name: "measurements-chart-\(count)")
+            try assertHasContent(image, "Measurement chart (\(count) positions)")
+        }
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()
