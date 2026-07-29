@@ -15,6 +15,7 @@
 #include <complex>
 #include <vector>
 
+#include "dspi_rc/capi.h"
 #include "dspi_rc/optimizer.hpp"
 #include "testing.hpp"
 
@@ -65,10 +66,16 @@ void addReflection(const FrequencyGrid& grid, std::vector<double>& curve,
 }
 
 // Assemble a complete problem from position curves.
+// `boostLimitDb` must reach the mask as well as the FitConfig, exactly as the
+// C API does it.  Building the mask with the default MaskConfig while raising
+// the FitConfig limit is the bug this file previously hid: boost is generated
+// and then punished, and a test asserting "we did not boost" passes because
+// boost was impossible rather than because it was correctly declined.
 FitProblem makeProblem(const FrequencyGrid& grid,
                        std::vector<std::vector<double>> curves,
                        const TargetSpec& targetSpec = presetFlat(),
-                       Platform platform = Platform::RP2350) {
+                       Platform platform = Platform::RP2350,
+                       double boostLimitDb = 0.0) {
     FitProblem problem;
     problem.grid = grid;
     problem.sampleRateHz = 48000.0;
@@ -91,7 +98,10 @@ FitProblem makeProblem(const FrequencyGrid& grid,
 
     problem.targetDb = buildTarget(grid, spec);
     problem.statistics = computeSpatialStatistics(grid, problem.positions, problem.targetDb);
-    problem.mask = buildCorrectionMask(grid, spec, problem.native, problem.statistics.reliability);
+    MaskConfig maskConfig;
+    maskConfig.maxBoostDb = boostLimitDb;
+    problem.mask = buildCorrectionMask(grid, spec, problem.native,
+                                       problem.statistics.reliability, maskConfig);
     return problem;
 }
 
@@ -120,9 +130,13 @@ TEST_CASE(a_single_seat_null_is_not_boosted) {
     addBump(grid, odd, 73.0, 0.05, -30.0);
     curves.push_back(odd);
 
-    const FitProblem problem = makeProblem(grid, curves);
+    // Boost genuinely permitted, through both the config and the mask. With
+    // the mask left at its default this test passed because nothing could be
+    // boosted anywhere, which is not the property it exists to check.
+    const FitProblem problem = makeProblem(grid, curves, presetFlat(),
+                                           Platform::RP2350, 3.0);
     FitConfig config;
-    config.boostLimitDb = 3.0;          // Advanced mode: boost is *permitted*
+    config.boostLimitDb = 3.0;
     config.combinedCeilingDb = 3.0;
     const FitResult result = fitCorrection(problem, config);
 
@@ -544,4 +558,102 @@ TEST_CASE(strength_outside_its_range_is_refused) {
     CHECK(!config.validate().empty());
     config.strength = 0.5;
     CHECK(config.validate().empty());
+}
+
+// ---------------------------------------------------------------------------
+// Raising the boost limit has to actually permit boost
+// ---------------------------------------------------------------------------
+
+TEST_CASE(a_trusted_dip_is_boosted_only_when_the_limit_allows_it) {
+    // Every position sees the same dip, so it is a property of the speaker
+    // rather than of where the microphone sat, and boosting it is the right
+    // answer once the user has asked for boost.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<std::vector<double>> curves;
+    for (int i = 0; i < 4; ++i) {
+        std::vector<double> curve = flat(grid);
+        addBump(grid, curve, 300.0, 0.5, -6.0);
+        curves.push_back(curve);
+    }
+    const std::size_t bin = binNear(grid, 300.0);
+
+    FitConfig cutOnly;
+    const FitResult declined = fitCorrection(makeProblem(grid, curves), cutOnly);
+
+    FitConfig permitted;
+    permitted.boostLimitDb = 6.0;
+    permitted.combinedCeilingDb = 6.0;
+    const FitResult boosted = fitCorrection(
+        makeProblem(grid, curves, presetFlat(), Platform::RP2350, 6.0), permitted);
+
+    // Convergence is deliberately not asserted here. With boost permitted the
+    // optimizer has more freedom and legitimately spends its whole iteration
+    // budget on this fixture; what matters is the correction it lands on.
+    CHECK(!declined.correctionDb.empty());
+    CHECK(!boosted.correctionDb.empty());
+    // Cut-only cannot fill a dip, and must not pretend to.
+    CHECK(declined.correctionDb[bin] < 0.5);
+    // With boost permitted it is filled, which is the whole point of the control.
+    CHECK(boosted.correctionDb[bin] > 1.5);
+}
+
+TEST_CASE(raising_the_boost_limit_does_not_attenuate_the_channel) {
+    // The symptom that exposed the wiring bug: with the mask still forbidding
+    // boost, requiredTrim treated any positive excursion as forbidden and
+    // pulled the whole channel down, so raising the limit made every dip read
+    // deeper rather than shallower.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<std::vector<double>> curves;
+    for (int i = 0; i < 4; ++i) {
+        std::vector<double> curve = flat(grid);
+        addBump(grid, curve, 300.0, 0.5, -6.0);
+        curves.push_back(curve);
+    }
+
+    FitConfig permitted;
+    permitted.boostLimitDb = 6.0;
+    permitted.combinedCeilingDb = 6.0;
+    const FitResult result = fitCorrection(
+        makeProblem(grid, curves, presetFlat(), Platform::RP2350, 6.0), permitted);
+
+    CHECK(!result.correctionDb.empty());
+    CHECK(result.trimDb > -3.0);
+}
+
+TEST_CASE(the_c_api_passes_the_boost_limit_to_the_mask) {
+    // The bug lived in the C API's mask construction, which none of the tests
+    // above reach: they build their own problem. This drives the real path.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve = flat(grid);
+    addBump(grid, curve, 300.0, 0.5, -6.0);
+
+    auto correctionAt300 = [&](double boostLimitDb) {
+        dspi_rc_session* session =
+            dspi_rc_session_create(20.0, 20000.0, 24, 48000.0, DSPI_RC_PLATFORM_RP2350);
+        CHECK(session != nullptr);
+        for (int i = 0; i < 4; ++i) {
+            CHECK(dspi_rc_session_add_position(session, curve.data(), curve.size(),
+                                               1.0, 1) == DSPI_RC_OK);
+        }
+        dspi_rc_target_spec target{};
+        CHECK(dspi_rc_target_preset(0, &target) == DSPI_RC_OK);   // flat
+        CHECK(dspi_rc_session_set_target(session, &target, 1) == DSPI_RC_OK);
+
+        dspi_rc_fit_config config{};
+        CHECK(dspi_rc_default_fit_config(&config) == DSPI_RC_OK);
+        config.boost_limit_db = boostLimitDb;
+        config.combined_ceiling_db = boostLimitDb > 0.0 ? boostLimitDb : -0.5;
+        CHECK(dspi_rc_session_fit(session, &config) == DSPI_RC_OK);
+
+        std::vector<double> correction(grid.size(), 0.0);
+        std::size_t written = 0;
+        CHECK(dspi_rc_session_curve(session, DSPI_RC_CURVE_CORRECTION, 0,
+                                    correction.data(), correction.size(),
+                                    &written) == DSPI_RC_OK);
+        dspi_rc_session_free(session);
+        return correction[binNear(grid, 300.0)];
+    };
+
+    CHECK(correctionAt300(0.0) < 0.5);
+    CHECK(correctionAt300(6.0) > 1.5);
 }

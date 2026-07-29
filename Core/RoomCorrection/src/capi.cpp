@@ -466,8 +466,15 @@ dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session, const dspi_rc_fit_c
     // After the statistics, so the power average being eased toward is the real
     // one, and before the mask, so reliability weighting still applies.
     applyStrength(problem, fit.strength);
+    // The caller's boost limit has to reach the mask, not just the per-filter
+    // bound. Without it the ceiling stays at zero while individual filters are
+    // free to take positive gain: boost gets generated, then punished by
+    // requiredTrim attenuating the whole channel, so raising the limit made
+    // the corrected response worse instead of better.
+    MaskConfig maskConfig;
+    maskConfig.maxBoostDb = fit.boostLimitDb;
     problem.mask = buildCorrectionMask(session->grid, session->targetSpec, problem.native,
-                                       problem.statistics.reliability);
+                                       problem.statistics.reliability, maskConfig);
 
     const FitResult result = fitCorrection(problem, fit);
     if (result.filters.empty() && !result.converged) {
