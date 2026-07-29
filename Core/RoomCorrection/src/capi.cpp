@@ -420,6 +420,7 @@ dspi_rc_status dspi_rc_default_fit_config(dspi_rc_fit_config* config) {
     const FitConfig defaults;
     config->max_filters = defaults.maxFilters;
     config->allow_shelves = defaults.allowShelves ? 1 : 0;
+    config->strength = defaults.strength;
     config->cut_limit_db = defaults.cutLimitDb;
     config->boost_limit_db = defaults.boostLimitDb;
     config->combined_ceiling_db = defaults.combinedCeilingDb;
@@ -439,6 +440,7 @@ dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session, const dspi_rc_fit_c
     if (config) {
         fit.maxFilters = config->max_filters;
         fit.allowShelves = config->allow_shelves != 0;
+        fit.strength = config->strength;
         fit.cutLimitDb = config->cut_limit_db;
         fit.boostLimitDb = config->boost_limit_db;
         fit.combinedCeilingDb = config->combined_ceiling_db;
@@ -460,6 +462,10 @@ dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session, const dspi_rc_fit_c
     problem.targetDb = buildTarget(session->grid, session->targetSpec);
     problem.statistics =
         computeSpatialStatistics(session->grid, session->positions, problem.targetDb);
+
+    // After the statistics, so the power average being eased toward is the real
+    // one, and before the mask, so reliability weighting still applies.
+    applyStrength(problem, fit.strength);
     problem.mask = buildCorrectionMask(session->grid, session->targetSpec, problem.native,
                                        problem.statistics.reliability);
 

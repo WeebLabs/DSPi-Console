@@ -381,6 +381,16 @@ extension RoomCorrectionCore {
         var allowShelves: Bool {
             get { config.allow_shelves != 0 } set { config.allow_shelves = newValue ? 1 : 0 }
         }
+        /// How much of the deviation from the target to chase, 0 < s <= 1.
+        ///
+        /// The target is eased toward the measured response rather than the
+        /// finished filters being scaled down, so the fit solves the reduced
+        /// goal under the same constraints and the metrics stay honest.
+        var strength: Double {
+            get { config.strength }
+            set { config.strength = min(1, max(0.05, newValue)) }
+        }
+
         /// Signed, as the core expects: cuts are negative and boosts positive,
         /// asymmetric by design because cutting a resonance is safe and
         /// boosting is not. The core rejects a non-negative cut limit outright.

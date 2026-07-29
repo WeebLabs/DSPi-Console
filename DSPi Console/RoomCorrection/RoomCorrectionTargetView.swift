@@ -214,6 +214,13 @@ struct RoomCorrectionTargetView: View {
             Text("Correction limits")
                 .font(.system(size: 12, weight: .medium))
 
+            slider("Strength", value: Binding(
+                get: { design.options.strength * 100 },
+                set: { design.options.strength = $0 / 100 }),
+                   range: 20...100, format: "%.0f%%",
+                   help: "How much of the gap between your room and the target to "
+                       + strengthDescription)
+
             slider("Maximum cut", value: Binding(
                 get: { design.options.maxCutDb },
                 set: { design.options.maxCutDb = $0 }),
@@ -260,6 +267,23 @@ struct RoomCorrectionTargetView: View {
                    help: "Above this nothing is corrected. High-frequency detail in a "
                        + "measurement is mostly where the microphone was, not what "
                        + "the room does.")
+        }
+    }
+
+    /// Names what the current setting means, since a percentage on its own does
+    /// not tell anyone whether they have gone too far.
+    private var strengthDescription: String {
+        switch design.options.strength {
+        case ..<0.45:
+            return "close. At this setting the correction is a light touch - "
+                 + "useful when a full correction measures well but sounds "
+                 + "over-processed."
+        case ..<0.8:
+            return "close. Partial correction, which often keeps more of a "
+                 + "speaker's character while still fixing the worst of the room."
+        default:
+            return "close. Full correction, which is the right default: the fit "
+                 + "already declines to chase what it cannot fix."
         }
     }
 

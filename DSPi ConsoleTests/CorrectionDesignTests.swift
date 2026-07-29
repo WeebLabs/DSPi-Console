@@ -311,6 +311,57 @@ final class CorrectionDesignTests: XCTestCase {
                        design.errorMessage ?? "the fit was rejected")
     }
 
+    // MARK: - Strength
+
+    func testStrengthDefaultsToFullAndClampsToItsValidRange() {
+        // The core refuses a strength of zero or above one and fails the whole
+        // fit, so the property must not be able to carry one there.
+        var options = RoomCorrectionCore.FitOptions()
+        XCTAssertEqual(options.strength, 1.0, "full correction is the default")
+
+        options.strength = 0
+        XCTAssertGreaterThan(options.strength, 0)
+        options.strength = 3
+        XCTAssertEqual(options.strength, 1.0)
+    }
+
+    func testAGentlerStrengthCorrectsLessInTheSameDirection() throws {
+        // What a user actually expects from the control: turning it down does
+        // less of the same thing, not something different.
+        func peakCut(strength: Double) throws -> Double {
+            let design = CorrectionDesign()
+            let session = MeasurementSession(capture: InertCapture(),
+                                             playback: InertPlayback(),
+                                             preparation: InertPreparation())
+            let magnitudes = session.grid.frequencies.map { hz -> Double in
+                8.0 * exp(-pow(log2(hz / 120.0) * 2.5, 2))
+            }
+            session.stubPositions((0..<3).map { index in
+                .init(name: "P\(index)",
+                      measurements: [MeasurementSession.SpeakerMeasurement(
+                        speakerIndex: 0, magnitudesDb: magnitudes,
+                        quality: CaptureQuality(), verdict: .pass, latencySeconds: 0.01)],
+                      weight: 1)
+            })
+            design.options.strength = strength
+            design.recompute(from: session, channels: [0],
+                             sampleRateHz: 48000, platform: .rp2350)
+            XCTAssertEqual(design.fittedChannels, [0], design.errorMessage ?? "")
+
+            let correction = design.curve(.correction, channel: 0)
+            let bin = try XCTUnwrap(design.grid.frequencies.enumerated()
+                .min { abs($0.element - 120) < abs($1.element - 120) }?.offset)
+            return correction[bin]
+        }
+
+        let full = try peakCut(strength: 1.0)
+        let gentle = try peakCut(strength: 0.4)
+
+        XCTAssertLessThan(full, -1.0, "a full correction should cut the peak")
+        XCTAssertLessThan(gentle, -0.1, "a gentle one should still cut it")
+        XCTAssertGreaterThan(gentle, full, "but by less")
+    }
+
     func testARecomputeThatProducesNothingSaysSo() {
         // A button that runs, fails and stays quiet is worse than one that is
         // disabled: the user has no idea whether anything happened.

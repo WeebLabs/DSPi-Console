@@ -478,3 +478,70 @@ TEST_CASE(an_already_perfect_room_gets_essentially_no_correction) {
     }
     CHECK(span < 1.0);
 }
+
+// Correction strength: the Advanced control for a correction that measures
+// well and sounds over-processed.
+TEST_CASE(strength_eases_the_target_toward_the_room) {
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve = flat(grid);
+    addBump(grid, curve, 120.0, 0.4, 8.0);
+    FitProblem problem = makeProblem(grid, {curve, curve, curve});
+
+    const std::vector<double> full = problem.targetDb;
+    applyStrength(problem, 0.5);
+
+    const std::size_t bin = binNear(grid, 120.0);
+    const double measured = problem.statistics.powerAverageDb[bin];
+    // Halfway between what the room does and what was asked for.
+    CHECK_NEAR(problem.targetDb[bin], measured + 0.5 * (full[bin] - measured), 1e-9);
+}
+
+TEST_CASE(full_strength_changes_nothing) {
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve = flat(grid);
+    addBump(grid, curve, 120.0, 0.4, 8.0);
+    FitProblem problem = makeProblem(grid, {curve, curve, curve});
+
+    const std::vector<double> before = problem.targetDb;
+    applyStrength(problem, 1.0);
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        CHECK_NEAR(problem.targetDb[i], before[i], 1e-12);
+    }
+}
+
+TEST_CASE(a_gentler_strength_corrects_less) {
+    // The property that matters to a user: turning it down does less, in the
+    // same direction, rather than doing something different.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve = flat(grid);
+    addBump(grid, curve, 120.0, 0.4, 8.0);
+
+    FitProblem strong = makeProblem(grid, {curve, curve, curve});
+    FitConfig config;
+    const FitResult full = fitCorrection(strong, config);
+
+    FitProblem gentle = makeProblem(grid, {curve, curve, curve});
+    applyStrength(gentle, 0.4);
+    const FitResult reduced = fitCorrection(gentle, config);
+
+    CHECK(full.converged);
+    CHECK(reduced.converged);
+
+    const std::size_t bin = binNear(grid, 120.0);
+    // Both cut the peak, and the gentler one cuts it less.
+    CHECK(full.correctionDb[bin] < -1.0);
+    CHECK(reduced.correctionDb[bin] < -0.2);
+    CHECK(reduced.correctionDb[bin] > full.correctionDb[bin]);
+}
+
+TEST_CASE(strength_outside_its_range_is_refused) {
+    // Zero would ask for no correction at all through a control that cannot
+    // express it; the caller should turn the feature off instead.
+    FitConfig config;
+    config.strength = 0.0;
+    CHECK(!config.validate().empty());
+    config.strength = 1.5;
+    CHECK(!config.validate().empty());
+    config.strength = 0.5;
+    CHECK(config.validate().empty());
+}

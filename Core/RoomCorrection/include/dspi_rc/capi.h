@@ -226,6 +226,8 @@ dspi_rc_status dspi_rc_session_set_target(dspi_rc_session* session,
 typedef struct dspi_rc_fit_config {
     int max_filters;
     int allow_shelves;
+    /* How much of the deviation from the target to chase, 0 < s <= 1. */
+    double strength;
     double cut_limit_db;
     double boost_limit_db;
     double combined_ceiling_db;

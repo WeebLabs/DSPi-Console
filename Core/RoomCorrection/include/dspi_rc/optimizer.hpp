@@ -46,6 +46,15 @@ struct FitConfig {
     double minFreqHz = 20.0;
     double maxFreqHz = 20000.0;
 
+    // How much of the deviation from the target to chase, 0..1.
+    //
+    // Applied by moving the target toward the measured response rather than by
+    // scaling the finished filters: the fit then optimises the reduced goal
+    // honestly, so every other limit here still binds and the reported metrics
+    // describe what will actually be heard.  A gentler setting is the usual
+    // answer to a correction that measures well and sounds over-processed.
+    double strength = 1.0;
+
     // Asymmetric by design: cutting a resonance is safe, boosting is not.
     double cutLimitDb = -12.0;
     double boostLimitDb = 0.0;        // Advanced mode raises this, typically +3.
@@ -149,6 +158,16 @@ struct FitProblem {
 
 // Fit a correction.  Never throws; a rejected problem comes back with
 // `converged == false` and an explanatory `message`.
+// Ease the target toward what the room actually does.
+//
+// `strength` of 1 leaves the problem untouched; 0.5 asks the fit to close half
+// the gap.  Expressed as a change to the target rather than as a scaling of the
+// finished filters, so the optimizer solves the reduced goal under all the same
+// constraints and the reported metrics describe what will really be heard.
+//
+// Recomputes the spatial statistics, which are defined relative to the target.
+void applyStrength(FitProblem& problem, double strength);
+
 FitResult fitCorrection(const FitProblem& problem, const FitConfig& config = {});
 
 // Evaluate an arbitrary bank against a problem without fitting it.  Used for

@@ -1,5 +1,7 @@
 #include "dspi_rc/optimizer.hpp"
 
+#include "dspi_rc/analysis.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -563,9 +565,21 @@ std::vector<Slot> buildSlots(const FitConfig& config) {
 
 // ---------------------------------------------------------------------------
 
+void applyStrength(FitProblem& problem, double strength) {
+    if (strength >= 1.0 || problem.positions.empty()) return;
+    const std::vector<double>& measured = problem.statistics.powerAverageDb;
+    const std::size_t n = std::min(problem.targetDb.size(), measured.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        problem.targetDb[i] = measured[i] + strength * (problem.targetDb[i] - measured[i]);
+    }
+    problem.statistics =
+        computeSpatialStatistics(problem.grid, problem.positions, problem.targetDb);
+}
+
 std::string FitConfig::validate() const {
     if (maxFilters < 1) return "at least one filter is required";
     if (minFreqHz <= 0.0 || maxFreqHz <= minFreqHz) return "invalid frequency range";
+    if (strength <= 0.0 || strength > 1.0) return "strength must be in (0, 1]";
     if (cutLimitDb >= 0.0) return "cut limit must be negative";
     if (boostLimitDb < 0.0) return "boost limit must not be negative";
     if (maxBoostQ <= 0.0 || maxCutQBelowTransition <= 0.0 || maxCutQAtTop <= 0.0) {
