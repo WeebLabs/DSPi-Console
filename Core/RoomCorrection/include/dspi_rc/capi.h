@@ -310,6 +310,17 @@ dspi_rc_status dspi_rc_session_uncorrected_metrics(const dspi_rc_session* sessio
 
 /* Curves, each `grid_points` long.  All are what to plot; none is recomputed
  * from an idealized cascade. */
+/* The broadband level the correction adds to a channel, weighted over the
+ * correction band.
+ *
+ * Section 7.5: a cut-only correction lowers each channel by roughly the average
+ * depth of its cuts, and every channel loses a different amount. Compensating
+ * this is what stops applying a correction from silently rebalancing a system.
+ * Negative for a typical cut-only result; negate it to get the compensation to
+ * apply at the destination. Requires a fitted session. */
+dspi_rc_status dspi_rc_session_level_change(const dspi_rc_session* session,
+                                            double* out_db);
+
 dspi_rc_status dspi_rc_session_curve(const dspi_rc_session* session,
                                      int which,          /* see below */
                                      int position_index, /* only for POSITION curves */

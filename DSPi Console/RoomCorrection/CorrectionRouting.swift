@@ -121,6 +121,23 @@ struct ForcedPath: Equatable {
     let bypassOutputBank: Int
     /// Crossovers the user chose to bypass. Empty unless they opted in.
     let bypassCrossoversOn: [Int]
+
+    /// False when the path is being built to *hear* the correction rather than
+    /// to measure the room through it.
+    ///
+    /// Verification has to run with the filters live - that is the whole point
+    /// of it - so it isolates one output exactly as a measurement does but
+    /// leaves both PEQ banks alone.
+    var bypassesBanks: Bool = true
+}
+
+extension RoutingValidator {
+    /// The same isolation as a measurement sweep, with the filters left on.
+    func verificationPath(forOutput output: Int) -> ForcedPath {
+        var path = forcedPath(forOutput: output)
+        path.bypassesBanks = false
+        return path
+    }
 }
 
 /// Reads the live matrix and works out what each mode can measure.

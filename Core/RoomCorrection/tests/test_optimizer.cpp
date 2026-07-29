@@ -657,3 +657,50 @@ TEST_CASE(the_c_api_passes_the_boost_limit_to_the_mask) {
     CHECK(correctionAt300(0.0) < 0.5);
     CHECK(correctionAt300(6.0) > 1.5);
 }
+
+// ---------------------------------------------------------------------------
+// Balance-preserving compensation (spec section 7.5)
+// ---------------------------------------------------------------------------
+
+TEST_CASE(level_change_reports_what_the_correction_removed) {
+    // A channel with a broad peak gets cut, and the level it loses is what has
+    // to be given back at the destination or applying correction silently
+    // rebalances the system.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve = flat(grid);
+    addBump(grid, curve, 200.0, 1.5, 6.0);       // broad, so the cut is broad
+
+    dspi_rc_session* session =
+        dspi_rc_session_create(20.0, 20000.0, 24, 48000.0, DSPI_RC_PLATFORM_RP2350);
+    CHECK(session != nullptr);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(dspi_rc_session_add_position(session, curve.data(), curve.size(),
+                                           1.0, 1) == DSPI_RC_OK);
+    }
+    dspi_rc_target_spec target{};
+    CHECK(dspi_rc_target_preset(0, &target) == DSPI_RC_OK);
+    CHECK(dspi_rc_session_set_target(session, &target, 1) == DSPI_RC_OK);
+
+    dspi_rc_fit_config config{};
+    CHECK(dspi_rc_default_fit_config(&config) == DSPI_RC_OK);
+    CHECK(dspi_rc_session_fit(session, &config) == DSPI_RC_OK);
+
+    double levelDb = 999.0;
+    CHECK(dspi_rc_session_level_change(session, &levelDb) == DSPI_RC_OK);
+
+    // Cut-only, so the channel can only have got quieter.
+    CHECK(levelDb < 0.0);
+    // And by a plausible amount rather than an absurd one.
+    CHECK(levelDb > -12.0);
+    dspi_rc_session_free(session);
+}
+
+TEST_CASE(level_change_needs_a_fit) {
+    dspi_rc_session* session =
+        dspi_rc_session_create(20.0, 20000.0, 24, 48000.0, DSPI_RC_PLATFORM_RP2350);
+    CHECK(session != nullptr);
+    double levelDb = 0.0;
+    CHECK(dspi_rc_session_level_change(session, &levelDb) != DSPI_RC_OK);
+    CHECK(dspi_rc_session_level_change(session, nullptr) != DSPI_RC_OK);
+    dspi_rc_session_free(session);
+}

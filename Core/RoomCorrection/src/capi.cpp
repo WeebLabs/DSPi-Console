@@ -628,6 +628,31 @@ dspi_rc_status dspi_rc_session_uncorrected_metrics(const dspi_rc_session* sessio
     return DSPI_RC_OK;
 }
 
+dspi_rc_status dspi_rc_session_level_change(const dspi_rc_session* session,
+                                            double* out_db) {
+    if (!session || !out_db) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+    if (!session->fitted) return fail(DSPI_RC_NOT_FITTED, "session has not been fitted");
+
+    const std::vector<double>& correction = session->result.correctionDb;
+    const std::vector<double>& weight = session->problem.mask.weight;
+    const std::size_t n = std::min(correction.size(), weight.size());
+
+    // Weighted in the power domain, because a level change is an energy
+    // statement: averaging decibels would let one deep narrow cut count as
+    // heavily as a broad shallow one.
+    double weighted = 0.0;
+    double total = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (weight[i] <= 0.0) continue;
+        weighted += weight[i] * std::pow(10.0, correction[i] / 10.0);
+        total += weight[i];
+    }
+    if (total <= 0.0) { *out_db = 0.0; return DSPI_RC_OK; }
+
+    *out_db = 10.0 * std::log10(weighted / total);
+    return DSPI_RC_OK;
+}
+
 dspi_rc_status dspi_rc_session_curve(const dspi_rc_session* session, int which,
                                      int position_index, double* out_values,
                                      size_t capacity, size_t* out_written) {

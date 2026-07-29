@@ -209,7 +209,12 @@ final class DSPiDevicePreparation: DevicePreparing {
 
         // The driven input is synthetic, so whatever the user has on it is
         // irrelevant. The target output's bank is bypassed because the
-        // correction replaces it outright.
+        // correction replaces it outright - except when verifying, where the
+        // filters being live is the thing under test.
+        guard path.bypassesBanks else {
+            try await settle()
+            return
+        }
         setBankBypassed(true, channel: path.bypassInputBank)
         setBankBypassed(true, channel: vm.eqChannel(forOutput: path.bypassOutputBank))
 

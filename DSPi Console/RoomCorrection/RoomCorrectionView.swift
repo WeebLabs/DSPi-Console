@@ -493,25 +493,12 @@ struct RoomCorrectionView: View {
             RoomCorrectionTargetView(model: model)
         case .results:
             RoomCorrectionResultsView(model: model)
-        default:
-            notYetBuilt
+        case .apply:
+            RoomCorrectionApplyView(model: model)
         }
     }
 
-    private var notYetBuilt: some View {
-        VStack(spacing: 10) {
-            Image(systemName: model.step.symbol)
-                .font(.system(size: 30))
-                .foregroundStyle(.tertiary)
-            Text(model.step.title)
-                .font(.system(size: 15, weight: .semibold))
-            Text("This step is not built yet.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
 
 // MARK: - Setup
 

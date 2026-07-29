@@ -467,6 +467,45 @@ final class RoomCorrectionRenderTests: XCTestCase {
         }
     }
 
+    func testApplyStepRendersTheChecklistAndOutcomes() throws {
+        let run = MeasurementRun(session: MeasurementSession(capture: SilentCapture(),
+                                                             playback: SilentPlayback(),
+                                                             preparation: NoPreparation()))
+        let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                        catalog: Self.sharedModel.catalog,
+                                        run: run)
+        model.step = .apply
+        model.mode = .outputChannels
+        model.selectedTargets = [0, 1]
+
+        let grid = model.design.grid
+        let magnitudes = grid.frequencies.map { hz -> Double in
+            75.0 + 7.0 * exp(-pow(log2(hz / 58.0) * 10, 2))
+                 - 5.0 * exp(-pow(log2(hz / 130.0) * 8, 2))
+                 - 2.0 * log2(hz / 1000.0)
+        }
+        run.session.stubPositions((0..<3).map { index in
+            .init(name: "P\(index)",
+                  measurements: [0, 1].map { speaker in
+                      MeasurementSession.SpeakerMeasurement(
+                        speakerIndex: speaker,
+                        magnitudesDb: magnitudes.map { $0 + Double(speaker) },
+                        quality: CaptureQuality(), verdict: .pass,
+                        latencySeconds: 0.01)
+                  },
+                  weight: 1)
+        })
+        model.design.recompute(from: run.session, channels: [0, 1],
+                               sampleRateHz: 48000, platform: .rp2350)
+        XCTAssertFalse(model.design.fittedChannels.isEmpty,
+                       model.design.errorMessage ?? "nothing fitted")
+
+        let image = try render(RoomCorrectionView(model: model),
+                               size: NSSize(width: 1080, height: 820),
+                               name: "apply")
+        try assertHasContent(image, "Apply")
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()

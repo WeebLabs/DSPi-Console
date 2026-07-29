@@ -674,6 +674,21 @@ extension RoomCorrectionCore {
             }
         }
 
+        /// Broadband level the correction adds, weighted over the correction
+        /// band. Negative for a typical cut-only result.
+        ///
+        /// Spec section 7.5: every channel loses a different amount to its
+        /// cuts, so applying correction without giving this back rebalances
+        /// the system even though no level control was touched.
+        var levelChangeDb: Double {
+            get throws {
+                var value: Double = 0
+                try RoomCorrectionCore.check(
+                    dspi_rc_session_level_change(handle, &value), "no fit available")
+                return value
+            }
+        }
+
         var metrics: Metrics {
             get throws {
                 var raw = dspi_rc_metrics()
