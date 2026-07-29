@@ -255,6 +255,62 @@ final class CorrectionDesignTests: XCTestCase {
         }
     }
 
+    // MARK: - Fit limits
+
+    func testTheCutLimitIsShownAsAPositiveMagnitude() {
+        // The core's convention is signed - cuts negative, boosts positive -
+        // but "maximum cut: -12 dB" on a slider that only goes positive is
+        // simply wrong on screen.
+        var options = RoomCorrectionCore.FitOptions()
+        XCTAssertLessThan(options.cutLimitDb, 0, "the core wants a negative limit")
+        XCTAssertEqual(options.maxCutDb, -options.cutLimitDb,
+                       "the UI-facing value is the same limit, positively signed")
+
+        options.maxCutDb = 18
+        XCTAssertEqual(options.cutLimitDb, -18, "and converts back on the way in")
+        XCTAssertEqual(options.maxCutDb, 18)
+    }
+
+    func testTheCutLimitCannotBeDrivenToZero() {
+        // The core refuses a non-negative cut limit and fails the whole fit,
+        // so a slider must not be able to reach one.
+        var options = RoomCorrectionCore.FitOptions()
+        options.maxCutDb = 0
+        XCTAssertLessThan(options.cutLimitDb, 0)
+
+        // A positive value written to the signed property is what the slider
+        // used to do, and it must not survive round-tripping either.
+        options.maxCutDb = -6
+        XCTAssertLessThan(options.cutLimitDb, 0, "a sign slip must not invert the limit")
+    }
+
+    func testAFitStillSucceedsAfterTheCutLimitIsChanged() throws {
+        // The real failure: setting this from the UI wrote a positive limit,
+        // which the core rejects outright, so touching the slider broke the
+        // whole calculation rather than just looking odd.
+        let design = CorrectionDesign()
+        let session = MeasurementSession(capture: InertCapture(),
+                                         playback: InertPlayback(),
+                                         preparation: InertPreparation())
+        let magnitudes = session.grid.frequencies.map { hz -> Double in
+            -7.0 * exp(-pow(log2(hz / 70.0), 2))
+        }
+        session.stubPositions([
+            .init(name: "Main",
+                  measurements: [MeasurementSession.SpeakerMeasurement(
+                    speakerIndex: 0, magnitudesDb: magnitudes,
+                    quality: CaptureQuality(), verdict: .pass, latencySeconds: 0.01)],
+                  weight: 1),
+        ])
+
+        design.options.maxCutDb = 18
+        design.recompute(from: session, channels: [0],
+                         sampleRateHz: 48000, platform: .rp2350)
+
+        XCTAssertEqual(design.fittedChannels, [0],
+                       design.errorMessage ?? "the fit was rejected")
+    }
+
     func testARecomputeThatProducesNothingSaysSo() {
         // A button that runs, fails and stays quiet is worse than one that is
         // disabled: the user has no idea whether anything happened.

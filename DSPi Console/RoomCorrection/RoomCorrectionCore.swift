@@ -381,7 +381,20 @@ extension RoomCorrectionCore {
         var allowShelves: Bool {
             get { config.allow_shelves != 0 } set { config.allow_shelves = newValue ? 1 : 0 }
         }
+        /// Signed, as the core expects: cuts are negative and boosts positive,
+        /// asymmetric by design because cutting a resonance is safe and
+        /// boosting is not. The core rejects a non-negative cut limit outright.
         var cutLimitDb: Double { get { config.cut_limit_db } set { config.cut_limit_db = newValue } }
+
+        /// The same limit as a positive magnitude, which is how a user thinks
+        /// about it and therefore what the UI binds to.
+        ///
+        /// Clamped away from zero because the core requires a strictly negative
+        /// cut limit and would refuse the whole fit.
+        var maxCutDb: Double {
+            get { -cutLimitDb }
+            set { cutLimitDb = -max(0.5, abs(newValue)) }
+        }
 
         /// Advanced mode. Default is cut-only, and raising this must be paired
         /// with the headroom the results screen reports.

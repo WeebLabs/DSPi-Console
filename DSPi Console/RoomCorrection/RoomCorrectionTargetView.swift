@@ -215,8 +215,8 @@ struct RoomCorrectionTargetView: View {
                 .font(.system(size: 12, weight: .medium))
 
             slider("Maximum cut", value: Binding(
-                get: { design.options.cutLimitDb },
-                set: { design.options.cutLimitDb = $0 }),
+                get: { design.options.maxCutDb },
+                set: { design.options.maxCutDb = $0 }),
                    range: 3...24, format: "%.0f dB",
                    help: "Cutting is cheap: it costs headroom but cannot ask the "
                        + "speaker for anything it cannot give.")
