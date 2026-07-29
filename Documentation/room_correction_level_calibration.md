@@ -57,6 +57,15 @@ The app states this before the pass and watches the input device's volume for
 the duration. If it changes, the session stops and says why rather than
 producing a confidently wrong match.
 
+**Gain cancels; frequency response does not.** The unknown chain gain is flat,
+so it cancels in any comparison. The microphone's own magnitude response is
+not flat, and it only cancels when both measurements sit in the same band.
+Comparing channels within one band therefore needs no calibration file at all,
+while comparing a subwoofer against the midband channels (section 4) genuinely
+does. Without a loaded calibration file, subwoofer matching is still performed
+but reported as reduced accuracy, with the microphone's uncalibrated
+low-frequency response named as the reason.
+
 ## 3. Sequence of user actions
 
 ### 3.1 Setup
@@ -137,29 +146,82 @@ configuration and their prediction was made without it.
 Verify confirms; it never discovers. A verify step that finds problems for the
 first time is a second calculate step wearing the wrong name.
 
-## 4. Comparison bands
+## 4. Comparison bands and normalisation
 
-**Full-range channels** are compared over roughly **200 Hz to 4 kHz**: above the
+Channels are compared as **in-band spectral level**, being power per octave
+averaged across the band, rather than as broadband RMS. This is the whole
+mechanism that lets differently band-limited channels be compared: power per
+octave is independent of how wide the band is, so a two-octave subwoofer and a
+four-octave midband measurement are directly comparable without needing any
+frequency range in common.
+
+Per-octave rather than per-third-octave is an arbitrary choice; it only has to
+be consistent across every channel in a session.
+
+**Full-range channels** are measured over roughly **200 Hz to 4 kHz**: above the
 modal region, so the reading is stable against small microphone movements, and
-below where directivity and air absorption dominate. Broadband RMS is a poor
-choice because it is dominated by bass, which is the least position-stable part
-of the measurement.
+below where directivity and air absorption dominate. Their mutual comparison
+sits in one band and needs no calibration file.
 
-**A subwoofer** has no output in that band and cannot be compared there. It is
-compared against a reference full-range channel over the **sub's own passband
-intersected with the band where that channel still has output**. With bass
-management that is the crossover overlap; without it, the sub's passband. One
-rule covers both cases.
+**A subwoofer** is measured with its own band-limited low-frequency stimulus,
+over its detected native bandwidth, and normalised the same way. A separate
+stimulus rather than the midband one because a subwoofer fed broadband noise
+discards almost all of the signal's energy in its own low-pass, leaving a poor
+signal to noise ratio exactly where the room is noisiest.
+
+Its result is then expressed as an offset from the full-range datum. That
+comparison crosses bands, so it requires the microphone magnitude calibration
+described in section 2.
+
+### 4.1 Rejected: matching in the crossover overlap
+
+An earlier draft compared the subwoofer against a reference full-range channel
+where the two overlap. This is recorded as rejected so it is not proposed
+again. The overlap is close to the worst available place to calibrate a
+subwoofer:
+
+- both the main and the subwoofer are rolling off there, so both readings sit
+  on steep slopes where small frequency errors become large level errors;
+- what is measured is their acoustic sum, which depends on relative phase and
+  delay rather than on either level alone;
+- room modes are strongest in that region;
+- in input mode with bass management, driving the reference channel drives the
+  subwoofer too, so no main-alone measurement exists to reference against;
+- a cancellation in the overlap makes a correctly adjusted subwoofer read as
+  too quiet, and the resulting advice to raise it would leave the system worse
+  than before.
+
+The last point is the disqualifying one: the failure mode is confident, wrong,
+and in the direction of damage.
+
+### 4.2 The LFE convention
+
+An LFE *program* channel carries a **+10 dB in-band gain** by convention. This
+is a gain applied to the channel's own band, and it is not the same claim as
+expecting a broadband meter to read 10 dB higher, because the LFE band is a
+small fraction of a broadband signal's energy.
+
+It is therefore applied explicitly as an in-band offset in the level
+arithmetic, never inferred from a measurement. A discrete LFE input channel is
+not a channel to equalise against the others, and any matching pass must know
+the difference between an LFE program channel and a subwoofer output.
 
 ## 5. Direction and cost
 
-Matching is always **downward**, toward the quietest channel. Every channel has
-already spent headroom on its correction, and asking for gain on top of that
-risks exceeding what is available. Attenuation always succeeds.
+Among **full-range channels**, matching is always **downward**, toward the
+quietest. Every channel has already spent headroom on its correction, and
+asking for gain on top of that risks exceeding what is available. Attenuation
+always succeeds.
 
-The consequence is that one badly low channel drags the entire system down with
-it, which is why section 3.2 raises it as a physical problem to fix rather than
-absorbing it silently.
+**The subwoofer does not participate in that search.** It sits on its own datum
+with an explicit offset (section 4), so it is neither a candidate for the
+quietest channel nor pulled to match one. A weak subwoofer must never attenuate
+seven other channels by default; that trades a correct system for a quiet one
+to satisfy an arithmetic rule.
+
+The output given up to downward matching among the full-range channels is
+reported, so a user with one quiet channel learns why the system got quieter
+rather than wondering.
 
 ## 6. Guidance when a channel is out of range
 
@@ -167,9 +229,19 @@ A channel outside the workable window produces an instruction, not a warning.
 The second sentence is the important half, because it states the cost of
 ignoring the first:
 
-> The subwoofer is 6.3 dB below the other channels. Raise its gain control and
-> measure again - otherwise every other channel has to be attenuated by 6.3 dB
-> to match it.
+> The centre channel is 6.3 dB below the other channels. Raise its gain control
+> and measure again - otherwise every other channel has to be attenuated by
+> 6.3 dB to match it.
+
+For a **subwoofer**, where downward matching does not apply, the consequence is
+different and so is the offer. The user may fix the gain or proceed knowingly:
+
+> The subwoofer is 6.3 dB below its reference level. Raise its gain control and
+> measure again, or continue with the subwoofer left uncalibrated.
+
+Continuing is a supported outcome, recorded in the project and shown in
+Results, not a silent failure. What is never offered is attenuating the rest of
+the system to meet it.
 
 Within the window, nothing is said and the digital trim absorbs the difference.
 
@@ -178,10 +250,11 @@ Within the window, nothing is said and the digital trim absorbs the difference.
 1. **The workable window.** How far a channel may sit from the median before a
    physical gain change is demanded. Suggested starting point is 3 dB, being
    roughly where the attenuation cost starts to matter.
-2. **The subwoofer's final level.** Calibration matches it flat, and most
-   listeners then raise it, because a measured-flat subwoofer sounds lean at
-   normal listening levels. Either expose a subwoofer offset in Target or leave
-   it entirely to the user afterwards.
+2. **The subwoofer's reference offset.** Section 4 gives the subwoofer an
+   explicit offset from the full-range datum rather than a matched level. Its
+   default value is undecided. Calibrating it to equal in-band spectral level
+   is the defensible starting point, but most listeners then raise it, so the
+   offset should probably be exposed rather than fixed.
 3. **Whether level matching can be skipped.** A user who has already calibrated
    with an SPL meter may not want their trims touched.
 
