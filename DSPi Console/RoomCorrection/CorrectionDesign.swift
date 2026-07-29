@@ -46,9 +46,15 @@ final class CorrectionDesign: ObservableObject {
         var gainDb: Double
     }
 
-    let grid: RoomCorrectionCore.Grid
+    /// The grid everything here is expressed on.
+    ///
+    /// Adopted from the session when there is one, because measurements are
+    /// analysed on the session's grid and a fit only accepts positions of that
+    /// length. Having a separate plotting grid meant every fit was rejected
+    /// for a length mismatch, and the failure was silent.
+    private(set) var grid: RoomCorrectionCore.Grid
 
-    init(grid: RoomCorrectionCore.Grid = .display) {
+    init(grid: RoomCorrectionCore.Grid = .standard) {
         self.grid = grid
     }
 
@@ -105,18 +111,19 @@ final class CorrectionDesign: ObservableObject {
         errorMessage = nil
         defer { isFitting = false }
 
+
+        // Follow the session, so the curves read back below are the same
+        // length as the frequencies they are plotted against.
+        grid = session.grid
+
         var built: [Int: RoomCorrectionCore.Fit] = [:]
         var failures: [String] = []
 
         for channel in channels {
             do {
-                // On the design's grid, not the session's: the curves read
-                // back from this fit are plotted against `grid.frequencies`,
-                // and a length mismatch makes the plot draw nothing at all.
                 let fit = try session.makeFit(forSpeaker: channel,
                                               sampleRateHz: sampleRateHz,
-                                              platform: platform,
-                                              grid: grid)
+                                              platform: platform)
                 guard fit.positionCount > 0 else { continue }
 
                 try fit.setTarget(target)
@@ -131,7 +138,15 @@ final class CorrectionDesign: ObservableObject {
         }
 
         fits = built
-        errorMessage = failures.isEmpty ? nil : failures.joined(separator: "\n")
+        if !failures.isEmpty {
+            errorMessage = failures.joined(separator: "\n")
+        } else if built.isEmpty {
+            // Nothing failed and nothing was produced, which from the user's
+            // side is a button that did nothing at all.
+            errorMessage = "None of the selected channels have a usable measurement "
+                         + "to correct. Go back to Measurements and capture at least "
+                         + "one position."
+        }
         isStale = false
     }
 

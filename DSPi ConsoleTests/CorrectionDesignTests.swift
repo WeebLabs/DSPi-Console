@@ -205,30 +205,31 @@ final class CorrectionDesignTests: XCTestCase {
 
         XCTAssertTrue(design.fits.isEmpty)
         XCTAssertTrue(design.fittedChannels.isEmpty)
-        XCTAssertNil(design.errorMessage, "skipping is not an error to report")
         XCTAssertFalse(design.isStale, "the recompute still happened")
     }
 
     func testCurvesComeBackOnTheGridTheyAreDrawnAgainst() throws {
-        // The plots index curves by `design.grid.frequencies`. A fit built on
-        // the session's own grid returns arrays four times as long, and every
-        // plot silently draws nothing rather than failing.
-        let design = makeDesign()
+        // Measurements are analysed on the session's grid, so a fit only
+        // accepts positions of that length and the plots must index curves by
+        // the same one. A design holding its own grid made every fit throw for
+        // a length mismatch, silently, and Calculate Correction did nothing.
+        //
+        // The stub magnitudes are built on the *session's* grid, which is what
+        // the measurement path actually produces. Building them on the design's
+        // grid instead is what let the earlier version of this test pass while
+        // the real path was broken.
+        let design = CorrectionDesign(grid: .display)
         let session = MeasurementSession(capture: InertCapture(),
                                          playback: InertPlayback(),
                                          preparation: InertPreparation(),
                                          grid: .standard)
-        XCTAssertNotEqual(RoomCorrectionCore.Grid.standard.pointCount,
-                          design.grid.pointCount,
-                          "this test is only meaningful if the grids differ")
+        XCTAssertNotEqual(session.grid.pointCount, design.grid.pointCount,
+                          "this test is only meaningful if they start out different")
 
-        // A measured response with a broad dip, so there is something to fit.
-        let points = design.grid.pointCount
-        let magnitudes = design.grid.frequencies.map { hz -> Double in
+        let magnitudes = session.grid.frequencies.map { hz -> Double in
             let octavesFrom80 = log2(hz / 80.0)
             return -6.0 * exp(-octavesFrom80 * octavesFrom80)
         }
-        XCTAssertEqual(magnitudes.count, points)
 
         session.stubPositions([
             .init(name: "Main",
@@ -245,10 +246,31 @@ final class CorrectionDesignTests: XCTestCase {
                          sampleRateHz: 48000, platform: .rp2350)
 
         XCTAssertEqual(design.fittedChannels, [0], design.errorMessage ?? "")
+        XCTAssertEqual(design.grid.pointCount, session.grid.pointCount,
+                       "the design must adopt the grid its measurements are on")
         for curve in [RoomCorrectionCore.Curve.target, .powerAverage, .correction] {
-            XCTAssertEqual(design.curve(curve, channel: 0).count, points,
-                           "\(curve) came back on the wrong grid")
+            XCTAssertEqual(design.curve(curve, channel: 0).count,
+                           design.grid.frequencies.count,
+                           "\(curve) came back on a different grid than it is plotted on")
         }
+    }
+
+    func testARecomputeThatProducesNothingSaysSo() {
+        // A button that runs, fails and stays quiet is worse than one that is
+        // disabled: the user has no idea whether anything happened.
+        let design = CorrectionDesign()
+        let session = MeasurementSession(capture: InertCapture(),
+                                         playback: InertPlayback(),
+                                         preparation: InertPreparation())
+
+        design.recompute(from: session, channels: [0, 1],
+                         sampleRateHz: 48000, platform: .rp2350)
+
+        XCTAssertTrue(design.fits.isEmpty)
+        XCTAssertNotNil(design.errorMessage,
+                        "a recompute that produced nothing must say why")
+        XCTAssertTrue(design.errorMessage?.contains("Measurements") ?? false,
+                      design.errorMessage ?? "")
     }
 
     func testReadingBackAnUnfittedChannelIsEmptyRatherThanACrash() {

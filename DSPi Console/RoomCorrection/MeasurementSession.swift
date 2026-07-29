@@ -65,7 +65,9 @@ final class MeasurementSession: ObservableObject {
     private let capture: AudioCaptureBackend
     private let playback: AudioPlaybackBackend
     private let preparation: DevicePreparing
-    private let grid: RoomCorrectionCore.Grid
+    /// The grid measurements are analysed on, and therefore the only grid
+    /// a fit or a plot of them can use.
+    let grid: RoomCorrectionCore.Grid
 
     private var cancelled = false
     private var prepared = false
@@ -278,15 +280,10 @@ final class MeasurementSession: ObservableObject {
     ///
     /// Finishing before the planned position count is always allowed, so this
     /// works with however many positions exist.
-    /// `grid` defaults to the session's own, but the design step passes its
-    /// plotting grid: a fit built on a different grid than the one the curves
-    /// are drawn against produces arrays of the wrong length, and the plot
-    /// silently draws nothing rather than failing.
     func makeFit(forSpeaker speakerIndex: Int,
                  sampleRateHz: Double,
-                 platform: RoomCorrectionCore.Platform,
-                 grid: RoomCorrectionCore.Grid? = nil) throws -> RoomCorrectionCore.Fit {
-        let fit = try RoomCorrectionCore.Fit(grid: grid ?? self.grid,
+                 platform: RoomCorrectionCore.Platform) throws -> RoomCorrectionCore.Fit {
+        let fit = try RoomCorrectionCore.Fit(grid: grid,
                                             sampleRateHz: sampleRateHz,
                                             platform: platform)
         for position in positions where position.enabled {

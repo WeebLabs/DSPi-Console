@@ -30,6 +30,13 @@ struct RoomCorrectionTargetView: View {
                     shapeSection
                     Divider()
                     advancedSection
+                    if let message = design.errorMessage {
+                        Divider()
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(22)
             }
@@ -266,6 +273,12 @@ struct RoomCorrectionTargetView: View {
                 Text("Calculating.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+            } else if let message = design.errorMessage {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if design.isStale && !design.fits.isEmpty {
                 Text("The target has changed since this was calculated.")
                     .font(.system(size: 11))
