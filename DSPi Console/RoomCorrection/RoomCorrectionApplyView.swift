@@ -13,6 +13,10 @@ struct RoomCorrectionApplyView: View {
     @State private var selected: Set<Int> = []
     @State private var applier: CorrectionApplier?
     @State private var applyState: CorrectionApplier.State = .idle
+    @State private var verifier: CorrectionVerifier?
+    @State private var verifyState: CorrectionVerifier.State = .idle
+    @State private var verifyResults: [VerificationResult] = []
+    @State private var shownVerification: Int?
 
     init(model: RoomCorrectionModel) {
         self.model = model
@@ -48,6 +52,10 @@ struct RoomCorrectionApplyView: View {
                         checklist
                         Divider()
                         outcome
+                        if case .applied = applyState {
+                            Divider()
+                            verification
+                        }
                     }
                 }
                 .padding(22)
@@ -200,6 +208,113 @@ struct RoomCorrectionApplyView: View {
         }
     }
 
+    // MARK: - Verification
+
+    private var verification: some View {
+        formSection("VERIFY") {
+            note("Sweeps each applied channel once at the main listening position "
+                 + "with the correction running, and compares what was measured "
+                 + "against what was predicted. This is the strongest check for a "
+                 + "routing mistake or a channel that is not the one you think.")
+
+            HStack(spacing: 12) {
+                Button("Verify Correction") { runVerification() }
+                    .disabled(verifyState.isBusy || model.microphone == nil)
+                if case .sweeping(let speaker, let done, let total) = verifyState {
+                    ProgressView().controlSize(.small)
+                    Text("Sweeping \(model.targetName(speaker)), \(done + 1) of \(total).")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                if model.microphone == nil {
+                    Text("No microphone selected.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if case .failed(let reason) = verifyState {
+                Label(reason, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !verifyResults.isEmpty {
+                verificationResults
+            }
+        }
+    }
+
+    private var verificationResults: some View {
+        let shown = verifyResults.first { $0.speakerIndex == shownVerification }
+            ?? verifyResults.first
+
+        return VStack(alignment: .leading, spacing: 10) {
+            if verifyResults.count > 1 {
+                Picker("", selection: Binding(
+                    get: { shown?.speakerIndex ?? 0 },
+                    set: { shownVerification = $0 })) {
+                    ForEach(verifyResults) { result in
+                        Text(model.targetName(result.speakerIndex)).tag(result.speakerIndex)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+
+            if let shown {
+                VerificationPlot(measured: shown.measuredDb,
+                                 predicted: shown.predictedDb,
+                                 target: shown.targetDb,
+                                 frequencies: design.grid.frequencies)
+                    .frame(height: 200)
+
+                HStack(spacing: 18) {
+                    legend("Measured after", .green)
+                    legend("Predicted", .accentColor)
+                    legend("Target", .secondary)
+                    Spacer()
+                }
+
+                Label(shown.summary,
+                      systemImage: shown.crossoverWasBypassed
+                        ? "info.circle"
+                        : (shown.agreesWithPrediction
+                           ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(shown.crossoverWasBypassed ? Color.secondary
+                                     : (shown.agreesWithPrediction ? Color.green
+                                                                   : Color.orange))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func legend(_ label: String, _ colour: Color) -> some View {
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(colour)
+                .frame(width: 14, height: 2)
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func runVerification() {
+        let verifier = CorrectionVerifier(session: model.run.session, design: design)
+        self.verifier = verifier
+        let bypassed = Set(model.bypassedForMeasurement.map(\.outputIndex))
+        Task {
+            await verifier.verify(plans: chosen, model: model,
+                                  bypassedCrossovers: bypassed)
+            verifyState = verifier.state
+            verifyResults = verifier.results
+        }
+    }
+
     // MARK: - Footer
 
     private var footer: some View {
@@ -255,5 +370,39 @@ struct RoomCorrectionApplyView: View {
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+
+// MARK: - Plot
+
+/// What was measured after applying, over what was predicted, over the target.
+///
+/// Measured and predicted are already referenced to a common mean by
+/// `CorrectionVerifier`, since the comparison is about whether the shape came
+/// out as modelled rather than about absolute level.
+private struct VerificationPlot: View {
+    let measured: [Double]
+    let predicted: [Double]
+    let target: [Double]
+    let frequencies: [Double]
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let axis = FrequencyAxis(frequencies: frequencies)
+            let scale = FrequencyPlotScale(fitting: measured + predicted,
+                                           minimumHalfRange: 8, padding: 1.1)
+            ZStack {
+                FrequencyPlotBackground(axis: axis, scale: scale)
+                axis.path(target, scale: scale, in: size)
+                    .stroke(Color.secondary.opacity(0.5),
+                            style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                axis.path(predicted, scale: scale, in: size)
+                    .stroke(Color.accentColor.opacity(0.9), lineWidth: 1.5)
+                axis.path(measured, scale: scale, in: size)
+                    .stroke(Color.green, lineWidth: 2)
+            }
+        }
     }
 }
