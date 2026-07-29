@@ -110,9 +110,13 @@ final class CorrectionDesign: ObservableObject {
 
         for channel in channels {
             do {
+                // On the design's grid, not the session's: the curves read
+                // back from this fit are plotted against `grid.frequencies`,
+                // and a length mismatch makes the plot draw nothing at all.
                 let fit = try session.makeFit(forSpeaker: channel,
                                               sampleRateHz: sampleRateHz,
-                                              platform: platform)
+                                              platform: platform,
+                                              grid: grid)
                 guard fit.positionCount > 0 else { continue }
 
                 try fit.setTarget(target)

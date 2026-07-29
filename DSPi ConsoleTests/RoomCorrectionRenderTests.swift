@@ -327,6 +327,48 @@ final class RoomCorrectionRenderTests: XCTestCase {
         }
     }
 
+    func testResultsStepRendersAFittedCorrection() throws {
+        // Three traces, a verdict, cautions and a filter table. Worth drawing:
+        // a curve that leaves its box or a table that does not line up only
+        // shows up in the picture.
+        let run = MeasurementRun(session: MeasurementSession(capture: SilentCapture(),
+                                                             playback: SilentPlayback(),
+                                                             preparation: NoPreparation()))
+        let model = RoomCorrectionModel(vm: Self.sharedModel.vm,
+                                        catalog: Self.sharedModel.catalog,
+                                        run: run)
+        model.step = .results
+        model.selectedTargets = [0]
+
+        // A room with a broad suckout and a peak, which is what a correction
+        // has to look plausible against.
+        let grid = model.design.grid
+        let magnitudes = grid.frequencies.map { hz -> Double in
+            let dip = -8.0 * exp(-pow(log2(hz / 65.0), 2))
+            let peak = 5.0 * exp(-pow(log2(hz / 180.0) * 1.5, 2))
+            return dip + peak
+        }
+        run.session.stubPositions((0..<3).map { index in
+            .init(name: "Position \(index + 1)",
+                  measurements: [MeasurementSession.SpeakerMeasurement(
+                    speakerIndex: 0,
+                    magnitudesDb: magnitudes.map { $0 + Double(index) * 0.4 },
+                    quality: CaptureQuality(),
+                    verdict: .pass,
+                    latencySeconds: 0.01)],
+                  weight: index == 0 ? 3 : 1)
+        })
+        model.design.recompute(from: run.session, channels: [0],
+                               sampleRateHz: 48000, platform: .rp2350)
+        XCTAssertFalse(model.design.fittedChannels.isEmpty,
+                       model.design.errorMessage ?? "nothing fitted")
+
+        let image = try render(RoomCorrectionView(model: model),
+                               size: NSSize(width: 1080, height: 900),
+                               name: "results")
+        try assertHasContent(image, "Results")
+    }
+
     func testWindowMinimumSizeStillRenders() throws {
         // The window allows 900x620; the layout must survive its own minimum.
         let model = makeModel()

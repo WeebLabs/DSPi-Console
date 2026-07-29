@@ -461,6 +461,8 @@ struct RoomCorrectionView: View {
             RoomCorrectionMeasurementsView(model: model)
         case .target:
             RoomCorrectionTargetView(model: model)
+        case .results:
+            RoomCorrectionResultsView(model: model)
         default:
             notYetBuilt
         }

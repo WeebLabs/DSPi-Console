@@ -209,6 +209,48 @@ final class CorrectionDesignTests: XCTestCase {
         XCTAssertFalse(design.isStale, "the recompute still happened")
     }
 
+    func testCurvesComeBackOnTheGridTheyAreDrawnAgainst() throws {
+        // The plots index curves by `design.grid.frequencies`. A fit built on
+        // the session's own grid returns arrays four times as long, and every
+        // plot silently draws nothing rather than failing.
+        let design = makeDesign()
+        let session = MeasurementSession(capture: InertCapture(),
+                                         playback: InertPlayback(),
+                                         preparation: InertPreparation(),
+                                         grid: .standard)
+        XCTAssertNotEqual(RoomCorrectionCore.Grid.standard.pointCount,
+                          design.grid.pointCount,
+                          "this test is only meaningful if the grids differ")
+
+        // A measured response with a broad dip, so there is something to fit.
+        let points = design.grid.pointCount
+        let magnitudes = design.grid.frequencies.map { hz -> Double in
+            let octavesFrom80 = log2(hz / 80.0)
+            return -6.0 * exp(-octavesFrom80 * octavesFrom80)
+        }
+        XCTAssertEqual(magnitudes.count, points)
+
+        session.stubPositions([
+            .init(name: "Main",
+                  measurements: [MeasurementSession.SpeakerMeasurement(
+                    speakerIndex: 0,
+                    magnitudesDb: magnitudes,
+                    quality: CaptureQuality(),
+                    verdict: .pass,
+                    latencySeconds: 0.01)],
+                  weight: 1),
+        ])
+
+        design.recompute(from: session, channels: [0],
+                         sampleRateHz: 48000, platform: .rp2350)
+
+        XCTAssertEqual(design.fittedChannels, [0], design.errorMessage ?? "")
+        for curve in [RoomCorrectionCore.Curve.target, .powerAverage, .correction] {
+            XCTAssertEqual(design.curve(curve, channel: 0).count, points,
+                           "\(curve) came back on the wrong grid")
+        }
+    }
+
     func testReadingBackAnUnfittedChannelIsEmptyRatherThanACrash() {
         let design = makeDesign()
         XCTAssertTrue(design.curve(.target, channel: 3).isEmpty)
