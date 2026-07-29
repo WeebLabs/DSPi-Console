@@ -63,6 +63,15 @@ struct InteractiveTargetPlot: View {
             .onTapGesture { location in
                 handleTap(at: location, axis: axis, scale: scale, in: size)
             }
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let location):
+                    hovering = hitTest(location, axis: axis, scale: scale, in: size)
+                case .ended:
+                    hovering = nil
+                }
+                updateCursor()
+            }
         }
     }
 
@@ -84,54 +93,33 @@ struct InteractiveTargetPlot: View {
 
     // MARK: - Curtains
 
-    /// Shaded out to each side, with a gradient across the taper.
+    /// The bands outside the correction range, shaded flat.
     ///
-    /// The curtain is not a cliff: correction fades over half an octave, since
-    /// a hard edge puts a step in the error curve and the optimizer spends a
-    /// filter on it. Drawing it as a hard edge would promise behaviour the
-    /// core deliberately does not have.
+    /// The correction does fade over half an octave beyond each curtain rather
+    /// than stopping dead, but drawing that as a gradient made the boundary
+    /// itself hard to see - and the boundary is the thing being dragged. The
+    /// edge is marked exactly where the curtain is; the taper is a detail of
+    /// how the mask rolls off, not something to aim at.
     private func curtains(axis: FrequencyAxis, in size: CGSize) -> some View {
-        // The taper runs outward from the curtain, not inward: buildCorrectionMask
-        // fades on `log2(lowCurtainHz / f)`, so correction is at full weight at
-        // the curtain frequency and reaches zero half an octave beyond it. Shading
-        // the inside would show the band as smaller than it is.
-        let taper = pow(2.0, 0.5)
         let lowEdge = axis.x(forHz: design.target.lowCurtainHz, in: size.width)
-        let lowFullyOut = axis.x(forHz: design.target.lowCurtainHz / taper, in: size.width)
         let highEdge = axis.x(forHz: design.target.highCurtainHz, in: size.width)
-        let highFullyOut = axis.x(forHz: design.target.highCurtainHz * taper, in: size.width)
 
-        // A neutral veil rather than a darkening one. The plot background is
-        // already near-black in dark mode, so shading with black is invisible
-        // there; `primary` resolves light-on-dark and dark-on-light, so the
-        // region reads as masked off in both themes.
+        // Darker than the plot rather than lighter, so the excluded band reads
+        // as switched off. Black at this opacity still separates from the
+        // plot's own fill in dark mode without going pitch black in light.
         //
         // Positioned explicitly rather than laid out: a ZStack with offsets put
         // the shading in the middle of the plot instead of at its edges.
-        let veil = Color.primary.opacity(0.16)
+        let veil = Color.black.opacity(0.42)
         return ZStack {
-            if lowFullyOut > 0 {
-                veil.frame(width: lowFullyOut, height: size.height)
-                    .position(x: lowFullyOut / 2, y: size.height / 2)
+            if lowEdge > 0 {
+                veil.frame(width: lowEdge, height: size.height)
+                    .position(x: lowEdge / 2, y: size.height / 2)
             }
-            if lowEdge > lowFullyOut {
-                LinearGradient(colors: [veil, Color.primary.opacity(0)],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: lowEdge - lowFullyOut, height: size.height)
-                    .position(x: (lowEdge + lowFullyOut) / 2, y: size.height / 2)
+            if highEdge < size.width {
+                veil.frame(width: size.width - highEdge, height: size.height)
+                    .position(x: (size.width + highEdge) / 2, y: size.height / 2)
             }
-
-            if highFullyOut < size.width {
-                veil.frame(width: size.width - highFullyOut, height: size.height)
-                    .position(x: (size.width + highFullyOut) / 2, y: size.height / 2)
-            }
-            if highFullyOut > highEdge {
-                LinearGradient(colors: [Color.primary.opacity(0), veil],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: highFullyOut - highEdge, height: size.height)
-                    .position(x: (highEdge + highFullyOut) / 2, y: size.height / 2)
-            }
-
             curtainEdge(at: lowEdge, in: size, target: .lowCurtain)
             curtainEdge(at: highEdge, in: size, target: .highCurtain)
         }
@@ -224,11 +212,17 @@ struct InteractiveTargetPlot: View {
             .onChanged { value in
                 let current = drag ?? hitTest(value.startLocation, axis: axis,
                                               scale: scale, in: size)
-                drag = current
+                if drag != current {
+                    drag = current
+                    updateCursor()
+                }
                 guard let current else { return }
                 apply(current, at: value.location, axis: axis, scale: scale, in: size)
             }
-            .onEnded { _ in drag = nil }
+            .onEnded { _ in
+                drag = nil
+                updateCursor()
+            }
     }
 
     /// Points win over curtains where they overlap: a point is a small target
@@ -323,6 +317,24 @@ struct InteractiveTargetPlot: View {
         design.addAnchor(atHz: axis.hz(forX: location.x, in: size.width),
                          curveValueDb: scale.db(forY: location.y, in: size.height))
         selectedAnchor = design.anchors.last?.id
+    }
+
+    /// Says what a handle will do before it is grabbed.
+    ///
+    /// A curtain moves only horizontally, so it gets the resize cursor; points
+    /// and shelf handles move in both axes, so they get the open hand. Set
+    /// rather than pushed: a push/pop stack is easy to leave unbalanced when
+    /// the pointer leaves during a drag.
+    private func updateCursor() {
+        let target = drag ?? hovering
+        switch target {
+        case .lowCurtain, .highCurtain:
+            NSCursor.resizeLeftRight.set()
+        case .bassShelf, .trebleShelf, .anchor:
+            NSCursor.openHand.set()
+        case nil:
+            NSCursor.arrow.set()
+        }
     }
 
     private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {

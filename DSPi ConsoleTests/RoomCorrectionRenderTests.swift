@@ -456,10 +456,15 @@ final class RoomCorrectionRenderTests: XCTestCase {
         model.design.addAnchor(atHz: 220, curveValueDb: -3)
         model.design.addAnchor(atHz: 1200, curveValueDb: 2)
 
-        let image = try render(RoomCorrectionView(model: model),
-                               size: NSSize(width: 1080, height: 940),
-                               name: "target-interactive")
-        try assertHasContent(image, "Interactive target")
+        // Both appearances: the curtain veil darkens the plot, which behaves
+        // very differently over a light background than a dark one.
+        for appearance in [NSAppearance.Name.darkAqua, .aqua] {
+            let image = try render(RoomCorrectionView(model: model),
+                                   size: NSSize(width: 1080, height: 940),
+                                   name: "target-interactive",
+                                   appearance: appearance)
+            try assertHasContent(image, "Interactive target (\(appearance.rawValue))")
+        }
     }
 
     func testWindowMinimumSizeStillRenders() throws {
