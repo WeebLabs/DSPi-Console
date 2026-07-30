@@ -150,3 +150,173 @@ Milestone 0 is closed. The following remain real Milestone
 - raw-capture deconvolution, frequency-dependent windowing, and smoothing;
 - RP2040 generator/filter and RP2350 SVF time-domain golden traces;
 - macOS arm64/x86_64 and Windows x64 portable-core parity.
+
+# Fixed-pole designer result - 2026-07-30
+
+Branch `room_correction_poles`. Full design and reasoning in
+`Documentation/room_correction_fixed_pole_design.md`; this records the numbers.
+
+The designer was replaced. Frequencies and Qs are now allocated from the
+measured error before anything is solved, and the fit is a bounded
+Gauss-Newton descent over gain, width and centre, run as a sequence of
+constrained linear least-squares problems. The searching fit, its three
+deterministic starts, its iteration cap and all six soft hygiene weights are
+gone; every limit is now structural.
+
+Both designers were run on the same six CLI fixtures through the same
+`evaluateBank` code, on RP2350 at 48 kHz with ten bands and the natural target.
+Baseline is the coordinate search at `fc565ea`. The metric is
+reliability-weighted worst-position RMSE.
+
+| Scenario | Uncorrected | Baseline | Fixed-pole | Delta |
+|---|---:|---:|---:|---:|
+| shared_room_modes | 2.101 | 0.208 | 0.145 | -0.063 |
+| single_seat_local_null | 3.754 | 2.815 | 2.812 | -0.003 |
+| moving_spatial_nulls | 2.968 | 1.686 | 1.689 | +0.003 |
+| single_position_rolloff | 3.682 | 0.281 | 0.403 | +0.122 |
+| nine_position_cancellation | 5.179 | 4.857 | 4.805 | -0.052 |
+| twentyone_position_diffuse | 7.432 | 4.016 | 4.100 | +0.084 |
+| **mean** | 4.186 | 2.311 | 2.326 | +0.015 |
+
+Parity on accuracy, marginally better on headroom (mean peak combined
+correction -1.8 dB against -2.05 dB), all safety gates passing in both the
+cut-only and +3 dB configurations, and 0.41 s against 39 s for the whole
+corpus.
+
+## RETRACTED: "the parallel bank does not pay"
+
+The first version of this section concluded that a firmware parallel filter bank
+would not improve DSPi's room correction at any section count. **That was wrong.**
+The reference designer it rested on had four independent defects, all of which
+flattered the cascade. Corrected, the result reverses.
+
+| Scenario | Cascade (10) | K=10 | K=16 | K=24 | K=32 | K=48 |
+|---|---:|---:|---:|---:|---:|---:|
+| shared_room_modes | 0.145 | 0.245 | 0.164 | 0.056 | 0.046 | 0.024 |
+| single_seat_local_null | 2.812 | 2.820 | 2.794 | 2.801 | 2.771 | 2.770 |
+| moving_spatial_nulls | 1.689 | 1.704 | 1.656 | 1.691 | 1.688 | 1.683 |
+| single_position_rolloff | 0.403 | 0.398 | 0.420 | 0.161 | 0.117 | 0.089 |
+| nine_position_cancellation | 4.805 | 4.779 | 4.699 | 4.670 | 4.628 | 4.661 |
+| twentyone_position_diffuse | 4.100 | 3.960 | 3.896 | 3.973 | 3.992 | 3.942 |
+| **mean** | 2.326 | 2.318 | 2.271 | 2.225 | 2.207 | 2.195 |
+
+Parity at equal order, then a growing margin: 0.13 dB at K = 32. On the fixtures
+where correction is genuinely available the gain is about five-fold -
+`shared_room_modes` 0.145 to 0.024, `single_position_rolloff` 0.403 to 0.089.
+The mean understates this badly, because two of the six fixtures are dominated
+by position-dependent interference that neither structure may touch.
+
+### Attribution: which defect mattered
+
+Mean reliability-weighted RMSE with one correction removed:
+
+| Variant | K=10 | K=24 | K=48 |
+|---|---:|---:|---:|
+| all corrections | 2.318 | 2.225 | 2.195 |
+| no target normalization | 2.795 | 2.443 | 2.295 |
+| no pole refinement | 2.514 | 2.305 | 2.210 |
+| spacing-rule Q (Bank's) | 2.318 | 2.221 | 2.239 |
+| log placement, LF-dense | 2.298 | 2.224 | 2.204 |
+| log placement, even | 2.343 | 2.234 | 2.197 |
+
+**The domain of the fit was the whole story.** Rows carried mask and position
+weight only, so the least squares minimized *linear* residuals while the metric
+measured dB. Since dB error is proportional to relative linear error, a plain
+linear fit minimizes `|target|^2 * (dB error)^2` - and in a cut-only corpus the
+target sits well below unity nearly everywhere, so the fit was instructed to
+ignore exactly the regions the metric weights most. A bin 12 dB down counted for
+a sixteenth. Fixing it is worth 0.48 dB at K = 10 and turned the loss into a win.
+
+Worth recording: **PORC, the canonical Python port of Bank's method, does not
+normalize either** - it runs a time-domain least squares on minimum-phase impulse
+responses. The correction is needed because of what the scoreboard measures, not
+because the reference implementations have it.
+
+The other three: poles were frozen while the cascade's centres were refined by up
+to an octave (worth 0.196 dB at K = 10); the pole radius was clamped at 0.9995, a
+7.6 Hz bandwidth floor that broadened the sub-50 Hz sections at high K; and
+`ParallelConfig` had drifted to `placementBias = 0.75` after the production
+default moved to 0.5.
+
+Two things turned out **not** to matter, which is worth as much as the two that
+did. Bank's spacing-rule Q is within 0.004 dB of feature-width Q at K = 24 and is
+better there. And log placement, weighted toward the low end as PORC's default
+pole set is, is within 0.02 dB of the greedy feature allocator at every K.
+**Log-spaced poles - the thing Bank's method is usually described by - made
+almost no difference on this corpus.**
+
+### The conclusion now
+
+The firmware question is **open, and leaning toward worth doing** for
+low-frequency modal resolution specifically, with one gate outstanding. The
+reference carries no per-section limits, because a bound on a numerator
+coefficient has no acoustic meaning, so part of its margin is freedom no
+shippable design would have. The next experiment is a *constrained* parallel
+designer, to find how much survives the safety rules. That is much smaller than
+the firmware work and it is the honest gate before committing to it.
+
+### How it was caught
+
+The tell was in the original table: `single_position_rolloff` went from 1.779 dB
+at K = 10 to 3.092 dB at K = 16. A healthy least squares does not get 74% worse
+on the cleanest fixture in the corpus when six sections are added. It was written
+into the risks section as an oddity instead of being investigated.
+
+`test_parallel.cpp` now carries canaries that close the gap: they hand the
+designer a target the bank can represent exactly and require it back. Two stages,
+deliberately - a consistent linear system is recovered exactly under *any*
+positive weights, so a single end-to-end canary would have passed throughout and
+proved nothing about the weighting. The first stage isolates basis and solver,
+the second adds the minimum-phase reconstruction, and a separate probe compares
+deep-cut error with and without the normalization.
+
+## Twelve bands buys the new designer nothing
+
+Firmware already has storage for twelve PEQ bands (`MAX_BANDS` is 12, with
+`channel_band_counts` set to 10), so raising the budget is a firmware constant
+rather than a format change. Reliability-weighted worst-position RMSE at ten and
+twelve bands, RP2350, 48 kHz:
+
+| Fixture | search @10 | search @12 | fixed-pole @10 | fixed-pole @12 |
+|---|---:|---:|---:|---:|
+| mixed_full_range (extra) | 1.569 | 1.340 | 1.222 | 1.234 |
+| shared_room_modes | 0.208 | 0.192 | 0.145 | 0.147 |
+| twentyone_position_diffuse | 4.016 | 4.036 | 4.100 | 4.029 |
+
+The search gains from the extra slots on the two correctable fixtures; the
+fixed-pole designer does not move outside allocator jitter, and on the full-range
+example it is marginally worse at twelve than at ten.
+
+The reading is that **the search was partly budget-limited and the new designer
+is not**. At ten bands the fixed-pole fit is already close to what these
+measurements support, so what binds is the measurement rather than the slot
+count. That is consistent with the section-count sweep above, where the parallel
+bank needs K = 24 before it pulls clearly ahead: the gains live in resolution far
+beyond twelve sections, not in one or two more.
+
+Note this cuts against the Milestone 0 finding that five of eight scenarios
+saturated the ten-band budget. That was measured with the search, and it was the
+search that was saturating.
+
+## Two defects worth not rediscovering
+
+Both were invisible to every metric the corpus already printed, because
+`FitMetrics` level-normalizes - deliberately, since one trim applies to the
+whole channel and the balance compensation restores level afterwards.
+
+**A level-invariant objective cannot see a fit that scores well by turning the
+channel down.** Two versions of the designer did exactly that, one reaching a
+bank sitting 17.5 dB below unity while scoring normally. The requirement is
+that the level offset be taken under *the same weights the loss uses*: taken
+under plain weights while the loss carries Huber and overshoot weights, a
+uniform downward shift no longer cancels and is genuinely downhill. Fixing the
+offset instead, at the uncorrected level, fails the opposite way - it demands a
+zero-mean correction, and a cut-only correction legitimately has a negative
+mean.
+
+**A ridge scaled to the matrix trace is set by the largest column.** The
+parallel designer's columns span ten orders of magnitude, since a pole at 24 Hz
+at 48 kHz sits at radius 0.9997 with a basis-function gain in the thousands
+while the direct path's column is a vector of ones. Trace scaling annihilated
+the direct path - 0.004 instead of 1.0 - and cost 28 dB of fit at the top of
+the band. The ridge must be relative to each column's own weighted norm.

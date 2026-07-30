@@ -188,4 +188,45 @@ FitMetrics evaluateBank(const FitProblem& problem,
                         double trimDb,
                         const FitConfig& config = {});
 
+// ---------------------------------------------------------------------------
+// Shared scoring
+//
+// Public because the reference fixed-pole designer in `parallel.hpp` must be
+// scored by exactly this code.  A comparison between two designers that each
+// computed their own metrics would be measuring the metrics.
+// ---------------------------------------------------------------------------
+
+// Score an arbitrary realized correction curve, for designs that are not a
+// FilterBank.  The filter-count metrics are left at zero.  `evaluateBank` is
+// this plus the counts.
+FitMetrics evaluateCorrection(const FitProblem& problem,
+                              const std::vector<double>& correctionDb);
+
+// Attenuation the channel must take so the combined response respects the
+// ceiling and takes no positive gain where boost is forbidden.
+double requiredTrimDb(const FitProblem& problem,
+                      const FitConfig& config,
+                      const std::vector<double>& responseDb);
+
+// The positions collapsed onto a single weighted error curve.
+//
+// The correction is common to every position, so the weighted sum of squares
+// over positions separates into a term in the weighted mean error and a term in
+// the across-position variance that does not contain the unknowns.  Minimizing
+// against the mean is therefore identical to minimizing against every position,
+// for the weights in force.  Weights are Huber weights on each position's
+// residual, which is what stops one position's deep cancellation null from
+// owning the fit.
+//
+// Used by the fixed-pole designer; the search in this file predates it and
+// iterates the positions directly.
+struct CollapsedProblem {
+    std::vector<double> errorDb;   // what the correction is being asked to be
+    std::vector<double> weight;
+};
+
+CollapsedProblem collapsePositions(const FitProblem& problem,
+                                   const std::vector<double>& responseDb,
+                                   double huberDeltaDb);
+
 }  // namespace dspi_rc

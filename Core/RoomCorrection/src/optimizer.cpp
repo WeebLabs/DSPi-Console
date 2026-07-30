@@ -179,17 +179,7 @@ public:
     // Attenuating the whole channel to guarantee the last two is a real cost,
     // and it is the right one: the alternative is boosting into a null.
     double requiredTrim(const std::vector<double>& response) const {
-        double peak = -1e300;
-        double forbiddenPeak = -1e300;
-        for (std::size_t i = 0; i < response.size(); ++i) {
-            peak = std::max(peak, response[i]);
-            const double ceiling =
-                i < problem_.mask.boostCeilingDb.size() ? problem_.mask.boostCeilingDb[i] : 0.0;
-            if (ceiling <= 0.0) forbiddenPeak = std::max(forbiddenPeak, response[i]);
-        }
-        double trim = std::min(0.0, config_.combinedCeilingDb - peak);
-        if (forbiddenPeak > -1e299) trim = std::min(trim, -forbiddenPeak);
-        return trim;
+        return requiredTrimDb(problem_, config_, response);
     }
 
     double operator()(const std::vector<double>& x) const {
@@ -587,6 +577,76 @@ std::vector<Slot> buildSlots(const FitConfig& config) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Shared scoring
+// ---------------------------------------------------------------------------
+
+double requiredTrimDb(const FitProblem& problem,
+                      const FitConfig& config,
+                      const std::vector<double>& responseDb) {
+    double peak = -1e300;
+    double forbiddenPeak = -1e300;
+    for (std::size_t i = 0; i < responseDb.size(); ++i) {
+        peak = std::max(peak, responseDb[i]);
+        const double ceiling =
+            i < problem.mask.boostCeilingDb.size() ? problem.mask.boostCeilingDb[i] : 0.0;
+        if (ceiling <= 0.0) forbiddenPeak = std::max(forbiddenPeak, responseDb[i]);
+    }
+    double trim = std::min(0.0, config.combinedCeilingDb - peak);
+    if (forbiddenPeak > -1e299) trim = std::min(trim, -forbiddenPeak);
+    return trim;
+}
+
+CollapsedProblem collapsePositions(const FitProblem& problem,
+                                   const std::vector<double>& responseDb,
+                                   double huberDeltaDb) {
+    const std::size_t n = problem.grid.size();
+    CollapsedProblem collapsed;
+    collapsed.errorDb.assign(n, 0.0);
+    collapsed.weight.assign(n, 0.0);
+
+    std::vector<double> maskWeight(n, 1.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        maskWeight[i] = i < problem.mask.weight.size() ? problem.mask.weight[i] : 1.0;
+    }
+
+    // Level-normalize, for the same reason the objective does: one trim applies
+    // to the whole channel and the balance compensation restores level
+    // afterwards, so an absolute offset is not a tonal defect.
+    double offsetSum = 0.0;
+    double offsetWeight = 0.0;
+    for (const PositionMeasurement& position : problem.positions) {
+        if (!position.enabled || position.weight <= 0.0) continue;
+        for (std::size_t i = 0; i < n && i < position.magnitudesDb.size(); ++i) {
+            const double w = position.weight * maskWeight[i];
+            offsetSum += w * (position.magnitudesDb[i] + responseDb[i] - problem.targetDb[i]);
+            offsetWeight += w;
+        }
+    }
+    const double offset = offsetWeight > 0.0 ? offsetSum / offsetWeight : 0.0;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        double numerator = 0.0;
+        double denominator = 0.0;
+        for (const PositionMeasurement& position : problem.positions) {
+            if (!position.enabled || position.weight <= 0.0) continue;
+            if (i >= position.magnitudesDb.size()) continue;
+
+            const double residual =
+                position.magnitudesDb[i] + responseDb[i] - problem.targetDb[i] - offset;
+            const double magnitude = std::fabs(residual);
+            const double robust = magnitude <= huberDeltaDb ? 1.0 : huberDeltaDb / magnitude;
+
+            const double w = position.weight * robust;
+            numerator += w * (problem.targetDb[i] + offset - position.magnitudesDb[i]);
+            denominator += w;
+        }
+        collapsed.errorDb[i] = denominator > 0.0 ? numerator / denominator : 0.0;
+        collapsed.weight[i] = maskWeight[i] * denominator;
+    }
+    return collapsed;
+}
+
+// ---------------------------------------------------------------------------
 
 void applyStrength(FitProblem& problem, double strength) {
     if (strength >= 1.0 || problem.positions.empty()) return;
@@ -632,18 +692,11 @@ std::string FitProblem::validate() const {
 
 // ---------------------------------------------------------------------------
 
-FitMetrics evaluateBank(const FitProblem& problem,
-                        const FilterBank& bank,
-                        double trimDb,
-                        const FitConfig& config) {
+FitMetrics evaluateCorrection(const FitProblem& problem,
+                              const std::vector<double>& response) {
     FitMetrics metrics;
     const std::size_t n = problem.grid.size();
-    if (n == 0) return metrics;
-
-    const std::vector<RealizedSection> sections =
-        realizeBank(bank, problem.sampleRateHz, problem.platform);
-    std::vector<double> response = magnitudeDb(sections, problem.grid, problem.sampleRateHz);
-    for (double& v : response) v += trimDb;
+    if (n == 0 || response.size() < n) return metrics;
 
     metrics.maxCombinedCorrectionDb = -1e300;
     metrics.minCombinedCorrectionDb = 1e300;
@@ -718,6 +771,20 @@ FitMetrics evaluateBank(const FitProblem& problem,
                 std::max(metrics.maxOutsideNativeBoostDb, response[i]);
         }
     }
+
+    return metrics;
+}
+
+FitMetrics evaluateBank(const FitProblem& problem,
+                        const FilterBank& bank,
+                        double trimDb,
+                        const FitConfig& config) {
+    const std::vector<RealizedSection> sections =
+        realizeBank(bank, problem.sampleRateHz, problem.platform);
+    std::vector<double> response = magnitudeDb(sections, problem.grid, problem.sampleRateHz);
+    for (double& v : response) v += trimDb;
+
+    FitMetrics metrics = evaluateCorrection(problem, response);
 
     for (const FilterParams& p : bank) {
         if (p.bypass || p.type == FilterType::Flat) continue;

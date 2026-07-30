@@ -21,7 +21,10 @@ add_library(dspi_rc STATIC
     src/calibration.cpp
     src/analysis.cpp
     src/target.cpp
+    src/lstsq.cpp
+    src/poles.cpp
     src/optimizer.cpp
+    src/parallel.cpp
     src/capi.cpp
 )
 
@@ -47,7 +50,10 @@ add_executable(dspi_rc_tests
     tests/test_calibration.cpp
     tests/test_analysis.cpp
     tests/test_target.cpp
+    tests/test_lstsq.cpp
+    tests/test_poles.cpp
     tests/test_optimizer.cpp
+    tests/test_parallel.cpp
 )
 target_link_libraries(dspi_rc_tests PRIVATE dspi_rc)
 target_include_directories(dspi_rc_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)

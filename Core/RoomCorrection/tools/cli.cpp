@@ -23,11 +23,17 @@
 
 #include "dspi_rc/capi.h"
 
+// Only the `poles` command reaches past the C ABI, and only because the
+// reference parallel designer is research material that is committed to being
+// deleted rather than a feature worth a stable boundary.  `corpus` and `fit`
+// still go through the ABI, which is what makes them the cross-platform
+// contract.
+#include "dspi_rc/parallel.hpp"
+
 namespace {
 
-// Local copy: this tool deliberately includes only the C ABI, which does
-// not expose the core's constants.
-constexpr double kPi = 3.14159265358979323846;
+using namespace dspi_rc;
+
 constexpr double kMinHz = 20.0;
 constexpr double kMaxHz = 20000.0;
 constexpr int kPointsPerOctave = 24;
@@ -322,6 +328,184 @@ int commandCorpus(bool verbose) {
     return gatesPassed ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// Fixed-pole comparison
+//
+// Unlike `corpus`, this goes through the C++ headers rather than the C ABI.
+// That is deliberate and is the opposite of the rule the rest of this file
+// follows: the reference parallel designer is research material that
+// `room_correction_fixed_pole_design.md` §8 commits to deleting once the
+// firmware decision is recorded, and putting a to-be-deleted feature on the
+// stable ABI would be a worse trade than the inconsistency.
+// ---------------------------------------------------------------------------
+
+FitProblem buildProblem(const Corpus& scenario, const FrequencyGrid& grid,
+                        const FitConfig& config) {
+    FitProblem problem;
+    problem.grid = grid;
+    problem.sampleRateHz = 48000.0;
+    problem.platform = Platform::RP2350;
+
+    for (size_t i = 0; i < scenario.positions.size(); ++i) {
+        PositionMeasurement position;
+        position.magnitudesDb = scenario.positions[i];
+        position.weight = (i == 0) ? 2.0 : 1.0;
+        position.enabled = true;
+        problem.positions.push_back(std::move(position));
+    }
+
+    // Mirrors dspi_rc_session_fit exactly, including the order: statistics
+    // before strength so the power average being eased toward is the real one,
+    // and the boost limit reaching the mask as well as the per-section bound.
+    problem.native =
+        estimateNativeBandwidth(grid, problem.positions.front().magnitudesDb);
+
+    TargetSpec spec = presetNatural();
+    const SpatialStatistics provisional =
+        computeSpatialStatistics(grid, problem.positions, {});
+    spec.levelDb = chooseAutoLevel(grid, provisional.powerAverageDb, spec, problem.native);
+
+    problem.targetDb = buildTarget(grid, spec);
+    problem.statistics = computeSpatialStatistics(grid, problem.positions, problem.targetDb);
+    applyStrength(problem, config.strength);
+
+    MaskConfig maskConfig;
+    maskConfig.maxBoostDb = config.boostLimitDb;
+    problem.mask = buildCorrectionMask(grid, spec, problem.native,
+                                       problem.statistics.reliability, maskConfig);
+    return problem;
+}
+
+int commandPoles(bool verbose) {
+    const std::vector<double> hz = gridFrequencies();
+    if (hz.empty()) { std::fprintf(stderr, "grid failed\n"); return 1; }
+
+    FrequencyGrid grid;
+    grid.hz = hz;
+
+    const std::vector<Corpus> corpus = buildCorpus(hz);
+    std::vector<FitProblem> problems;
+    problems.reserve(corpus.size());
+    for (const Corpus& scenario : corpus) {
+        problems.push_back(buildProblem(scenario, grid, FitConfig{}));
+    }
+
+    std::printf("libdspi_rc %s\n", dspi_rc_algorithm_version());
+    std::printf("grid: %.0f-%.0f Hz, %d points/octave, %zu points\n",
+                kMinHz, kMaxHz, kPointsPerOctave, hz.size());
+    std::printf("metric: reliability-weighted worst-position RMSE, dB (lower is better)\n"
+                "'cascade' is the shipping ten-band PEQ fit; the rest is the reference\n"
+                "fixed-pole parallel bank, which DSPi cannot run.\n\n");
+
+    // ---- Attribution: which correction did the work -------------------------
+    //
+    // The reference designer was wrong in four separate ways at once, so a
+    // before/after number attributes nothing.  Each row turns one correction
+    // off and leaves the rest on.
+    {
+        struct Variant {
+            const char* name;
+            void (*apply)(ParallelConfig&);
+        };
+        const Variant variants[] = {
+            {"all corrections", [](ParallelConfig&) {}},
+            {"no target normalization", [](ParallelConfig& c) { c.normalizeByTarget = false; }},
+            {"no pole refinement", [](ParallelConfig& c) { c.refinePoles = false; }},
+            {"spacing-rule Q (Bank)", [](ParallelConfig& c) { c.qFromFeatureWidth = false; }},
+            {"log placement, LF-dense", [](ParallelConfig& c) { c.placementBias = 1.0; }},
+            {"log placement, even", [](ParallelConfig& c) {
+                 c.placementBias = 1.0;
+                 c.logDensityLowShare = 0.0;
+             }},
+        };
+        const std::vector<int> ablationCounts{10, 24, 48};
+
+        std::printf("=== attribution: mean reliability-weighted RMSE, one fix removed ===\n");
+        std::printf("%-28s", "variant");
+        for (int k : ablationCounts) std::printf("   K=%-4d", k);
+        std::printf("\n");
+
+        for (const Variant& variant : variants) {
+            std::printf("%-28s", variant.name);
+            for (int k : ablationCounts) {
+                double total = 0.0;
+                for (const FitProblem& problem : problems) {
+                    ParallelConfig config;
+                    config.sections = k;
+                    variant.apply(config);
+                    const ParallelDesign design = designParallel(problem, FitConfig{}, config);
+                    total += design.metrics.reliableWorstPositionRmseDb;
+                }
+                std::printf("  %6.3f", total / static_cast<double>(problems.size()));
+            }
+            std::printf("\n");
+        }
+        std::printf("\n");
+    }
+
+    // ---- Section count sweep, reference parallel bank -----------------------
+    //
+    // Run twice.  "As specified" is Bank's method: logarithmically placed poles
+    // weighted toward the modal region, Q from the spacing to the neighbours,
+    // and the poles genuinely fixed.  "Refined" additionally moves the poles and
+    // takes Q from the measured feature width, which is not Bank's method and is
+    // there so the reference gets the same freedom the cascade's centres have.
+    //
+    // Headroom is reported beside the error because it is the reference's real
+    // cost: its sections carry no per-section limits, so it takes positive gain
+    // where boost is forbidden and the trim then attenuates the whole channel.
+    const std::vector<int> counts{10, 16, 24, 32, 48};
+
+    for (int variant = 0; variant < 2; ++variant) {
+        const bool refined = variant == 1;
+        std::printf("=== parallel bank by section count, %s ===\n",
+                    refined ? "with pole refinement (not Bank's method)"
+                            : "as specified (log placement, poles fixed)");
+        std::printf("%-30s %8s %8s", "scenario", "uncorr", "cascade");
+        for (int k : counts) std::printf("      K=%d", k);
+        std::printf("\n");
+
+        std::vector<double> totals(counts.size(), 0.0);
+        std::vector<double> trims(counts.size(), 0.0);
+        double cascadeTotal = 0.0, uncorrectedTotal = 0.0, cascadeTrim = 0.0;
+
+        for (size_t s = 0; s < corpus.size(); ++s) {
+            const FitMetrics uncorrected = evaluateBank(problems[s], {}, 0.0, FitConfig{});
+            const FitResult cascade = fitCorrection(problems[s], FitConfig{});
+            cascadeTotal += cascade.metrics.reliableWorstPositionRmseDb;
+            cascadeTrim += cascade.trimDb;
+            uncorrectedTotal += uncorrected.reliableWorstPositionRmseDb;
+
+            std::printf("%-30s %8.3f %8.3f", corpus[s].name.c_str(),
+                        uncorrected.reliableWorstPositionRmseDb,
+                        cascade.metrics.reliableWorstPositionRmseDb);
+
+            for (size_t i = 0; i < counts.size(); ++i) {
+                ParallelConfig config;
+                config.sections = counts[i];
+                config.placementBias = 1.0;          // log placement
+                config.qFromFeatureWidth = refined;  // Bank's spacing rule when not refined
+                config.refinePoles = refined;
+                const ParallelDesign design = designParallel(problems[s], FitConfig{}, config);
+                std::printf("  %6.3f", design.metrics.reliableWorstPositionRmseDb);
+                totals[i] += design.metrics.reliableWorstPositionRmseDb;
+                trims[i] += design.trimDb;
+                if (verbose && !design.ok) std::printf(" (%s)", design.message.c_str());
+            }
+            std::printf("\n");
+        }
+
+        const auto n = static_cast<double>(corpus.size());
+        std::printf("%-30s %8.3f %8.3f", "mean", uncorrectedTotal / n, cascadeTotal / n);
+        for (size_t i = 0; i < counts.size(); ++i) std::printf("  %6.3f", totals[i] / n);
+        std::printf("\n%-30s %8s %8.1f", "mean preamp given up, dB", "", cascadeTrim / n);
+        for (size_t i = 0; i < counts.size(); ++i) std::printf("  %6.1f", trims[i] / n);
+        std::printf("\n\n");
+    }
+
+    return 0;
+}
+
 int commandFit(int argc, char** argv) {
     if (argc < 1) {
         std::fprintf(stderr, "usage: dspi_rc_cli fit <response.txt> [more.txt ...]\n");
@@ -400,6 +584,9 @@ int main(int argc, char** argv) {
     if (arguments.empty() || std::strcmp(arguments[0], "corpus") == 0) {
         return commandCorpus(verbose);
     }
+    if (std::strcmp(arguments[0], "poles") == 0) {
+        return commandPoles(verbose);
+    }
     if (std::strcmp(arguments[0], "fit") == 0) {
         return commandFit(static_cast<int>(arguments.size()) - 1, arguments.data() + 1);
     }
@@ -407,6 +594,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage:\n"
                  "  dspi_rc_cli [corpus] [-v]        run the acceptance corpus\n"
+                 "  dspi_rc_cli poles [-v]           compare fixed-pole designers\n"
                  "  dspi_rc_cli fit <file> [file...] fit measured responses\n");
     return 2;
 }

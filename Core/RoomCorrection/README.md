@@ -26,6 +26,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/dspi_rc_tests          # unit tests
 ./build/dspi_rc_cli corpus -v  # acceptance corpus and safety gates
+./build/dspi_rc_cli poles      # designer parameter sweeps and the parallel comparison
 ```
 
 `ctest --test-dir build` works too. The build sets
@@ -44,7 +45,10 @@ is a symlink into `build/` so clangd resolves headers.
 | calibration parsing | done |
 | smoothing and spatial statistics | done |
 | target construction | done |
-| constrained PEQ optimizer | done |
+| `lstsq` - bounded ridge least squares | done |
+| `poles` - section placement | done |
+| constrained PEQ designer | done |
+| `parallel` - reference fixed-pole bank (research; deletable) | done |
 | C ABI and CLI harness | done |
 | cross-platform CI | done |
 
@@ -67,6 +71,37 @@ look like mistakes in isolation:
 Predicting anything less faithfully means the optimizer converges on a
 response the hardware does not produce. Reference: firmware
 `dsp_pipeline.c:96-318` on `release/v1.1.5` (`9776c2f`).
+
+## The designer is a bounded descent, not a search
+
+`optimizer.cpp` allocates section frequencies and Qs from the measured error
+before solving anything, then refines gain, width and centre by Gauss-Newton
+within bounds around that allocation, each pass being a constrained linear
+least squares. One deterministic start, a fixed pass count, no stall
+heuristic, and every safety limit structural rather than a penalty term.
+
+`parallel.cpp` implements Bank's actual parallel structure, which **the
+hardware cannot run**: the DSP is a cascade with no accumulator and the wire
+carries filter recipes rather than coefficients. It exists only to answer
+whether firmware should grow one. It should not; see
+`Documentation/room_correction_fixed_pole_design.md` section 8 and
+`Research/RoomCorrection/RESULTS.md`. Delete it once that is accepted.
+
+## A level-invariant objective cannot see wasted headroom
+
+`FitMetrics` normalizes level, deliberately: one trim applies to the whole
+channel and the balance compensation restores inter-channel level afterwards,
+so an absolute offset is not a tonal defect. The consequence is that no metric
+here can see a fit that scores well by attenuating, and two versions of the
+designer did precisely that - one reaching a bank 17.5 dB below unity while its
+numbers looked normal.
+
+The rule that prevents it is not obvious: **the level offset must be taken
+under the same weights the loss uses.** Under plain weights, while the loss
+carries Huber and overshoot weights, a uniform downward shift stops cancelling
+and becomes genuinely downhill. Fixing the offset instead fails the other way,
+since a cut-only correction legitimately has a negative mean. Regression tests
+in `test_optimizer.cpp` pin both directions.
 
 ## Two findings worth not rediscovering
 
