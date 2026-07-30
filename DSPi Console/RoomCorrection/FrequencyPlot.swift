@@ -33,6 +33,32 @@ struct FrequencyPlotScale {
         self.halfRange = Swift.max(0.5, halfRange)
     }
 
+    /// Centres on the data but holds the range fixed.
+    ///
+    /// For a plot that has to conform to a presentation standard the range is
+    /// not ours to choose - see `cea2034HalfRangeDb` - but where the data sits
+    /// inside it still is.
+    init(centring values: [Double], halfRange: Double) {
+        let finite = values.filter(\.isFinite)
+        if let low = finite.min(), let high = finite.max(), high >= low {
+            self.centre = (low + high) / 2
+        } else {
+            self.centre = 0
+        }
+        self.halfRange = Swift.max(0.5, halfRange)
+    }
+
+    /// CTA-2034-A presentation: **one decade of frequency occupies the same
+    /// distance as 50 dB of level**, following IEC 60263.  Half of that is the
+    /// distance from the centre to the top edge.
+    ///
+    /// The point of the rule is comparability: a given deviation has to look
+    /// the same size on every plot, or two measurements cannot be read against
+    /// each other. That makes it an aspect ratio rather than a range, so the
+    /// height is not free - see `FrequencyAxis.decades`, and note that an
+    /// auto-fitted vertical range breaks conformance even when it looks better.
+    static let cea2034HalfRangeDb: Double = 25
+
     func y(forDb db: Double, in height: CGFloat) -> CGFloat {
         height / 2 - CGFloat((db - centre) / halfRange) * (height / 2)
     }
@@ -70,6 +96,16 @@ struct FrequencyAxis {
     let frequencies: [Double]
 
     static let decades: [Double] = [20, 100, 1000, 10000]
+
+    /// Decades of frequency the axis actually covers, which is what the
+    /// CTA-2034-A aspect ratio is measured against.  Derived from the grid
+    /// rather than assumed, so changing the analysis range cannot silently
+    /// leave the plot non-conforming.
+    var decadeSpan: Double {
+        guard let low = frequencies.first, let high = frequencies.last,
+              low > 0, high > low else { return 1 }
+        return log10(high / low)
+    }
     static let labelled: [Double] = [100, 1000, 10000]
 
     func x(forHz hz: Double, in width: CGFloat) -> CGFloat {

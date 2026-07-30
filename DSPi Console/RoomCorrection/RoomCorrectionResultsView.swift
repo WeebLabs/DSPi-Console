@@ -95,7 +95,6 @@ struct RoomCorrectionResultsView: View {
                 correction: design.curve(.correction, channel: channel),
                 comparison: design.parallelCurve(channel: channel),
                 frequencies: design.grid.frequencies)
-                .frame(height: 300)
 
             HStack(spacing: 18) {
                 legend("Measured", .secondary)
@@ -426,18 +425,30 @@ private struct ResponseComparisonPlot: View {
         return zip(measured, comparison).map(+)
     }
 
+    /// One decade of frequency to 50 dB of level, per CTA-2034-A and IEC 60263.
+    ///
+    /// With a 20 Hz to 20 kHz grid that is three decades, so the plot is three
+    /// times as wide as it is tall and the height is not independently
+    /// choosable: making it taller means making the window wider.
+    private var conformantAspect: Double {
+        FrequencyAxis(frequencies: frequencies).decadeSpan
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
             let axis = FrequencyAxis(frequencies: frequencies)
-            // A 50 dB window (±25) as the floor, so the same room always looks
-            // the same size and a modest correction is not magnified into
-            // drama by an auto-fitted scale.  Still a minimum rather than a
-            // fixed window: a deep null covers more than 50 dB and clipping it
-            // would hide the one thing worth seeing.
+            // Fixed 50 dB window, not an auto-fitted one.  CTA-2034-A ties the
+            // vertical scale to the horizontal: one decade of frequency has to
+            // occupy the same distance as 50 dB, so a range that grows to fit
+            // the data would break the conformance the aspect ratio below
+            // establishes.  Curves outside it ride the edge - `path` clamps -
+            // which is the honest failure: a null deeper than the window still
+            // reads as "off the bottom" rather than quietly rescaling
+            // everything else to accommodate it.
             let scale = FrequencyPlotScale(
-                fitting: measured + target + corrected + comparisonCorrected,
-                minimumHalfRange: 25, padding: 1.1)
+                centring: measured + target + corrected + comparisonCorrected,
+                halfRange: FrequencyPlotScale.cea2034HalfRangeDb)
             ZStack {
                 FrequencyPlotBackground(axis: axis, scale: scale)
                 axis.path(measured, scale: scale, in: size)
@@ -455,5 +466,6 @@ private struct ResponseComparisonPlot: View {
                     .stroke(Color.green, lineWidth: 2)
             }
         }
+        .aspectRatio(conformantAspect, contentMode: .fit)
     }
 }
