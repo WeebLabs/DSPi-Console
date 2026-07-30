@@ -32,6 +32,22 @@ final class CorrectionDesign: ObservableObject {
         didSet { invalidate() }
     }
 
+    /// Settings for the fixed-pole comparison.
+    ///
+    /// The design this produces cannot be written to the hardware, so changing
+    /// these never affects what would be applied - only what is drawn beside it.
+    @Published var parallelOptions = RoomCorrectionCore.ParallelOptions() {
+        didSet { invalidate() }
+    }
+
+    /// Whether to design the fixed-pole bank alongside each fit.
+    ///
+    /// Off by default: it roughly doubles the time a recompute takes and
+    /// answers a research question rather than a product one.
+    @Published var comparesFixedPole = false {
+        didSet { invalidate() }
+    }
+
     /// The fit per channel index, once computed.
     @Published private(set) var fits: [Int: RoomCorrectionCore.Fit] = [:]
     @Published private(set) var isFitting = false
@@ -194,6 +210,14 @@ final class CorrectionDesign: ObservableObject {
                     try fit.addTargetAnchor(freqHz: anchor.freqHz, gainDb: anchor.gainDb)
                 }
                 try fit.fit(options)
+                if comparesFixedPole {
+                    // A failure here must not lose the real correction, which is
+                    // the thing the user came for.
+                    do { try fit.designParallel(parallelOptions) } catch {
+                        failures.append("Channel \(channel + 1) fixed-pole comparison: "
+                                        + error.localizedDescription)
+                    }
+                }
                 built[channel] = fit
             } catch {
                 failures.append("Channel \(channel + 1): \(error.localizedDescription)")
@@ -219,6 +243,28 @@ final class CorrectionDesign: ObservableObject {
     func curve(_ which: RoomCorrectionCore.Curve, channel: Int) -> [Double] {
         guard let fit = fits[channel] else { return [] }
         return (try? fit.curve(which)) ?? []
+    }
+
+    /// The fixed-pole bank's predicted correction, or empty when it was not
+    /// designed for this channel.
+    func parallelCurve(channel: Int) -> [Double] {
+        guard let fit = fits[channel], fit.hasParallelDesign else { return [] }
+        return (try? fit.curve(.parallelCorrection)) ?? []
+    }
+
+    func parallelMetrics(channel: Int) -> RoomCorrectionCore.Metrics? {
+        guard let fit = fits[channel], fit.hasParallelDesign else { return nil }
+        return try? fit.parallelMetrics
+    }
+
+    func parallelTrimDb(channel: Int) -> Double? {
+        guard let fit = fits[channel], fit.hasParallelDesign else { return nil }
+        return try? fit.parallelTrimDb
+    }
+
+    func parallelSections(channel: Int) -> [RoomCorrectionCore.ParallelSection] {
+        guard let fit = fits[channel], fit.hasParallelDesign else { return [] }
+        return (try? fit.parallelSections) ?? []
     }
 
     func metrics(channel: Int) -> RoomCorrectionCore.Metrics? {

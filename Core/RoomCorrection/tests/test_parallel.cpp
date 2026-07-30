@@ -427,3 +427,103 @@ TEST_CASE(target_normalization_changes_where_the_error_lands) {
     const double normalized = worstDeepError(true);
     CHECK(normalized < plain);
 }
+
+// ---------------------------------------------------------------------------
+// The C ABI path
+//
+// This is the exact sequence the macOS app runs, through the same boundary.
+// The C++ tests above can pass while the ABI is broken - a missing state check,
+// a curve that reads back empty, a metrics call that returns the cascade's
+// numbers - and none of that shows up until someone takes a measurement.
+// ---------------------------------------------------------------------------
+
+#include "dspi_rc/capi.h"
+
+TEST_CASE(the_c_abi_designs_a_parallel_bank_for_a_fitted_session) {
+    dspi_rc_session* session =
+        dspi_rc_session_create(20.0, 20000.0, 24, 48000.0, DSPI_RC_PLATFORM_RP2350);
+    CHECK(session != nullptr);
+
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve(grid.size(), 75.0);
+    addBump(grid, curve, 52.0, 0.35, 9.0);
+    addBump(grid, curve, 3200.0, 1.1, -4.0);
+
+    for (int i = 0; i < 3; ++i) {
+        CHECK(dspi_rc_session_add_position(session, curve.data(), curve.size(),
+                                           i == 0 ? 2.0 : 1.0, 1) == DSPI_RC_OK);
+    }
+
+    dspi_rc_target_spec target;
+    dspi_rc_target_preset(1, &target);
+    CHECK(dspi_rc_session_set_target(session, &target, 1) == DSPI_RC_OK);
+
+    // Designing before fitting must be refused rather than producing something
+    // against an empty problem.
+    CHECK(dspi_rc_session_design_parallel(session, nullptr) != DSPI_RC_OK);
+
+    CHECK(dspi_rc_session_fit(session, nullptr) == DSPI_RC_OK);
+
+    // ... and reading a design that has not been made must also be refused.
+    double trim = 0.0;
+    CHECK(dspi_rc_session_parallel_trim_db(session, &trim) != DSPI_RC_OK);
+
+    dspi_rc_parallel_config config;
+    CHECK(dspi_rc_default_parallel_config(&config) == DSPI_RC_OK);
+    // The defaults are Bank's method as specified.
+    CHECK_NEAR(config.placement_bias, 1.0, 0.0);
+    CHECK(config.refine_poles == 0);
+    CHECK(config.q_from_feature_width == 0);
+
+    config.sections = 16;
+    CHECK(dspi_rc_session_design_parallel(session, &config) == DSPI_RC_OK);
+
+    std::size_t sectionCount = 0;
+    CHECK(dspi_rc_session_parallel_section_count(session, &sectionCount) == DSPI_RC_OK);
+    CHECK(sectionCount == 16);
+
+    std::vector<dspi_rc_parallel_section> sections(sectionCount);
+    std::size_t written = 0;
+    CHECK(dspi_rc_session_parallel_sections(session, sections.data(), sections.size(),
+                                            &written) == DSPI_RC_OK);
+    CHECK(written == 16);
+    for (const dspi_rc_parallel_section& s : sections) {
+        CHECK(s.freq_hz > 0.0);
+        CHECK(std::fabs(s.a2) < 1.0);                 // stable
+        CHECK(std::fabs(s.a1) < 1.0 + s.a2);
+        CHECK(std::isfinite(s.b0) && std::isfinite(s.b1));
+    }
+
+    // The curve must come back on the session grid and be a real correction,
+    // not zeros - an empty read is the failure mode that looks like success.
+    std::size_t points = 0;
+    CHECK(dspi_rc_grid_points(20.0, 20000.0, 24, &points) == DSPI_RC_OK);
+    std::vector<double> correction(points, 0.0);
+    std::size_t got = 0;
+    CHECK(dspi_rc_session_curve(session, DSPI_RC_CURVE_PARALLEL_CORRECTION, 0,
+                                correction.data(), correction.size(), &got) == DSPI_RC_OK);
+    CHECK(got == points);
+    double span = 0.0;
+    for (double v : correction) {
+        CHECK(std::isfinite(v));
+        span = std::max(span, std::fabs(v));
+    }
+    CHECK(span > 1.0);
+
+    // The parallel metrics must be the parallel design's, not the cascade's.
+    dspi_rc_metrics parallelMetrics;
+    dspi_rc_metrics fitMetrics;
+    CHECK(dspi_rc_session_parallel_metrics(session, &parallelMetrics) == DSPI_RC_OK);
+    CHECK(dspi_rc_session_metrics(session, &fitMetrics) == DSPI_RC_OK);
+    CHECK(parallelMetrics.reliable_worst_position_rmse_db !=
+          fitMetrics.reliable_worst_position_rmse_db);
+    CHECK(dspi_rc_session_parallel_trim_db(session, &trim) == DSPI_RC_OK);
+    CHECK(trim <= 0.0);
+
+    // Re-fitting must invalidate the design rather than leave one describing
+    // the previous target.
+    CHECK(dspi_rc_session_fit(session, nullptr) == DSPI_RC_OK);
+    CHECK(dspi_rc_session_parallel_trim_db(session, &trim) != DSPI_RC_OK);
+
+    dspi_rc_session_free(session);
+}

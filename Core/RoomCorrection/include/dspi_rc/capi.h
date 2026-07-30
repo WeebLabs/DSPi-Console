@@ -293,6 +293,7 @@ dspi_rc_status dspi_rc_default_fit_config(dspi_rc_fit_config* config);
 dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session,
                                    const dspi_rc_fit_config* config);
 
+
 /* -------------------------------------------------------------------------- */
 /* Results                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -324,6 +325,78 @@ dspi_rc_status dspi_rc_session_metrics(const dspi_rc_session* session, dspi_rc_m
 dspi_rc_status dspi_rc_session_uncorrected_metrics(const dspi_rc_session* session,
                                                    dspi_rc_metrics* out);
 
+/* -------------------------------------------------------------------------- */
+/* Fixed-pole parallel design - evaluation only                               */
+/*                                                                            */
+/* Balázs Bank's parallel filter, designed for the same problem the fit just   */
+/* solved so the two are directly comparable.                                 */
+/*                                                                            */
+/* **This cannot be written to a DSPi.**  The firmware DSP is a cascade with   */
+/* no accumulator to sum sections into, and `EqParamPacket` carries filter     */
+/* recipes - type, frequency, Q, gain - rather than coefficients, so a section */
+/* with an arbitrary numerator has no representation on the wire.  There is    */
+/* deliberately no filter list here and no apply path: what comes back is a    */
+/* predicted correction curve, its metrics, and the poles, for looking at.     */
+/* -------------------------------------------------------------------------- */
+
+typedef struct dspi_rc_parallel_config {
+    int sections;
+    double min_freq_hz;
+    double max_freq_hz;
+    /* 1 is pure logarithmic placement, which is Bank's method; 0 spends the
+     * whole budget on measured features. */
+    double placement_bias;
+    /* Share of the log-spaced sections below `log_density_break_hz`.  Bank's
+     * own pole sets are weighted toward the modal region this way. */
+    double log_density_low_share;
+    double log_density_break_hz;
+    /* Off is Bank's spacing rule.  On takes Q from the measured feature width,
+     * which helps at low section counts and is not Bank's method. */
+    int q_from_feature_width;
+    /* Off keeps the poles genuinely fixed, which is what makes the design a
+     * linear solve.  On refines them, which does not. */
+    int refine_poles;
+    int include_direct_path;
+    /* Weight rows by the inverse square of the target magnitude, so a
+     * linear-domain solve approximates a log-magnitude one.  Off measures a
+     * different quantity from the one the metrics report. */
+    int normalize_by_target;
+    double ridge;
+    int solve_passes;
+} dspi_rc_parallel_config;
+
+/* Defaults are Bank's method as specified: logarithmic placement weighted
+ * toward the modal region, Q from the spacing to the neighbours, poles fixed.
+ * These are the settings the evaluation in
+ * `Documentation/room_correction_fixed_pole_design.md` reports. */
+dspi_rc_status dspi_rc_default_parallel_config(dspi_rc_parallel_config* config);
+
+/* Requires a prior successful `dspi_rc_session_fit`: the parallel design reuses
+ * that call's problem so both designs see identical measurements, target, mask
+ * and statistics. */
+dspi_rc_status dspi_rc_session_design_parallel(dspi_rc_session* session,
+                                               const dspi_rc_parallel_config* config);
+
+typedef struct dspi_rc_parallel_section {
+    double freq_hz;   /* pole centre */
+    double q;         /* pole Q */
+    double a1, a2;    /* denominator, fixed before the solve */
+    double b0, b1;    /* numerator, solved */
+} dspi_rc_parallel_section;
+
+dspi_rc_status dspi_rc_session_parallel_section_count(dspi_rc_session* session,
+                                                      size_t* out_count);
+dspi_rc_status dspi_rc_session_parallel_sections(dspi_rc_session* session,
+                                                 dspi_rc_parallel_section* out_sections,
+                                                 size_t capacity, size_t* out_written);
+
+dspi_rc_status dspi_rc_session_parallel_metrics(dspi_rc_session* session,
+                                                dspi_rc_metrics* out_metrics);
+/* Attenuation the design forces.  Large negative values are expected and are
+ * the point: the design carries no per-section limits, so it takes gain where
+ * boost is forbidden and the trim pulls the channel down to compensate. */
+dspi_rc_status dspi_rc_session_parallel_trim_db(dspi_rc_session* session, double* out_db);
+
 /* Curves, each `grid_points` long.  All are what to plot; none is recomputed
  * from an idealized cascade. */
 /* The broadband level the correction adds to a channel, weighted over the
@@ -352,7 +425,8 @@ enum {
     DSPI_RC_CURVE_CORRECTION = 4,      /* includes trim */
     DSPI_RC_CURVE_MASK_WEIGHT = 5,
     DSPI_RC_CURVE_POSITION = 6,        /* measured, per position */
-    DSPI_RC_CURVE_PREDICTED = 7        /* corrected, per position */
+    DSPI_RC_CURVE_PREDICTED = 7,       /* corrected, per position */
+    DSPI_RC_CURVE_PARALLEL_CORRECTION = 8 /* fixed-pole bank, includes its trim */
 };
 
 dspi_rc_status dspi_rc_session_transition_hz(const dspi_rc_session* session,

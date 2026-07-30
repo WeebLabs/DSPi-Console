@@ -9,6 +9,7 @@
 #include "dspi_rc/analysis.hpp"
 #include "dspi_rc/calibration.hpp"
 #include "dspi_rc/optimizer.hpp"
+#include "dspi_rc/parallel.hpp"
 #include "dspi_rc/sweep.hpp"
 #include "dspi_rc/target.hpp"
 
@@ -54,6 +55,10 @@ struct dspi_rc_session {
     FitResult result;
     FitMetrics uncorrected;
     bool fitted = false;
+
+    // Evaluation only; never written to hardware.  See capi.h.
+    ParallelDesign parallelDesign;
+    bool parallelDesigned = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -584,8 +589,107 @@ dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session, const dspi_rc_fit_c
     session->result = result;
     session->uncorrected = evaluateBank(session->problem, {}, 0.0, fit);
     session->fitted = true;
+    // A stale parallel design would silently describe the previous target.
+    session->parallelDesigned = false;
+    session->parallelDesign = ParallelDesign{};
     return DSPI_RC_OK;
 }
+
+dspi_rc_status dspi_rc_default_parallel_config(dspi_rc_parallel_config* config) {
+    if (!config) return fail(DSPI_RC_INVALID_ARGUMENT, "config is null");
+    const ParallelConfig defaults;
+    config->sections = 32;
+    config->min_freq_hz = defaults.minFreqHz;
+    config->max_freq_hz = defaults.maxFreqHz;
+    // Bank's method as specified, which is what the evaluation reports:
+    // logarithmic placement weighted toward the modal region, spacing-rule Q,
+    // poles fixed.  The C++ defaults differ because they are tuned for the
+    // sweeps rather than for fidelity to the published method.
+    config->placement_bias = 1.0;
+    config->log_density_low_share = defaults.logDensityLowShare;
+    config->log_density_break_hz = defaults.logDensityBreakHz;
+    config->q_from_feature_width = 0;
+    config->refine_poles = 0;
+    config->include_direct_path = defaults.includeDirectPath ? 1 : 0;
+    config->normalize_by_target = defaults.normalizeByTarget ? 1 : 0;
+    config->ridge = defaults.ridge;
+    config->solve_passes = defaults.solvePasses;
+    return DSPI_RC_OK;
+}
+
+dspi_rc_status dspi_rc_session_design_parallel(dspi_rc_session* session,
+                                               const dspi_rc_parallel_config* config) {
+    if (!session) return fail(DSPI_RC_INVALID_ARGUMENT, "session is null");
+    if (!session->fitted) {
+        return fail(DSPI_RC_INVALID_STATE, "fit the correction first");
+    }
+
+    ParallelConfig parallel;
+    if (config) {
+        parallel.sections = config->sections;
+        parallel.minFreqHz = config->min_freq_hz;
+        parallel.maxFreqHz = config->max_freq_hz;
+        parallel.placementBias = config->placement_bias;
+        parallel.logDensityLowShare = config->log_density_low_share;
+        parallel.logDensityBreakHz = config->log_density_break_hz;
+        parallel.qFromFeatureWidth = config->q_from_feature_width != 0;
+        parallel.refinePoles = config->refine_poles != 0;
+        parallel.includeDirectPath = config->include_direct_path != 0;
+        parallel.normalizeByTarget = config->normalize_by_target != 0;
+        parallel.ridge = config->ridge;
+        parallel.solvePasses = config->solve_passes;
+    } else {
+        dspi_rc_parallel_config defaults;
+        dspi_rc_default_parallel_config(&defaults);
+        return dspi_rc_session_design_parallel(session, &defaults);
+    }
+    if (parallel.sections < 1) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "at least one section is required");
+    }
+
+    // The same problem the fit solved, so the comparison isolates the design.
+    FitConfig fit;
+    const ParallelDesign design = designParallel(session->problem, fit, parallel);
+    if (!design.ok) {
+        return fail(DSPI_RC_FIT_FAILED,
+                    design.message.empty() ? "the parallel design failed" : design.message);
+    }
+
+    session->parallelDesign = design;
+    session->parallelDesigned = true;
+    return DSPI_RC_OK;
+}
+
+dspi_rc_status dspi_rc_session_parallel_section_count(dspi_rc_session* session,
+                                                      size_t* out_count) {
+    if (!session || !out_count) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+    if (!session->parallelDesigned) return fail(DSPI_RC_INVALID_STATE, "no parallel design");
+    *out_count = session->parallelDesign.sections.size();
+    return DSPI_RC_OK;
+}
+
+dspi_rc_status dspi_rc_session_parallel_sections(dspi_rc_session* session,
+                                                 dspi_rc_parallel_section* out_sections,
+                                                 size_t capacity, size_t* out_written) {
+    if (!session || !out_sections || !out_written) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+    }
+    if (!session->parallelDesigned) return fail(DSPI_RC_INVALID_STATE, "no parallel design");
+
+    const std::vector<ParallelSection>& sections = session->parallelDesign.sections;
+    const std::size_t count = std::min(sections.size(), capacity);
+    for (std::size_t i = 0; i < count; ++i) {
+        out_sections[i].freq_hz = sections[i].freqHz;
+        out_sections[i].q = sections[i].q;
+        out_sections[i].a1 = sections[i].a1;
+        out_sections[i].a2 = sections[i].a2;
+        out_sections[i].b0 = sections[i].b0;
+        out_sections[i].b1 = sections[i].b1;
+    }
+    *out_written = sections.size();
+    return DSPI_RC_OK;
+}
+
 
 // ---------------------------------------------------------------------------
 // Results
@@ -660,6 +764,21 @@ dspi_rc_status dspi_rc_session_uncorrected_metrics(const dspi_rc_session* sessio
     return DSPI_RC_OK;
 }
 
+dspi_rc_status dspi_rc_session_parallel_metrics(dspi_rc_session* session,
+                                                dspi_rc_metrics* out_metrics) {
+    if (!session || !out_metrics) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+    if (!session->parallelDesigned) return fail(DSPI_RC_INVALID_STATE, "no parallel design");
+    toCMetrics(session->parallelDesign.metrics, out_metrics);
+    return DSPI_RC_OK;
+}
+
+dspi_rc_status dspi_rc_session_parallel_trim_db(dspi_rc_session* session, double* out_db) {
+    if (!session || !out_db) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+    if (!session->parallelDesigned) return fail(DSPI_RC_INVALID_STATE, "no parallel design");
+    *out_db = session->parallelDesign.trimDb;
+    return DSPI_RC_OK;
+}
+
 dspi_rc_status dspi_rc_session_level_change(const dspi_rc_session* session,
                                             double* out_db) {
     if (!session || !out_db) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
@@ -700,6 +819,12 @@ dspi_rc_status dspi_rc_session_curve(const dspi_rc_session* session, int which,
         case DSPI_RC_CURVE_SPREAD: source = &session->problem.statistics.madDb; break;
         case DSPI_RC_CURVE_RELIABILITY: source = &session->problem.statistics.reliability; break;
         case DSPI_RC_CURVE_CORRECTION: source = &session->result.correctionDb; break;
+        case DSPI_RC_CURVE_PARALLEL_CORRECTION:
+            if (!session->parallelDesigned) {
+                return fail(DSPI_RC_INVALID_STATE, "no parallel design");
+            }
+            source = &session->parallelDesign.correctionDb;
+            break;
         case DSPI_RC_CURVE_MASK_WEIGHT: source = &session->problem.mask.weight; break;
         case DSPI_RC_CURVE_POSITION: {
             if (position_index < 0 ||

@@ -11,6 +11,7 @@ struct RoomCorrectionResultsView: View {
 
     @State private var selectedChannel: Int?
     @State private var showFilters = false
+    @State private var showFixedPole = false
 
     init(model: RoomCorrectionModel) {
         self.model = model
@@ -37,6 +38,8 @@ struct RoomCorrectionResultsView: View {
                         }
                         Divider()
                         filtersSection
+                        Divider()
+                        fixedPoleSection
                     }
                 }
                 .padding(22)
@@ -90,6 +93,7 @@ struct RoomCorrectionResultsView: View {
                 measured: design.curve(.powerAverage, channel: channel),
                 target: design.curve(.target, channel: channel),
                 correction: design.curve(.correction, channel: channel),
+                comparison: design.parallelCurve(channel: channel),
                 frequencies: design.grid.frequencies)
                 .frame(height: 220)
 
@@ -97,6 +101,9 @@ struct RoomCorrectionResultsView: View {
                 legend("Measured", .secondary)
                 legend("Target", .accentColor)
                 legend("Corrected", .green)
+                if !design.parallelCurve(channel: channel).isEmpty {
+                    legend("Fixed-pole", .orange)
+                }
                 Spacer()
             }
         }
@@ -202,6 +209,92 @@ struct RoomCorrectionResultsView: View {
         }
     }
 
+    // MARK: - Fixed-pole comparison
+
+    /// A research comparison, not a product choice.
+    ///
+    /// The design this draws cannot be written to a DSPi - the firmware DSP is
+    /// a cascade with no accumulator, and the wire carries filter recipes
+    /// rather than coefficients - so nothing here changes what Apply would do.
+    /// It is here because the firmware question needs real measurements and
+    /// this is where they are.
+    private var fixedPoleSection: some View {
+        DisclosureGroup(isExpanded: $showFixedPole) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: Binding(
+                    get: { design.comparesFixedPole },
+                    set: { design.comparesFixedPole = $0 })) {
+                    Text("Design a fixed-pole bank alongside the correction")
+                        .font(.system(size: 12))
+                }
+                .toggleStyle(.checkbox)
+                .padding(.top, 8)
+
+                Text("Adds an orange trace to the response plot. It cannot be "
+                     + "applied: the firmware runs a cascade and the wire carries "
+                     + "filter recipes, not coefficients.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if design.comparesFixedPole {
+                    HStack(spacing: 10) {
+                        Text("Sections")
+                            .font(.system(size: 12))
+                            .frame(width: 70, alignment: .leading)
+                        Picker("", selection: Binding(
+                            get: { design.parallelOptions.sections },
+                            set: { design.parallelOptions.sections = $0 })) {
+                            ForEach([10, 12, 16, 24, 32, 48], id: \.self) { count in
+                                Text("\(count)").tag(count)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 90)
+                        Text("ten matches the hardware's PEQ budget")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+
+                    if design.isStale {
+                        Text("Recalculate on the Target step to see it.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                if let parallel = design.parallelMetrics(channel: channel),
+                   let real = design.metrics(channel: channel) {
+                    Divider()
+                    HStack(alignment: .top, spacing: 26) {
+                        reading("Correction error",
+                                String(format: "%.2f dB", real.reliableWorstPositionRmseDb),
+                                caption: "what will be applied", emphasis: .neutral)
+                        reading("Fixed-pole error",
+                                String(format: "%.2f dB", parallel.reliableWorstPositionRmseDb),
+                                caption: "\(design.parallelSections(channel: channel).count) sections",
+                                emphasis: parallel.reliableWorstPositionRmseDb
+                                    < real.reliableWorstPositionRmseDb ? .good : .neutral)
+                        if let trim = design.parallelTrimDb(channel: channel) {
+                            reading("Its level cost",
+                                    String(format: "%.1f dB", trim),
+                                    caption: trim < -8
+                                        ? "far more than the correction takes"
+                                        : "preamp it would need",
+                                    emphasis: trim < -8 ? .warning : .neutral)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        } label: {
+            Text("FIXED-POLE COMPARISON")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - Filters
 
     private var filtersSection: some View {
@@ -271,7 +364,7 @@ struct RoomCorrectionResultsView: View {
 
     // MARK: - Helpers
 
-    private enum Emphasis { case good, neutral }
+    private enum Emphasis { case good, neutral, warning }
 
     private func reading(_ label: String, _ value: String,
                          caption: String, emphasis: Emphasis) -> some View {
@@ -281,7 +374,8 @@ struct RoomCorrectionResultsView: View {
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.system(size: 20, weight: .medium, design: .rounded))
-                .foregroundStyle(emphasis == .good ? Color.green : Color.primary)
+                .foregroundStyle(emphasis == .good ? Color.green
+                                 : emphasis == .warning ? Color.orange : Color.primary)
             Text(caption)
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
@@ -303,7 +397,8 @@ struct RoomCorrectionResultsView: View {
 
 // MARK: - Plot
 
-/// Measured, target, and what the correction is predicted to produce.
+/// Measured, target, what the correction is predicted to produce, and
+/// optionally what a fixed-pole parallel bank would have produced instead.
 ///
 /// The corrected trace is measured plus correction rather than a separate
 /// prediction, so what is drawn is exactly what the filters do to what was
@@ -312,6 +407,10 @@ private struct ResponseComparisonPlot: View {
     let measured: [Double]
     let target: [Double]
     let correction: [Double]
+    /// The fixed-pole bank's correction, or empty.  Drawn on the same terms as
+    /// the real one - measured plus correction - so the two traces are
+    /// comparable rather than one being a prediction and the other a model.
+    var comparison: [Double] = []
     let frequencies: [Double]
 
     /// Measured plus correction, rather than a separate prediction: what is
@@ -322,12 +421,18 @@ private struct ResponseComparisonPlot: View {
         return zip(measured, correction).map(+)
     }
 
+    private var comparisonCorrected: [Double] {
+        guard !comparison.isEmpty, measured.count == comparison.count else { return [] }
+        return zip(measured, comparison).map(+)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
             let axis = FrequencyAxis(frequencies: frequencies)
-            let scale = FrequencyPlotScale(fitting: measured + target + corrected,
-                                           minimumHalfRange: 8, padding: 1.1)
+            let scale = FrequencyPlotScale(
+                fitting: measured + target + corrected + comparisonCorrected,
+                minimumHalfRange: 8, padding: 1.1)
             ZStack {
                 FrequencyPlotBackground(axis: axis, scale: scale)
                 axis.path(measured, scale: scale, in: size)
@@ -335,6 +440,12 @@ private struct ResponseComparisonPlot: View {
                 axis.path(target, scale: scale, in: size)
                     .stroke(Color.accentColor.opacity(0.9),
                             style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                if !comparisonCorrected.isEmpty {
+                    // Under the real correction, because that is the one the
+                    // user is deciding about.
+                    axis.path(comparisonCorrected, scale: scale, in: size)
+                        .stroke(Color.orange.opacity(0.85), lineWidth: 1.5)
+                }
                 axis.path(corrected, scale: scale, in: size)
                     .stroke(Color.green, lineWidth: 2)
             }

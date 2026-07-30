@@ -526,6 +526,67 @@ extension RoomCorrectionCore {
         }
     }
 
+    /// Settings for the fixed-pole parallel design.
+    ///
+    /// This design **cannot be written to a DSPi**: the firmware DSP is a
+    /// cascade with no accumulator, and the vendor wire carries filter recipes
+    /// rather than coefficients.  It exists so a real measurement can be run
+    /// through it and the predicted correction looked at, which is the input
+    /// the firmware decision is missing.
+    ///
+    /// Defaults are Bank's method as specified - logarithmic pole placement
+    /// weighted toward the modal region, Q from the spacing to the neighbours,
+    /// poles fixed - so what the app shows matches what the evaluation reports.
+    struct ParallelOptions {
+        var config: dspi_rc_parallel_config
+
+        init() {
+            var value = dspi_rc_parallel_config()
+            dspi_rc_default_parallel_config(&value)
+            self.config = value
+        }
+
+        /// Pole pairs.  The hardware's ten PEQ bands are not a limit here; the
+        /// whole question is what more sections would buy.
+        var sections: Int {
+            get { Int(config.sections) }
+            set { config.sections = Int32(max(1, newValue)) }
+        }
+
+        /// 1 is pure logarithmic placement, which is Bank's method.
+        var placementBias: Double {
+            get { config.placement_bias }
+            set { config.placement_bias = min(1, max(0, newValue)) }
+        }
+
+        /// Off keeps the poles fixed, which is what makes the design a linear
+        /// solve. On refines them, which is not Bank's method but is what the
+        /// cascade's centres get.
+        var refinePoles: Bool {
+            get { config.refine_poles != 0 }
+            set { config.refine_poles = newValue ? 1 : 0 }
+        }
+
+        /// Off is Bank's spacing rule; on takes Q from the measured feature
+        /// width, which helps at low section counts.
+        var qFromFeatureWidth: Bool {
+            get { config.q_from_feature_width != 0 }
+            set { config.q_from_feature_width = newValue ? 1 : 0 }
+        }
+    }
+
+    /// One pole pair and its solved numerator.
+    ///
+    /// Deliberately not a `FilterParams`: there is no type, no gain in dB, and
+    /// no PEQ recipe that expresses it.
+    struct ParallelSection: Identifiable {
+        let id = UUID()
+        let freqHz: Double
+        let q: Double
+        let b0: Double
+        let b1: Double
+    }
+
     struct Metrics {
         let rawWorstPositionRmseDb: Double
         let reliableWorstPositionRmseDb: Double
@@ -564,6 +625,9 @@ extension RoomCorrectionCore {
         case maskWeight
         case position(Int)
         case predicted(Int)
+        /// The fixed-pole parallel bank's predicted correction, including its
+        /// own trim.  Evaluation only; see `ParallelOptions`.
+        case parallelCorrection
 
         var raw: Int32 {
             switch self {
@@ -575,6 +639,7 @@ extension RoomCorrectionCore {
             case .maskWeight: return Int32(DSPI_RC_CURVE_MASK_WEIGHT)
             case .position: return Int32(DSPI_RC_CURVE_POSITION)
             case .predicted: return Int32(DSPI_RC_CURVE_PREDICTED)
+            case .parallelCorrection: return Int32(DSPI_RC_CURVE_PARALLEL_CORRECTION)
             }
         }
 
@@ -594,6 +659,7 @@ extension RoomCorrectionCore {
         let grid: Grid
         private(set) var positionCount = 0
         private(set) var isFitted = false
+        private(set) var hasParallelDesign = false
 
         init(grid: Grid, sampleRateHz: Double, platform: Platform) throws {
             guard let handle = dspi_rc_session_create(grid.minHz, grid.maxHz,
@@ -651,6 +717,61 @@ extension RoomCorrectionCore {
                 dspi_rc_session_fit(handle, &config),
                 "the correction could not be calculated")
             isFitted = true
+            hasParallelDesign = false
+        }
+
+        /// Design a fixed-pole parallel bank for the same problem the fit just
+        /// solved, so the two are directly comparable.  Requires a prior `fit`.
+        ///
+        /// Nothing here can be applied to the hardware.
+        func designParallel(_ options: ParallelOptions = ParallelOptions()) throws {
+            var config = options.config
+            try RoomCorrectionCore.check(
+                dspi_rc_session_design_parallel(handle, &config),
+                "the fixed-pole design could not be calculated")
+            hasParallelDesign = true
+        }
+
+        var parallelMetrics: Metrics {
+            get throws {
+                var raw = dspi_rc_metrics()
+                try RoomCorrectionCore.check(
+                    dspi_rc_session_parallel_metrics(handle, &raw), "no fixed-pole design")
+                return Metrics(raw)
+            }
+        }
+
+        /// Attenuation the fixed-pole design forces.  Expect large negative
+        /// values: it carries no per-section limits, so it takes gain where
+        /// boost is forbidden and the trim pulls the channel down to match.
+        var parallelTrimDb: Double {
+            get throws {
+                var value: Double = 0
+                try RoomCorrectionCore.check(
+                    dspi_rc_session_parallel_trim_db(handle, &value), "no fixed-pole design")
+                return value
+            }
+        }
+
+        var parallelSections: [ParallelSection] {
+            get throws {
+                var count = 0
+                try RoomCorrectionCore.check(
+                    dspi_rc_session_parallel_section_count(handle, &count),
+                    "no fixed-pole design")
+                guard count > 0 else { return [] }
+
+                var raw = [dspi_rc_parallel_section](repeating: dspi_rc_parallel_section(),
+                                                     count: count)
+                var written = 0
+                let status = raw.withUnsafeMutableBufferPointer { buffer in
+                    dspi_rc_session_parallel_sections(handle, buffer.baseAddress, count, &written)
+                }
+                try RoomCorrectionCore.check(status, "could not read the pole sections")
+                return raw.map {
+                    ParallelSection(freqHz: $0.freq_hz, q: $0.q, b0: $0.b0, b1: $0.b1)
+                }
+            }
         }
 
         /// Filters ready to write to the device.  `type` carries the firmware's
