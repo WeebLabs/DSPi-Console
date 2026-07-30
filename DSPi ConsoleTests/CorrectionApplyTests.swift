@@ -95,6 +95,7 @@ final class CorrectionApplyTests: XCTestCase {
 
     private func plan(speaker: Int, channel: Int,
                       levelChange: Double = -3,
+                      levelMatch: Double = 0,
                       originalGain: Float = -2) -> ChannelApplyPlan {
         var bands = Array(repeating: FilterParams(), count: 10)
         bands[0] = peak(63, -6)
@@ -104,7 +105,9 @@ final class CorrectionApplyTests: XCTestCase {
                                 destination: .outputGain(output: speaker),
                                 bands: bands,
                                 levelChangeDb: levelChange,
-                                compensatedGainDb: originalGain - Float(levelChange),
+                                levelMatchDb: levelMatch,
+                                compensatedGainDb: originalGain
+                                    + Float(-levelChange + levelMatch),
                                 originalGainDb: originalGain)
     }
 
@@ -152,6 +155,21 @@ final class CorrectionApplyTests: XCTestCase {
         XCTAssertFalse(device.log.contains { $0.contains("ch3") },
                        "an unselected channel must not be touched: \(device.log)")
         XCTAssertEqual(device.bands[3]?[0].freq, 4000, "its existing EQ is intact")
+    }
+
+    func testTheLevelMatchAndTheCompensationAreWrittenAsOneValue() async {
+        // Two writes could each be right and still leave the device wrong if
+        // only one landed, so they are summed into the gain that gets written.
+        let applier = applier()
+        await applier.apply([plan(speaker: 0, channel: 2,
+                                  levelChange: -3, levelMatch: -1.5,
+                                  originalGain: -2)])
+
+        XCTAssertEqual(applier.state, .applied)
+        // -2 baseline, +3 given back, -1.5 to reach the datum.
+        XCTAssertEqual(device.outputGain[0] ?? 999, -0.5, accuracy: 0.001)
+        XCTAssertEqual(device.log.filter { $0 == "write gain out0" }.count, 1,
+                       "one write, not two: \(device.log)")
     }
 
     // MARK: - Refusals, before anything is written

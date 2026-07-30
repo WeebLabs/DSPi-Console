@@ -303,6 +303,38 @@ dspi_rc_status dspi_rc_target_preset(int preset, dspi_rc_target_spec* spec) {
     }
 }
 
+dspi_rc_status dspi_rc_band_level(const double* magnitudes_db, size_t points,
+                                  double min_hz, double max_hz,
+                                  int points_per_octave,
+                                  double band_low_hz, double band_high_hz,
+                                  double* out_db) {
+    if (!magnitudes_db || !out_db) return fail(DSPI_RC_INVALID_ARGUMENT, "null argument");
+    if (band_high_hz <= band_low_hz) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "empty band");
+    }
+
+    const FrequencyGrid grid = FrequencyGrid::logSpaced(min_hz, max_hz, points_per_octave);
+    if (grid.empty()) return fail(DSPI_RC_INVALID_ARGUMENT, "invalid grid");
+    if (points != grid.size()) {
+        return fail(DSPI_RC_INVALID_ARGUMENT, "curve does not match the grid");
+    }
+
+    double power = 0.0;
+    std::size_t counted = 0;
+    for (std::size_t i = 0; i < points; ++i) {
+        if (grid.hz[i] < band_low_hz || grid.hz[i] > band_high_hz) continue;
+        power += std::pow(10.0, magnitudes_db[i] / 10.0);
+        ++counted;
+    }
+    if (counted == 0) return fail(DSPI_RC_INVALID_ARGUMENT, "no grid bin inside the band");
+
+    // Mean per bin rather than a total: the grid is log spaced, so a mean over
+    // bins is a mean per octave up to a constant, and that constant is what
+    // makes the figure independent of the band's width.
+    *out_db = 10.0 * std::log10(power / static_cast<double>(counted));
+    return DSPI_RC_OK;
+}
+
 dspi_rc_status dspi_rc_spatial_statistics(const double* positions_db,
                                           size_t position_count,
                                           size_t points,

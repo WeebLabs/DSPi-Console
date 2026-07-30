@@ -359,6 +359,26 @@ extension RoomCorrectionCore {
         }
     }
 
+    /// Mean power per bin over a band, in dB.
+    ///
+    /// Band-independent by construction, which is what lets a subwoofer and a
+    /// midband channel be compared without any frequency range in common.
+    static func bandLevel(_ magnitudesDb: [Double],
+                          grid: Grid,
+                          band: ClosedRange<Double>) throws -> Double {
+        guard magnitudesDb.count == grid.pointCount, !magnitudesDb.isEmpty else {
+            throw CoreError.failed("the curve does not match the analysis grid")
+        }
+        var level: Double = 0
+        let status = magnitudesDb.withUnsafeBufferPointer { input in
+            dspi_rc_band_level(input.baseAddress, magnitudesDb.count,
+                               grid.minHz, grid.maxHz, Int32(grid.pointsPerOctave),
+                               band.lowerBound, band.upperBound, &level)
+        }
+        try check(status, "could not measure the band level")
+        return level
+    }
+
     /// The spatial average and spread of a set of positions, with no fit.
     ///
     /// The same power-domain average the fit will use, so the curve a user

@@ -179,6 +179,22 @@ typedef struct dspi_rc_target_spec {
 /* preset: 0 = flat, 1 = natural, 2 = studio, 3 = bass warm. */
 dspi_rc_status dspi_rc_target_preset(int preset, dspi_rc_target_spec* spec);
 
+/* Mean power per bin over a frequency band, in dB.
+ *
+ * The quantity channel level matching compares. Band-independent by
+ * construction: a flat response at L dB returns L whatever the band's width,
+ * so a two-octave subwoofer and a four-octave midband measurement are directly
+ * comparable and need no frequency range in common. Broadband RMS is not
+ * usable for that, being dominated by whichever band happens to be widest.
+ *
+ * Averaged in the power domain, because a level is an energy statement.
+ * Returns DSPI_RC_INVALID_ARGUMENT when no grid bin falls inside the band. */
+dspi_rc_status dspi_rc_band_level(const double* magnitudes_db, size_t points,
+                                  double min_hz, double max_hz,
+                                  int points_per_octave,
+                                  double band_low_hz, double band_high_hz,
+                                  double* out_db);
+
 /* The spatial average and spread of a set of positions, with no fit involved.
  *
  * Session curves require a fit, and a fit requires a target - but a

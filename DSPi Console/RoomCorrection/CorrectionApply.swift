@@ -19,8 +19,14 @@ struct ChannelApplyPlan: Identifiable, Equatable {
     let bands: [FilterParams]
     /// Level the correction removes, weighted over the correction band.
     let levelChangeDb: Double
-    /// What the destination's gain becomes: its original value less the level
-    /// the correction added, so the pre-correction balance survives.
+    /// Offset that brings this channel to the common datum, from the level
+    /// pass. Zero when level matching was not run or not needed.
+    let levelMatchDb: Double
+    /// What the destination's gain becomes: the original value, less the level
+    /// the correction removed, plus the level-match offset.
+    ///
+    /// One value written once. Two separate writes could each be correct and
+    /// still leave the device wrong if only one of them landed.
     let compensatedGainDb: Float
     let originalGainDb: Float
 
@@ -36,7 +42,11 @@ struct ChannelApplyPlan: Identifiable, Equatable {
     /// Bands carrying an actual filter, for display.
     var activeBandCount: Int { bands.filter { $0.type != .flat }.count }
 
+    /// Everything the gain moves by, which is what actually gets written.
     var compensationDb: Float { compensatedGainDb - originalGainDb }
+
+    /// The part of it that is giving back what the correction took.
+    var balanceCompensationDb: Float { Float(-levelChangeDb) }
 }
 
 /// What Apply needs from the device.
@@ -286,7 +296,8 @@ extension CorrectionDesign {
     func applyPlans(mode: MeasurementMode,
                     eqChannel: (Int) -> Int,
                     baselineOutputGainDb: (Int) -> Float,
-                    baselinePreampDb: (Int) -> Float) -> [ChannelApplyPlan] {
+                    baselinePreampDb: (Int) -> Float,
+                    levelMatchDb: (Int) -> Double = { _ in 0 }) -> [ChannelApplyPlan] {
         fittedChannels.compactMap { speaker in
             guard let fit = fits[speaker] else { return nil }
 
@@ -295,6 +306,11 @@ extension CorrectionDesign {
             while bands.count < Self.bandsPerBank { bands.append(FilterParams()) }
 
             let levelChange = (try? fit.levelChangeDb) ?? 0
+            let levelMatch = levelMatchDb(speaker)
+            // Summed, not applied in sequence: the compensation gives back what
+            // the correction took, the match brings the channel to the datum,
+            // and the destination gain carries both.
+            let total = Float(-levelChange + levelMatch)
 
             switch mode {
             case .outputChannels:
@@ -305,7 +321,8 @@ extension CorrectionDesign {
                     destination: .outputGain(output: speaker),
                     bands: bands,
                     levelChangeDb: levelChange,
-                    compensatedGainDb: original - Float(levelChange),
+                    levelMatchDb: levelMatch,
+                    compensatedGainDb: original + total,
                     originalGainDb: original)
             case .inputChannels:
                 let original = baselinePreampDb(speaker)
@@ -315,7 +332,8 @@ extension CorrectionDesign {
                     destination: .inputPreamp(channel: speaker),
                     bands: bands,
                     levelChangeDb: levelChange,
-                    compensatedGainDb: original - Float(levelChange),
+                    levelMatchDb: levelMatch,
+                    compensatedGainDb: original + total,
                     originalGainDb: original)
             }
         }

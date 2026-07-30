@@ -535,3 +535,86 @@ TEST_CASE(smoothing_rejects_a_mismatched_grid) {
     CHECK(dspi_rc_smooth_curve(nullptr, 64, 20.0, 20000.0, 24, 0.0, 200.0,
                                out.data()) != DSPI_RC_OK);
 }
+
+// ---------------------------------------------------------------------------
+// In-band spectral level, the quantity channel level matching compares
+// ---------------------------------------------------------------------------
+
+TEST_CASE(band_level_is_independent_of_band_width) {
+    // The property the whole approach rests on: a two-octave subwoofer and a
+    // four-octave midband measurement compare directly, with no shared band.
+    const FrequencyGrid grid = viewGrid();
+    const std::vector<double> flatCurve(grid.size(), 72.0);
+
+    double narrow = 0.0;
+    double wide = 0.0;
+    CHECK(dspi_rc_band_level(flatCurve.data(), grid.size(), 20.0, 20000.0, 24,
+                             30.0, 60.0, &narrow) == DSPI_RC_OK);
+    CHECK(dspi_rc_band_level(flatCurve.data(), grid.size(), 20.0, 20000.0, 24,
+                             200.0, 4000.0, &wide) == DSPI_RC_OK);
+
+    CHECK_NEAR(narrow, 72.0, 1e-9);
+    CHECK_NEAR(wide, 72.0, 1e-9);
+}
+
+TEST_CASE(band_level_tracks_a_level_change) {
+    const FrequencyGrid grid = viewGrid();
+    std::vector<double> quiet(grid.size(), 60.0);
+    std::vector<double> loud(grid.size(), 66.0);
+
+    double a = 0.0;
+    double b = 0.0;
+    CHECK(dspi_rc_band_level(quiet.data(), grid.size(), 20.0, 20000.0, 24,
+                             200.0, 4000.0, &a) == DSPI_RC_OK);
+    CHECK(dspi_rc_band_level(loud.data(), grid.size(), 20.0, 20000.0, 24,
+                             200.0, 4000.0, &b) == DSPI_RC_OK);
+    CHECK_NEAR(b - a, 6.0, 1e-9);
+}
+
+TEST_CASE(band_level_averages_in_the_power_domain) {
+    // Half the band 20 dB down. A decibel mean would report 62; the energy the
+    // listener receives is far closer to the louder half.
+    const FrequencyGrid grid = viewGrid();
+    std::vector<double> curve(grid.size(), 72.0);
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        if (grid.hz[i] > 800.0) curve[i] = 52.0;
+    }
+
+    double level = 0.0;
+    CHECK(dspi_rc_band_level(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                             200.0, 3200.0, &level) == DSPI_RC_OK);
+    CHECK(level > 66.0);
+    CHECK(level < 72.0);
+}
+
+TEST_CASE(band_level_ignores_everything_outside_the_band) {
+    const FrequencyGrid grid = viewGrid();
+    std::vector<double> curve(grid.size(), 70.0);
+    // A huge peak well below the band must not move the reading.
+    for (std::size_t i = 0; i < grid.size(); ++i) {
+        if (grid.hz[i] < 60.0) curve[i] = 100.0;
+    }
+
+    double level = 0.0;
+    CHECK(dspi_rc_band_level(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                             200.0, 4000.0, &level) == DSPI_RC_OK);
+    CHECK_NEAR(level, 70.0, 1e-9);
+}
+
+TEST_CASE(band_level_refuses_a_band_with_no_bins) {
+    const FrequencyGrid grid = viewGrid();
+    const std::vector<double> curve(grid.size(), 70.0);
+    double level = 0.0;
+
+    // Above the grid entirely.
+    CHECK(dspi_rc_band_level(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                             30000.0, 40000.0, &level) != DSPI_RC_OK);
+    // Inverted.
+    CHECK(dspi_rc_band_level(curve.data(), grid.size(), 20.0, 20000.0, 24,
+                             4000.0, 200.0, &level) != DSPI_RC_OK);
+    // Mismatched grid.
+    CHECK(dspi_rc_band_level(curve.data(), 64, 20.0, 20000.0, 24,
+                             200.0, 4000.0, &level) != DSPI_RC_OK);
+    CHECK(dspi_rc_band_level(nullptr, grid.size(), 20.0, 20000.0, 24,
+                             200.0, 4000.0, &level) != DSPI_RC_OK);
+}
