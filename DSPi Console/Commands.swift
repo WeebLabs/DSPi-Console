@@ -223,14 +223,14 @@ extension DSPViewModel {
     // MARK: - USB-only sends (no @Published update, for slider drag)
 
     func sendPreampToDevice(_ db: Float) {
-        var val = (db * 10).rounded() / 10
+        var val = db
         if val == -0.0 { val = 0.0 }
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
 
     func sendPreampChannelToDevice(channel: Int, db: Float) {
-        var val = (db * 10).rounded() / 10
+        var val = db
         if val == -0.0 { val = 0.0 }
         let data = Data(bytes: &val, count: 4)
         // Link couples only the stereo USB L/R pair (inputs 0/1) via two
@@ -265,7 +265,7 @@ extension DSPViewModel {
     }
 
     func sendOutputGainToDevice(output: Int, db: Float) {
-        var val = (db * 10).rounded() / 10
+        var val = db
         if val == -0.0 { val = 0.0 }
         outputGainDB[output] = val
         let data = Data(bytes: &val, count: 4)
@@ -489,7 +489,7 @@ extension DSPViewModel {
 
     /// Legacy global preamp SET — sets both channels to the same value via 0x44.
     func setPreamp(_ db: Float) {
-        var val = (db * 10).rounded() / 10
+        var val = db
         if val == -0.0 { val = 0.0 }
         self.preampDB = [val, val]
         let data = Data(bytes: &val, count: 4)
@@ -516,7 +516,8 @@ extension DSPViewModel {
     // MARK: - Per-Channel Preamp
 
     func setPreampChannel(channel: Int, db: Float) {
-        var val = (db * 10).rounded() / 10
+        // Ungridded for the same reason as setOutputGain above.
+        var val = db
         if val == -0.0 { val = 0.0 }
         self.preampDB[channel] = val
         let data = Data(bytes: &val, count: 4)
@@ -1376,7 +1377,11 @@ extension DSPViewModel {
     // MARK: - Per-Output Gain
 
     func setOutputGain(output: Int, db: Float) {
-        var val = (db * 10).rounded() / 10
+        // No 0.1 dB grid: the wire carries float32, so that was a host
+        // convention rather than a wire limit. Room correction computes
+        // compensation off any such grid, and quantizing it here made an
+        // applied value disagree with the value that was asked for.
+        var val = db
         if val == -0.0 { val = 0.0 }
         outputGainDB[output] = val
         let data = Data(bytes: &val, count: 4)
@@ -1392,6 +1397,67 @@ extension DSPViewModel {
                 }
             }
         }
+    }
+
+    // The per-channel and per-output gain paths all carry float32 on the wire,
+    // so none of them quantizes to 0.1 dB any more. Consistency matters here as
+    // much as precision: while one path gridded and another did not, the value
+    // the device held depended on whether it had been dragged or calculated,
+    // and a read-back could disagree with a write for no visible reason.
+    //
+    // `roundMasterVolume` is deliberately left alone. Its graduated steps are a
+    // protocol constraint rather than a host convention.
+
+    /// Reads one output's gain straight from the device.
+    ///
+    /// `fetchOutputGainDB` publishes into the cache from a `DispatchQueue.main`
+    /// hop, so a caller on the main actor reading the cache immediately
+    /// afterwards gets the value from *before* the fetch. That is fine for
+    /// polling and useless for verifying a write, which needs the device's own
+    /// answer rather than a reflection of what this app meant to send.
+    func deviceOutputGainDB(output: Int) -> Float? {
+        guard let data = usb.getControlRequest(request: REQ_GET_OUTPUT_GAIN,
+                                               value: UInt16(output), index: 2,
+                                               length: 4) else { return nil }
+        return data.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
+    /// Reads one input's preamp straight from the device, as above.
+    func devicePreampDB(channel: Int) -> Float? {
+        guard let data = usb.getControlRequest(request: REQ_GET_PREAMP_CH,
+                                               value: UInt16(channel), index: 0,
+                                               length: 4) else { return nil }
+        return data.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
+    /// Reads one PEQ band straight from the device, as above.
+    func deviceFilter(ch: Int, band: Int) -> FilterParams? {
+        func value<T>(_ param: Int) -> T? {
+            let wValue = UInt16((ch << 8) | (band << 3) | param)
+            guard let data = usb.getControlRequest(request: REQ_GET_EQ_PARAM,
+                                                  value: wValue, index: 0,
+                                                  length: 4) else { return nil }
+            return data.withUnsafeBytes { $0.load(as: T.self) }
+        }
+
+        guard let typeRaw: UInt32 = value(0),
+              let freq: Float = value(1),
+              let q: Float = value(2),
+              let gain: Float = value(3) else { return nil }
+
+        // Bypass predates nothing else here, but pre-1.1.4 firmware STALLs on
+        // param 4; treat a missing answer as active rather than as a failure.
+        let bypassRaw: UInt32 = value(4) ?? 0
+
+        var params = FilterParams(type: FilterType(rawValue: Int(typeRaw)) ?? .flat,
+                                  freq: freq,
+                                  q: q,
+                                  gain: gain,
+                                  bypass: (bypassRaw & 0xFF) == 1)
+        if params.type == .linkwitzTransform, let qpRaw: UInt32 = value(5) {
+            params.qp = FilterParams.decodeQp(UInt16(qpRaw & 0xFFFF))
+        }
+        return params
     }
 
     // MARK: - Per-Output Mute

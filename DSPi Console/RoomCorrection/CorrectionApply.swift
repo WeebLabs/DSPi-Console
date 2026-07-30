@@ -329,13 +329,11 @@ extension DSPViewModel: CorrectionApplyTarget {
     }
 
     func readBand(channel: Int, band: Int) -> FilterParams? {
-        // Straight from the device: reading the cache would verify only that
-        // this app remembered what it meant to write.
-        fetchFilter(ch: channel, band: band)
-        guard let bank = channelData[channel], bank.indices.contains(band) else {
-            return nil
-        }
-        return bank[band]
+        // Straight from the device, synchronously. The cache-populating
+        // `fetchFilter` publishes from a main-queue hop, so reading the cache
+        // here would return the value from before the fetch - which is to say,
+        // whatever this app had just written into it.
+        deviceFilter(ch: channel, band: band)
     }
 
     func writeOutputGain(output: Int, db: Float) {
@@ -343,9 +341,7 @@ extension DSPViewModel: CorrectionApplyTarget {
     }
 
     func readOutputGain(output: Int) -> Float? {
-        fetchOutputGainDB(output: output)
-        guard outputGainDB.indices.contains(output) else { return nil }
-        return outputGainDB[output]
+        deviceOutputGainDB(output: output)
     }
 
     func writeInputPreamp(channel: Int, db: Float) {
@@ -353,8 +349,6 @@ extension DSPViewModel: CorrectionApplyTarget {
     }
 
     func readInputPreamp(channel: Int) -> Float? {
-        fetchPreampChannel(channel: channel)
-        guard preampDB.indices.contains(channel) else { return nil }
-        return preampDB[channel]
+        devicePreampDB(channel: channel)
     }
 }

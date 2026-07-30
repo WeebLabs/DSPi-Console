@@ -79,6 +79,38 @@ final class FilterGainPrecisionTests: XCTestCase {
         }
     }
 
+    /// The compensation room correction writes is a level, and it went through
+    /// the same 0.1 dB grid the filter gains used to.
+    ///
+    /// This is what made Apply impossible: the plan held an ungridded
+    /// compensation, the setter quantized it on the way out, and the read-back
+    /// verification then found the two disagreeing in the second decimal place
+    /// and rolled the whole thing back every time.
+    func testOutputGainKeepsItsSecondDecimalPlace() {
+        let vm = makeViewModel()
+        vm.setOutputGain(output: 0, db: 4.93)
+        XCTAssertEqual(vm.outputGainDB[0], 4.93,
+                       "the wire carries float32; the grid was a host convention")
+
+        vm.setOutputGain(output: 1, db: -2.07)
+        XCTAssertEqual(vm.outputGainDB[1], -2.07)
+    }
+
+    func testInputPreampKeepsItsSecondDecimalPlace() {
+        let vm = makeViewModel()
+        vm.setPreampChannel(channel: 0, db: -3.46)
+        XCTAssertEqual(vm.preampDB[0], -3.46)
+    }
+
+    func testGainsThatWereAlreadyOnTheGridAreUnchanged() {
+        // Removing the rounding must not perturb the values it used to produce.
+        let vm = makeViewModel()
+        for db in [Float(0), -6, 3.5, -12.1] {
+            vm.setOutputGain(output: 2, db: db)
+            XCTAssertEqual(vm.outputGainDB[2], db, "\(db) should survive untouched")
+        }
+    }
+
     /// Negative zero is still normalized, because it is a display artifact
     /// rather than a precision question, and `-0.0 == 0.0` would otherwise
     /// hide a real diff behind an inconsistent textual rendering.
@@ -89,5 +121,39 @@ final class FilterGainPrecisionTests: XCTestCase {
         p.gain = -0.0
         vm.setFilter(ch: 0, band: 2, p: p)
         XCTAssertEqual(vm.channelData[0]?[2].gain.sign, .plus)
+    }
+
+    /// The same normalization survives on the level path, where it is also a
+    /// display concern rather than a precision one.
+    func testNegativeZeroIsNormalizedOnGainsToo() {
+        let vm = makeViewModel()
+        vm.setOutputGain(output: 3, db: -0.0)
+        XCTAssertEqual(vm.outputGainDB[3].sign, .plus)
+        vm.setPreampChannel(channel: 1, db: -0.0)
+        XCTAssertEqual(vm.preampDB[1].sign, .plus)
+    }
+
+    /// Apply verifies against the device, not against its own cache.
+    ///
+    /// The cache-populating fetches publish from a main-queue hop, so a caller
+    /// on the main actor that read the cache straight afterwards would get the
+    /// value from before the fetch - which is whatever this app had just
+    /// written into it. That verifies nothing.
+    @MainActor
+    func testApplyReadBackDoesNotConsultTheCache() {
+        let vm = makeViewModel()
+        var peak = FilterParams()
+        peak.type = .peaking
+        peak.freq = 63
+        peak.gain = -6
+        vm.setFilter(ch: 0, band: 0, p: peak)
+        vm.setOutputGain(output: 0, db: -4.25)
+
+        // With no device attached the transfers fail, so an honest device read
+        // returns nil. A cache read would cheerfully return the values above.
+        XCTAssertNil(vm.readBand(channel: 0, band: 0),
+                     "a read-back with no device must not fall back on the cache")
+        XCTAssertNil(vm.readOutputGain(output: 0))
+        XCTAssertNil(vm.readInputPreamp(channel: 0))
     }
 }
