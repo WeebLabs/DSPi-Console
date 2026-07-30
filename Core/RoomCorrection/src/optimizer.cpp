@@ -609,20 +609,41 @@ CollapsedProblem collapsePositions(const FitProblem& problem,
         maskWeight[i] = i < problem.mask.weight.size() ? problem.mask.weight[i] : 1.0;
     }
 
-    // Level-normalize, for the same reason the objective does: one trim applies
-    // to the whole channel and the balance compensation restores level
-    // afterwards, so an absolute offset is not a tonal defect.
-    double offsetSum = 0.0;
-    double offsetWeight = 0.0;
-    for (const PositionMeasurement& position : problem.positions) {
-        if (!position.enabled || position.weight <= 0.0) continue;
-        for (std::size_t i = 0; i < n && i < position.magnitudesDb.size(); ++i) {
-            const double w = position.weight * maskWeight[i];
-            offsetSum += w * (position.magnitudesDb[i] + responseDb[i] - problem.targetDb[i]);
-            offsetWeight += w;
+    // Level-normalize before scoring tonal error: one trim applies to the whole
+    // channel and the balance compensation restores level afterwards, so an
+    // absolute offset is not a tonal defect.
+    //
+    // The offset must be taken under **the same weights the loss uses**, which
+    // is not obvious and is easy to get wrong twice.  Taken under plain mask
+    // weights while the loss carries Huber weights, a uniform downward shift no
+    // longer cancels: it still reduces the loss, so a fit can buy score by
+    // attenuating, and no metric here can see it because they all level-
+    // normalize.  The weights depend on the residual and the residual depends on
+    // the offset, so this is a two-step fixed point; it converges immediately
+    // because the weights are bounded.
+    double offset = 0.0;
+    for (int pass = 0; pass < 3; ++pass) {
+        double sum = 0.0;
+        double total = 0.0;
+        for (const PositionMeasurement& position : problem.positions) {
+            if (!position.enabled || position.weight <= 0.0) continue;
+            for (std::size_t i = 0; i < n && i < position.magnitudesDb.size(); ++i) {
+                const double error =
+                    position.magnitudesDb[i] + responseDb[i] - problem.targetDb[i];
+                // The first pass has no offset to weight against, so it is the
+                // plain weighted mean and the two after it refine from there.
+                const double robust =
+                    pass == 0 ? 1.0
+                              : (std::fabs(error - offset) <= huberDeltaDb
+                                     ? 1.0
+                                     : huberDeltaDb / std::fabs(error - offset));
+                const double w = position.weight * maskWeight[i] * robust;
+                sum += w * error;
+                total += w;
+            }
         }
+        if (total > 0.0) offset = sum / total;
     }
-    const double offset = offsetWeight > 0.0 ? offsetSum / offsetWeight : 0.0;
 
     for (std::size_t i = 0; i < n; ++i) {
         double numerator = 0.0;

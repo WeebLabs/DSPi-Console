@@ -198,7 +198,7 @@ flattered the cascade. Corrected, the result reverses.
 | single_position_rolloff | 0.281 | 0.700 | 0.502 | 0.255 | 0.175 | 0.147 | 0.136 |
 | nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | 4.739 |
 | twentyone_position_diffuse | 4.016 | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
-| **mean** | 2.310 | 2.370 | 2.323 | 2.286 | 2.263 | 2.268 | 2.254 |
+| **mean** | 2.310 | 2.366 | 2.319 | 2.286 | 2.271 | 2.277 | 2.266 |
 
 
 Bank's method as specified: log placement weighted toward the modal region,
@@ -207,9 +207,9 @@ is Bank's method) the mean improves to 2.198 dB at K=48 and the preamp cost is
 unchanged at -16.2 dB.
 
 **The preamp table is the finding, read per fixture.** Accuracy separates the
-two designs by hundredths of a decibel. Headroom separates them by 4 to 6 dB on
-four fixtures, 14 to 26 dB on the diffuse one, and 36 to 59 dB on the roll-off
-one. The mean (-10.9 dB at K=10) is dominated by that last case and should not
+two designs by hundredths of a decibel. Headroom separates them by 3 to 7 dB on
+four fixtures, 17 to 29 dB on the diffuse one, and 37 to 59 dB on the roll-off
+one. The mean (-12.1 dB at K=10) is dominated by that last case and should not
 be quoted as typical.
 
 The pattern is diagnostic: wherever correction is forbidden outside the
@@ -217,8 +217,8 @@ speaker's passband, the reference puts gain there anyway, having no per-section
 limits, and `requiredTrimDb` attenuates the whole channel to compensate.
 
 **Ten sections is not enough, and neither is twelve.** At equal order Bank's
-method is behind the cascade (2.370 against 2.310). Twelve, all the firmware has
-storage for, gives 2.323 and still does not cross over. Sixteen draws level;
+method is behind the cascade (2.366 against 2.310). Twelve, all the firmware has
+storage for, gives 2.319 and still does not cross over. Sixteen draws level;
 twenty-four is where it becomes worth naming. So the firmware question is not
 "use the two spare slots" - it is "spend twenty-four or more sections per
 channel", where the RP2040 CPU budget binds.

@@ -394,23 +394,23 @@ neighbours, poles fixed.  Reliability-weighted worst-position RMSE in dB.
 | Scenario | Cascade (10) | K=10 | K=12 | K=16 | K=24 | K=32 | K=48 |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | shared_room_modes | 0.208 | 0.205 | **0.145** | 0.176 | 0.152 | 0.148 | 0.146 |
-| single_seat_local_null | 2.815 | 2.797 | 2.792 | 2.785 | 2.778 | **2.770** | 2.774 |
+| single_seat_local_null | 2.815 | 2.797 | 2.792 | 2.785 | 2.779 | **2.770** | 2.774 |
 | moving_spatial_nulls | 1.686 | 1.691 | 1.699 | 1.689 | 1.683 | **1.674** | 1.683 |
-| single_position_rolloff | 0.281 | 0.700 | 0.502 | 0.255 | 0.175 | 0.147 | **0.136** |
-| nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | **4.739** |
-| twentyone_position_diffuse | **4.016** | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
-| **mean** | 2.310 | 2.370 | 2.323 | 2.286 | 2.263 | 2.268 | **2.254** |
+| single_position_rolloff | 0.281 | 0.701 | 0.502 | 0.255 | 0.175 | 0.147 | **0.136** |
+| nine_position_cancellation | 4.857 | 4.770 | **4.753** | 4.779 | 4.809 | 4.854 | 4.770 |
+| twentyone_position_diffuse | **4.016** | 4.032 | 4.025 | 4.033 | 4.026 | 4.067 | 4.083 |
+| **mean** | 2.310 | 2.366 | 2.319 | 2.286 | 2.271 | 2.277 | **2.266** |
 
 Preamp attenuation each design forces, same runs, in dB:
 
 | Scenario | Cascade (10) | K=10 | K=12 | K=16 | K=24 | K=32 | K=48 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| shared_room_modes | -0.2 | -5.8 | -5.9 | -6.0 | -6.2 | -6.3 | -6.5 |
-| single_seat_local_null | 0.0 | -4.9 | -4.9 | -5.0 | -5.2 | -5.3 | -5.4 |
-| moving_spatial_nulls | -0.3 | -4.5 | -4.6 | -4.7 | -4.8 | -4.9 | -5.0 |
-| single_position_rolloff | 0.0 | **-36.5** | **-40.0** | **-45.0** | **-51.9** | **-58.2** | **-58.6** |
-| nine_position_cancellation | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | -0.2 | -0.5 |
-| twentyone_position_diffuse | 0.0 | -14.0 | -16.0 | -18.7 | -21.8 | -23.7 | -25.7 |
+| shared_room_modes | -0.2 | -6.1 | -6.2 | -6.3 | -6.5 | -6.6 | -6.7 |
+| single_seat_local_null | 0.0 | -5.3 | -5.4 | -5.5 | -5.6 | -5.7 | -5.8 |
+| moving_spatial_nulls | -0.3 | -5.1 | -5.2 | -5.3 | -5.4 | -5.5 | -5.6 |
+| single_position_rolloff | 0.0 | **-36.9** | **-40.5** | **-45.6** | **-52.6** | **-58.9** | **-59.2** |
+| nine_position_cancellation | 0.0 | -2.9 | -2.9 | -3.2 | -3.3 | -3.4 | -3.7 |
+| twentyone_position_diffuse | 0.0 | -16.6 | -18.7 | -21.5 | -24.6 | -26.6 | -28.7 |
 
 With pole refinement and feature-width Q - neither of which is Bank's method,
 and both of which exist so the reference gets the freedom the cascade's centres
@@ -422,9 +422,9 @@ have - the accuracy improves and the headroom does not:
 | mean preamp, dB | -0.1 | -12.7 | -14.0 | -15.0 | -15.5 | -16.2 |
 
 **Read the preamp table, and read it per fixture rather than averaged.**  The
-cost is concentrated, not spread: on four of six fixtures it is 4 to 6 dB, and
-on `single_position_rolloff` it is 36 dB at ten sections and 58 dB at
-thirty-two.  A mean over that distribution (-10.9 dB at K=10) is dominated
+cost is concentrated, not spread: on four of six fixtures it is 3 to 7 dB, and
+on `single_position_rolloff` it is 37 dB at ten sections and 59 dB at
+thirty-two.  A mean over that distribution (-12.1 dB at K=10) is dominated
 entirely by the outlier and says nothing useful; an earlier draft of this
 section quoted it as though it were a typical figure, which it is not.
 
@@ -438,8 +438,8 @@ not a property of the parallel structure; it is the absence of the constraint,
 and section 8.2 is where that is owed.
 
 **Ten sections is not enough, and neither is twelve.**  At equal order Bank's
-method is slightly *behind* the ten-band cascade (2.370 against 2.310).  Twelve,
-which is all the firmware has storage for today, narrows that to 2.323 and still
+method is slightly *behind* the ten-band cascade (2.366 against 2.310).  Twelve,
+which is all the firmware has storage for today, narrows that to 2.319 and still
 does not cross over.  Sixteen draws level; twenty-four is where the advantage
 becomes worth naming.  The firmware question is therefore not "use the two spare
 slots" but "spend twenty-four or more sections per channel", which puts the
