@@ -145,6 +145,15 @@ final class RoomCorrectionModel: ObservableObject {
     @Published var plannedPositions: Int = 5
     @Published var sweepSeconds: Double = 8
 
+    /// Destination gains as they were when the measurement was taken.
+    ///
+    /// The compensation is relative to the state the room was measured in, not
+    /// to whatever the device holds now - which after one apply already
+    /// includes a compensation. Reading the live value made every re-apply
+    /// compound the last one.
+    @Published private(set) var baselineOutputGainDb: [Float] = []
+    @Published private(set) var baselineInputPreampDb: [Float] = []
+
     /// Outputs whose crossover the user has chosen to bypass while measuring.
     ///
     /// Empty by default and never populated automatically: bypassing is only
@@ -228,6 +237,37 @@ final class RoomCorrectionModel: ObservableObject {
             let name = vm.channelNames[index] ?? ""
             return name.isEmpty ? "Input \(index + 1)" : name
         }
+    }
+
+    /// Records the pre-measurement gains, once per run.
+    ///
+    /// Taken before the first sweep, which is the state the correction is
+    /// calculated against. Re-taking it later would capture a device that has
+    /// already been corrected.
+    func captureGainBaselineIfNeeded() {
+        guard baselineOutputGainDb.isEmpty, baselineInputPreampDb.isEmpty else { return }
+        baselineOutputGainDb = vm.outputGainDB
+        baselineInputPreampDb = vm.preampDB
+    }
+
+    /// Forgets the baseline, so a fresh measurement captures a fresh one.
+    func clearGainBaseline() {
+        baselineOutputGainDb = []
+        baselineInputPreampDb = []
+    }
+
+    /// The gain a channel had before measuring, falling back to the live value
+    /// for a project opened without a measurement of its own.
+    func baselineOutputGain(_ output: Int) -> Float {
+        baselineOutputGainDb.indices.contains(output)
+            ? baselineOutputGainDb[output]
+            : (vm.outputGainDB.indices.contains(output) ? vm.outputGainDB[output] : 0)
+    }
+
+    func baselineInputPreamp(_ channel: Int) -> Float {
+        baselineInputPreampDb.indices.contains(channel)
+            ? baselineInputPreampDb[channel]
+            : (vm.preampDB.indices.contains(channel) ? vm.preampDB[channel] : 0)
     }
 
     // MARK: Crossovers

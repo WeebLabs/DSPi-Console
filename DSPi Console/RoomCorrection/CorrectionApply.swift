@@ -278,10 +278,15 @@ extension CorrectionDesign {
     /// changes. Unused bands are cleared to Off rather than left alone: the
     /// correction replaces the bank, and a surviving band from the user's
     /// previous EQ would sit underneath it unannounced.
+    /// `baselineOutputGainDb` and `baselinePreampDb` must be the gains the
+    /// measurement was taken with, not the device's current values. The
+    /// compensation is an offset from that state, and after one apply the
+    /// device already carries it - so feeding the live value back in makes
+    /// every re-apply compound the last.
     func applyPlans(mode: MeasurementMode,
                     eqChannel: (Int) -> Int,
-                    currentOutputGainDb: (Int) -> Float,
-                    currentPreampDb: (Int) -> Float) -> [ChannelApplyPlan] {
+                    baselineOutputGainDb: (Int) -> Float,
+                    baselinePreampDb: (Int) -> Float) -> [ChannelApplyPlan] {
         fittedChannels.compactMap { speaker in
             guard let fit = fits[speaker] else { return nil }
 
@@ -293,7 +298,7 @@ extension CorrectionDesign {
 
             switch mode {
             case .outputChannels:
-                let original = currentOutputGainDb(speaker)
+                let original = baselineOutputGainDb(speaker)
                 return ChannelApplyPlan(
                     speakerIndex: speaker,
                     destinationChannel: eqChannel(speaker),
@@ -303,7 +308,7 @@ extension CorrectionDesign {
                     compensatedGainDb: original - Float(levelChange),
                     originalGainDb: original)
             case .inputChannels:
-                let original = currentPreampDb(speaker)
+                let original = baselinePreampDb(speaker)
                 return ChannelApplyPlan(
                     speakerIndex: speaker,
                     destinationChannel: speaker,

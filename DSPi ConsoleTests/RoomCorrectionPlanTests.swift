@@ -108,6 +108,59 @@ final class RoomCorrectionPlanTests: XCTestCase {
         XCTAssertTrue(model.bypassCrossoverOutputs.isEmpty)
     }
 
+    // MARK: - The compensation baseline
+
+    func testTheGainBaselineSurvivesTheDeviceBeingWritten() {
+        // The reported bug: the plan took its baseline from the device's live
+        // gain, which after one apply already carries a compensation. Applying
+        // again added another, and the preamp climbed each time.
+        let model = makeModel()
+        model.vm.preampDB[0] = -6
+        model.vm.outputGainDB[0] = -2
+
+        model.captureGainBaselineIfNeeded()
+
+        // An apply lands, so the live values now include the compensation.
+        model.vm.preampDB[0] = -1.5
+        model.vm.outputGainDB[0] = 2.5
+
+        XCTAssertEqual(model.baselineInputPreamp(0), -6,
+                       "the baseline is the state the room was measured in")
+        XCTAssertEqual(model.baselineOutputGain(0), -2)
+    }
+
+    func testTheBaselineIsTakenOnceRatherThanRefreshed() {
+        // Re-taking it later would capture a device that has already been
+        // corrected, which is the same bug by a different route.
+        let model = makeModel()
+        model.vm.preampDB[0] = -6
+        model.captureGainBaselineIfNeeded()
+
+        model.vm.preampDB[0] = 3
+        model.captureGainBaselineIfNeeded()
+
+        XCTAssertEqual(model.baselineInputPreamp(0), -6)
+    }
+
+    func testWithoutAMeasurementTheLiveGainIsUsed() {
+        // A project opened without measuring has no baseline of its own, and
+        // the live value is the only honest answer available.
+        let model = makeModel()
+        model.vm.preampDB[0] = -4
+        XCTAssertEqual(model.baselineInputPreamp(0), -4)
+    }
+
+    func testClearingTheBaselineLetsAFreshMeasurementTakeANewOne() {
+        let model = makeModel()
+        model.vm.preampDB[0] = -6
+        model.captureGainBaselineIfNeeded()
+        model.clearGainBaseline()
+
+        model.vm.preampDB[0] = -1
+        model.captureGainBaselineIfNeeded()
+        XCTAssertEqual(model.baselineInputPreamp(0), -1)
+    }
+
     // MARK: - The choice reaching the sweep
 
     func testAPlanBypassesExactlyTheOutputsTheUserOptedIn() throws {

@@ -360,6 +360,46 @@ final class CorrectionDesignTests: XCTestCase {
         }
     }
 
+    // MARK: - Apply plans
+
+    /// A design with one fitted channel, for plan construction.
+    private func fittedDesign() -> (CorrectionDesign, MeasurementSession) {
+        let design = CorrectionDesign()
+        let session = MeasurementSession(capture: InertCapture(),
+                                         playback: InertPlayback(),
+                                         preparation: InertPreparation())
+        let magnitudes = session.grid.frequencies.map { hz -> Double in
+            8.0 * exp(-pow(log2(hz / 90.0) * 6, 2))
+        }
+        session.stubPositions((0..<3).map { index in
+            .init(name: "P\(index)",
+                  measurements: [MeasurementSession.SpeakerMeasurement(
+                    speakerIndex: 0, magnitudesDb: magnitudes,
+                    quality: CaptureQuality(), verdict: .pass, latencySeconds: 0.01)],
+                  weight: 1)
+        })
+        design.recompute(from: session, channels: [0],
+                         sampleRateHz: 48000, platform: .rp2350)
+        return (design, session)
+    }
+
+    func testTheCompensationIsAnOffsetFromTheBaselineNotFromZero() throws {
+        // Two channels sitting at different gains must each keep their own
+        // starting point, or applying correction rebalances the system.
+        let (design, _) = fittedDesign()
+        let plans = design.applyPlans(mode: .inputChannels,
+                                      eqChannel: { $0 + 2 },
+                                      baselineOutputGainDb: { _ in 0 },
+                                      baselinePreampDb: { channel in
+                                          channel == 0 ? -6 : 0
+                                      })
+        let plan = try XCTUnwrap(plans.first)
+        XCTAssertEqual(plan.originalGainDb, -6)
+        XCTAssertEqual(plan.compensatedGainDb,
+                       plan.originalGainDb - Float(plan.levelChangeDb),
+                       accuracy: 0.001)
+    }
+
     // MARK: - Fit limits
 
     func testTheCutLimitIsShownAsAPositiveMagnitude() {

@@ -146,6 +146,9 @@ final class MeasurementRun: ObservableObject {
             // again would re-snapshot a device that is already modified, and
             // the snapshot is what the user gets back at the end.
             if !started {
+                // Before the device is touched: this is the gain structure the
+                // correction will be calculated against.
+                model.captureGainBaselineIfNeeded()
                 try await session.begin(mode: model.mode,
                                         correctedChannels: Array(model.selectedTargets))
                 started = true

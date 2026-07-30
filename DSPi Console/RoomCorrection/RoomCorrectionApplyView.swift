@@ -26,14 +26,8 @@ struct RoomCorrectionApplyView: View {
     private var plans: [ChannelApplyPlan] {
         design.applyPlans(mode: model.mode,
                           eqChannel: model.vm.eqChannel(forOutput:),
-                          currentOutputGainDb: { output in
-                              model.vm.outputGainDB.indices.contains(output)
-                                  ? model.vm.outputGainDB[output] : 0
-                          },
-                          currentPreampDb: { channel in
-                              model.vm.preampDB.indices.contains(channel)
-                                  ? model.vm.preampDB[channel] : 0
-                          })
+                          baselineOutputGainDb: model.baselineOutputGain,
+                          baselinePreampDb: model.baselineInputPreamp)
     }
 
     private var chosen: [ChannelApplyPlan] {
