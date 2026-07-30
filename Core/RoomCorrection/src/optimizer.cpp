@@ -86,8 +86,17 @@ std::vector<double> encode(const FilterBank& bank) {
 // limit and a suggestion - the CLI corpus caught the soft version being outbid
 // and producing boost filters at Q 2.25 against a stated ceiling of 2.
 void applyQLimits(FilterParams& p, double transitionHz, const FitConfig& config) {
-    double limit = cutQLimit(p.freq, transitionHz, config);
-    if (p.gainDb > 0.0) limit = std::min(limit, config.maxBoostQ);
+    const bool isShelf =
+        p.type == FilterType::LowShelf || p.type == FilterType::HighShelf;
+
+    // A shelf's Q sets how sharply its transition turns, not how narrow a
+    // feature it corrects. Past about 1 it overshoots at the corner, which is
+    // the opposite of what a shelf is for - so it gets its own limit rather
+    // than the peaking filter's, which reaches 10 below the transition.
+    double limit = isShelf
+        ? config.maxShelfQ
+        : cutQLimit(p.freq, transitionHz, config);
+    if (!isShelf && p.gainDb > 0.0) limit = std::min(limit, config.maxBoostQ);
     limit = std::min(limit, static_cast<double>(FirmwareLimits::maxQ));
     if (static_cast<double>(p.q) > limit) p.q = static_cast<float>(limit);
     if (static_cast<double>(p.q) < config.minQ) p.q = static_cast<float>(config.minQ);
@@ -493,8 +502,22 @@ double lineSearch(const Objective& objective, std::vector<double>& x, std::size_
         if (b - a < 1e-9) break;
     }
 
-    const double best = (fc < fd) ? c : d;
-    x[index] = clampd(best, lower, upper);
+    // Never leave a coordinate worse than it started.
+    //
+    // Golden section finds the minimum only where the bracket contains it and
+    // the function is unimodal along the coordinate. Neither holds here: the
+    // objective carries softplus hinges, overlapping filters, and a trim term
+    // that is a max over bins, and the bracket is only the current value plus
+    // or minus a quarter of the range. Without this the search moved uphill
+    // whenever both probes were worse than the starting point, which is why
+    // extra iterations and extra bands could each make the fit worse.
+    x[index] = original;
+    const double f0 = objective(x);
+    double bestX = original;
+    double bestF = f0;
+    if (fc < bestF) { bestF = fc; bestX = c; }
+    if (fd < bestF) { bestF = fd; bestX = d; }
+    x[index] = clampd(bestX, lower, upper);
     return objective(x);
 }
 
@@ -753,6 +776,11 @@ FitResult fitCorrection(const FitProblem& problem, const FitConfig& config) {
     double bestValue = 1e300;
     int totalSweeps = 0;
     bool anyConverged = false;
+    // Tracked separately so a converged candidate is never beaten by one that
+    // merely ran out of sweeps. Reporting "converged" because a *different*
+    // start converged, while returning a truncated candidate, described a run
+    // that never happened.
+    bool bestConverged = false;
 
     for (std::vector<double>& start : starts) {
         std::vector<double> candidate = start;
@@ -763,7 +791,15 @@ FitResult fitCorrection(const FitProblem& problem, const FitConfig& config) {
             minimize(objective, candidate, bounds, config.maxIterations);
         totalSweeps += minimized.sweeps;
         anyConverged = anyConverged || minimized.converged;
-        if (minimized.value < bestValue) {
+
+        // A converged candidate outranks an unconverged one outright; among
+        // equals, the lower objective wins.
+        const bool preferable = (minimized.converged && !bestConverged)
+            || (minimized.converged == bestConverged && minimized.value < bestValue);
+        if (preferable) {
+            bestConverged = minimized.converged;
+        }
+        if (preferable) {
             bestValue = minimized.value;
             best = candidate;
         }

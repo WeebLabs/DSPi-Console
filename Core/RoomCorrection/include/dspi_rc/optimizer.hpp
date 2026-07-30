@@ -69,6 +69,9 @@ struct FitConfig {
     // always fighting a null.  Cuts may be narrow at low frequencies, where
     // modes genuinely are narrow, and must broaden with frequency.
     double maxBoostQ = 2.0;
+    // Shelves are shaped by their corner, not by their width. Roughly 0.5 to
+    // 1.0 is the useful range; beyond that the transition overshoots.
+    double maxShelfQ = 1.0;
     double maxCutQBelowTransition = 10.0;
     double maxCutQAtTop = 3.0;
     double minQ = 0.3;
@@ -91,7 +94,14 @@ struct FitConfig {
 
     // Search effort.  Deterministic: same inputs and config give the same
     // filters, which the project format depends on.
-    int maxIterations = 1200;
+    //
+    // Raised from 1200 when the line search stopped moving uphill. With every
+    // coordinate now either improving or holding, the descent keeps making
+    // progress for longer and the old cap truncated it: the hardest corpus
+    // scenario hit 75 sweeps on all three starts without stalling. Costs almost
+    // nothing in practice, since the stall test fires well before the cap on
+    // everything else.
+    int maxIterations = 4800;
     int starts = 3;
 
     std::string validate() const;

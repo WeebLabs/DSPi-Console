@@ -12,6 +12,7 @@
 // response.  Raw worst-position error is deliberately *not* a hard gate,
 // because refusing to invert an unreliable null legitimately increases it.
 #include <cmath>
+#include <cstdio>
 #include <complex>
 #include <vector>
 
@@ -704,3 +705,39 @@ TEST_CASE(level_change_needs_a_fit) {
     CHECK(dspi_rc_session_level_change(session, nullptr) != DSPI_RC_OK);
     dspi_rc_session_free(session);
 }
+
+// ---------------------------------------------------------------------------
+// Search correctness
+// ---------------------------------------------------------------------------
+
+TEST_CASE(a_shelf_keeps_its_own_q_limit) {
+    // A shelf's Q sets how sharply its corner turns, not how narrow a feature
+    // it corrects. Sharing the peaking filter's limit let a shelf reach Q 10
+    // below the transition, which is a resonance wearing a shelf's name.
+    //
+    // Dense narrow modes rather than a broad tilt: a tilt recruits shelves but
+    // leaves them gentle, so it never exercised the bound. This fixture drove
+    // the old code to Q 10 exactly.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<std::vector<double>> curves;
+    for (int i = 0; i < 4; ++i) {
+        std::vector<double> curve = flat(grid);
+        for (int mode = 0; mode < 7; ++mode) {
+            addBump(grid, curve, 40.0 * std::pow(1.45, mode) + i, 0.07,
+                    (mode % 2 == 1) ? -7.0 : 8.0);
+        }
+        curves.push_back(curve);
+    }
+
+    FitConfig config;
+    const FitResult result = fitCorrection(makeProblem(grid, curves), config);
+
+    bool sawShelf = false;
+    for (const FilterParams& f : result.filters) {
+        if (f.type != FilterType::LowShelf && f.type != FilterType::HighShelf) continue;
+        sawShelf = true;
+        CHECK(static_cast<double>(f.q) <= config.maxShelfQ + 1e-6);
+    }
+    CHECK(sawShelf);
+}
+
