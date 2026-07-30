@@ -461,8 +461,8 @@ int commandPoles(bool verbose) {
         std::printf("=== parallel bank by section count, %s ===\n",
                     refined ? "with pole refinement (not Bank's method)"
                             : "as specified (log placement, poles fixed)");
-        std::printf("%-30s %8s %8s", "scenario", "uncorr", "cascade");
-        for (int k : counts) std::printf("      K=%d", k);
+        std::printf("%-30s %8s %11s", "scenario", "uncorr", "cascade");
+        for (int k : counts) std::printf("        K=%-3d", k);
         std::printf("\n");
 
         std::vector<double> totals(counts.size(), 0.0);
@@ -476,9 +476,9 @@ int commandPoles(bool verbose) {
             cascadeTrim += cascade.trimDb;
             uncorrectedTotal += uncorrected.reliableWorstPositionRmseDb;
 
-            std::printf("%-30s %8.3f %8.3f", corpus[s].name.c_str(),
+            std::printf("%-30s %8.3f %5.3f/%-5.1f", corpus[s].name.c_str(),
                         uncorrected.reliableWorstPositionRmseDb,
-                        cascade.metrics.reliableWorstPositionRmseDb);
+                        cascade.metrics.reliableWorstPositionRmseDb, cascade.trimDb);
 
             for (size_t i = 0; i < counts.size(); ++i) {
                 ParallelConfig config;
@@ -487,7 +487,8 @@ int commandPoles(bool verbose) {
                 config.qFromFeatureWidth = refined;  // Bank's spacing rule when not refined
                 config.refinePoles = refined;
                 const ParallelDesign design = designParallel(problems[s], FitConfig{}, config);
-                std::printf("  %6.3f", design.metrics.reliableWorstPositionRmseDb);
+                std::printf("  %5.3f/%-5.1f", design.metrics.reliableWorstPositionRmseDb,
+                            design.trimDb);
                 totals[i] += design.metrics.reliableWorstPositionRmseDb;
                 trims[i] += design.trimDb;
                 if (verbose && !design.ok) std::printf(" (%s)", design.message.c_str());
@@ -496,10 +497,11 @@ int commandPoles(bool verbose) {
         }
 
         const auto n = static_cast<double>(corpus.size());
-        std::printf("%-30s %8.3f %8.3f", "mean", uncorrectedTotal / n, cascadeTotal / n);
-        for (size_t i = 0; i < counts.size(); ++i) std::printf("  %6.3f", totals[i] / n);
-        std::printf("\n%-30s %8s %8.1f", "mean preamp given up, dB", "", cascadeTrim / n);
-        for (size_t i = 0; i < counts.size(); ++i) std::printf("  %6.1f", trims[i] / n);
+        std::printf("%-30s %8.3f %5.3f/%-5.1f", "mean", uncorrectedTotal / n,
+                    cascadeTotal / n, cascadeTrim / n);
+        for (size_t i = 0; i < counts.size(); ++i) {
+            std::printf("  %5.3f/%-5.1f", totals[i] / n, trims[i] / n);
+        }
         std::printf("\n\n");
     }
 

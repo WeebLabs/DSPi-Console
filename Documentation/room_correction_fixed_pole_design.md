@@ -28,8 +28,8 @@ better headroom and every safety gate passing, in 0.41 s against 39 s. It needs
 one deterministic start rather than three, no iteration cap, no stall
 heuristic, and no soft penalty weights.
 
-**A parallel filter bank is worth roughly four hundredths of a decibel and
-costs sixteen decibels of headroom, as implemented.** The first version of this
+**A parallel filter bank is worth hundredths of a decibel and costs headroom
+that ranges from 4 dB to 58 dB depending on the measurement, as implemented.** The first version of this
 document concluded it does not pay at any section count; that was wrong, because
 the reference had four defects that all flattered the cascade (section 8.3).
 Corrected, the accuracy question is genuinely close - Bank's method needs
@@ -400,7 +400,17 @@ neighbours, poles fixed.  Reliability-weighted worst-position RMSE in dB.
 | nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | **4.739** |
 | twentyone_position_diffuse | **4.016** | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
 | **mean** | 2.310 | 2.370 | 2.323 | 2.286 | 2.263 | 2.268 | **2.254** |
-| **mean preamp, dB** | **-0.1** | -10.9 | -11.9 | -13.2 | -15.0 | -16.4 | -16.9 |
+
+Preamp attenuation each design forces, same runs, in dB:
+
+| Scenario | Cascade (10) | K=10 | K=12 | K=16 | K=24 | K=32 | K=48 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| shared_room_modes | -0.2 | -5.8 | -5.9 | -6.0 | -6.2 | -6.3 | -6.5 |
+| single_seat_local_null | 0.0 | -4.9 | -4.9 | -5.0 | -5.2 | -5.3 | -5.4 |
+| moving_spatial_nulls | -0.3 | -4.5 | -4.6 | -4.7 | -4.8 | -4.9 | -5.0 |
+| single_position_rolloff | 0.0 | **-36.5** | **-40.0** | **-45.0** | **-51.9** | **-58.2** | **-58.6** |
+| nine_position_cancellation | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | -0.2 | -0.5 |
+| twentyone_position_diffuse | 0.0 | -14.0 | -16.0 | -18.7 | -21.8 | -23.7 | -25.7 |
 
 With pole refinement and feature-width Q - neither of which is Bank's method,
 and both of which exist so the reference gets the freedom the cascade's centres
@@ -411,12 +421,21 @@ have - the accuracy improves and the headroom does not:
 | mean | 2.310 | 2.287 | 2.247 | 2.226 | 2.211 | **2.198** |
 | mean preamp, dB | -0.1 | -12.7 | -14.0 | -15.0 | -15.5 | -16.2 |
 
-**Read the preamp row first.**  The accuracy difference across the whole sweep
-is four to eleven hundredths of a decibel on the corpus mean.  The headroom
-difference is eleven to seventeen decibels.  As implemented, the parallel bank
-buys a negligible improvement at an enormous cost, and section 8.2 explains why
-that cost is an artifact of the reference rather than a property of the
-structure.
+**Read the preamp table, and read it per fixture rather than averaged.**  The
+cost is concentrated, not spread: on four of six fixtures it is 4 to 6 dB, and
+on `single_position_rolloff` it is 36 dB at ten sections and 58 dB at
+thirty-two.  A mean over that distribution (-10.9 dB at K=10) is dominated
+entirely by the outlier and says nothing useful; an earlier draft of this
+section quoted it as though it were a typical figure, which it is not.
+
+The pattern is specific and diagnostic.  Wherever the measurement rolls off and
+correction is forbidden outside the speaker's passband, the reference puts gain
+there anyway - it has no per-section limits, because a bound on a numerator
+coefficient has no acoustic meaning - and `requiredTrimDb` then attenuates the
+whole channel to compensate.  The cascade never does this, because each of its
+sections is individually barred from boosting there.  So the headroom cost is
+not a property of the parallel structure; it is the absence of the constraint,
+and section 8.2 is where that is owed.
 
 **Ten sections is not enough, and neither is twelve.**  At equal order Bank's
 method is slightly *behind* the ten-band cascade (2.370 against 2.310).  Twelve,

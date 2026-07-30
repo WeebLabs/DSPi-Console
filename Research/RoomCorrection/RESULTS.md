@@ -199,19 +199,22 @@ flattered the cascade. Corrected, the result reverses.
 | nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | 4.739 |
 | twentyone_position_diffuse | 4.016 | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
 | **mean** | 2.310 | 2.370 | 2.323 | 2.286 | 2.263 | 2.268 | 2.254 |
-| **mean preamp, dB** | -0.1 | -10.9 | -11.9 | -13.2 | -15.0 | -16.4 | -16.9 |
+
 
 Bank's method as specified: log placement weighted toward the modal region,
 spacing-rule Q, poles fixed. With pole refinement and feature-width Q (neither
 is Bank's method) the mean improves to 2.198 dB at K=48 and the preamp cost is
 unchanged at -16.2 dB.
 
-**The preamp row is the finding.** Accuracy separates the two designs by four to
-eleven hundredths of a decibel on the corpus mean; headroom separates them by
-eleven to seventeen decibels. The reference carries no per-section limits -
-a bound on a numerator coefficient has no acoustic meaning - so it takes gain
-where boost is forbidden and `requiredTrimDb` pulls the whole channel down to
-compensate.
+**The preamp table is the finding, read per fixture.** Accuracy separates the
+two designs by hundredths of a decibel. Headroom separates them by 4 to 6 dB on
+four fixtures, 14 to 26 dB on the diffuse one, and 36 to 59 dB on the roll-off
+one. The mean (-10.9 dB at K=10) is dominated by that last case and should not
+be quoted as typical.
+
+The pattern is diagnostic: wherever correction is forbidden outside the
+speaker's passband, the reference puts gain there anyway, having no per-section
+limits, and `requiredTrimDb` attenuates the whole channel to compensate.
 
 **Ten sections is not enough, and neither is twelve.** At equal order Bank's
 method is behind the cascade (2.370 against 2.310). Twelve, all the firmware has
