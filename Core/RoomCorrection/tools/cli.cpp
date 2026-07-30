@@ -454,7 +454,7 @@ int commandPoles(bool verbose) {
     // Headroom is reported beside the error because it is the reference's real
     // cost: its sections carry no per-section limits, so it takes positive gain
     // where boost is forbidden and the trim then attenuates the whole channel.
-    const std::vector<int> counts{10, 16, 24, 32, 48};
+    const std::vector<int> counts{10, 12, 16, 24, 32, 48};
 
     for (int variant = 0; variant < 2; ++variant) {
         const bool refined = variant == 1;

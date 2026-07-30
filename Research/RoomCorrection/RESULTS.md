@@ -190,21 +190,35 @@ would not improve DSPi's room correction at any section count. **That was wrong.
 The reference designer it rested on had four independent defects, all of which
 flattered the cascade. Corrected, the result reverses.
 
-| Scenario | Cascade (10) | K=10 | K=16 | K=24 | K=32 | K=48 |
-|---|---:|---:|---:|---:|---:|---:|
-| shared_room_modes | 0.145 | 0.245 | 0.164 | 0.056 | 0.046 | 0.024 |
-| single_seat_local_null | 2.812 | 2.820 | 2.794 | 2.801 | 2.771 | 2.770 |
-| moving_spatial_nulls | 1.689 | 1.704 | 1.656 | 1.691 | 1.688 | 1.683 |
-| single_position_rolloff | 0.403 | 0.398 | 0.420 | 0.161 | 0.117 | 0.089 |
-| nine_position_cancellation | 4.805 | 4.779 | 4.699 | 4.670 | 4.628 | 4.661 |
-| twentyone_position_diffuse | 4.100 | 3.960 | 3.896 | 3.973 | 3.992 | 3.942 |
-| **mean** | 2.326 | 2.318 | 2.271 | 2.225 | 2.207 | 2.195 |
+| Scenario | Cascade (10) | K=10 | K=12 | K=16 | K=24 | K=32 | K=48 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| shared_room_modes | 0.208 | 0.205 | 0.145 | 0.176 | 0.152 | 0.148 | 0.146 |
+| single_seat_local_null | 2.815 | 2.797 | 2.792 | 2.785 | 2.778 | 2.770 | 2.774 |
+| moving_spatial_nulls | 1.686 | 1.691 | 1.699 | 1.689 | 1.683 | 1.674 | 1.683 |
+| single_position_rolloff | 0.281 | 0.700 | 0.502 | 0.255 | 0.175 | 0.147 | 0.136 |
+| nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | 4.739 |
+| twentyone_position_diffuse | 4.016 | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
+| **mean** | 2.310 | 2.370 | 2.323 | 2.286 | 2.263 | 2.268 | 2.254 |
+| **mean preamp, dB** | -0.1 | -10.9 | -11.9 | -13.2 | -15.0 | -16.4 | -16.9 |
 
-Parity at equal order, then a growing margin: 0.13 dB at K = 32. On the fixtures
-where correction is genuinely available the gain is about five-fold -
-`shared_room_modes` 0.145 to 0.024, `single_position_rolloff` 0.403 to 0.089.
-The mean understates this badly, because two of the six fixtures are dominated
-by position-dependent interference that neither structure may touch.
+Bank's method as specified: log placement weighted toward the modal region,
+spacing-rule Q, poles fixed. With pole refinement and feature-width Q (neither
+is Bank's method) the mean improves to 2.198 dB at K=48 and the preamp cost is
+unchanged at -16.2 dB.
+
+**The preamp row is the finding.** Accuracy separates the two designs by four to
+eleven hundredths of a decibel on the corpus mean; headroom separates them by
+eleven to seventeen decibels. The reference carries no per-section limits -
+a bound on a numerator coefficient has no acoustic meaning - so it takes gain
+where boost is forbidden and `requiredTrimDb` pulls the whole channel down to
+compensate.
+
+**Ten sections is not enough, and neither is twelve.** At equal order Bank's
+method is behind the cascade (2.370 against 2.310). Twelve, all the firmware has
+storage for, gives 2.323 and still does not cross over. Sixteen draws level;
+twenty-four is where it becomes worth naming. So the firmware question is not
+"use the two spare slots" - it is "spend twenty-four or more sections per
+channel", where the RP2040 CPU budget binds.
 
 ### Attribution: which defect mattered
 

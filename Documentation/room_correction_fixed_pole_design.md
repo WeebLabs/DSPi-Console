@@ -28,13 +28,16 @@ better headroom and every safety gate passing, in 0.41 s against 39 s. It needs
 one deterministic start rather than three, no iteration cap, no stall
 heuristic, and no soft penalty weights.
 
-**A parallel filter bank does beat the ten-band cascade, and the first version
-of this document said the opposite because the reference implementation was
-wrong.** Corrected, the reference wins at every section count tested, by
-0.13 dB at K = 32 on the corpus mean and by far more on the fixtures where
-correction is genuinely available. Section 8 has the table, the attribution of
-which correction mattered, and the caveats that remain. Section 8.3 records the
-retraction, because a reversal of this size is worth being able to audit.
+**A parallel filter bank is worth roughly four hundredths of a decibel and
+costs sixteen decibels of headroom, as implemented.** The first version of this
+document concluded it does not pay at any section count; that was wrong, because
+the reference had four defects that all flattered the cascade (section 8.3).
+Corrected, the accuracy question is genuinely close - Bank's method needs
+sixteen sections to draw level with the ten-band cascade and twenty-four before
+the advantage is worth naming - but the reference forces 11 to 17 dB of preamp
+attenuation against the cascade's 0.1 dB, because its sections carry no
+per-section limits. **A constrained parallel designer is the gate before any
+firmware work**, and it is a much smaller piece of work than the firmware.
 
 ## 2. Why the parallel structure cannot reach the device
 
@@ -384,37 +387,53 @@ One scenario exceeds the 0.1 dB per-scenario tolerance, by 0.022 dB.
 
 ### 8.1 The parallel bank, by section count
 
-The reference designer on the same fixtures and metrics, after the corrections
-in 8.3. Recall from 3.1 that this is an optimistic bound: its sections carry no
-per-section limit.
+Bank's method as specified: logarithmically placed poles weighted toward the
+modal region the way PORC's default pole set is, Q from the spacing to the
+neighbours, poles fixed.  Reliability-weighted worst-position RMSE in dB.
 
-| Scenario | Cascade (10) | K=10 | K=16 | K=24 | K=32 | K=48 |
+| Scenario | Cascade (10) | K=10 | K=12 | K=16 | K=24 | K=32 | K=48 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| shared_room_modes | 0.208 | 0.205 | **0.145** | 0.176 | 0.152 | 0.148 | 0.146 |
+| single_seat_local_null | 2.815 | 2.797 | 2.792 | 2.785 | 2.778 | **2.770** | 2.774 |
+| moving_spatial_nulls | 1.686 | 1.691 | 1.699 | 1.689 | 1.683 | **1.674** | 1.683 |
+| single_position_rolloff | 0.281 | 0.700 | 0.502 | 0.255 | 0.175 | 0.147 | **0.136** |
+| nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | **4.739** |
+| twentyone_position_diffuse | **4.016** | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
+| **mean** | 2.310 | 2.370 | 2.323 | 2.286 | 2.263 | 2.268 | **2.254** |
+| **mean preamp, dB** | **-0.1** | -10.9 | -11.9 | -13.2 | -15.0 | -16.4 | -16.9 |
+
+With pole refinement and feature-width Q - neither of which is Bank's method,
+and both of which exist so the reference gets the freedom the cascade's centres
+have - the accuracy improves and the headroom does not:
+
+| | Cascade | K=10 | K=16 | K=24 | K=32 | K=48 |
 |---|---:|---:|---:|---:|---:|---:|
-| shared_room_modes | 0.145 | 0.245 | 0.164 | 0.056 | 0.046 | **0.024** |
-| single_seat_local_null | 2.812 | 2.820 | 2.794 | 2.801 | 2.771 | **2.770** |
-| moving_spatial_nulls | 1.689 | 1.704 | **1.656** | 1.691 | 1.688 | 1.683 |
-| single_position_rolloff | 0.403 | 0.398 | 0.420 | 0.161 | 0.117 | **0.089** |
-| nine_position_cancellation | 4.805 | 4.779 | 4.699 | 4.670 | **4.628** | 4.661 |
-| twentyone_position_diffuse | 4.100 | 3.960 | **3.896** | 3.973 | 3.992 | 3.942 |
-| **mean** | 2.326 | 2.318 | 2.271 | 2.225 | 2.207 | **2.195** |
+| mean | 2.310 | 2.287 | 2.247 | 2.226 | 2.211 | **2.198** |
+| mean preamp, dB | -0.1 | -12.7 | -14.0 | -15.0 | -15.5 | -16.2 |
 
-**The parallel bank wins at every section count, including K = 10.** At equal
-order it is a dead heat (2.318 against 2.326), which is the expected result and
-was not what the broken version reported. The margin then grows with K, to
-0.13 dB at K = 32, and the improvement is monotone apart from noise in the third
-decimal.
+**Read the preamp row first.**  The accuracy difference across the whole sweep
+is four to eleven hundredths of a decibel on the corpus mean.  The headroom
+difference is eleven to seventeen decibels.  As implemented, the parallel bank
+buys a negligible improvement at an enormous cost, and section 8.2 explains why
+that cost is an artifact of the reference rather than a property of the
+structure.
 
-The per-fixture shape is what matters more than the mean. Where correction is
-genuinely available the gain is large and keeps coming: `shared_room_modes`
-falls from the cascade's 0.145 dB to 0.024 dB, and `single_position_rolloff`
-from 0.403 dB to 0.089 dB, both roughly a factor of five. Where the residual is
-position-dependent interference the two structures converge, because neither is
-allowed to invert it: the cancellation and diffuse fixtures sit within 0.2 dB of
-the cascade at every K and account for most of why the *mean* moves so little.
+**Ten sections is not enough, and neither is twelve.**  At equal order Bank's
+method is slightly *behind* the ten-band cascade (2.370 against 2.310).  Twelve,
+which is all the firmware has storage for today, narrows that to 2.323 and still
+does not cross over.  Sixteen draws level; twenty-four is where the advantage
+becomes worth naming.  The firmware question is therefore not "use the two spare
+slots" but "spend twenty-four or more sections per channel", which puts the
+RP2040 CPU budget in the frame.
 
-The mean is therefore the least informative number in the table. Averaging six
-fixtures, two of which are dominated by error no magnitude EQ may touch,
-compresses a five-fold improvement on the correctable ones into 0.13 dB.
+**Where it wins, it wins clearly.**  On the fixtures where correction is
+genuinely available the advantage is real and grows with section count: the
+roll-off fixture reaches 0.136 dB against the cascade's 0.281, and with
+refinement the modal fixture reaches 0.023 dB against 0.208.  On the
+interference-dominated fixtures the two converge, because neither may invert a
+cancellation that moves with the microphone.  That is why the corpus mean barely
+separates: two of six fixtures are error no magnitude EQ may touch, and they
+dominate the average.
 
 ### 8.2 What the margin might be buying
 
