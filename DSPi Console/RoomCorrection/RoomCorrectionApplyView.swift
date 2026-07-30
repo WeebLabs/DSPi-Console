@@ -16,6 +16,7 @@ struct RoomCorrectionApplyView: View {
     @State private var verifier: CorrectionVerifier?
     @State private var verifyState: CorrectionVerifier.State = .idle
     @State private var verifyResults: [VerificationResult] = []
+    @State private var levelAgreement: LevelAgreement?
     @State private var shownVerification: Int?
 
     init(model: RoomCorrectionModel) {
@@ -236,9 +237,113 @@ struct RoomCorrectionApplyView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if let levelAgreement {
+                levelAgreementReport(levelAgreement)
+            }
+
             if !verifyResults.isEmpty {
                 verificationResults
             }
+        }
+    }
+
+    /// Whether the channels came out level with each other.
+    ///
+    /// Reported separately from the per-channel shape comparison because it
+    /// answers a different question: the shape says whether the filters did
+    /// what was modelled, this says whether the balance between channels is
+    /// right. A correction can pass one and fail the other.
+    private func levelAgreementReport(_ agreement: LevelAgreement) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: agreement.passes
+                        ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(agreement.passes ? Color.green : Color.orange)
+                Text("CHANNEL LEVELS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.2f dB spread", agreement.worstDeviationDb))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                Spacer()
+            }
+
+            Text(agreement.summary)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !agreement.deviations.isEmpty {
+                ForEach(agreement.deviations) { deviation in
+                    HStack(spacing: 0) {
+                        Text(model.targetName(deviation.speakerIndex))
+                            .frame(width: 130, alignment: .leading)
+                        Text(String(format: "%+.2f dB", deviation.deviationDb))
+                            .frame(width: 90, alignment: .trailing)
+                            .foregroundStyle(abs(deviation.deviationDb)
+                                                > LevelAgreement.passWithinDb
+                                             ? Color.orange : Color.secondary)
+                        Spacer()
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                }
+            }
+
+            if !agreement.excluded.isEmpty {
+                Text("Not compared: "
+                     + agreement.excluded.map(model.targetName).joined(separator: ", ")
+                     + ". A subwoofer sits on its own reference, and a channel measured "
+                     + "without its crossover cannot be compared with one that kept "
+                     + "theirs.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Offered once. A second pass would be chasing noise rather than
+            // converging, and the tolerance is set where repeatability runs out.
+            if agreement.isRetryable, !(verifier?.residualApplied ?? false) {
+                Button("Apply Residual Adjustment") { applyResidual(agreement) }
+                    .controlSize(.small)
+            } else if verifier?.residualApplied == true {
+                Text("A residual adjustment has already been applied. Anything left "
+                     + "is at the limit of what remeasuring can resolve.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func applyResidual(_ agreement: LevelAgreement) {
+        let residual = agreement.residualOffsets
+        guard !residual.isEmpty else { return }
+        verifier?.markResidualApplied()
+
+        // Written on top of what is already there, as a plain gain nudge: the
+        // filters are correct and only the level needs closing.
+        let adjusted = chosen.compactMap { plan -> ChannelApplyPlan? in
+            guard let offset = residual[plan.speakerIndex], abs(offset) > 0.01 else {
+                return nil
+            }
+            return ChannelApplyPlan(speakerIndex: plan.speakerIndex,
+                                    destinationChannel: plan.destinationChannel,
+                                    destination: plan.destination,
+                                    bands: plan.bands,
+                                    levelChangeDb: plan.levelChangeDb,
+                                    levelMatchDb: plan.levelMatchDb + offset,
+                                    compensatedGainDb: plan.compensatedGainDb
+                                        + Float(offset),
+                                    originalGainDb: plan.originalGainDb)
+        }
+        guard !adjusted.isEmpty else { return }
+
+        let applier = CorrectionApplier(target: model.vm,
+                                        expectedSerial: model.vm.selectedDevice?.serial,
+                                        expectedRouting: model.vm.matrixRouting)
+        self.applier = applier
+        Task {
+            await applier.apply(adjusted)
+            applyState = applier.state
         }
     }
 
@@ -307,6 +412,7 @@ struct RoomCorrectionApplyView: View {
                                   bypassedCrossovers: bypassed)
             verifyState = verifier.state
             verifyResults = verifier.results
+            levelAgreement = verifier.levelAgreement
         }
     }
 

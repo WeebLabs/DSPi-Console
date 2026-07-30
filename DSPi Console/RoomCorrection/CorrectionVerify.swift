@@ -16,6 +16,14 @@ struct VerificationResult: Identifiable, Equatable {
     /// True when this channel was measured with its crossover switched off, so
     /// the prediction describes a configuration nobody is listening to.
     let crossoverWasBypassed: Bool
+    /// In-band spectral level from the *raw* measurement, for comparing
+    /// channels against each other.
+    ///
+    /// Taken before `measuredDb` is referenced to the prediction, since that
+    /// referencing deliberately removes the absolute level the shape comparison
+    /// does not want and this one entirely depends on.
+    let bandLevelDb: Double
+    let role: RoomCorrectionCore.SpeakerRole
 
     var id: Int { speakerIndex }
 
@@ -36,6 +44,101 @@ struct VerificationResult: Identifiable, Equatable {
             : String(format: "Measured response differs from the prediction by %.1f dB "
                      + "RMS. Check the routing and that the correct speaker is playing.",
                      rmsDeviationDb)
+    }
+}
+
+/// Whether the channels came out at the same level.
+///
+/// Compared to each other in one back-to-back pass rather than against the
+/// levels recorded earlier. Drift that would ruin an absolute comparison -
+/// temperature, a nudged microphone, an altered gain - is common to every
+/// channel in a single pass and cancels, which is what makes a tight tolerance
+/// defensible here where the same figure against a twenty-minute-old
+/// measurement would fail routinely.
+struct LevelAgreement: Equatable {
+
+    struct Deviation: Identifiable, Equatable {
+        let speakerIndex: Int
+        let deviationDb: Double
+        var id: Int { speakerIndex }
+    }
+
+    /// Each channel against the median, for naming the outlier and for the
+    /// residual offsets.
+    let deviations: [Deviation]
+    /// The spread between the loudest and quietest comparable channel.
+    ///
+    /// The headline figure, because the spec's tolerance is on the
+    /// channel-to-channel difference. Deviation from the median would halve it:
+    /// two channels 1 dB apart each sit 0.5 dB from their own median and would
+    /// pass a 0.5 dB test while being audibly unbalanced against each other.
+    let worstDeviationDb: Double
+    /// Channels left out, and why: a subwoofer is on its own datum, and a
+    /// channel measured without its crossover cannot be compared with one that
+    /// has its crossover on.
+    let excluded: [Int]
+
+    static let passWithinDb = 0.5
+    /// Above this a residual pass would be chasing something physical rather
+    /// than converging.
+    static let retryableBelowDb = 2.0
+
+    var passes: Bool { deviations.count < 2 || worstDeviationDb <= Self.passWithinDb }
+    var isRetryable: Bool { !passes && worstDeviationDb < Self.retryableBelowDb }
+
+    init(results: [VerificationResult]) {
+        let comparable = results.filter { !$0.crossoverWasBypassed && $0.role != .subwoofer }
+        excluded = results.filter { $0.crossoverWasBypassed || $0.role == .subwoofer }
+            .map(\.speakerIndex)
+
+        guard comparable.count >= 2 else {
+            deviations = comparable.map { .init(speakerIndex: $0.speakerIndex,
+                                                deviationDb: 0) }
+            worstDeviationDb = 0
+            return
+        }
+
+        // Against the median, so one stray channel is reported as the outlier
+        // rather than shifting the reference and implicating every other one.
+        let sorted = comparable.map(\.bandLevelDb).sorted()
+        let median = sorted.count % 2 == 1
+            ? sorted[sorted.count / 2]
+            : (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+
+        deviations = comparable
+            .map { .init(speakerIndex: $0.speakerIndex,
+                         deviationDb: $0.bandLevelDb - median) }
+            .sorted { $0.speakerIndex < $1.speakerIndex }
+        worstDeviationDb = (sorted.last ?? 0) - (sorted.first ?? 0)
+    }
+
+    /// The offset that would bring each channel the rest of the way.
+    ///
+    /// Only meaningful once, and only when the residual is small: a larger one
+    /// means something physical changed and applying it would chase noise.
+    var residualOffsets: [Int: Double] {
+        guard isRetryable else { return [:] }
+        return Dictionary(uniqueKeysWithValues:
+            deviations.map { ($0.speakerIndex, -$0.deviationDb) })
+    }
+
+    var summary: String {
+        if deviations.count < 2 {
+            return "Only one channel could be compared, so there is no level "
+                 + "agreement to report."
+        }
+        if passes {
+            return String(format: "Channels agree to %.2f dB, within the %.1f dB "
+                          + "tolerance.", worstDeviationDb, Self.passWithinDb)
+        }
+        if isRetryable {
+            return String(format: "Channels differ by up to %.2f dB. One more small "
+                          + "adjustment should close it.", worstDeviationDb)
+        }
+        return String(format: "Channels differ by up to %.2f dB, which is more than a "
+                      + "residual adjustment should be asked to fix. Check that nothing "
+                      + "moved and that each sweep played through the speaker it was "
+                      + "meant to.", worstDeviationDb)
     }
 }
 
@@ -60,6 +163,10 @@ final class CorrectionVerifier: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var results: [VerificationResult] = []
+    /// Whether the channels came out level with each other.
+    @Published private(set) var levelAgreement: LevelAgreement?
+    /// True once a residual pass has been used, so it is offered only once.
+    @Published private(set) var residualApplied = false
 
     private let session: MeasurementSession
     private let design: CorrectionDesign
@@ -118,12 +225,14 @@ final class CorrectionVerifier: ObservableObject {
 
                 collected.append(compare(speaker: speaker,
                                          measured: measured.magnitudesDb,
+                                         role: model.targetRoles[speaker] ?? .fullRange,
                                          crossoverWasBypassed:
                                             bypassedCrossovers.contains(speaker)))
             }
 
             await session.end()
             results = collected
+            levelAgreement = LevelAgreement(results: collected)
             state = .finished
         } catch {
             await session.end()
@@ -171,12 +280,22 @@ final class CorrectionVerifier: ObservableObject {
 
     private static let scratchName = "Verification"
 
+    /// Records that the one permitted residual adjustment has been used.
+    func markResidualApplied() { residualApplied = true }
+
     private func compare(speaker: Int,
                          measured: [Double],
+                         role: RoomCorrectionCore.SpeakerRole,
                          crossoverWasBypassed: Bool) -> VerificationResult {
         let predicted = predictedCurve(for: speaker)
         let target = design.curve(.target, channel: speaker)
         let weight = design.curve(.maskWeight, channel: speaker)
+
+        // From the raw measurement, before any referencing: the level
+        // comparison is the one thing here that depends on absolute level.
+        let band = LevelCheckController.band(for: role)
+        let bandLevel = (try? RoomCorrectionCore.bandLevel(measured, grid: design.grid,
+                                                          band: band)) ?? 0
 
         guard measured.count == predicted.count, !measured.isEmpty else {
             return VerificationResult(speakerIndex: speaker,
@@ -185,7 +304,9 @@ final class CorrectionVerifier: ObservableObject {
                                       targetDb: target,
                                       worstDeviationDb: 0,
                                       rmsDeviationDb: 0,
-                                      crossoverWasBypassed: crossoverWasBypassed)
+                                      crossoverWasBypassed: crossoverWasBypassed,
+                                      bandLevelDb: bandLevel,
+                                      role: role)
         }
 
         // Both referenced to their own means: the comparison is about whether
@@ -216,7 +337,9 @@ final class CorrectionVerifier: ObservableObject {
             targetDb: target,
             worstDeviationDb: worst,
             rmsDeviationDb: totalWeight > 0 ? sqrt(sumSquares / totalWeight) : 0,
-            crossoverWasBypassed: crossoverWasBypassed)
+            crossoverWasBypassed: crossoverWasBypassed,
+            bandLevelDb: bandLevel,
+            role: role)
     }
 
     /// Measured plus correction, which is what the fit predicts will be heard.
