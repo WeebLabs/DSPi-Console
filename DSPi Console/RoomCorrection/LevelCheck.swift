@@ -57,14 +57,22 @@ final class LevelCheckController: ObservableObject {
     private let capture: AudioCaptureBackend
     private let playback: AudioPlaybackBackend
     private let thresholds: QualityThresholds
+
+    /// Watches for the measurement chain moving underneath a level pass.
+    ///
+    /// Injected so a test can drive a gain change, which CoreAudio gives no way
+    /// to fake, and so the guard's own rules stay testable separately.
+    let chainGuard: MeasurementChainGuard
     private var meterTask: Task<Void, Never>?
 
     init(capture: AudioCaptureBackend,
          playback: AudioPlaybackBackend,
-         thresholds: QualityThresholds = .standard) {
+         thresholds: QualityThresholds = .standard,
+         chainGuard: MeasurementChainGuard? = nil) {
         self.capture = capture
         self.playback = playback
         self.thresholds = thresholds
+        self.chainGuard = chainGuard ?? MeasurementChainGuard()
     }
 
     // MARK: - Findings
@@ -120,6 +128,11 @@ final class LevelCheckController: ObservableObject {
         stage = .measuringNoiseFloor
         errorMessage = nil
         result = nil
+
+        // The chain is pinned here rather than at the level pass, because the
+        // noise floor is itself a measurement everything downstream is compared
+        // against.
+        chainGuard.start(device: microphone.id, uid: microphone.uid)
 
         do {
             try capture.start(device: microphone, channelIndex: channel)
@@ -238,6 +251,15 @@ final class LevelCheckController: ObservableObject {
                               playbackDevice: AudioDeviceInfo,
                               sampleRate: Double) async -> [ChannelLevel] {
         guard !stage.isBusy, noiseFloorDbfs != nil else { return [] }
+
+        // Checked before anything is played as well as from the listeners: a
+        // listener installed a moment after a change would miss it entirely,
+        // and a level set measured across a gain change is worse than none.
+        if let violation = chainGuard.check(currentUID: microphone.uid) {
+            fail(violation.explanation + " Restore it and measure again.")
+            return []
+        }
+
         stage = .measuringChannels
         errorMessage = nil
         channelLevels = []
@@ -269,6 +291,15 @@ final class LevelCheckController: ObservableObject {
                     fail("Audio dropped out while measuring channel "
                          + "\(target.speaker + 1). Close other audio applications "
                          + "and try again.")
+                    return []
+                }
+
+                // Re-checked per channel: a pass over eight channels takes
+                // long enough for someone to reach for a knob partway through,
+                // and the channels measured either side of that are on
+                // different scales.
+                if let violation = chainGuard.check(currentUID: microphone.uid) {
+                    fail(violation.explanation + " Restore it and measure again.")
                     return []
                 }
 

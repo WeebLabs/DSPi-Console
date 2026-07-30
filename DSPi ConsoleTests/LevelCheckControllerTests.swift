@@ -478,6 +478,68 @@ final class LevelCheckControllerTests: XCTestCase {
         XCTAssertNotNil(controller.errorMessage)
     }
 
+    func testAGainChangeMidPassAbandonsTheLevels() async {
+        // The rule the whole relative comparison rests on. Channels measured
+        // either side of a gain change are on different scales, and matching
+        // from them would be confidently wrong rather than merely imprecise.
+        let sentry = MeasurementChainGuard()
+        var volume: Float? = 0.5
+        sentry.readVolume = { _ in volume }
+        sentry.readSampleRate = { _ in 48000 }
+
+        capture = FakeCapture()
+        playback = FakePlayback()
+        let controller = LevelCheckController(capture: capture, playback: playback,
+                                              chainGuard: sentry)
+        controller.sleep = { _ in }
+
+        capture.samples = noise(rms: 0.0003)
+        await controller.measureNoiseFloor(microphone: microphone, channel: 0)
+        capture.samples = noise(rms: 0.05)
+
+        // The user reaches for the gain knob after the floor is taken.
+        volume = 0.9
+
+        let levels = await controller.measureChannelLevels(
+            [(speaker: 0, playbackChannel: 0, role: .fullRange),
+             (speaker: 1, playbackChannel: 1, role: .fullRange)],
+            microphone: microphone, micChannel: 0,
+            playbackDevice: dspi, sampleRate: 48000)
+
+        XCTAssertTrue(levels.isEmpty)
+        XCTAssertEqual(playback.playCount, 0,
+                       "the change is caught before anything is played")
+        XCTAssertTrue(controller.errorMessage?.contains("input gain") ?? false,
+                      controller.errorMessage ?? "no message")
+        XCTAssertTrue(controller.errorMessage?.contains("measure again") ?? false,
+                      controller.errorMessage ?? "no message")
+    }
+
+    func testAnUnchangedChainLetsThePassRun() async {
+        // The guard must not be so eager that it blocks an honest session.
+        let sentry = MeasurementChainGuard()
+        sentry.readVolume = { _ in 0.5 }
+        sentry.readSampleRate = { _ in 48000 }
+
+        capture = FakeCapture()
+        playback = FakePlayback()
+        let controller = LevelCheckController(capture: capture, playback: playback,
+                                              chainGuard: sentry)
+        controller.sleep = { _ in }
+
+        capture.samples = noise(rms: 0.0003)
+        await controller.measureNoiseFloor(microphone: microphone, channel: 0)
+        capture.samples = noise(rms: 0.05)
+
+        let levels = await controller.measureChannelLevels(
+            [(speaker: 0, playbackChannel: 0, role: .fullRange)],
+            microphone: microphone, micChannel: 0,
+            playbackDevice: dspi, sampleRate: 48000)
+
+        XCTAssertEqual(levels.count, 1)
+        XCTAssertNil(controller.errorMessage)
+    }
+
     // MARK: - The test signal itself
 
     func testTheToneHitsTheRequestedPeakLevel() {
