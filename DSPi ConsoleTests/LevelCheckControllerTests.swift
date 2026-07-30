@@ -346,6 +346,138 @@ final class LevelCheckControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .ready)
     }
 
+    // MARK: - Channel levels
+
+    func testSpectralLevelIsIndependentOfBandWidth() {
+        // The property the comparison rests on: the same signal read over a
+        // narrow band and a wide one gives the same level per octave, so a
+        // subwoofer is not penalised for covering less ground.
+        let samples = [Float](repeating: 0.1, count: 4800)
+        let narrow = LevelCheckController.spectralLevel(of: samples, band: 20...80)
+        let wide = LevelCheckController.spectralLevel(of: samples, band: 200...4000)
+
+        // Two octaves against about 4.3, so the wider band is divided by more.
+        XCTAssertLessThan(wide, narrow)
+        // And the difference is exactly the ratio of the widths: the wider band
+        // is divided by more octaves, so it reads lower by that ratio.
+        let expected = 10 * log10(log2(4000.0 / 200) / log2(80.0 / 20))
+        XCTAssertEqual(narrow - wide, expected, accuracy: 0.001)
+    }
+
+    func testSpectralLevelTracksAmplitude() {
+        let quiet = [Float](repeating: 0.05, count: 4800)
+        let loud = [Float](repeating: 0.1, count: 4800)
+        let band: ClosedRange<Double> = 200...4000
+        XCTAssertEqual(LevelCheckController.spectralLevel(of: loud, band: band)
+                        - LevelCheckController.spectralLevel(of: quiet, band: band),
+                       6.02, accuracy: 0.05)
+    }
+
+    func testASubwooferIsMeasuredOverItsOwnBand() {
+        // It has no output in the full-range band, so measuring it there would
+        // read whatever leaked rather than what it produces.
+        XCTAssertEqual(LevelCheckController.band(for: .subwoofer), 20...80)
+        XCTAssertEqual(LevelCheckController.band(for: .fullRange),
+                       ChannelLevelMatch.fullRangeBand)
+        XCTAssertEqual(LevelCheckController.band(for: .bassLimited),
+                       ChannelLevelMatch.fullRangeBand)
+    }
+
+    func testTheStimulusIsLimitedToTheBandBeingMeasured() {
+        // Leakage is not harmless: energy below 200 Hz in a midband stimulus
+        // excites the woofer and would read as midband level.
+        let sampleRate = 48000.0
+        let midband = LevelCheckController.toneSamples(seconds: 1,
+                                                      sampleRate: sampleRate,
+                                                      levelDbfs: -12,
+                                                      band: 200...4000)
+        let sub = LevelCheckController.toneSamples(seconds: 1,
+                                                  sampleRate: sampleRate,
+                                                  levelDbfs: -12,
+                                                  band: 20...80)
+
+        // Zero crossings scale with the band's centre, so a midband stimulus
+        // must cross far more often than a subwoofer one.
+        func crossings(_ samples: [Float]) -> Int {
+            var count = 0
+            for index in 1..<samples.count where samples[index - 1].sign != samples[index].sign {
+                count += 1
+            }
+            return count
+        }
+        XCTAssertGreaterThan(crossings(midband), crossings(sub) * 4,
+                             "the two stimuli should occupy clearly different bands")
+    }
+
+    func testEachBandStillHitsTheRequestedPeak() {
+        let bands: [ClosedRange<Double>] = [20...80, 200...4000, 30...12000]
+        for band in bands {
+            let samples = LevelCheckController.toneSamples(seconds: 1,
+                                                          sampleRate: 48000,
+                                                          levelDbfs: -18,
+                                                          band: band)
+            let peak = samples.reduce(Float(0)) { max($0, abs($1)) }
+            XCTAssertEqual(20 * log10(Double(peak)), -18, accuracy: 0.1,
+                           "band \(band) should still reach the requested level")
+        }
+    }
+
+    func testTheChannelPassRefusesWithoutANoiseFloor() async {
+        // Without one there is nothing to judge signal to noise against, and
+        // the level figures would be reported with no idea whether the room was
+        // quiet enough for them to mean anything.
+        let controller = makeController()
+        let levels = await controller.measureChannelLevels(
+            [(speaker: 0, playbackChannel: 0, role: .fullRange)],
+            microphone: microphone, micChannel: 0,
+            playbackDevice: dspi, sampleRate: 48000)
+
+        XCTAssertTrue(levels.isEmpty)
+        XCTAssertEqual(playback.playCount, 0, "nothing should have been played")
+    }
+
+    func testTheChannelPassMeasuresEveryChannel() async {
+        let controller = makeController()
+        capture.samples = noise(rms: 0.0003)
+        await controller.measureNoiseFloor(microphone: microphone, channel: 0)
+        capture.samples = noise(rms: 0.05)
+
+        let levels = await controller.measureChannelLevels(
+            [(speaker: 0, playbackChannel: 0, role: .fullRange),
+             (speaker: 1, playbackChannel: 1, role: .fullRange),
+             (speaker: 8, playbackChannel: 0, role: .subwoofer)],
+            microphone: microphone, micChannel: 0,
+            playbackDevice: dspi, sampleRate: 48000)
+
+        XCTAssertEqual(levels.map(\.speakerIndex), [0, 1, 8])
+        XCTAssertEqual(playback.playCount, 3)
+        XCTAssertEqual(controller.stage, .channelsMeasured)
+        // The subwoofer carries its own band, which is what makes its level
+        // comparable to the others despite covering different frequencies.
+        XCTAssertEqual(levels.last?.bandHz, 20...80)
+        XCTAssertEqual(levels.first?.bandHz, ChannelLevelMatch.fullRangeBand)
+    }
+
+    func testADropoutDuringTheChannelPassAbandonsIt() async {
+        // Half a set of levels is worse than none: matching from it would trim
+        // some channels against a datum the rest never contributed to.
+        let controller = makeController()
+        capture.samples = noise(rms: 0.0003)
+        await controller.measureNoiseFloor(microphone: microphone, channel: 0)
+        capture.samples = noise(rms: 0.05)
+        playback.underrunCount = 1
+
+        let levels = await controller.measureChannelLevels(
+            [(speaker: 0, playbackChannel: 0, role: .fullRange),
+             (speaker: 1, playbackChannel: 1, role: .fullRange)],
+            microphone: microphone, micChannel: 0,
+            playbackDevice: dspi, sampleRate: 48000)
+
+        XCTAssertTrue(levels.isEmpty)
+        XCTAssertTrue(controller.channelLevels.isEmpty)
+        XCTAssertNotNil(controller.errorMessage)
+    }
+
     // MARK: - The test signal itself
 
     func testTheToneHitsTheRequestedPeakLevel() {

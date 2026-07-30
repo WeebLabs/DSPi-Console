@@ -27,6 +27,10 @@ struct RoomCorrectionLevelCheckView: View {
                         Divider()
                         resultSection
                     }
+                    if check.result != nil {
+                        Divider()
+                        channelLevelSection
+                    }
                 }
                 .padding(22)
             }
@@ -214,6 +218,116 @@ struct RoomCorrectionLevelCheckView: View {
                                  : emphasis == .bad ? Color.orange : Color.primary)
         }
         .frame(width: 130, alignment: .leading)
+    }
+
+    // MARK: - Channel levels
+
+    private var channelLevelSection: some View {
+        formSection("3. CHANNEL LEVELS") {
+            Toggle("Bring the channels to a common level", isOn: $model.matchChannelLevels)
+                .font(.system(size: 12))
+
+            note("Measures each channel in turn at this position and works out the "
+                 + "trim that matches them. Runs before the sweeps because fixing a "
+                 + "badly matched channel means turning a gain control, and that "
+                 + "invalidates any measurement already taken."
+                 + (model.matchChannelLevels ? "" : " Turned off, your existing "
+                    + "balance between channels is left exactly as it is."))
+
+            HStack(spacing: 12) {
+                Button(check.channelLevels.isEmpty ? "Measure Channel Levels"
+                                                   : "Measure Again") { measureLevels() }
+                    .disabled(!canPlayTone || !model.matchChannelLevels)
+                if check.stage == .measuringChannels {
+                    ProgressView().controlSize(.small)
+                    Text("Measuring each channel. Please keep still and quiet.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if let match = model.levelMatch {
+                levelTable(match)
+            }
+        }
+    }
+
+    private func levelTable(_ match: ChannelLevelMatch) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 0) {
+                Text("CHANNEL").frame(width: 130, alignment: .leading)
+                Text("LEVEL").frame(width: 90, alignment: .trailing)
+                Text("VS OTHERS").frame(width: 90, alignment: .trailing)
+                Text("TRIM").frame(width: 80, alignment: .trailing)
+                Spacer()
+            }
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.secondary)
+
+            ForEach(match.offsets) { offset in
+                let level = check.channelLevels.first { $0.speakerIndex == offset.speakerIndex }
+                HStack(spacing: 0) {
+                    Text(model.targetName(offset.speakerIndex))
+                        .frame(width: 130, alignment: .leading)
+                    Text(level.map { String(format: "%.1f dB", $0.levelDb) } ?? "-")
+                        .frame(width: 90, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                    Text(String(format: "%+.1f dB", offset.deviationDb))
+                        .frame(width: 90, alignment: .trailing)
+                        .foregroundStyle(offset.needsPhysicalGainChange ? .orange : .secondary)
+                    Text(offset.isSubwoofer
+                         ? "-"
+                         : String(format: "%+.1f dB", offset.offsetDb))
+                        .frame(width: 80, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .font(.system(size: 11, design: .monospaced))
+            }
+
+            ForEach(match.outOfRange) { offset in
+                if let text = offset.guidance(name: model.targetName(offset.speakerIndex)) {
+                    Label(text, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if match.outputLostDb > 0.05 {
+                note(String(format: "Matching costs %.1f dB of output overall, because "
+                            + "every channel comes down to the quietest one.",
+                            match.outputLostDb))
+            }
+            if match.subwooferAccuracyReduced {
+                Label("No microphone calibration is loaded, so the subwoofer's level "
+                      + "relative to the other channels carries the microphone's own "
+                      + "uncalibrated low-frequency response.",
+                      systemImage: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if match.isReady {
+                Label("Channels are close enough to match with a digital trim.",
+                      systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.green)
+            }
+        }
+    }
+
+    private func measureLevels() {
+        guard let microphone = model.microphone,
+              let playbackDevice = model.playbackDevice else { return }
+        Task {
+            _ = await check.measureChannelLevels(model.levelTargets(),
+                                                 microphone: microphone,
+                                                 micChannel: model.microphoneChannel,
+                                                 playbackDevice: playbackDevice,
+                                                 sampleRate: playbackDevice.nominalSampleRate)
+        }
     }
 
     // MARK: - Footer

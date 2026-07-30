@@ -27,7 +27,8 @@ struct RoomCorrectionApplyView: View {
         design.applyPlans(mode: model.mode,
                           eqChannel: model.vm.eqChannel(forOutput:),
                           baselineOutputGainDb: model.baselineOutputGain,
-                          baselinePreampDb: model.baselineInputPreamp)
+                          baselinePreampDb: model.baselineInputPreamp,
+                          levelMatchDb: model.levelMatchOffset)
     }
 
     private var chosen: [ChannelApplyPlan] {

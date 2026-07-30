@@ -21,14 +21,22 @@ final class LevelCheckController: ObservableObject {
         case ready
         case playingTone
         case done
+        /// Stepping through every channel to record its level.
+        case measuringChannels
+        case channelsMeasured
 
-        var isBusy: Bool { self == .measuringNoiseFloor || self == .playingTone }
+        var isBusy: Bool {
+            self == .measuringNoiseFloor || self == .playingTone
+                || self == .measuringChannels
+        }
     }
 
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var noiseFloorDbfs: Double?
     @Published private(set) var result: LevelCheckResult?
     @Published private(set) var errorMessage: String?
+    /// One entry per channel, once the level pass has run.
+    @Published private(set) var channelLevels: [ChannelLevel] = []
 
     /// Live input peak, for the meter. Updated while a capture is running.
     @Published private(set) var inputPeakDbfs: Double = -120
@@ -213,8 +221,101 @@ final class LevelCheckController: ObservableObject {
         if noiseFloorDbfs != nil { stage = .ready }
     }
 
+    // MARK: - Channel levels
+
+    /// Measures every channel's in-band spectral level at the main position.
+    ///
+    /// The stimulus is limited to each channel's comparison band, so the
+    /// captured RMS *is* the in-band level and no spectrum estimate is needed.
+    /// Dividing by the band's width in octaves makes the figure independent of
+    /// how wide that band is, which is what lets a subwoofer be compared
+    /// against a midband channel at all.
+    func measureChannelLevels(_ targets: [(speaker: Int,
+                                           playbackChannel: Int,
+                                           role: RoomCorrectionCore.SpeakerRole)],
+                              microphone: AudioDeviceInfo,
+                              micChannel: Int,
+                              playbackDevice: AudioDeviceInfo,
+                              sampleRate: Double) async -> [ChannelLevel] {
+        guard !stage.isBusy, noiseFloorDbfs != nil else { return [] }
+        stage = .measuringChannels
+        errorMessage = nil
+        channelLevels = []
+
+        var measured: [ChannelLevel] = []
+        for target in targets {
+            let band = Self.band(for: target.role)
+            let tone = Self.toneSamples(seconds: toneSeconds,
+                                        sampleRate: sampleRate,
+                                        levelDbfs: playbackLevelDbfs,
+                                        band: band)
+            do {
+                try capture.start(device: microphone, channelIndex: micChannel)
+                startMetering()
+                try playback.play(samples: tone,
+                                  device: playbackDevice,
+                                  channelIndex: target.playbackChannel) { _ in }
+                try await sleep(toneSeconds + 0.4)
+                playback.stop()
+                stopMetering()
+                let recorded = capture.stop()
+
+                guard !recorded.isEmpty else {
+                    fail("No audio came back while measuring the level of channel "
+                         + "\(target.speaker + 1).")
+                    return []
+                }
+                if playback.underrunCount > 0 || capture.overloadCount > 0 {
+                    fail("Audio dropped out while measuring channel "
+                         + "\(target.speaker + 1). Close other audio applications "
+                         + "and try again.")
+                    return []
+                }
+
+                measured.append(ChannelLevel(
+                    speakerIndex: target.speaker,
+                    levelDb: Self.spectralLevel(of: recorded, band: band),
+                    role: target.role,
+                    bandHz: band))
+            } catch {
+                playback.stop()
+                _ = capture.stop()
+                fail(error.localizedDescription)
+                return []
+            }
+        }
+
+        channelLevels = measured
+        stage = .channelsMeasured
+        return measured
+    }
+
+    /// The band a channel is compared over.
+    ///
+    /// A subwoofer cannot be compared in the full-range band, having no output
+    /// there, so it is measured over its own passband instead. The figures stay
+    /// comparable because the level is per octave.
+    static func band(for role: RoomCorrectionCore.SpeakerRole) -> ClosedRange<Double> {
+        role == .subwoofer ? 20...80 : ChannelLevelMatch.fullRangeBand
+    }
+
+    /// In-band level per octave, in dB relative to full scale.
+    ///
+    /// The width division is what makes the figure band-independent: without it
+    /// a narrow-band subwoofer would read quiet purely for covering less
+    /// ground.
+    static func spectralLevel(of samples: [Float],
+                              band: ClosedRange<Double>) -> Double {
+        let total = MeasurementQualityAnalyzer.dbfs(MeasurementQualityAnalyzer.rms(samples))
+        let octaves = log2(band.upperBound / band.lowerBound)
+        guard octaves > 0 else { return total }
+        return total - 10 * log10(octaves)
+    }
+
     // MARK: - Internals
 
+    /// Every caller has already stopped whatever it started, so this only
+    /// records the reason. Stopping again here double-stopped the device.
     private func fail(_ message: String) {
         stopMetering()
         errorMessage = message
@@ -264,9 +365,15 @@ final class LevelCheckController: ObservableObject {
     /// hopeless in one position and clipping a metre away. Noise across the
     /// range averages that out and is a far better predictor of how a sweep
     /// will actually fare.
+    /// The band used when none is given: wide enough to predict how a
+    /// full-range sweep will fare, narrow enough to keep the energy where the
+    /// speaker can reproduce it.
+    static let defaultToneBand: ClosedRange<Double> = 30...12000
+
     static func toneSamples(seconds: Double,
                             sampleRate: Double,
-                            levelDbfs: Double) -> [Float] {
+                            levelDbfs: Double,
+                            band: ClosedRange<Double> = defaultToneBand) -> [Float] {
         let count = max(1, Int(seconds * sampleRate))
         let amplitude = pow(10.0, levelDbfs / 20.0)
 
@@ -281,20 +388,31 @@ final class LevelCheckController: ObservableObject {
             white[index] = Double(Int64(bitPattern: state)) / Double(Int64.max)
         }
 
-        // One-pole pair either side of the audible band: keeps the energy where
-        // the speaker can actually reproduce it, so the level reading is not
-        // dominated by subsonic content nobody will hear.
-        var lowState = 0.0
-        var highState = 0.0
-        let lowCoefficient = exp(-2.0 * Double.pi * 30.0 / sampleRate)
-        let highCoefficient = exp(-2.0 * Double.pi * 12000.0 / sampleRate)
+        // Four cascaded one-pole sections each way, giving about 24 dB per
+        // octave outside the band.
+        //
+        // A single pole leaks badly, and leakage is not harmless here: a level
+        // reading is only comparable between channels if each one is measured
+        // over the band it is supposed to be measured over. Energy below 200 Hz
+        // in a midband stimulus excites the woofer and reads as midband level.
+        let stages = 4
+        let lowCoefficient = exp(-2.0 * Double.pi * band.lowerBound / sampleRate)
+        let highCoefficient = exp(-2.0 * Double.pi * band.upperBound / sampleRate)
 
-        var shaped = [Double](repeating: 0, count: count)
-        for index in 0..<count {
-            lowState = white[index] + lowCoefficient * lowState
-            let highPassed = white[index] - (1 - lowCoefficient) * lowState
-            highState = (1 - highCoefficient) * highPassed + highCoefficient * highState
-            shaped[index] = highState
+        var shaped = white
+        for _ in 0..<stages {
+            var state = 0.0
+            for index in 0..<count {
+                state = shaped[index] + lowCoefficient * state
+                shaped[index] = shaped[index] - (1 - lowCoefficient) * state
+            }
+        }
+        for _ in 0..<stages {
+            var state = 0.0
+            for index in 0..<count {
+                state = (1 - highCoefficient) * shaped[index] + highCoefficient * state
+                shaped[index] = state
+            }
         }
 
         // Normalize to the requested peak: the filtering above changes the

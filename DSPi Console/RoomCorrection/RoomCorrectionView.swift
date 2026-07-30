@@ -239,6 +239,36 @@ final class RoomCorrectionModel: ObservableObject {
         }
     }
 
+    /// Whether the correction should bring the channels to a common level.
+    ///
+    /// On by default, because that is what calibration means and what every
+    /// comparable tool does. Off for someone who has already matched levels
+    /// with an SPL meter and does not want their trims touched.
+    @Published var matchChannelLevels = true
+
+    /// What the level pass found, and what to do about it.
+    ///
+    /// Nil until the pass has run. Without it the correction still applies, it
+    /// just leaves the existing balance alone.
+    var levelMatch: ChannelLevelMatch? {
+        let levels = levelCheck.channelLevels.filter { selectedTargets.contains($0.speakerIndex) }
+        guard matchChannelLevels, !levels.isEmpty else { return nil }
+        return ChannelLevelMatch(levels: levels, hasCalibration: calibration != nil)
+    }
+
+    /// The offset that brings one channel to the datum, or zero.
+    func levelMatchOffset(_ speaker: Int) -> Double {
+        levelMatch?.offset(for: speaker) ?? 0
+    }
+
+    /// The channels the level pass will step through, in order.
+    func levelTargets() -> [(speaker: Int, playbackChannel: Int,
+                             role: RoomCorrectionCore.SpeakerRole)] {
+        (try? speakerPlans())?.map {
+            ($0.speakerIndex, $0.playbackChannel, $0.role)
+        } ?? []
+    }
+
     /// Records the pre-measurement gains, once per run.
     ///
     /// Taken before the first sweep, which is the state the correction is
