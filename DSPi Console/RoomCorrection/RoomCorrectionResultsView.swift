@@ -95,7 +95,7 @@ struct RoomCorrectionResultsView: View {
                 correction: design.curve(.correction, channel: channel),
                 comparison: design.parallelCurve(channel: channel),
                 frequencies: design.grid.frequencies)
-                .frame(height: 220)
+                .frame(height: 300)
 
             HStack(spacing: 18) {
                 legend("Measured", .secondary)
@@ -430,9 +430,14 @@ private struct ResponseComparisonPlot: View {
         GeometryReader { geometry in
             let size = geometry.size
             let axis = FrequencyAxis(frequencies: frequencies)
+            // A 50 dB window (±25) as the floor, so the same room always looks
+            // the same size and a modest correction is not magnified into
+            // drama by an auto-fitted scale.  Still a minimum rather than a
+            // fixed window: a deep null covers more than 50 dB and clipping it
+            // would hide the one thing worth seeing.
             let scale = FrequencyPlotScale(
                 fitting: measured + target + corrected + comparisonCorrected,
-                minimumHalfRange: 8, padding: 1.1)
+                minimumHalfRange: 25, padding: 1.1)
             ZStack {
                 FrequencyPlotBackground(axis: axis, scale: scale)
                 axis.path(measured, scale: scale, in: size)
