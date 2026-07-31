@@ -524,6 +524,20 @@ extension RoomCorrectionCore {
         var combinedCeilingDb: Double {
             get { config.combined_ceiling_db } set { config.combined_ceiling_db = newValue }
         }
+
+        /// How narrow a boosting band may be.
+        ///
+        /// Held low because a narrow boost is nearly always fighting a
+        /// cancellation, and inverting one is the characteristic failure of
+        /// automatic room EQ. What stops that is the reliability floor - boost
+        /// is refused outright where the positions disagree - so this decides
+        /// how finely a dip the seats *do* agree on can be filled.
+        ///
+        /// Only has an effect when some boost is permitted.
+        var maxBoostQ: Double {
+            get { config.max_boost_q }
+            set { config.max_boost_q = min(10, max(0.5, newValue)) }
+        }
     }
 
     /// Settings for the fixed-pole parallel design.

@@ -52,6 +52,12 @@ final class CorrectionDesign: ObservableObject {
     static var defaultFitOptions: RoomCorrectionCore.FitOptions {
         var options = RoomCorrectionCore.FitOptions()
         options.boostLimitDb = 6
+        // Q 2 is about two-thirds of an octave, which cannot reach a narrow
+        // dip at all.  Measured on a room with one: raising this to 4 improved
+        // shape more than doubling the boost budget did, and costs no extra
+        // level.  Still guarded by the reliability floor, which refuses boost
+        // of any width where the positions disagree.
+        options.maxBoostQ = 4
         return options
     }
 

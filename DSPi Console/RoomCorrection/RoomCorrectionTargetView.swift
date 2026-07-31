@@ -265,6 +265,17 @@ struct RoomCorrectionTargetView: View {
                        + "default, means cut only - which is what most rooms want and "
                        + "what no room is harmed by.")
 
+            slider("Boost sharpness", value: Binding(
+                get: { design.options.maxBoostQ },
+                set: { design.options.maxBoostQ = $0 }),
+                   range: 1...8, format: "Q %.1f",
+                   help: "How narrow a boosting band may be. Higher reaches into "
+                       + "tighter dips; a narrow boost is also more often fighting "
+                       + "a cancellation, which is refused separately wherever the "
+                       + "seats disagree.")
+                .disabled(design.options.boostLimitDb <= 0)
+                .opacity(design.options.boostLimitDb <= 0 ? 0.45 : 1)
+
             Toggle("Allow shelving filters", isOn: Binding(
                 get: { design.options.allowShelves },
                 set: { design.options.allowShelves = $0 }))
