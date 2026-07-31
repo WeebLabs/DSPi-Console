@@ -28,8 +28,31 @@ final class CorrectionDesign: ObservableObject {
     /// Free-form points on top of the macro controls, lowest first.
     @Published private(set) var anchors: [Anchor] = []
 
-    @Published var options = RoomCorrectionCore.FitOptions() {
+    @Published var options = CorrectionDesign.defaultFitOptions {
         didSet { invalidate() }
+    }
+
+    /// What the Target step starts on.
+    ///
+    /// The core's own default is cut-only, which is the conservative reading of
+    /// spec 7.3 and what the acceptance corpus is scored against. Console starts
+    /// at 6 dB instead: a dip every seat agrees on is worth filling, and leaving
+    /// the budget at zero means the level of the whole correction is pinned by
+    /// the deepest dip nobody chose to fill.
+    ///
+    /// Deliberately a product decision made here rather than a change to the
+    /// core default, so the core keeps the documented conservative behaviour and
+    /// the corpus keeps measuring it.
+    ///
+    /// This does not raise `combinedCeilingDb`. Boost the fit generates is still
+    /// brought back under the ceiling by the trim, so this buys correction shape
+    /// at the cost of channel level rather than buying level - and spec 7.3
+    /// keeps the ceiling where it is until the firmware signal path and its
+    /// saturation behaviour are verified.
+    static var defaultFitOptions: RoomCorrectionCore.FitOptions {
+        var options = RoomCorrectionCore.FitOptions()
+        options.boostLimitDb = 6
+        return options
     }
 
     /// Settings for the fixed-pole comparison.
