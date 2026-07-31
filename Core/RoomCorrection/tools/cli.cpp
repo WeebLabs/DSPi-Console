@@ -187,15 +187,16 @@ bool readResponse(const std::string& path, const std::vector<double>& hz,
     return true;
 }
 
-void printMetrics(const char* label, const dspi_rc_metrics& m) {
+void printMetrics(const char* label, const dspi_rc_metrics& m, double ceiling) {
     std::printf("  %-14s rawRMSE=%7.3f relRMSE=%7.3f relMed=%6.3f p95over=%6.3f "
                 "maxCorr=%7.3f minCorr=%8.3f dispBoost=%6.3f outBoost=%6.3f "
-                "boostQ=%5.2f bands=%2d shelves=%d\n",
+                "boostQ=%5.2f bands=%2d shelves=%d unusedHeadroom=%6.2f\n",
                 label, m.raw_worst_position_rmse_db, m.reliable_worst_position_rmse_db,
                 m.reliable_median_abs_error_db, m.p95_positive_overshoot_db,
                 m.max_combined_correction_db, m.min_combined_correction_db,
                 m.max_disputed_boost_db, m.max_outside_native_boost_db,
-                m.max_boost_filter_q, m.active_filter_count, m.shelf_filter_count);
+                m.max_boost_filter_q, m.active_filter_count, m.shelf_filter_count,
+                ceiling - m.max_combined_correction_db);
 }
 
 int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gatesPassed) {
@@ -258,8 +259,8 @@ int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gates
     std::printf("%s  (%zu positions, transition %.0f Hz%s, trim %.2f dB, improvement %.1f%%)\n",
                 scenario.name.c_str(), scenario.positions.size(), transition,
                 estimated ? "" : " fallback", trim, improvement);
-    printMetrics("uncorrected", uncorrected);
-    printMetrics("corrected", fitted);
+    printMetrics("uncorrected", uncorrected, config.combined_ceiling_db);
+    printMetrics("corrected", fitted, config.combined_ceiling_db);
 
     // Safety gates.  These are the ones Milestone 0 established as hard
     // requirements; error improvement is reported but is not a gate on the
@@ -272,6 +273,13 @@ int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gates
         {"no disputed boost", fitted.max_disputed_boost_db <= 0.5 + 1e-6},
         {"no out-of-band boost", fitted.max_outside_native_boost_db <= 0.5 + 1e-6},
         {"boost Q limited", fitted.max_boost_filter_q <= config.max_boost_q + 0.01},
+        // Headroom the fit was allowed to use and did not.  Never zero on the
+        // fixtures where boost is widely forbidden - there the trim is bound by
+        // the response in those regions rather than by the ceiling - so this is
+        // a regression guard rather than a tight bound.  It was 6.59 dB before
+        // the objective charged for it.
+        {"headroom not wasted",
+         ceiling - fitted.max_combined_correction_db <= 3.0 + 1e-6},
         {"bands within budget", fitted.active_filter_count <= config.max_filters},
         {"error not worsened",
          fitted.reliable_worst_position_rmse_db <=
@@ -562,9 +570,11 @@ int commandFit(int argc, char** argv) {
     dspi_rc_metrics uncorrected;
     dspi_rc_session_metrics(session, &fitted);
     dspi_rc_session_uncorrected_metrics(session, &uncorrected);
+    dspi_rc_fit_config defaults;
+    dspi_rc_default_fit_config(&defaults);
     std::printf("\n");
-    printMetrics("uncorrected", uncorrected);
-    printMetrics("corrected", fitted);
+    printMetrics("uncorrected", uncorrected, defaults.combined_ceiling_db);
+    printMetrics("corrected", fitted, defaults.combined_ceiling_db);
 
     dspi_rc_session_free(session);
     return 0;

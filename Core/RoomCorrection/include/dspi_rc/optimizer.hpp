@@ -92,6 +92,29 @@ struct FitConfig {
     double sharpnessWeight = 0.5;
     double complexityWeight = 0.002;
 
+    // Charge the fit for headroom it was allowed to use and did not.
+    //
+    // The error term is level-invariant on purpose - one trim applies to the
+    // whole channel and the balance compensation restores level afterwards, so
+    // an absolute offset is not a tonal defect.  The cost of that is a free
+    // variable: a correction sitting 7 dB below the ceiling scores exactly the
+    // same as one sitting on it, so nothing stops the fit spending a band on a
+    // broad cut that does nothing for shape and simply turns the channel down.
+    //
+    // No metric could see it either, because they all level-normalise for the
+    // same reason.  It showed up only as a predicted response drawn lower than
+    // it needed to be, and as `maxCombinedCorrectionDb` sitting well under
+    // `combinedCeilingDb` - which is now the diagnostic for it.
+    //
+    // Only ever penalises being *below* the ceiling.  Going above is handled
+    // structurally by the trim and must stay that way.
+    // Swept on the corpus: 0.02 recovers most of the waste on the worst
+    // fixture but barely moves one where the error term is large enough to
+    // drown it.  0.5 recovers 6.59 dB to 0.49 there while *improving* its
+    // error slightly, and costs 0.016 dB on the diffuse fixture.  Above 0.5
+    // the returns flatten.
+    double headroomWeight = 0.5;
+
     // Search effort.  Deterministic: same inputs and config give the same
     // filters, which the project format depends on.
     //

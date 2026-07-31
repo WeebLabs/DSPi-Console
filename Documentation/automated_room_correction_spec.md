@@ -484,9 +484,29 @@ Minimize a deterministic objective of the form:
 J(theta) = sum(wPosition * wFrequency * wReliability * Huber(R))
          + overshoot penalty at every position
          + positive-correction/headroom penalty
+         + unused-headroom penalty
          + filter sharpness and high-Q penalties
          + small per-filter complexity penalty
 ```
+
+The **unused-headroom** term exists because the rest of the objective is
+level-invariant. A shared offset is subtracted before the error is scored -
+correctly, since one trim applies to the whole channel and the balance
+compensation restores level afterwards - and the consequence is that the
+correction's absolute level is a free variable. Without a term charging for it,
+a correction sitting 7 dB below the combined ceiling scores exactly the same as
+one sitting on it, so nothing stops the fit spending a band on a broad cut that
+does nothing for shape and simply turns the channel down.
+
+No metric in section 9 could detect this, because they all level-normalise for
+the same reason. It surfaced only as a predicted response drawn lower than it
+needed to be, with `maxCombinedCorrectionDb` measured 6.59 dB under
+`combinedCeilingDb` on the cancellation fixture. That difference is now
+reported by the corpus harness and gated.
+
+The term penalises only being *below* the ceiling. Exceeding it stays a
+structural matter for the trim and must not become a penalty the error term
+could outbid.
 
 Sampling uniformly in log frequency gives roughly equal importance per octave. The main listening position's default weight is 2.0; all other positions default to 1.0.
 

@@ -243,6 +243,13 @@ public:
             unreliableBoost /= static_cast<double>(n);
         }
 
+        // Unused headroom.  `response` already carries the trim, so its peak
+        // can never exceed the ceiling; the gap below it is pure waste.
+        double peak = -1e300;
+        for (std::size_t i = 0; i < n; ++i) peak = std::max(peak, response[i]);
+        const double unusedHeadroom =
+            n > 0 ? softHinge(config_.combinedCeilingDb - peak) : 0.0;
+
         double sharpness = 0.0;
         double complexity = 0.0;
         for (const FilterParams& p : bank) {
@@ -259,7 +266,8 @@ public:
                    (config_.overshootWeight * overshootPenalty +
                     config_.positiveCorrectionWeight * positive +
                     config_.unreliableBoostWeight * unreliableBoost +
-                    config_.sharpnessWeight * sharpness) +
+                    config_.sharpnessWeight * sharpness +
+                    config_.headroomWeight * unusedHeadroom * unusedHeadroom) +
                config_.complexityWeight * complexity;
     }
 
