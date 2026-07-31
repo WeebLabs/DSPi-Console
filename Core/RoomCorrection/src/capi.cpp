@@ -563,6 +563,8 @@ dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session, const dspi_rc_fit_c
     problem.platform = session->platform;
     problem.native =
         estimateNativeBandwidth(session->grid, session->positions.front().magnitudesDb);
+    problem.lowCurtainHz = session->targetSpec.lowCurtainHz;
+    problem.highCurtainHz = session->targetSpec.highCurtainHz;
     problem.targetDb = buildTarget(session->grid, session->targetSpec);
     problem.statistics =
         computeSpatialStatistics(session->grid, session->positions, problem.targetDb);

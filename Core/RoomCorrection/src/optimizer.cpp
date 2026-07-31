@@ -307,12 +307,20 @@ struct Bounds {
 Bounds makeBounds(const FitProblem& problem, const FitConfig& config,
                   const std::vector<Slot>& slots) {
     Bounds bounds;
-    const double maxFreq =
-        std::min(config.maxFreqHz, problem.sampleRateHz * FirmwareLimits::freqNyquistFraction);
+
+    // Filter centres are held inside the curtains, not merely unrewarded for
+    // leaving them.  A filter's skirt still acts a little beyond its centre,
+    // which is unavoidable and is how the correction fades at the edge, but the
+    // centre respects what the user set.
+    const double maxFreq = std::min({config.maxFreqHz,
+                                     problem.sampleRateHz * FirmwareLimits::freqNyquistFraction,
+                                     problem.highCurtainHz});
+    const double minFreq = std::max({static_cast<double>(FirmwareLimits::minFreqHz),
+                                     config.minFreqHz,
+                                     problem.lowCurtainHz});
     for (std::size_t i = 0; i < slots.size(); ++i) {
-        bounds.lower.push_back(std::log10(std::max(
-            static_cast<double>(FirmwareLimits::minFreqHz), config.minFreqHz)));
-        bounds.upper.push_back(std::log10(maxFreq));
+        bounds.lower.push_back(std::log10(minFreq));
+        bounds.upper.push_back(std::log10(std::max(minFreq * 1.01, maxFreq)));
         bounds.lower.push_back(std::log(std::max(0.05, config.minQ)));
         bounds.upper.push_back(std::log(static_cast<double>(FirmwareLimits::maxQ)));
         bounds.lower.push_back(config.cutLimitDb);

@@ -160,6 +160,22 @@ struct FitProblem {
     SpatialStatistics statistics;
     CorrectionMask mask;
     NativeBandwidth native;
+
+    // Where the user said correction may act at all.
+    //
+    // The mask already tapers the *error weight* to zero outside these, which
+    // makes the fit indifferent to what happens there - but indifferent is not
+    // the same as forbidden, and the two were being confused.  With the bounds
+    // running to the full 20 Hz - 20 kHz the search could drag a filter outside
+    // the curtains for free, because nothing out there was scored.  A user who
+    // sets the low curtain to 120 Hz and is handed a filter at 58 Hz has been
+    // ignored, whatever the objective thinks.
+    //
+    // Defaults span the whole band, so a caller that does not set them gets the
+    // previous behaviour rather than a silently narrowed correction.
+    double lowCurtainHz = 20.0;
+    double highCurtainHz = 20000.0;
+
     double sampleRateHz = 48000.0;
     Platform platform = Platform::RP2350;
 

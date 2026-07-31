@@ -741,3 +741,68 @@ TEST_CASE(a_shelf_keeps_its_own_q_limit) {
     CHECK(sawShelf);
 }
 
+
+TEST_CASE(no_filter_is_placed_outside_the_correction_curtains) {
+    // The curtains are the user saying "do not correct here".  The mask makes
+    // the fit *indifferent* to error outside them, which is not the same thing:
+    // with the frequency bounds running the full 20 Hz to 20 kHz, the search
+    // could park a filter outside for free, because nothing out there was
+    // scored.  Setting the low curtain to 120 Hz and being handed a filter at
+    // 58 Hz is the fit ignoring an instruction, whatever the objective thinks.
+    //
+    // The problems here are deliberately placed outside the curtains, so a fit
+    // that has not been bounded will reach for them.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<std::vector<double>> curves;
+    for (int i = 0; i < 4; ++i) {
+        std::vector<double> curve = flat(grid);
+        addBump(grid, curve, 40.0, 0.3, 9.0);      // well below the low curtain
+        addBump(grid, curve, 500.0, 0.4, -5.0);    // inside
+        addBump(grid, curve, 9000.0, 0.4, 8.0);    // well above the high curtain
+        curves.push_back(curve);
+    }
+
+    TargetSpec spec = presetFlat();
+    spec.lowCurtainHz = 120.0;
+    spec.highCurtainHz = 3000.0;
+
+    FitProblem problem = makeProblem(grid, curves, spec);
+    problem.lowCurtainHz = spec.lowCurtainHz;
+    problem.highCurtainHz = spec.highCurtainHz;
+
+    const FitResult result = fitCorrection(problem);
+    CHECK(result.converged);
+    CHECK(!result.filters.empty());
+
+    for (const FilterParams& f : result.filters) {
+        CHECK(static_cast<double>(f.freq) >= spec.lowCurtainHz - 1e-3);
+        CHECK(static_cast<double>(f.freq) <= spec.highCurtainHz + 1e-3);
+    }
+}
+
+TEST_CASE(curtains_left_wide_do_not_narrow_the_fit) {
+    // The bound must be the curtains, not a new restriction of its own: a
+    // problem that never sets them has to behave exactly as before.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<std::vector<double>> curves;
+    for (int i = 0; i < 4; ++i) {
+        std::vector<double> curve = flat(grid);
+        addBump(grid, curve, 40.0, 0.3, 9.0);
+        addBump(grid, curve, 9000.0, 0.4, 8.0);
+        curves.push_back(curve);
+    }
+
+    const FitProblem problem = makeProblem(grid, curves);
+    const FitResult result = fitCorrection(problem);
+    CHECK(result.converged);
+
+    // The defaults span the band, so the fit is free to work at both extremes
+    // and should have done so on a fixture whose problems live there.
+    bool low = false, high = false;
+    for (const FilterParams& f : result.filters) {
+        if (f.freq < 80.0) low = true;
+        if (f.freq > 5000.0) high = true;
+    }
+    CHECK(low);
+    CHECK(high);
+}
