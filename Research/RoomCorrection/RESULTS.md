@@ -198,7 +198,7 @@ flattered the cascade. Corrected, the result reverses.
 | single_position_rolloff | 0.281 | 0.700 | 0.502 | 0.255 | 0.175 | 0.147 | 0.136 |
 | nine_position_cancellation | 4.857 | 4.791 | 4.777 | 4.781 | 4.778 | 4.825 | 4.739 |
 | twentyone_position_diffuse | 4.016 | 4.034 | 4.024 | 4.029 | 4.014 | 4.044 | 4.047 |
-| **mean** | 2.310 | 2.366 | 2.319 | 2.286 | 2.271 | 2.277 | 2.266 |
+| **mean** | 2.323 | 2.366 | 2.319 | 2.286 | 2.271 | 2.277 | 2.266 |
 
 
 Bank's method as specified: log placement weighted toward the modal region,
@@ -217,7 +217,7 @@ speaker's passband, the reference puts gain there anyway, having no per-section
 limits, and `requiredTrimDb` attenuates the whole channel to compensate.
 
 **Ten sections is not enough, and neither is twelve.** At equal order Bank's
-method is behind the cascade (2.366 against 2.310). Twelve, all the firmware has
+method is behind the cascade (2.366 against 2.323). Twelve, all the firmware has
 storage for, gives 2.319 and still does not cross over. Sixteen draws level;
 twenty-four is where it becomes worth naming. So the firmware question is not
 "use the two spare slots" - it is "spend twenty-four or more sections per

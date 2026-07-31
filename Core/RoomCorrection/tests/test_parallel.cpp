@@ -527,3 +527,57 @@ TEST_CASE(the_c_abi_designs_a_parallel_bank_for_a_fitted_session) {
 
     dspi_rc_session_free(session);
 }
+
+TEST_CASE(no_pole_is_placed_outside_the_correction_curtains) {
+    // Same defect the cascade had, and the same reasoning: the mask makes the
+    // design indifferent to error outside the curtains, which is not the same
+    // as forbidding it to act there.  The reference placed its poles across the
+    // whole 20 Hz - 20 kHz band regardless of what the user set - 9 of 16
+    // outside a 120 Hz to 3 kHz band on this fixture.
+    //
+    // The problems are deliberately outside, so a design that is not bounded
+    // will reach for them.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve(grid.size(), 75.0);
+    addBump(grid, curve, 40.0, 0.30, 9.0);
+    addBump(grid, curve, 500.0, 0.40, -5.0);
+    addBump(grid, curve, 9000.0, 0.40, 8.0);
+
+    FitProblem problem = makeProblem(grid, {curve, curve, curve});
+    problem.lowCurtainHz = 120.0;
+    problem.highCurtainHz = 3000.0;
+
+    ParallelConfig config;
+    config.sections = 16;
+
+    const ParallelDesign design = designParallel(problem, FitConfig{}, config);
+    CHECK(design.ok);
+    CHECK(design.sections.size() == 16);
+    for (const ParallelSection& section : design.sections) {
+        CHECK(section.freqHz >= problem.lowCurtainHz - 1e-3);
+        CHECK(section.freqHz <= problem.highCurtainHz + 1e-3);
+    }
+}
+
+TEST_CASE(wide_curtains_leave_the_pole_set_spanning_the_band) {
+    // The bound must be the curtains and not a new restriction of its own.
+    const FrequencyGrid grid = corpusGrid();
+    std::vector<double> curve(grid.size(), 75.0);
+    addBump(grid, curve, 40.0, 0.30, 9.0);
+    addBump(grid, curve, 9000.0, 0.40, 8.0);
+
+    const FitProblem problem = makeProblem(grid, {curve, curve, curve});
+    ParallelConfig config;
+    config.sections = 16;
+
+    const ParallelDesign design = designParallel(problem, FitConfig{}, config);
+    CHECK(design.ok);
+
+    double lowest = 1e9, highest = 0.0;
+    for (const ParallelSection& section : design.sections) {
+        lowest = std::min(lowest, section.freqHz);
+        highest = std::max(highest, section.freqHz);
+    }
+    CHECK(lowest < 60.0);
+    CHECK(highest > 8000.0);
+}

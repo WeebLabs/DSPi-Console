@@ -438,7 +438,7 @@ not a property of the parallel structure; it is the absence of the constraint,
 and section 8.2 is where that is owed.
 
 **Ten sections is not enough, and neither is twelve.**  At equal order Bank's
-method is slightly *behind* the ten-band cascade (2.366 against 2.310).  Twelve,
+method is slightly *behind* the ten-band cascade (2.366 against 2.323).  Twelve,
 which is all the firmware has storage for today, narrows that to 2.319 and still
 does not cross over.  Sixteen draws level; twenty-four is where the advantage
 becomes worth naming.  The firmware question is therefore not "use the two spare

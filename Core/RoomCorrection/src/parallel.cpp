@@ -226,6 +226,8 @@ void refinePoleFrequencies(const std::vector<Complex>& target,
                            const FrequencyGrid& grid,
                            double sampleRateHz,
                            const ParallelConfig& config,
+                           double bandLowHz,
+                           double bandHighHz,
                            const std::vector<double>& placedLogF,
                            ParallelDesign& design) {
     const std::size_t n = grid.size();
@@ -275,9 +277,8 @@ void refinePoleFrequencies(const std::vector<Complex>& target,
     std::vector<double> upper(sectionCount, 0.0);
     for (std::size_t s = 0; s < sectionCount; ++s) {
         const double logF = std::log(design.sections[s].freqHz);
-        const double floor = std::max(std::log(config.minFreqHz), placedLogF[s] - maxDrift);
-        const double ceiling = std::min(std::log(std::min(config.maxFreqHz, 0.45 * sampleRateHz)),
-                                        placedLogF[s] + maxDrift);
+        const double floor = std::max(std::log(bandLowHz), placedLogF[s] - maxDrift);
+        const double ceiling = std::min(std::log(bandHighHz), placedLogF[s] + maxDrift);
         lower[s] = std::max(floor - logF, -maxStep);
         upper[s] = std::min(ceiling - logF, maxStep);
         if (upper[s] < lower[s]) lower[s] = upper[s] = 0.0;
@@ -291,8 +292,8 @@ void refinePoleFrequencies(const std::vector<Complex>& target,
     for (std::size_t s = 0; s < sectionCount; ++s) {
         const double logF = std::log(design.sections[s].freqHz);
         const double moved = clampd(logF + solved.x[s],
-                                    std::max(std::log(config.minFreqHz), placedLogF[s] - maxDrift),
-                                    std::min(std::log(config.maxFreqHz), placedLogF[s] + maxDrift));
+                                    std::max(std::log(bandLowHz), placedLogF[s] - maxDrift),
+                                    std::min(std::log(bandHighHz), placedLogF[s] + maxDrift));
         setPole(design.sections[s], std::exp(moved), design.sections[s].q, sampleRateHz);
     }
 }
@@ -320,10 +321,24 @@ ParallelDesign designParallel(const FitProblem& problem,
     const CollapsedProblem uncorrected =
         collapsePositions(problem, responseDb, parallelConfig.huberDeltaDb);
 
+    // The band correction is allowed to act in.  The curtains are the user
+    // saying "do not correct here", and a pole placed outside them is the
+    // design ignoring that - the same defect the cascade had, and for the same
+    // reason: the mask makes the fit indifferent to error out there, which is
+    // not the same as forbidding it to act.
+    //
+    // Intersected with the config's own range and Nyquist rather than replacing
+    // them, so a caller that leaves the curtains wide is unaffected.
+    const double bandLowHz = std::max({parallelConfig.minFreqHz, 1.0, problem.lowCurtainHz});
+    const double bandHighHz = std::min({parallelConfig.maxFreqHz,
+                                        0.45 * sampleRateHz,
+                                        problem.highCurtainHz});
+    if (!(bandHighHz > bandLowHz)) { design.message = "no correctable band"; return design; }
+
     PlacementConfig placementConfig;
     placementConfig.count = parallelConfig.sections;
-    placementConfig.minFreqHz = std::max(parallelConfig.minFreqHz, 1.0);
-    placementConfig.maxFreqHz = std::min(parallelConfig.maxFreqHz, 0.45 * sampleRateHz);
+    placementConfig.minFreqHz = bandLowHz;
+    placementConfig.maxFreqHz = bandHighHz;
     placementConfig.placementBias = parallelConfig.placementBias;
     placementConfig.minSpacingOctaves = parallelConfig.minSpacingOctaves;
     placementConfig.qFromFeatureWidth = parallelConfig.qFromFeatureWidth;
@@ -363,7 +378,7 @@ ParallelDesign designParallel(const FitProblem& problem,
 
         if (parallelConfig.refinePoles && pass > 0) {
             refinePoleFrequencies(target, collapsed.weight, problem.grid, sampleRateHz,
-                                  parallelConfig, placedLogF, design);
+                                  parallelConfig, bandLowHz, bandHighHz, placedLogF, design);
             // The numerators were solved for the old poles; re-solve exactly
             // rather than carrying an approximation into the next pass.
             ok = solveParallelNumerators(target, collapsed.weight, problem.grid, sampleRateHz,

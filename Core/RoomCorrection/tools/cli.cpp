@@ -375,6 +375,8 @@ FitProblem buildProblem(const Corpus& scenario, const FrequencyGrid& grid,
 
     problem.targetDb = buildTarget(grid, spec);
     problem.statistics = computeSpatialStatistics(grid, problem.positions, problem.targetDb);
+    problem.lowCurtainHz = spec.lowCurtainHz;
+    problem.highCurtainHz = spec.highCurtainHz;
     applyStrength(problem, config.strength);
 
     MaskConfig maskConfig;
