@@ -276,6 +276,22 @@ struct RoomCorrectionTargetView: View {
                 .disabled(design.options.boostLimitDb <= 0)
                 .opacity(design.options.boostLimitDb <= 0 ? 0.45 : 1)
 
+            // Shown as willingness rather than as the floor it sets, so the
+            // slider moves the same way as the effect the user is after.
+            slider("Null filling", value: Binding(
+                get: { (1 - design.options.boostReliabilityFloor) * 100 },
+                set: { design.options.boostReliabilityFloor = 1 - $0 / 100 }),
+                   range: 10...90, format: "%.0f%%",
+                   help: "How much the seats have to agree before a dip is filled. "
+                       + "The other two say how much boost and how narrow; this says "
+                       + "whether it happens at all, and it is the reason a dip you "
+                       + "can see goes uncorrected. Raise it to fill more. A dip the "
+                       + "seats disagree about is a cancellation that moves with the "
+                       + "microphone, and boosting one spends headroom without "
+                       + "filling it for anybody.")
+                .disabled(design.options.boostLimitDb <= 0)
+                .opacity(design.options.boostLimitDb <= 0 ? 0.45 : 1)
+
             Toggle("Allow shelving filters", isOn: Binding(
                 get: { design.options.allowShelves },
                 set: { design.options.allowShelves = $0 }))

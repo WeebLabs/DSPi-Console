@@ -529,6 +529,7 @@ dspi_rc_status dspi_rc_default_fit_config(dspi_rc_fit_config* config) {
     config->boost_limit_db = defaults.boostLimitDb;
     config->combined_ceiling_db = defaults.combinedCeilingDb;
     config->max_boost_q = defaults.maxBoostQ;
+    config->boost_reliability_floor = MaskConfig().boostReliabilityFloor;
     config->hygiene_weight = defaults.hygieneWeight;
     config->max_iterations = defaults.maxIterations;
     config->starts = defaults.starts;
@@ -579,6 +580,13 @@ dspi_rc_status dspi_rc_session_fit(dspi_rc_session* session, const dspi_rc_fit_c
     // the corrected response worse instead of better.
     MaskConfig maskConfig;
     maskConfig.maxBoostDb = fit.boostLimitDb;
+    // Where boost is allowed at all, as distinct from how much.  Carried on the
+    // fit config because it is a user-facing decision about how much seat
+    // disagreement to tolerate, not a property of the target curve.
+    if (config && config->boost_reliability_floor >= 0.0 &&
+        config->boost_reliability_floor <= 1.0) {
+        maskConfig.boostReliabilityFloor = config->boost_reliability_floor;
+    }
     problem.mask = buildCorrectionMask(session->grid, session->targetSpec, problem.native,
                                        problem.statistics.reliability, maskConfig);
 

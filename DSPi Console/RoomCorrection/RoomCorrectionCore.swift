@@ -538,6 +538,22 @@ extension RoomCorrectionCore {
             get { config.max_boost_q }
             set { config.max_boost_q = min(10, max(0.5, newValue)) }
         }
+
+        /// How much the seats must agree before a dip may be boosted at all.
+        ///
+        /// Reliability is sign agreement across the positions, discounted by
+        /// how far they spread: a dip every seat shares scores high, one that
+        /// moves with the microphone scores low. Below this, boost is refused
+        /// outright however much budget or sharpness is allowed.
+        ///
+        /// This is the control over null filling. The other two decide how much
+        /// and how narrow; this decides *whether*. Lowering it fills more
+        /// nulls, and eventually starts filling ones that are cancellations -
+        /// which boost cannot fix and can only spend headroom on.
+        var boostReliabilityFloor: Double {
+            get { config.boost_reliability_floor }
+            set { config.boost_reliability_floor = min(1, max(0, newValue)) }
+        }
     }
 
     /// Settings for the fixed-pole parallel design.

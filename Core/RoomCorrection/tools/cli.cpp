@@ -199,7 +199,8 @@ void printMetrics(const char* label, const dspi_rc_metrics& m, double ceiling) {
                 ceiling - m.max_combined_correction_db);
 }
 
-int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gatesPassed) {
+int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gatesPassed,
+           double boostFloor = -1.0) {
     dspi_rc_session* session = dspi_rc_session_create(
         kMinHz, kMaxHz, kPointsPerOctave, 48000.0, DSPI_RC_PLATFORM_RP2350);
     if (!session) {
@@ -231,6 +232,7 @@ int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gates
         config.boost_limit_db = 3.0;
         config.combined_ceiling_db = 3.0;
     }
+    if (boostFloor >= 0.0) config.boost_reliability_floor = boostFloor;
 
     if (dspi_rc_session_fit(session, &config) != DSPI_RC_OK) {
         std::fprintf(stderr, "fit failed: %s\n", dspi_rc_last_error());
@@ -311,7 +313,7 @@ int runOne(const Corpus& scenario, bool advancedBoost, bool verbose, bool& gates
     return 0;
 }
 
-int commandCorpus(bool verbose) {
+int commandCorpus(bool verbose, double boostFloor = -1.0) {
     const std::vector<double> hz = gridFrequencies();
     if (hz.empty()) { std::fprintf(stderr, "grid failed\n"); return 1; }
 
@@ -324,12 +326,12 @@ int commandCorpus(bool verbose) {
 
     std::printf("=== default (cut-only) ===\n");
     for (const Corpus& scenario : corpus) {
-        if (runOne(scenario, false, verbose, gatesPassed) != 0) return 1;
+        if (runOne(scenario, false, verbose, gatesPassed, boostFloor) != 0) return 1;
     }
 
     std::printf("\n=== advanced boost (+3 dB permitted) ===\n");
     for (const Corpus& scenario : corpus) {
-        if (runOne(scenario, true, verbose, gatesPassed) != 0) return 1;
+        if (runOne(scenario, true, verbose, gatesPassed, boostFloor) != 0) return 1;
     }
 
     std::printf("\n%s\n", gatesPassed ? "ALL GATES PASSED" : "GATES FAILED");
@@ -586,17 +588,22 @@ int commandFit(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     bool verbose = false;
+    // Negative means leave the library default alone.  Present so the effect of
+    // moving the floor on disputed boost can be measured rather than asserted.
+    double boostFloor = -1.0;
     std::vector<char*> arguments;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-v") == 0 || std::strcmp(argv[i], "--verbose") == 0) {
             verbose = true;
+        } else if (std::strcmp(argv[i], "--boost-floor") == 0 && i + 1 < argc) {
+            boostFloor = std::atof(argv[++i]);
         } else {
             arguments.push_back(argv[i]);
         }
     }
 
     if (arguments.empty() || std::strcmp(arguments[0], "corpus") == 0) {
-        return commandCorpus(verbose);
+        return commandCorpus(verbose, boostFloor);
     }
     if (std::strcmp(arguments[0], "poles") == 0) {
         return commandPoles(verbose);
@@ -607,7 +614,8 @@ int main(int argc, char** argv) {
 
     std::fprintf(stderr,
                  "usage:\n"
-                 "  dspi_rc_cli [corpus] [-v]        run the acceptance corpus\n"
+                 "  dspi_rc_cli [corpus] [-v] [--boost-floor v]\n"
+                 "                                   run the acceptance corpus\n"
                  "  dspi_rc_cli poles [-v]           compare fixed-pole designers\n"
                  "  dspi_rc_cli fit <file> [file...] fit measured responses\n");
     return 2;

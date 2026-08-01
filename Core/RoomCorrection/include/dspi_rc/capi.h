@@ -282,6 +282,16 @@ typedef struct dspi_rc_fit_config {
     double boost_limit_db;
     double combined_ceiling_db;
     double max_boost_q;
+    /* How much the positions must agree before boost is permitted at all,
+     * 0...1. Reliability is sign agreement across the seats discounted by their
+     * spread, so a dip every seat shares scores high and one that moves with
+     * the microphone scores low.
+     *
+     * This, not the boost budget or the Q cap, is what decides whether a null
+     * gets filled. Lowering it fills more of them; a null the seats disagree
+     * about is a cancellation that boost cannot fix and will only spend
+     * headroom on, which is why the default is cautious. */
+    double boost_reliability_floor;
     double hygiene_weight;
     int max_iterations;
     int starts;
