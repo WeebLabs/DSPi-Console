@@ -57,6 +57,11 @@ final class RoomCorrectionWindowController: NSObject, ObservableObject {
 extension RoomCorrectionWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         isVisible = false
+        // The microphone gain is deliberately not released here. A campaign
+        // survives the window being closed, and every level in it is on the
+        // same gain only for as long as that gain is held; putting it back now
+        // would silently change the scale the remaining positions are measured
+        // on. `MicrophoneGain` restores on quit instead.
     }
 }
 

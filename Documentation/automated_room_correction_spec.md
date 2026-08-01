@@ -201,6 +201,18 @@ Level Check prevents most invalid and unsafe sessions:
 
 The app must not automatically raise master volume or output gain. It may tell the user to set their normal listening volume. Stop output immediately if the microphone input or DSPi reports clipping.
 
+**The microphone is captured at unity gain, not at whatever the system input slider happens to be.** Every dBFS figure in this feature - the noise floor, headroom, SNR, and the per-channel levels the balance pass compares - is silently scaled by that slider, which the user may never have set deliberately and which other applications move on their own. A campaign calibrated at 40% is not the one calibrated at 100%, and nothing downstream can tell the difference. So on taking the noise floor the input volume is set to unity and held there.
+
+Unity means 0 dB, not the top of the control. A device with an input preamp puts positive gain at the top of its range and measuring into that spends headroom for nothing. Where the device publishes a decibel scale, the 0 dB position is used; where it publishes only an opaque `0…1` scalar, full scale is the only position that is certainly not attenuating. A muted input is unmuted. Three cases, all of which the screen must state:
+
+- **no software input gain** - common, and the good case: the hardware sets the level and nothing can move it;
+- **held** - the achieved gain is reported, in dB where the device gives one;
+- **present but not settable** - warn. The measurement is on a gain the user could still move, and the chain guard is the only remaining protection.
+
+This must run *before* the chain guard takes its baseline (section 6.4), or the guard reports our own write as the drift it exists to catch and abandons the session before a sweep runs.
+
+The setting is system-wide and outlives the process, so it is restored on quit and whenever a different microphone is taken up. It is deliberately **not** restored when the window closes: a campaign outlives that, and its levels are comparable only while the gain stays where it was for the first sweep. A process that dies outright is the one case this cannot cover.
+
 ### 5.5 Measurements
 
 Position 1 is always the **Main Listening Position** and has the largest default optimization weight. Later cards guide the mic around the listening area. The mic must remain at ear height and keep the calibration file's intended orientation.

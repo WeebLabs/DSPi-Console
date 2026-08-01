@@ -515,6 +515,53 @@ final class LevelCheckControllerTests: XCTestCase {
                       controller.errorMessage ?? "no message")
     }
 
+    func testTheMicrophoneIsHeldBeforeTheChainBaselineIsTaken() async {
+        // Ordering hazard: taking the microphone to unity is itself a change to
+        // the input gain. If the guard records the chain first, it reports our
+        // own write as the drift it exists to catch and abandons the session
+        // before a single sweep runs.
+        var live: Float = 0.35
+        let control = RecordingGainControl(read: { live }, write: { live = $0 })
+        let sentry = MeasurementChainGuard()
+        sentry.readVolume = { _ in live }
+        sentry.readSampleRate = { _ in 48000 }
+
+        capture = FakeCapture()
+        playback = FakePlayback()
+        let controller = LevelCheckController(
+            capture: capture, playback: playback, chainGuard: sentry,
+            microphoneGain: MicrophoneGain(control: control))
+        controller.sleep = { _ in }
+
+        capture.samples = noise(rms: 0.0003)
+        await controller.measureNoiseFloor(microphone: microphone, channel: 0)
+
+        XCTAssertEqual(controller.microphoneGainOutcome, .held(decibels: 0))
+        XCTAssertEqual(sentry.baseline?.volume, 1.0,
+                       "the baseline must be the held value, not the user's")
+        XCTAssertNil(sentry.check(currentUID: microphone.uid),
+                     "holding the microphone is not drift")
+    }
+
+    /// A microphone with a plain 0...1 control and no decibel scale, so unity
+    /// is full scale.
+    private struct RecordingGainControl: MicrophoneGainControl {
+        let read: () -> Float
+        let write: (Float) -> Void
+
+        func hasVolume(_ device: AudioObjectID) -> Bool { true }
+        func isVolumeSettable(_ device: AudioObjectID) -> Bool { true }
+        func scalar(_ device: AudioObjectID) -> Float? { read() }
+        func setScalar(_ device: AudioObjectID, _ value: Float) -> Bool {
+            write(value)
+            return true
+        }
+        func unityScalar(_ device: AudioObjectID) -> Float? { nil }
+        func decibels(_ device: AudioObjectID, forScalar scalar: Float) -> Double? { 0 }
+        func muted(_ device: AudioObjectID) -> Bool? { false }
+        func setMuted(_ device: AudioObjectID, _ muted: Bool) -> Bool { true }
+    }
+
     func testAnUnchangedChainLetsThePassRun() async {
         // The guard must not be so eager that it blocks an honest session.
         let sentry = MeasurementChainGuard()

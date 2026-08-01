@@ -63,16 +63,23 @@ final class LevelCheckController: ObservableObject {
     /// Injected so a test can drive a gain change, which CoreAudio gives no way
     /// to fake, and so the guard's own rules stay testable separately.
     let chainGuard: MeasurementChainGuard
+    /// Holds the microphone at unity so the system input slider cannot scale
+    /// what is measured. Injected for the same reason as the guard.
+    let microphoneGain: MicrophoneGain
+    /// What holding the microphone achieved, for the screen to state.
+    @Published private(set) var microphoneGainOutcome: MicrophoneGain.Outcome?
     private var meterTask: Task<Void, Never>?
 
     init(capture: AudioCaptureBackend,
          playback: AudioPlaybackBackend,
          thresholds: QualityThresholds = .standard,
-         chainGuard: MeasurementChainGuard? = nil) {
+         chainGuard: MeasurementChainGuard? = nil,
+         microphoneGain: MicrophoneGain? = nil) {
         self.capture = capture
         self.playback = playback
         self.thresholds = thresholds
         self.chainGuard = chainGuard ?? MeasurementChainGuard()
+        self.microphoneGain = microphoneGain ?? MicrophoneGain()
     }
 
     // MARK: - Findings
@@ -132,6 +139,13 @@ final class LevelCheckController: ObservableObject {
         // The chain is pinned here rather than at the level pass, because the
         // noise floor is itself a measurement everything downstream is compared
         // against.
+        //
+        // Order matters: taking the microphone to unity is itself a change to
+        // the input gain, so it has to happen before the guard records what the
+        // chain looked like, or the guard reports our own write as drift.
+        // Mirrored onto this controller rather than read off the gain object,
+        // which is a separate observable the view would not be watching.
+        microphoneGainOutcome = microphoneGain.hold(device: microphone.id)
         chainGuard.start(device: microphone.id, uid: microphone.uid)
 
         do {

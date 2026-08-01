@@ -100,6 +100,20 @@ struct RoomCorrectionLevelCheckView: View {
                 note("Measured with nothing playing. This sets the floor everything "
                      + "else is judged against.")
             }
+
+            // Stated where it is decided. Every dBFS figure on this screen and
+            // in the level pass is scaled by this, so if it could not be held
+            // the user needs to know before they trust any of them.
+            if let outcome = check.microphoneGainOutcome {
+                if outcome.isPinned {
+                    note(outcome.explanation)
+                } else {
+                    Label(outcome.explanation, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
