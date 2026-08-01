@@ -17,17 +17,30 @@ struct ChannelApplyPlan: Identifiable, Equatable {
     let destination: Destination
     /// Ten bands, unused ones already cleared to Off.
     let bands: [FilterParams]
+    /// Attenuation the designed correction takes so its peak sits on the
+    /// combined ceiling.
+    ///
+    /// The optimizer's error term is level-blind on purpose, so the raw
+    /// cascade's absolute level is a free variable and routinely lands well
+    /// above unity - up to +18 dB on the corpus. Every safety guarantee the fit
+    /// makes is a property of the curve *after* this trim, so the bands alone
+    /// do not carry the correction that was designed: this has to be written
+    /// too, or the device runs that much hotter than anything the user was
+    /// shown.
+    let trimDb: Double
     /// Level the correction removes, weighted over the correction band.
     let levelChangeDb: Double
     /// Offset that brings this channel to the common datum, from the level
     /// pass. Zero when level matching was not run or not needed.
     let levelMatchDb: Double
-    /// What the destination's gain becomes: the original value, less the level
-    /// the correction removed, plus the level-match offset.
+    /// The level every corrected channel is brought to, shared by all of them.
     ///
-    /// One value written once. Two separate writes could each be correct and
-    /// still leave the device wrong if only one of them landed.
-    let compensatedGainDb: Float
+    /// Set by `balanced(_:)` across the channels being applied, not by any one
+    /// channel. See there for why it is the deepest channel's level change.
+    let commonDatumDb: Double
+    /// Peak of the designed correction, which the fit holds at the combined
+    /// ceiling. Only used to work out how hot the filter block itself runs.
+    let combinedPeakDb: Double
     let originalGainDb: Float
 
     var id: Int { speakerIndex }
@@ -42,11 +55,65 @@ struct ChannelApplyPlan: Identifiable, Equatable {
     /// Bands carrying an actual filter, for display.
     var activeBandCount: Int { bands.filter { $0.type != .flat }.count }
 
+    /// What the destination's gain becomes.
+    ///
+    /// One value written once. Two separate writes could each be correct and
+    /// still leave the device wrong if only one of them landed.
+    ///
+    /// Derived rather than stored so it cannot disagree with the terms it is
+    /// made of - `balanced(_:)` changes the datum, and a stored gain would go
+    /// stale the moment the user changed which channels to apply.
+    var compensatedGainDb: Float {
+        originalGainDb + Float(trimDb - levelChangeDb + commonDatumDb + levelMatchDb)
+    }
+
+    /// The gain that makes a flat bank sound as loud as the correction does.
+    ///
+    /// The corrected channel averages `commonDatumDb` above its baseline, so
+    /// this is simply that - which is the whole point of choosing one datum for
+    /// every channel. Bypassing at this gain gives a comparison of shape rather
+    /// than of loudness.
+    var bypassedGainDb: Float {
+        originalGainDb + Float(commonDatumDb + levelMatchDb)
+    }
+
     /// Everything the gain moves by, which is what actually gets written.
     var compensationDb: Float { compensatedGainDb - originalGainDb }
 
-    /// The part of it that is giving back what the correction took.
-    var balanceCompensationDb: Float { Float(-levelChangeDb) }
+    /// The part of the move that belongs to the correction: the headroom it
+    /// takes, less the level its cuts removed, brought to the shared datum.
+    var correctionLevelDb: Float { Float(trimDb - levelChangeDb + commonDatumDb) }
+
+    /// How far above its input the filter block itself peaks.
+    ///
+    /// The bands carry the untrimmed cascade, so this is what the EQ stage sees
+    /// internally regardless of where the compensating gain lands. It only
+    /// matters when that gain is downstream - see `runsHot`.
+    var internalPeakDb: Double { combinedPeakDb - trimDb }
+
+    /// Whether the filter block is asked to exceed unity before anything pulls
+    /// it back.
+    ///
+    /// For an input destination the preamp is upstream of the bank, so the
+    /// attenuation lands first and the block never sees more than the output
+    /// does. For an output destination the per-output gain sits after the
+    /// output EQ, so the block runs `internalPeakDb` hot on its own.
+    var runsHot: Bool {
+        if case .outputGain = destination { return internalPeakDb > 0 }
+        return false
+    }
+
+    /// Where the internal peak stops being a note and becomes a warning.
+    ///
+    /// Almost every output-destination correction runs somewhat hot, so
+    /// flagging any excursion would flag nearly all of them and mean nothing.
+    /// The threshold is set against the tighter of the two platforms: RP2350
+    /// works in float32, where internal headroom is not a practical concern,
+    /// while RP2040 runs a fixed-point path with a bounded margin above unity.
+    /// Spec 7.3 records that the firmware's saturation behaviour has not been
+    /// measured, so this is a judgement pending that measurement rather than a
+    /// figure derived from it.
+    static let hotWarningDb = 12.0
 }
 
 /// What Apply needs from the device.
@@ -69,6 +136,46 @@ protocol CorrectionApplyTarget: AnyObject {
     func readOutputGain(output: Int) -> Float?
     func writeInputPreamp(channel: Int, db: Float)
     func readInputPreamp(channel: Int) -> Float?
+}
+
+@MainActor
+extension CorrectionApplyTarget {
+    func readGain(_ destination: ChannelApplyPlan.Destination) -> Float? {
+        switch destination {
+        case .outputGain(let output): return readOutputGain(output: output)
+        case .inputPreamp(let channel): return readInputPreamp(channel: channel)
+        }
+    }
+
+    func writeGain(_ destination: ChannelApplyPlan.Destination, db: Float) {
+        switch destination {
+        case .outputGain(let output): writeOutputGain(output: output, db: db)
+        case .inputPreamp(let channel): writeInputPreamp(channel: channel, db: db)
+        }
+    }
+
+    /// A whole bank plus its destination gain, in the order that never gets
+    /// loud in between.
+    ///
+    /// Every band is written, including the unused ones cleared to Off, so no
+    /// remnant of the user's previous bank survives underneath.
+    ///
+    /// The attenuating half goes first. The bands carry the untrimmed cascade
+    /// and the gain carries the trim, so writing the bands first would put the
+    /// whole of that boost on the output for as long as the gain write takes -
+    /// on the corpus that is up to 18 dB.
+    func writeBank(_ bands: [FilterParams],
+                   to channel: Int,
+                   destination: ChannelApplyPlan.Destination,
+                   gainDb: Float,
+                   from previousGainDb: Float) {
+        let attenuating = gainDb < previousGainDb
+        if attenuating { writeGain(destination, db: gainDb) }
+        for (band, params) in bands.enumerated() {
+            writeBand(channel: channel, band: band, params: params)
+        }
+        if !attenuating { writeGain(destination, db: gainDb) }
+    }
 }
 
 /// Applies a calculated correction as a best-effort transaction.
@@ -145,7 +252,7 @@ final class CorrectionApplier: ObservableObject {
             return
         }
 
-        for (index, plan) in plans.enumerated() {
+        for plan in plans {
             state = .applying(channel: plan.speakerIndex, of: plans.count)
 
             write(plan)
@@ -197,12 +304,11 @@ final class CorrectionApplier: ObservableObject {
     }
 
     private func write(_ plan: ChannelApplyPlan) {
-        // Step 3: every band, including the unused ones cleared to Off, so no
-        // remnant of the user's previous bank survives underneath.
-        for (band, params) in plan.bands.enumerated() {
-            target.writeBand(channel: plan.destinationChannel, band: band, params: params)
-        }
-        writeGain(plan.destination, db: plan.compensatedGainDb)
+        target.writeBank(plan.bands,
+                         to: plan.destinationChannel,
+                         destination: plan.destination,
+                         gainDb: plan.compensatedGainDb,
+                         from: plan.originalGainDb)
     }
 
     /// Step 4. Returns nil when everything read back correctly.
@@ -229,28 +335,16 @@ final class CorrectionApplier: ObservableObject {
 
     private func restore(_ snapshot: [Snapshot]) {
         for entry in snapshot {
-            for (band, params) in entry.bands.enumerated() {
-                target.writeBand(channel: entry.plan.destinationChannel,
-                                 band: band, params: params)
-            }
-            writeGain(entry.plan.destination, db: entry.gainDb)
+            target.writeBank(entry.bands,
+                             to: entry.plan.destinationChannel,
+                             destination: entry.plan.destination,
+                             gainDb: entry.gainDb,
+                             from: entry.plan.compensatedGainDb)
         }
     }
-
-    // MARK: - Destination
 
     private func readGain(_ destination: ChannelApplyPlan.Destination) -> Float? {
-        switch destination {
-        case .outputGain(let output): return target.readOutputGain(output: output)
-        case .inputPreamp(let channel): return target.readInputPreamp(channel: channel)
-        }
-    }
-
-    private func writeGain(_ destination: ChannelApplyPlan.Destination, db: Float) {
-        switch destination {
-        case .outputGain(let output): target.writeOutputGain(output: output, db: db)
-        case .inputPreamp(let channel): target.writeInputPreamp(channel: channel, db: db)
-        }
+        target.readGain(destination)
     }
 
     // MARK: - Comparison
@@ -298,19 +392,17 @@ extension CorrectionDesign {
                     baselineOutputGainDb: (Int) -> Float,
                     baselinePreampDb: (Int) -> Float,
                     levelMatchDb: (Int) -> Double = { _ in 0 }) -> [ChannelApplyPlan] {
-        fittedChannels.compactMap { speaker in
+        let built: [ChannelApplyPlan] = fittedChannels.compactMap { speaker in
             guard let fit = fits[speaker] else { return nil }
 
             var bands = (try? fit.filters) ?? []
             guard bands.count <= Self.bandsPerBank else { return nil }
             while bands.count < Self.bandsPerBank { bands.append(FilterParams()) }
 
+            let trim = (try? fit.trimDb) ?? 0
             let levelChange = (try? fit.levelChangeDb) ?? 0
+            let peak = (try? fit.metrics.maxCombinedCorrectionDb) ?? 0
             let levelMatch = levelMatchDb(speaker)
-            // Summed, not applied in sequence: the compensation gives back what
-            // the correction took, the match brings the channel to the datum,
-            // and the destination gain carries both.
-            let total = Float(-levelChange + levelMatch)
 
             switch mode {
             case .outputChannels:
@@ -320,9 +412,11 @@ extension CorrectionDesign {
                     destinationChannel: eqChannel(speaker),
                     destination: .outputGain(output: speaker),
                     bands: bands,
+                    trimDb: trim,
                     levelChangeDb: levelChange,
                     levelMatchDb: levelMatch,
-                    compensatedGainDb: original + total,
+                    commonDatumDb: 0,
+                    combinedPeakDb: peak,
                     originalGainDb: original)
             case .inputChannels:
                 let original = baselinePreampDb(speaker)
@@ -331,11 +425,77 @@ extension CorrectionDesign {
                     destinationChannel: speaker,
                     destination: .inputPreamp(channel: speaker),
                     bands: bands,
+                    trimDb: trim,
                     levelChangeDb: levelChange,
                     levelMatchDb: levelMatch,
-                    compensatedGainDb: original + total,
+                    commonDatumDb: 0,
+                    combinedPeakDb: peak,
                     originalGainDb: original)
             }
+        }
+        return ChannelApplyPlan.balanced(built)
+    }
+}
+
+extension ChannelApplyPlan {
+    /// The same plan with its level-match offset moved.
+    ///
+    /// Used by the residual pass after verification, where the filters are
+    /// already right and only the measured level needs closing.
+    func nudged(by offsetDb: Double) -> ChannelApplyPlan {
+        ChannelApplyPlan(speakerIndex: speakerIndex,
+                         destinationChannel: destinationChannel,
+                         destination: destination,
+                         bands: bands,
+                         trimDb: trimDb,
+                         levelChangeDb: levelChangeDb,
+                         levelMatchDb: levelMatchDb + offsetDb,
+                         commonDatumDb: commonDatumDb,
+                         combinedPeakDb: combinedPeakDb,
+                         originalGainDb: originalGainDb)
+    }
+
+    /// Settles the shared datum across the channels that are actually going to
+    /// be written.
+    ///
+    /// Each channel's gain is `trim - levelChange + datum + levelMatch`. The
+    /// three moving parts do different jobs:
+    ///
+    /// - `trim` puts the designed correction on the device rather than the
+    ///   untrimmed cascade the bands describe;
+    /// - `-levelChange` gives back the broadband level this channel's cuts
+    ///   removed, so a channel that needed deep cuts does not emerge quieter
+    ///   than one that needed gentle ones (spec section 7.5);
+    /// - `datum` then lowers every channel by the same amount.
+    ///
+    /// Only the differences between channels carry the balance, so the datum is
+    /// free, and choosing the deepest channel's level change spends that
+    /// freedom on never asking a destination gain to go positive. The channel
+    /// that needed the most gets exactly its own trim; every other channel gets
+    /// less. That also keeps the applied peak at or under the combined ceiling
+    /// on every channel, which giving the level back outright does not: a
+    /// correction's peak is always above its average, and the difference was
+    /// landing on the output as clipping.
+    ///
+    /// Recomputable: the gain is derived, so calling this again with a
+    /// different subset simply settles a different datum.
+    static func balanced(_ plans: [ChannelApplyPlan]) -> [ChannelApplyPlan] {
+        guard let deepest = plans.map(\.levelChangeDb).min() else { return plans }
+        // Clamped so a correction that nets out louder cannot raise the datum
+        // above unity, which would put boost on a bypassed, flat bank.
+        let datum = min(0, deepest)
+        return plans.map { plan in
+            ChannelApplyPlan(
+                speakerIndex: plan.speakerIndex,
+                destinationChannel: plan.destinationChannel,
+                destination: plan.destination,
+                bands: plan.bands,
+                trimDb: plan.trimDb,
+                levelChangeDb: plan.levelChangeDb,
+                levelMatchDb: plan.levelMatchDb,
+                commonDatumDb: datum,
+                combinedPeakDb: plan.combinedPeakDb,
+                originalGainDb: plan.originalGainDb)
         }
     }
 }

@@ -335,7 +335,7 @@ Applying is a best-effort transaction:
 
 1. Capture a fresh snapshot of every destination PEQ bank.
 2. Confirm the connected device identity and capability fingerprint still match the calculation.
-3. Write every band of each destination channel, clearing unused bands to Off, and write the balance-preserving compensation for each applied channel at its destination (section 7.5).
+3. Write every band of each destination channel, clearing unused bands to Off, and write the destination gain for each applied channel: the correction's trim, its balance-preserving compensation, and the level match, as one value (section 7.5). Write whichever of the two is the quieter first. The bands carry the untrimmed cascade and the gain carries the trim, so writing the bands ahead of a falling gain puts the whole of that boost on the output in between.
 4. Read back every band and every compensation value.
 5. On any mismatch, restore all affected banks and compensation values and report exactly what failed.
 6. Mark normal preset state as unsaved; do not write flash.
@@ -345,6 +345,10 @@ Confirm before writing that the matrix routing still matches the mapping recorde
 After application, offer **Verify Correction**. It repeats a sweep at the main position with the new filters active and overlays measured-after, predicted-after, and target. Because playback now traverses the whole chain, verification works identically for both destinations; this is the specific capability that device-side generation could not provide (section 4.1). Verification is the strongest way to catch routing mistakes, gain changes, or a poor model, and should be considered part of the recommended flow.
 
 Provide a level-matched **Correction Bypass** audition control after application. Level matching is essential; a louder result must not win merely because it is louder.
+
+It must move both halves together. The destination gain sits outside the PEQ bank, so clearing the bands alone leaves the level where the correction put it and the comparison becomes a loudness test. Bypassed is a flat bank at `datum + levelMatch`, which is the level the corrected channel averages to (section 7.5); engaged is the plan's bands at its own gain. The two therefore match by construction rather than by measurement. Per-band bypass is the wrong mechanism: it cannot carry the gain, and it needs firmware 1.1.4.
+
+The control changes the live device and is not the rollback path, which restores the user's own EQ rather than the correction. Leaving the screen leaves the device in whichever state the control is in, and the screen must say so.
 
 ## 6. Measurement processing
 
@@ -529,6 +533,8 @@ Initial safe defaults:
 
 No-boost is the normal mode. It is achieved by choosing target vertical level so the complete correction cascade remains at or below `-0.5 dB`, not merely by forbidding positive gain on each individual band. This gives predictable headroom while still allowing overlapping filter shapes.
 
+**That ceiling is a property of the trimmed curve, and it is only real once the trim is applied.** The optimizer's error term is level-blind by design, so the raw cascade's absolute level is a free variable: on the corpus it lands between 0 and +18.3 dB, and `requiredTrimDb` slides it down to the ceiling before anything is scored, gated, or plotted. The filter recipes alone therefore do not describe the correction that was designed. The trim must travel with them to the destination gain, or the device runs that much hotter than every guarantee made here - including the no-boost mask, which the fit satisfies on the trimmed curve and the hardware would then violate by exactly the trim. The first implementation omitted it and would have applied corrections up to 18 dB hot; it is now pinned by tests at both the plan and the applier layer.
+
 Advanced boost mode must show required headroom and reduce gain before the first boosting stage if the DSP signal path supports that safely. Until the firmware signal path and internal saturation behavior are verified, it must never apply an uncompensated positive combined response.
 
 Use a no-boost mask for:
@@ -573,6 +579,18 @@ Version 1 must therefore:
 - compute, per channel, the broadband level change the correction introduces, weighted over the correction band;
 - compensate it so that the pre-correction relative balance between channels is preserved, using **output trim** for an output-destination correction and the **per-input preamp** for an input-destination correction;
 - report the applied compensation and the pre-existing broadband level differences, and include the compensation in the snapshot and rollback path.
+
+**The compensation is relative, and no destination gain may be positive.** Only the differences between channels carry the balance, so the absolute level of the whole set is free. Spending that freedom on makeup gain is a mistake: a correction's peak is always above its average, so giving the average back outright pushes the peak above unity by exactly that difference, and the ceiling this section's sibling guarantees stops being true at the output. The set is therefore brought to one shared datum, chosen as the deepest channel's level change, so that
+
+```
+gain = trim - levelChange + datum + levelMatch
+```
+
+with every term at or below zero. The channel that needed the most level receives exactly its own trim; every other channel receives less. Balance is preserved exactly, the ceiling holds on every channel, and the system ends up quieter by the datum, which the user makes up on the amplifier. This is the behaviour REW and Dirac Live both have, arrived at for the same reason.
+
+The destination gain sits outside the PEQ bank, which makes a level-matched comparison possible in a way a plugin's own bypass is not: bypassing the bank alone would leave the level where the correction put it. A flat bank at `datum + levelMatch` has the same broadband level as the corrected bank, so switching between them is a comparison of shape rather than of loudness. Since the louder side of an unmatched comparison always sounds better, an unmatched A/B is not evidence about the correction at all.
+
+**Where the compensating gain sits relative to the filters matters, and differs by destination.** The per-input preamp is upstream of the input bank, so its attenuation lands before any boost and the block never sees more than the output does. A per-output gain is downstream of the output bank, so that block carries the untrimmed cascade on its own - up to +18 dB on the corpus. The output stays under the ceiling either way, but whether the DSP saturates in between is the open question §7.3 raises. Version 1 measures and reports it on the Apply screen; it does not block the write.
 
 The compensation must be applied at the destination, not merely somewhere convenient. Trimming an output to offset a correction that lives on an input leaves the two on opposite sides of the matrix, so any routing that is not one-to-one would carry the correction and its compensation to different places. Since the input destination is only offered when routing is one-to-one (section 4.3), matching the compensation to the destination keeps the pair inseparable and makes rollback exact.
 

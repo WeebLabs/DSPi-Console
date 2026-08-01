@@ -18,6 +18,13 @@ struct RoomCorrectionApplyView: View {
     @State private var verifyResults: [VerificationResult] = []
     @State private var levelAgreement: LevelAgreement?
     @State private var shownVerification: Int?
+    /// Level nudge from verification, once it has been applied. Folded into
+    /// `chosen` so everything downstream sees one description of the device.
+    @State private var residual: [Int: Double] = [:]
+    @State private var comparison: CorrectionComparison?
+    /// Mirrored out of the comparison so the rest of the screen can see it -
+    /// verifying a bypassed system would report the correction as inert.
+    @State private var isBypassed = false
 
     init(model: RoomCorrectionModel) {
         self.model = model
@@ -32,8 +39,19 @@ struct RoomCorrectionApplyView: View {
                           levelMatchDb: model.levelMatchOffset)
     }
 
+    /// Rebalanced over the selection, because the shared datum is the deepest
+    /// level change among the channels actually being written. Deselecting the
+    /// channel that needed the most level should not leave the rest attenuated
+    /// on its behalf.
+    ///
+    /// Any residual from verification is folded in here rather than written
+    /// separately, so the table, the comparison, and a re-apply all describe
+    /// the same device state.
     private var chosen: [ChannelApplyPlan] {
-        plans.filter { selected.contains($0.speakerIndex) }
+        let balanced = ChannelApplyPlan
+            .balanced(plans.filter { selected.contains($0.speakerIndex) })
+        guard !residual.isEmpty else { return balanced }
+        return balanced.map { $0.nudged(by: residual[$0.speakerIndex] ?? 0) }
     }
 
     var body: some View {
@@ -105,13 +123,18 @@ struct RoomCorrectionApplyView: View {
     }
 
     private var checklist: some View {
-        formSection("CHANNELS") {
+        // Settled once. It reaches into the core for every fitted channel, so
+        // reading it per row would repeat that work for each one.
+        let applying = chosen
+        return formSection("CHANNELS") {
             HStack(spacing: 0) {
                 Text("").frame(width: 26)
                 Text("CHANNEL").frame(width: 130, alignment: .leading)
                 Text("WRITES TO").frame(width: 120, alignment: .leading)
                 Text("BANDS").frame(width: 70, alignment: .trailing)
-                Text("LEVEL").frame(width: 90, alignment: .trailing)
+                Text("MATCH").frame(width: 74, alignment: .trailing)
+                Text("CORRECTION").frame(width: 88, alignment: .trailing)
+                Text("TOTAL").frame(width: 74, alignment: .trailing)
                 Spacer()
             }
             .font(.system(size: 9, weight: .bold))
@@ -137,18 +160,49 @@ struct RoomCorrectionApplyView: View {
                     Text("\(plan.activeBandCount) of \(CorrectionDesign.bandsPerBank)")
                         .frame(width: 70, alignment: .trailing)
                         .foregroundStyle(.secondary)
-                    Text(String(format: "%+.1f dB", plan.compensationDb))
-                        .frame(width: 90, alignment: .trailing)
+                    // The figures come from the rebalanced selection, since
+                    // that is what would actually be written. An unselected
+                    // channel has no level to state.
+                    let applied = applying.first { $0.speakerIndex == plan.speakerIndex }
+                    Text(applied.map { String(format: "%+.1f dB", $0.levelMatchDb) } ?? "-")
+                        .frame(width: 74, alignment: .trailing)
                         .foregroundStyle(.secondary)
+                    Text(applied.map { String(format: "%+.1f dB", $0.correctionLevelDb) } ?? "-")
+                        .frame(width: 88, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                    Text(applied.map { String(format: "%+.1f dB", $0.compensationDb) } ?? "-")
+                        .frame(width: 74, alignment: .trailing)
                     Spacer()
                 }
                 .font(.system(size: 11))
             }
 
-            note("The level column is the balance compensation: a cut-only "
-                 + "correction lowers each channel by a different amount, so the "
-                 + "\(destinationWord) gain gives that back and your existing "
-                 + "balance between channels survives.")
+            note("Correction is the headroom this channel's filters need, less the "
+                 + "broadband level its cuts removed, brought to a level every "
+                 + "corrected channel shares. Match is the offset from the level "
+                 + "pass. Total is what the \(destinationWord) gain moves by, and it "
+                 + "is never positive: your balance between channels is preserved by "
+                 + "the differences, so nothing has to be turned up to preserve it.")
+
+            if let hottest = applying.filter(\.runsHot).map(\.internalPeakDb).max() {
+                let text = String(
+                    format: "An output's gain sits after its EQ, so the filters "
+                          + "themselves reach %.1f dB on the way through even though "
+                          + "the output stays under the ceiling. Whether the DSP "
+                          + "saturates in between has not been measured on this "
+                          + "firmware.", hottest)
+                if hottest > ChannelApplyPlan.hotWarningDb {
+                    Label(text + " That is close enough to the limit to be worth "
+                          + "correcting at the input instead, where the attenuation "
+                          + "lands before the filters.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    note(text)
+                }
+            }
         }
     }
 
@@ -183,6 +237,7 @@ struct RoomCorrectionApplyView: View {
                 note("Nothing has been saved to flash. Use Save to Current Preset in "
                      + "the main window to keep this across a power cycle, or reload "
                      + "the preset to discard it.")
+                compare
             }
         case .rolledBack(let reason):
             formSection("ROLLED BACK") {
@@ -204,6 +259,15 @@ struct RoomCorrectionApplyView: View {
         }
     }
 
+    // MARK: - Comparison
+
+    @ViewBuilder
+    private var compare: some View {
+        if let comparison {
+            CompareControl(comparison: comparison, isBypassed: $isBypassed)
+        }
+    }
+
     // MARK: - Verification
 
     private var verification: some View {
@@ -215,7 +279,7 @@ struct RoomCorrectionApplyView: View {
 
             HStack(spacing: 12) {
                 Button("Verify Correction") { runVerification() }
-                    .disabled(verifyState.isBusy || model.microphone == nil)
+                    .disabled(verifyState.isBusy || model.microphone == nil || isBypassed)
                 if case .sweeping(let speaker, let done, let total) = verifyState {
                     ProgressView().controlSize(.small)
                     Text("Sweeping \(model.targetName(speaker)), \(done + 1) of \(total).")
@@ -224,6 +288,13 @@ struct RoomCorrectionApplyView: View {
                 }
                 if model.microphone == nil {
                     Text("No microphone selected.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                if isBypassed {
+                    // Sweeping now would measure the bypassed system and
+                    // report the correction as having done nothing.
+                    Text("The correction is bypassed for comparison.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -315,27 +386,29 @@ struct RoomCorrectionApplyView: View {
     }
 
     private func applyResidual(_ agreement: LevelAgreement) {
-        let residual = agreement.residualOffsets
-        guard !residual.isEmpty else { return }
+        let offsets = agreement.residualOffsets
+        guard !offsets.isEmpty else { return }
         verifier?.markResidualApplied()
 
-        // Written on top of what is already there, as a plain gain nudge: the
-        // filters are correct and only the level needs closing.
-        let adjusted = chosen.compactMap { plan -> ChannelApplyPlan? in
-            guard let offset = residual[plan.speakerIndex], abs(offset) > 0.01 else {
-                return nil
-            }
-            return ChannelApplyPlan(speakerIndex: plan.speakerIndex,
-                                    destinationChannel: plan.destinationChannel,
-                                    destination: plan.destination,
-                                    bands: plan.bands,
-                                    levelChangeDb: plan.levelChangeDb,
-                                    levelMatchDb: plan.levelMatchDb + offset,
-                                    compensatedGainDb: plan.compensatedGainDb
-                                        + Float(offset),
-                                    originalGainDb: plan.originalGainDb)
-        }
+        // The filters are correct and only the level needs closing, so this is
+        // a plain gain nudge folded into the level-match term.
+        //
+        // Only the differences between the offsets carry the fix, so they are
+        // shifted down until none is positive. Otherwise closing a spread of a
+        // dB could put a destination gain above unity, which is exactly what
+        // the rest of this screen guarantees it will not do.
+        let highest = offsets.values.max() ?? 0
+        let settled = offsets.mapValues { $0 - highest }
+
+        // Every channel with an offset is rewritten, because that shift moved
+        // all of them, not only the ones that were out. Built from `settled`
+        // rather than by reading the state property back, so what is written
+        // does not depend on when SwiftUI publishes the change.
+        let adjusted = chosen
+            .filter { settled[$0.speakerIndex] != nil }
+            .map { $0.nudged(by: settled[$0.speakerIndex] ?? 0) }
         guard !adjusted.isEmpty else { return }
+        residual = settled
 
         let applier = CorrectionApplier(target: model.vm,
                                         expectedSerial: model.vm.selectedDevice?.serial,
@@ -344,6 +417,7 @@ struct RoomCorrectionApplyView: View {
         Task {
             await applier.apply(adjusted)
             applyState = applier.state
+            readyToCompare(applier.state)
         }
     }
 
@@ -450,7 +524,18 @@ struct RoomCorrectionApplyView: View {
         Task {
             await applier.apply(chosen)
             applyState = applier.state
+            readyToCompare(applier.state)
         }
+    }
+
+    /// The comparison is rebuilt from whatever was just written, so a residual
+    /// pass cannot leave it bypassing to a level that is no longer there.
+    private func readyToCompare(_ state: CorrectionApplier.State) {
+        isBypassed = false
+        guard case .applied = state else { comparison = nil; return }
+        comparison = CorrectionComparison(target: model.vm,
+                                          expectedSerial: model.vm.selectedDevice?.serial,
+                                          plans: chosen)
     }
 
     // MARK: - Helpers
@@ -474,6 +559,54 @@ struct RoomCorrectionApplyView: View {
     }
 }
 
+
+// MARK: - Comparison
+
+/// Switch the correction in and out without changing the volume.
+///
+/// Both halves move together: the bands and the destination gain. Turning only
+/// the bands off would leave the level where the correction put it, and the
+/// louder side of an unmatched comparison always sounds better, whichever side
+/// it happens to be.
+///
+/// Its own view because the comparison is a reference type created after the
+/// write lands, and the toggle has to follow its published state.
+private struct CompareControl: View {
+    @ObservedObject var comparison: CorrectionComparison
+    /// Mirrored up so the Verify section can refuse to sweep a bypassed system.
+    @Binding var isBypassed: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Toggle("Bypass the correction, at a matched level", isOn: Binding(
+                    get: { comparison.isBypassed },
+                    set: {
+                        comparison.setBypassed($0)
+                        isBypassed = comparison.isBypassed
+                    }))
+                    .font(.system(size: 12))
+                    .disabled(!comparison.canCompare)
+                Spacer()
+            }
+
+            Text("Switches the filters out and drops the level to match, so what you "
+                 + "hear is the difference in shape rather than in volume. This "
+                 + "changes the device live, and leaving this screen leaves it in "
+                 + "whichever state the switch is in.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let failure = comparison.failure {
+                Label(failure, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
 
 // MARK: - Plot
 

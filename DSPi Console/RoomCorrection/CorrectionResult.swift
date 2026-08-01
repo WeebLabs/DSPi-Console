@@ -86,9 +86,10 @@ struct CorrectionSummary: Equatable {
         }
         if trimDb < -0.5 {
             found.append(String(
-                format: "Takes %.1f dB of level to make room for the correction. This "
-                      + "is expected, not a fault: cuts and boosts both need headroom.",
-                      -trimDb))
+                format: "Takes %.1f dB of level to make room for the correction, which "
+                      + "Apply puts on this channel's gain. This is expected, not a "
+                      + "fault: cuts and boosts both need headroom, and the system will "
+                      + "be that much quieter until you turn it up.", -trimDb))
         }
         if !transitionEstimated {
             found.append("The transition between modal and statistical behaviour could "

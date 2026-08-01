@@ -396,8 +396,41 @@ final class CorrectionDesignTests: XCTestCase {
         let plan = try XCTUnwrap(plans.first)
         XCTAssertEqual(plan.originalGainDb, -6)
         XCTAssertEqual(plan.compensatedGainDb,
-                       plan.originalGainDb - Float(plan.levelChangeDb),
+                       plan.originalGainDb
+                           + Float(plan.trimDb - plan.levelChangeDb
+                                   + plan.commonDatumDb + plan.levelMatchDb),
                        accuracy: 0.001)
+    }
+
+    func testAPlanCarriesTheTrimTheFitAsked() throws {
+        // The bands are the untrimmed cascade. Whatever headroom the fit took
+        // to keep the combined response under its ceiling has to travel with
+        // them, or the device runs hotter than anything that was gated.
+        let (design, _) = fittedDesign()
+        let plans = design.applyPlans(mode: .inputChannels,
+                                      eqChannel: { $0 + 2 },
+                                      baselineOutputGainDb: { _ in 0 },
+                                      baselinePreampDb: { _ in 0 })
+        let plan = try XCTUnwrap(plans.first)
+        XCTAssertEqual(plan.trimDb, design.trimDb(channel: 0), accuracy: 1e-9)
+        XCTAssertLessThanOrEqual(plan.trimDb, 0)
+    }
+
+    func testNoAppliedGainIsEverPositive() throws {
+        // The rule the scheme exists to keep, checked against a real fit rather
+        // than a hand-built plan.
+        let (design, _) = fittedDesign()
+        for mode in [MeasurementMode.inputChannels, .outputChannels] {
+            let plans = design.applyPlans(mode: mode,
+                                          eqChannel: { $0 + 2 },
+                                          baselineOutputGainDb: { _ in 0 },
+                                          baselinePreampDb: { _ in 0 })
+            for plan in plans {
+                XCTAssertLessThanOrEqual(plan.compensatedGainDb, 0,
+                                         "\(mode) channel \(plan.speakerIndex)")
+                XCTAssertLessThanOrEqual(plan.bypassedGainDb, 0)
+            }
+        }
     }
 
     // MARK: - Fit limits

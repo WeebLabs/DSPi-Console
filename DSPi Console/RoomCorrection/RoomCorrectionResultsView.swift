@@ -143,7 +143,8 @@ struct RoomCorrectionResultsView: View {
                     reading("Level taken",
                             String(format: "%.1f dB", summary.trimDb == 0 ? 0
                                                                           : summary.trimDb),
-                            caption: "to make headroom", emphasis: .neutral)
+                            caption: "headroom, applied on Apply",
+                            emphasis: .neutral)
                     Spacer()
                 }
 
