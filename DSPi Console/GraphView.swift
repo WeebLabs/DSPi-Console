@@ -434,9 +434,13 @@ struct BodePlotView: View {
 // MARK: - Graph Resize Handle
 
 struct GraphResizeHandle: View {
+    /// Drag-strip height.  The main window keeps it slim now that no legend
+    /// row follows the graph; the pop-out window can afford the taller default.
+    var height: CGFloat = 20
+
     var body: some View {
         GraphResizeHandleRepresentable()
-            .frame(height: 20)
+            .frame(height: height)
             .padding(.horizontal)
     }
 }

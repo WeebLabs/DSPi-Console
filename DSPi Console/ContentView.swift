@@ -99,6 +99,13 @@ struct ContentView: View {
         renamingChannel = channelIdx
     }
 
+    /// Show/hide one channel's curve on the frequency response graph.  The
+    /// sidebar descriptor pills are the only control for this; selection still
+    /// drives visibility on its own (solo on select, all curves in overview).
+    private func toggleCurve(_ eqCh: Int) {
+        vm.channelVisibility[eqCh] = !(vm.channelVisibility[eqCh] ?? true)
+    }
+
     private func presetLabel(_ slot: Int) -> String {
         let display = slot + 1
         return "\(display): \(presetDropdownLabel(slot))"
@@ -315,7 +322,9 @@ struct ContentView: View {
                                   isRenaming: renamingChannel == ch,
                                   renameText: $renameText,
                                   rowHeight: sidebarRowHeight,
-                                  onCommitRename: { commitRename() })
+                                  onCommitRename: { commitRename() },
+                                  isCurveVisible: vm.channelVisibility[ch] ?? true,
+                                  onToggleCurve: { toggleCurve(ch) })
                             .onOptionClick { startRename(ch) }
                             .onTapGesture {
                                 if renamingChannel != nil { commitRename() }
@@ -352,7 +361,9 @@ struct ContentView: View {
                                   renameText: $renameText,
                                   rowHeight: sidebarRowHeight,
                                   onCommitRename: { commitRename() },
-                                  chIdx: eqCh)
+                                  chIdx: eqCh,
+                                  isCurveVisible: vm.channelVisibility[eqCh] ?? true,
+                                  onToggleCurve: { toggleCurve(eqCh) })
                             .onOptionClick { startRename(eqCh) }
                             .onTapGesture {
                                 if renamingChannel != nil { commitRename() }
@@ -716,7 +727,11 @@ struct ContentView: View {
             }
 
             // MAIN CONTENT
-            VStack(alignment: .leading, spacing: 20) {
+            // Spacing is 2 because the graph block already ends in the 12pt
+            // resize strip and the dashboard adds 4pt of its own top padding:
+            // 12 + 2 + 4 gives the graph the same 18pt gap the cards use
+            // between themselves.
+            VStack(alignment: .leading, spacing: 2) {
                 // Graph + connection status
                 VStack(alignment: .leading, spacing: 0) {
                     // Header: graph title (or pop-out close button) on
@@ -744,16 +759,19 @@ struct ContentView: View {
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)
-                    .padding(.bottom, graphWindowController.isVisible ? 0 : 16)
+                    // Popped out there is no graph or resize strip below the
+                    // header, so it carries the gap to the content itself.
+                    .padding(.bottom, graphWindowController.isVisible ? 14 : 16)
 
                     if !graphWindowController.isVisible {
                         BodePlotView(vm: vm)
                             .frame(height: CGFloat(settings.graphHeight))
                             .padding(.horizontal)
                             .transition(.scale(scale: 0.95, anchor: .top).combined(with: .opacity))
-                        GraphResizeHandle()
-                        GraphLegend(vm: vm).padding(.horizontal).padding(.top, -16)
-                            .transition(.opacity)
+                        // No legend row here: the sidebar descriptor pills are
+                        // the per-channel show/hide control in the main window,
+                        // so the graph only needs the slim drag strip below it.
+                        GraphResizeHandle(height: 12)
                     }
                 }
 
@@ -800,9 +818,14 @@ struct ContentView: View {
                                             availableTypes: availableFilterTypes(vm: vm))
 
                     case .overview:
+                        // `.never`, not `.hidden`: on macOS `.hidden` still
+                        // brings the scroller back when a mouse is connected,
+                        // and a legacy scroller steals ~15pt off the right edge,
+                        // leaving the cards narrower than the graph above them.
                         ScrollView {
                             DashboardOverview(vm: vm)
                         }
+                        .scrollIndicators(.never)
                     }
                 }
                 // Greedy: the detail area soaks up all vertical slack, so

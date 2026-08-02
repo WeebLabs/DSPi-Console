@@ -357,6 +357,43 @@ struct MuteableLabel: View {
 
 // MARK: - Sidebar Rows
 
+/// Sidebar descriptor badge that doubles as the graph curve's visibility toggle:
+/// coloured when the curve is drawn, greyed out when it is hidden.  The tap
+/// target is padded well beyond the capsule so the pill can be hit without
+/// tripping the row's channel-selection gesture.
+struct ChannelVisibilityPill: View {
+    let descriptor: String
+    let color: Color
+    let isVisible: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: {
+            withAnimation(.easeInOut(duration: 0.1)) { onToggle() }
+        }) {
+            Text(descriptor)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(isVisible ? color : .secondary)
+                .frame(minWidth: 32)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(isVisible ? color.opacity(0.15)
+                                                     : Color.gray.opacity(0.12)))
+                .overlay(Capsule().stroke(isVisible ? color.opacity(0.4)
+                                                    : Color.gray.opacity(0.35),
+                                          lineWidth: 1))
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.leading, 10)
+                .padding(.trailing, 8)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isVisible ? "Hide \(descriptor) on the graph"
+                        : "Show \(descriptor) on the graph")
+    }
+}
+
 struct ChannelRow: View {
     let channelIndex: Int   // unified input EQ channel index (0..chOut1-1)
     let color: Color
@@ -369,6 +406,9 @@ struct ChannelRow: View {
     /// Row height, tightened by the sidebar when input channels are crowded.
     var rowHeight: CGFloat = 28
     let onCommitRename: () -> Void
+    /// Graph-curve visibility for this channel, toggled by the descriptor pill.
+    let isCurveVisible: Bool
+    let onToggleCurve: () -> Void
     @FocusState private var isFocused: Bool
 
     var body: some View {
@@ -400,18 +440,12 @@ struct ChannelRow: View {
                 color: color,
                 isClipping: (meters.status.clipLatched & (UInt32(1) << UInt32(channelIndex))) != 0
             )
-            .padding(.horizontal, 4)
+            .padding(.leading, 4)
 
-            Text(descriptor)
-                .font(.system(size: 8, weight: .bold))
-                .foregroundColor(color)
-                .frame(minWidth: 28)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(color.opacity(0.15)))
-                .overlay(Capsule().stroke(color.opacity(0.4), lineWidth: 1))
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.trailing, 8)
+            ChannelVisibilityPill(descriptor: descriptor,
+                                  color: color,
+                                  isVisible: isCurveVisible,
+                                  onToggle: onToggleCurve)
         }
         .frame(height: rowHeight)
         .contentShape(Rectangle())
@@ -442,6 +476,9 @@ struct OutputRow: View {
     let onCommitRename: () -> Void
     /// Unified EQ/channel index for this output (output index + chOut1).
     let chIdx: Int
+    /// Graph-curve visibility for this channel, toggled by the descriptor pill.
+    let isCurveVisible: Bool
+    let onToggleCurve: () -> Void
     @FocusState private var isFocused: Bool
 
     var body: some View {
@@ -474,18 +511,12 @@ struct OutputRow: View {
                 isMuted: isMuted,
                 isClipping: (meters.status.clipLatched & (UInt32(1) << UInt32(chIdx))) != 0
             )
-            .padding(.horizontal, 4)
+            .padding(.leading, 4)
 
-            Text(output.descriptor)
-                .font(.system(size: 8, weight: .bold))
-                .foregroundColor(output.color)
-                .frame(minWidth: 28)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(output.color.opacity(0.15)))
-                .overlay(Capsule().stroke(output.color.opacity(0.4), lineWidth: 1))
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.trailing, 8)
+            ChannelVisibilityPill(descriptor: output.descriptor,
+                                  color: output.color,
+                                  isVisible: isCurveVisible,
+                                  onToggle: onToggleCurve)
         }
         .frame(height: rowHeight)
         .contentShape(Rectangle())
