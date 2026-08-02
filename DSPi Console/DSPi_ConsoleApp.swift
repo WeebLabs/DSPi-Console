@@ -4075,7 +4075,8 @@ struct ControlSurfacesSettingsTab: View {
             let names = ["Default", "Chu Moy", "Meier", "Custom"]
             return (value >= 0 && value < names.count) ? names[value] : "Preset \(value)"
         case CS_NOUN_UPMIX_CENTER_MODE:
-            let names = ["Sinner", "Logician"]
+            // Caps v5 appended Off as value 2 (the surround enum puts Off first).
+            let names = ["Sinner", "Logician", "Off"]
             return (value >= 0 && value < names.count) ? names[value] : "Mode \(value)"
         case CS_NOUN_UPMIX_SURROUND_MODE:
             let names = ["Off", "Sinner", "Logician"]
@@ -5021,10 +5022,11 @@ struct HardwareSettingsTab: View {
             // MARK: Inputs
             if section == .spdif && vm.inputSourceSupported {
                 Section {
-                    // Number of S/PDIF inputs — 1..3.  Optional inputs 2/3 share
-                    // the single receiver; the count selector enables inputs 1..N
-                    // and disables the rest.  Only shown on firmware that
-                    // advertises the optional inputs (multiSpdifSupported).
+                    // Number of S/PDIF inputs — 1..N, where N is whatever the
+                    // device reports (3 or 4).  The optional inputs share the
+                    // single receiver; the count selector enables inputs 1..N and
+                    // disables the rest.  Only shown on firmware that advertises
+                    // the optional inputs (multiSpdifSupported).
                     if vm.multiSpdifSupported {
                         HStack {
                             Image(systemName: "arrow.down.to.line")
@@ -5738,7 +5740,7 @@ struct HardwareSettingsTab: View {
         .fixedSize()
     }
 
-    /// Set how many S/PDIF inputs are active (1..3): enables inputs 1..target
+    /// Set how many S/PDIF inputs are active (1..N): enables inputs 1..target
     /// and disables the rest.  Enables run low→high so a lower input frees its
     /// state first; disables run high→low.  Surfaces the firmware's reason on
     /// the first rejection (pin conflict when enabling, or "switch away first"
@@ -5767,7 +5769,7 @@ struct HardwareSettingsTab: View {
 
             // Disable inputs above the target (descending).
             if failure == nil {
-                for idx in stride(from: SPDIF_RX_NUM_INPUTS - 1, through: 1, by: -1)
+                for idx in stride(from: vm.spdifInputCount - 1, through: 1, by: -1)
                 where idx >= target && vm.spdifInputEnabled(index: idx) {
                     let s = vm.setSpdifInputEnable(index: idx, false)
                     if s != PIN_CONFIG_SUCCESS {

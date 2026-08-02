@@ -16,19 +16,21 @@ final class I2sSlaveWireTests: XCTestCase {
         XCTAssertEqual(I2S_CLOCK_MODE_SLAVE, 1)
     }
 
-    /// V21 claims WireInputConfig byte +11 for i2s_clock_mode without changing
-    /// the section or total size (still 5876 bytes, unchanged from V20).  Bytes
-    /// +8/+9/+10 are already taken by the optional SPDIF 2/3 pins + enable mask.
+    /// V21 claimed a WireInputConfig reserved byte for i2s_clock_mode without
+    /// changing the section or total size.  V28 moved it to +12: bytes +8/+9/+10
+    /// are the optional SPDIF 2/3/4 pins and +11 their enable mask.
     func testWireFormatSizing() {
         // V22 (Linkwitz Transform) reuses each WireBandParams' reserved bytes
         // for qp; sizes and this section's offsets are unchanged from V21.
         // V23 (Psychoacoustic Bass) appends a 24-byte section, growing the flat
         // layout 5876 -> 5900; this section's offsets are unchanged.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 26)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 28)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
-        // The clock-mode byte is byte +11 within the 16-byte WireInputConfig.
-        XCTAssertEqual(BULK_INPUT_I2S_CLOCK_MODE_OFFSET, BULK_INPUT_CONFIG_OFFSET + 11)
+        // The clock-mode byte is byte +12 within the 16-byte WireInputConfig.
+        // V28 widened spdif_rx_pin_ext from 2 to 3 entries for the fourth S/PDIF
+        // input, pushing this byte and the ADAT fields below it down one.
+        XCTAssertEqual(BULK_INPUT_I2S_CLOCK_MODE_OFFSET, BULK_INPUT_CONFIG_OFFSET + 12)
         // Still inside the input-config section, ahead of the next section (LG).
         XCTAssertLessThan(BULK_INPUT_I2S_CLOCK_MODE_OFFSET, BULK_LG_OFFSET)
     }

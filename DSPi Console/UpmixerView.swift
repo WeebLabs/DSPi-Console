@@ -83,15 +83,21 @@ struct UpmixerView: View {
                         enginesSection
                             .padding(.horizontal, 16)
 
-                        Divider().padding(.horizontal, 16)
+                        // An engine that is off has nothing to configure, so its
+                        // whole block goes with it - header, divider and all.
+                        if !centreOff {
+                            Divider().padding(.horizontal, 16)
 
-                        centreSection
-                            .padding(.horizontal, 16)
+                            centreSection
+                                .padding(.horizontal, 16)
+                        }
 
-                        Divider().padding(.horizontal, 16)
+                        if surroundOn {
+                            Divider().padding(.horizontal, 16)
 
-                        surroundSection
-                            .padding(.horizontal, 16)
+                            surroundSection
+                                .padding(.horizontal, 16)
+                        }
 
                         Divider().padding(.horizontal, 16)
 
@@ -180,8 +186,10 @@ struct UpmixerView: View {
             if vm.upmixActive {
                 telemetryGauge(label: "Correlation", value: (vm.upmixCorr + 1) / 2,
                                display: String(format: "%+.2f", vm.upmixCorr), color: .accentColor)
-                telemetryGauge(label: "Centre gain", value: vm.upmixCenterGain,
-                               display: String(format: "%.0f%%", vm.upmixCenterGain * 100), color: .green)
+                if !centreOff {
+                    telemetryGauge(label: "Centre gain", value: vm.upmixCenterGain,
+                                   display: String(format: "%.0f%%", vm.upmixCenterGain * 100), color: .green)
+                }
                 if surroundOn {
                     telemetryGauge(label: "Ls gain", value: vm.upmixLsGain,
                                    display: String(format: "%.0f%%", vm.upmixLsGain * 100), color: .purple)
@@ -250,6 +258,9 @@ struct UpmixerView: View {
                     get: { vm.upmixCenterMode },
                     set: { vm.setUpmixCenterMode($0) }
                 )) {
+                    // Off is wire value 2, but sits first here to line up with the
+                    // Surround row below - the enum order is not the UI order.
+                    Text("Off").tag(UPMIX_CENTER_MODE_OFF)
                     Text("Sinner").tag(UPMIX_CENTER_MODE_PASSIVE)
                     Text("Logician").tag(UPMIX_CENTER_MODE_ADAPTIVE)
                 }
@@ -292,6 +303,8 @@ struct UpmixerView: View {
 
             // Strength and Width are the passive engine's working controls, so
             // they stay active in both modes (spec §4 per-mode applicability).
+            // The engine-off case never reaches here: the body drops this whole
+            // section, since none of it has any effect with the centre off.
             paramRow(
                 title: "Strength", unit: "%",
                 value: vm.upmixStrengthPct, range: 0...100, maxDecimals: 0, scrollStep: 1,
@@ -353,6 +366,9 @@ struct UpmixerView: View {
     /// only apply here.
     private var centreAdaptive: Bool { vm.upmixCenterMode == UPMIX_CENTER_MODE_ADAPTIVE }
 
+    /// Centre engine off (V27+): no C output at all, L/R bit-exact.
+    private var centreOff: Bool { vm.upmixCenterMode == UPMIX_CENTER_MODE_OFF }
+
     // MARK: - Surround parameters
 
     private var surroundSection: some View {
@@ -361,42 +377,36 @@ struct UpmixerView: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            // The conditioning chain applies in both Sinner and Logician surround;
-            // when the engine is Off no rears are produced, so hide the controls
-            // and show only a short explanation in their place.
-            if surroundOn {
-                paramRow(
-                    title: "Delay", unit: "ms",
-                    value: vm.upmixSurroundDelayMs, range: 0...20, maxDecimals: 1, scrollStep: 0.5,
-                    help: "Haas delay on Ls/Rs (precedence effect). Rule of thumb ~1 ms per foot of listener distance.",
-                    set: { vm.setUpmixSurroundDelay($0) }
-                )
-                Divider()
-                paramRow(
-                    title: "Band-limit HPF", unit: "Hz",
-                    value: vm.upmixSurroundHpfHz, range: 20...2000, maxDecimals: 0, scrollStep: 5,
-                    help: "Surround high-pass; keeps rumble out of the rears.",
-                    set: { vm.setUpmixSurroundHpf($0) }
-                )
-                Divider()
-                paramRow(
-                    title: "Band-limit LPF", unit: "Hz",
-                    value: vm.upmixSurroundLpfHz, range: 1000...20000, maxDecimals: 0, scrollStep: 100,
-                    help: "Surround low-pass. 7 kHz is the classic surround voicing; raise for full-band rears.",
-                    set: { vm.setUpmixSurroundLpf($0) }
-                )
-                Divider()
-                paramRow(
-                    title: "Decorrelation", unit: "%",
-                    value: vm.upmixDecorrPct, range: 0...100, maxDecimals: 0, scrollStep: 1,
-                    help: "Schroeder allpass decorrelator amount. 0 disables decorrelation.",
-                    set: { vm.setUpmixDecorr($0) }
-                )
-            } else {
-                Text("Surround engine is off - rows Ls/Rs are not produced.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
+            // The conditioning chain applies in both Sinner and Logician surround.
+            // The engine-off case never reaches here - the body drops the whole
+            // section rather than leaving a header over an explanation.
+            paramRow(
+                title: "Delay", unit: "ms",
+                value: vm.upmixSurroundDelayMs, range: 0...20, maxDecimals: 1, scrollStep: 0.5,
+                help: "Haas delay on Ls/Rs (precedence effect). Rule of thumb ~1 ms per foot of listener distance.",
+                set: { vm.setUpmixSurroundDelay($0) }
+            )
+            Divider()
+            paramRow(
+                title: "Band-limit HPF", unit: "Hz",
+                value: vm.upmixSurroundHpfHz, range: 20...2000, maxDecimals: 0, scrollStep: 5,
+                help: "Surround high-pass; keeps rumble out of the rears.",
+                set: { vm.setUpmixSurroundHpf($0) }
+            )
+            Divider()
+            paramRow(
+                title: "Band-limit LPF", unit: "Hz",
+                value: vm.upmixSurroundLpfHz, range: 1000...20000, maxDecimals: 0, scrollStep: 100,
+                help: "Surround low-pass. 7 kHz is the classic surround voicing; raise for full-band rears.",
+                set: { vm.setUpmixSurroundLpf($0) }
+            )
+            Divider()
+            paramRow(
+                title: "Decorrelation", unit: "%",
+                value: vm.upmixDecorrPct, range: 0...100, maxDecimals: 0, scrollStep: 1,
+                help: "Schroeder allpass decorrelator amount. 0 disables decorrelation.",
+                set: { vm.setUpmixDecorr($0) }
+            )
         }
     }
 

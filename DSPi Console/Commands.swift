@@ -1811,8 +1811,12 @@ extension DSPViewModel {
     /// older firmware the request STALLs; we fall back to the single-input pin read
     /// (REQ_GET_SPDIF_RX_PIN index 0) and mark multi-input as unsupported.
     func fetchSpdifInputConfig() {
-        guard let d = usb.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0, index: 2, length: 5),
-              d.count >= 5 else {
+        // The response is 2 + count bytes.  Ask for the largest inventory we know
+        // about; a three-input firmware answers short, which is why the pin list
+        // is sized from the returned count rather than a fixed length.
+        let maxLen = UInt16(2 + SPDIF_RX_NUM_INPUTS)
+        guard let d = usb.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0, index: 2, length: maxLen),
+              d.count >= 3 else {
             DispatchQueue.main.async {
                 self.multiSpdifSupported = false
                 self.spdifInputCount = 1
@@ -1820,15 +1824,24 @@ extension DSPViewModel {
             fetchSpdifRxPin()
             return
         }
-        let count = Int(d[0])
+        let count = min(Int(d[0]), min(d.count - 2, SPDIF_RX_NUM_INPUTS))
         let mask = d[1]
-        let pin0 = d[2], pin1 = d[3], pin2 = d[4]
+        let pin0 = d[2]
+        // Keep the ext arrays at full length whatever the device reports, so a
+        // three-input device still has a well-formed slot for a future input 4;
+        // indices past `count` stay at their defaults and are never shown.
+        var pinsExt = Array(SPDIF_RX_PIN_DEFAULTS.dropFirst())
+        var enabled = Array(repeating: false, count: SPDIF_RX_NUM_INPUTS - 1)
+        for idx in 1..<max(count, 1) {
+            pinsExt[idx - 1] = d[2 + idx]
+            enabled[idx - 1] = (mask & (1 << UInt8(idx))) != 0
+        }
         DispatchQueue.main.async {
             self.multiSpdifSupported = true
-            self.spdifInputCount = count
+            self.spdifInputCount = max(count, 1)
             self.spdifRxPin = pin0
-            self.spdifRxPinsExt = [pin1, pin2]
-            self.spdifExtEnabled = [(mask & 0x02) != 0, (mask & 0x04) != 0]
+            self.spdifRxPinsExt = pinsExt
+            self.spdifExtEnabled = enabled
         }
     }
 
@@ -1860,7 +1873,7 @@ extension DSPViewModel {
         }
     }
 
-    /// Set the GPIO pin used for a S/PDIF input (index 0..2, default 0 = input 1).
+    /// Set the GPIO pin used for a S/PDIF input (index 0..3, default 0 = input 1).
     /// Single IN transfer: wValue = (index << 8) | pin.  Returns the firmware
     /// PIN_CONFIG_* status code.  The pin is hot-swappable while the input is
     /// active (no OUTPUT_ACTIVE rejection); a disabled optional input stores the
@@ -1881,7 +1894,7 @@ extension DSPViewModel {
         return 0xFF
     }
 
-    /// Enable or disable an optional S/PDIF input (index 1 = SPDIF 2, 2 = SPDIF 3).
+    /// Enable or disable an optional S/PDIF input (index 1..3 = SPDIF 2/3/4).
     /// Input 1 (index 0) is always enabled.  IN transfer: wValue = (index<<8)|enable.
     /// Returns the firmware PIN_CONFIG_* status.  Enabling validates the configured
     /// pin; disabling is refused (PIN_IN_USE) while the input is the active source.
@@ -2693,16 +2706,18 @@ extension DSPViewModel {
         let bulkI2SRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 5],
                                          data[BULK_INPUT_CONFIG_OFFSET + 6],
                                          data[BULK_INPUT_CONFIG_OFFSET + 7]]
-        // v1.1.5 optional S/PDIF inputs 2/3: pins at +8/+9 (0 = keep live),
-        // enable mask "plus one" at +10 (0 = field absent; otherwise mask = enc-1,
-        // bit0 = SPDIF2, bit1 = SPDIF3).  The +1 encoding lets old hosts push
-        // zeros meaning "absent" rather than "disable both".
+        // Optional S/PDIF inputs 2/3/4: pins at +8/+9/+10 (0 = keep live), enable
+        // mask "plus one" at +11 (0 = field absent; otherwise mask = enc-1,
+        // bit0 = SPDIF2 .. bit2 = SPDIF4).  The +1 encoding lets old hosts push
+        // zeros meaning "absent" rather than "disable them all".  V28 grew the
+        // pin array from 2 to 3, which is what shifted this and the fields below.
         let bulkSpdifRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 8],
-                                           data[BULK_INPUT_CONFIG_OFFSET + 9]]
-        let bulkSpdifEnabledExtP1 = data[BULK_INPUT_CONFIG_OFFSET + 10]
-        // V21+ I2S clock mode at +11 (0=master, 1=slave).
+                                           data[BULK_INPUT_CONFIG_OFFSET + 9],
+                                           data[BULK_INPUT_CONFIG_OFFSET + 10]]
+        let bulkSpdifEnabledExtP1 = data[BULK_INPUT_CONFIG_OFFSET + 11]
+        // V21+ I2S clock mode at +12 (0=master, 1=slave).
         let bulkI2SClockMode = data[BULK_INPUT_I2S_CLOCK_MODE_OFFSET]
-        // V24+ ADAT input at +12/+13/+14 (RP2350).  Pin: 0 = unset (0xFF never on
+        // V24+ ADAT input at +13/+14/+15 (RP2350).  Pin: 0 = unset (0xFF never on
         // the wire).  Enable / clock mode are +1 encoded (0 = absent/keep live).
         let bulkAdatInputPinRaw = data[BULK_INPUT_ADAT_PIN_OFFSET]
         let bulkAdatInputPin: UInt8 = bulkAdatInputPinRaw == 0 ? ADAT_INPUT_PIN_UNSET : bulkAdatInputPinRaw
@@ -2854,16 +2869,19 @@ extension DSPViewModel {
             self.inputSource = bulkInputSource
             self.inputSourceSupported = true
             self.spdifRxPin = bulkSpdifRxPin
-            // Optional S/PDIF 2/3: a non-zero enable-mask+1 byte marks the
+            // Optional S/PDIF 2/3/4: a non-zero enable-mask+1 byte marks the
             // multiple-input feature present and carries the live enable state;
-            // ext pins of 0 mean "absent, keep the live pin".
+            // ext pins of 0 mean "absent, keep the live pin".  The count comes
+            // from the 0xEF inventory (fetchSpdifInputConfig), which is the only
+            // thing that knows how many inputs this firmware actually has; bulk
+            // just fills in the state.  Assume the full count until it lands.
             if bulkSpdifEnabledExtP1 != 0 {
                 self.multiSpdifSupported = true
-                self.spdifInputCount = SPDIF_RX_NUM_INPUTS
+                if self.spdifInputCount < 2 { self.spdifInputCount = SPDIF_RX_NUM_INPUTS }
                 let mask = bulkSpdifEnabledExtP1 - 1
-                self.spdifExtEnabled = [(mask & 0x01) != 0, (mask & 0x02) != 0]
-                for i in 0..<2 where bulkSpdifRxPinsExt[i] != 0 {
-                    self.spdifRxPinsExt[i] = bulkSpdifRxPinsExt[i]
+                for i in 0..<(SPDIF_RX_NUM_INPUTS - 1) {
+                    self.spdifExtEnabled[i] = (mask & (1 << UInt8(i))) != 0
+                    if bulkSpdifRxPinsExt[i] != 0 { self.spdifRxPinsExt[i] = bulkSpdifRxPinsExt[i] }
                 }
             }
             self.i2sInputSupported = true
@@ -3406,7 +3424,7 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.input_source (BULK_INPUT_CONFIG_OFFSET = 4712, 1 byte).  Fired at the
+        // input_config.input_source (BULK_INPUT_CONFIG_OFFSET, 1 byte).  Fired at the
         // tail of the firmware's deferred input-source switch handler —
         // i.e. after all per-source thaw/init work has run (including
         // the SPDIF→USB audio_set_volume() thaw).  Use this as the
@@ -3431,7 +3449,7 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.i2s_rx_pin (offset 4714, 1 byte) — pair 0 data pin.
+        // input_config.i2s_rx_pin (+2, 1 byte) — pair 0 data pin.
         // Fires when 0xF1 (pair 0) succeeds, bulk apply, or a preset load.
         if off == BULK_INPUT_CONFIG_OFFSET + 2 && sz == 1 && payload.count >= 1 {
             self.i2sInputSupported = true
@@ -3439,7 +3457,7 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.i2s_input_rate (offset 4715, 1 byte, enum 0/1/2) —
+        // input_config.i2s_input_rate (+3, 1 byte, enum 0/1/2) —
         // fires when 0xED accepts a rate.
         if off == BULK_INPUT_CONFIG_OFFSET + 3 && sz == 1 && payload.count >= 1 {
             self.i2sInputSupported = true

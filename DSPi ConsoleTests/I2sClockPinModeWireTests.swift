@@ -28,7 +28,7 @@ final class I2sClockPinModeWireTests: XCTestCase {
         // this section's offsets and the total size are unchanged from V21.
         // V23 (Psychoacoustic Bass) appends a 24-byte section, growing the flat
         // layout 5876 -> 5900; this section's offsets are unchanged.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 26)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 28)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
         XCTAssertEqual(BULK_I2S_CLOCK_PIN_MODE_OFFSET, BULK_I2S_OFFSET + 8)
         XCTAssertEqual(BULK_I2S_BCK_PIN_SLAVE_OFFSET, BULK_I2S_OFFSET + 9)

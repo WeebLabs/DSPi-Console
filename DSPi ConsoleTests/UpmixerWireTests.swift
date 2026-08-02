@@ -36,6 +36,9 @@ final class UpmixerWireTests: XCTestCase {
     func testModeAndParkedConstants() {
         XCTAssertEqual(UPMIX_CENTER_MODE_PASSIVE, 0)
         XCTAssertEqual(UPMIX_CENTER_MODE_ADAPTIVE, 1)
+        // V27 appended OFF as 2 rather than renumbering to the surround enum's
+        // OFF-first layout, so saved presets and older hosts keep their meaning.
+        XCTAssertEqual(UPMIX_CENTER_MODE_OFF, 2)
         XCTAssertEqual(UPMIX_SURROUND_MODE_OFF, 0)
         XCTAssertEqual(UPMIX_SURROUND_MODE_PASSIVE, 1)
         XCTAssertEqual(UPMIX_SURROUND_MODE_ADAPTIVE, 2)
@@ -49,7 +52,7 @@ final class UpmixerWireTests: XCTestCase {
     /// 5900, growing the flat layout to 5944 bytes; V26 claims its reserved byte
     /// +3 for presence_q1 with no size change (spec §7).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 26)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 28)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
         XCTAssertEqual(BULK_UPMIX_OFFSET, 5900)
         XCTAssertEqual(UPMIX_CONFIG_PACKET_SIZE, 44)

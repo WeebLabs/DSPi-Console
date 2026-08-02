@@ -233,7 +233,7 @@ extension PresetSnapshot {
             changes.append(.init(category: "Upmix", description: "Stereo Upmixer: \(new.upmixEnabled ? "enabled" : "disabled")"))
         }
         if old.upmixCenterMode != new.upmixCenterMode {
-            let names = ["Sinner", "Logician"]
+            let names = ["Sinner", "Logician", "Off"]   // Off is wire value 2
             let o = old.upmixCenterMode < names.count ? names[old.upmixCenterMode] : "\(old.upmixCenterMode)"
             let n = new.upmixCenterMode < names.count ? names[new.upmixCenterMode] : "\(new.upmixCenterMode)"
             changes.append(.init(category: "Upmix", description: "Centre mode: \(o) → \(n)"))

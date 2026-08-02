@@ -12,7 +12,7 @@ enum PinConsumer: Equatable {
     case i2sBck         // also covers LRCLK (BCK + 1)
     case i2sBckSlave    // slave-mode BCK pair (LRCLK = BCK + 1); reserved only in SPLIT clock-pin mode
     case mck
-    case spdifRx(Int)   // S/PDIF RX data pin, per input index (0..2)
+    case spdifRx(Int)   // S/PDIF RX data pin, per input index (0..3)
     case i2sRx(Int)     // I2S input data pin, per stereo pair (0..3)
     case dacMute
     case uartCtrl       // UART control interface (covers both TX and RX pins)
@@ -937,7 +937,7 @@ class DSPViewModel: ObservableObject {
     // the first fetch.  The firmware clamps every float to its documented range;
     // the app enforces the same ranges on commit so state stays identical.
     @Published var upmixEnabled: Bool = false
-    @Published var upmixCenterMode: Int = UPMIX_CENTER_MODE_ADAPTIVE       // 0/1
+    @Published var upmixCenterMode: Int = UPMIX_CENTER_MODE_ADAPTIVE       // 0/1/2
     @Published var upmixSurroundMode: Int = UPMIX_SURROUND_MODE_ADAPTIVE   // 0/1/2
     @Published var upmixStrengthPct: Float = 100.0        // 0..100 %
     @Published var upmixCenterWidthPct: Float = 25.0      // 0..100 %
@@ -1001,20 +1001,23 @@ class DSPViewModel: ObservableObject {
     @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
     // Input source state
-    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S, 4=SPDIF2, 5=SPDIF3
+    @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S, 4/5/6=SPDIF2/3/4
     @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
     @Published var spdifRxPin: UInt8 = 11             // GPIO pin for S/PDIF input 1
 
     // Multiple S/PDIF inputs (firmware v1.1.5+, probed via REQ_GET_SPDIF_INPUT_CONFIG).
     // `multiSpdifSupported` is false on older firmware that STALLs 0xEF, in which
-    // case only input 1 (`spdifRxPin`) exists.  Inputs 2/3 are optional and
+    // case only input 1 (`spdifRxPin`) exists.  Inputs 2/3/4 are optional and
     // disabled by default; a disabled input's pin is a stored preference only.
+    // `spdifInputCount` is the device's own inventory size, so firmware that
+    // predates the fourth input simply reports 3 and the extra row never appears.
     @Published var multiSpdifSupported: Bool = false
     @Published var spdifInputCount: Int = 1
-    /// GPIO pins for optional S/PDIF inputs 2 and 3 (indices 1 and 2).
-    @Published var spdifRxPinsExt: [UInt8] = [SPDIF_RX_PIN_DEFAULTS[1], SPDIF_RX_PIN_DEFAULTS[2]]
-    /// Enable state for optional S/PDIF inputs 2 and 3 (indices 1 and 2).
-    @Published var spdifExtEnabled: [Bool] = [false, false]
+    /// GPIO pins for the optional S/PDIF inputs 2/3/4 (indices 1..3).  Always
+    /// SPDIF_RX_NUM_INPUTS-1 long; entries past the device's count are unused.
+    @Published var spdifRxPinsExt: [UInt8] = Array(SPDIF_RX_PIN_DEFAULTS.dropFirst())
+    /// Enable state for the optional S/PDIF inputs 2/3/4 (indices 1..3).
+    @Published var spdifExtEnabled: [Bool] = Array(repeating: false, count: SPDIF_RX_NUM_INPUTS - 1)
 
     // I2S input state (firmware wire format V12+).  `i2sInputSupported` is
     // false on older firmware that STALLs REQ_GET_I2S_RX_PIN (0xF2) or returns
@@ -1090,11 +1093,12 @@ class DSPViewModel: ObservableObject {
 
     // MARK: - S/PDIF input helpers
 
-    /// GPIO pin configured for a S/PDIF input index (0 = input 1, 1/2 = optional).
+    /// GPIO pin configured for a S/PDIF input index (0 = input 1, 1..3 = optional).
     func spdifPin(index: Int) -> UInt8 {
         if index == 0 { return spdifRxPin }
         let i = index - 1
-        return spdifRxPinsExt.indices.contains(i) ? spdifRxPinsExt[i] : SPDIF_RX_PIN_DEFAULTS[min(index, 2)]
+        if spdifRxPinsExt.indices.contains(i) { return spdifRxPinsExt[i] }
+        return SPDIF_RX_PIN_DEFAULTS[min(index, SPDIF_RX_PIN_DEFAULTS.count - 1)]
     }
 
     /// Whether a S/PDIF input index is enabled.  Input 1 is always enabled.
@@ -1104,28 +1108,23 @@ class DSPViewModel: ObservableObject {
         return spdifExtEnabled.indices.contains(i) ? spdifExtEnabled[i] : false
     }
 
-    /// Map a S/PDIF input index (0..2) to its InputSource enum value (1/4/5).
+    /// Map a S/PDIF input index (0..3) to its InputSource enum value (1/4/5/6).
+    /// The optional sources are contiguous from INPUT_SOURCE_SPDIF2, matching the
+    /// firmware's arithmetic helpers.
     func spdifSource(forIndex index: Int) -> Int {
-        switch index {
-        case 0: return INPUT_SOURCE_SPDIF
-        case 1: return INPUT_SOURCE_SPDIF2
-        default: return INPUT_SOURCE_SPDIF3
-        }
+        index == 0 ? INPUT_SOURCE_SPDIF : INPUT_SOURCE_SPDIF2 + (index - 1)
     }
 
-    /// Map an InputSource enum value (1/4/5) back to a S/PDIF input index (0..2),
-    /// or nil if it isn't a S/PDIF source.
+    /// Map an InputSource enum value (1/4/5/6) back to a S/PDIF input index
+    /// (0..3), or nil if it isn't a S/PDIF source.
     func spdifIndex(forSource source: Int) -> Int? {
-        switch source {
-        case INPUT_SOURCE_SPDIF:  return 0
-        case INPUT_SOURCE_SPDIF2: return 1
-        case INPUT_SOURCE_SPDIF3: return 2
-        default: return nil
-        }
+        if source == INPUT_SOURCE_SPDIF { return 0 }
+        let i = source - INPUT_SOURCE_SPDIF2 + 1
+        return (1..<SPDIF_RX_NUM_INPUTS).contains(i) ? i : nil
     }
 
-    /// True when any optional S/PDIF input (2 or 3) is enabled — used to decide
-    /// whether input 1 should be labelled "S/PDIF 1" vs the bare "S/PDIF".
+    /// True when any optional S/PDIF input (2, 3 or 4) is enabled — used to
+    /// decide whether input 1 should be labelled "S/PDIF 1" vs the bare "S/PDIF".
     var anyOptionalSpdifEnabled: Bool { spdifExtEnabled.contains(true) }
 
     /// Number of S/PDIF inputs treated as active for the count-selector UI:
@@ -1133,8 +1132,10 @@ class DSPViewModel: ObservableObject {
     /// non-consecutive enable state (e.g. only input 3 on) still reports 3 so
     /// every row up to the highest is shown; re-selecting a count normalises it.
     var spdifEnabledCount: Int {
-        if spdifInputEnabled(index: 2) { return 3 }
-        if spdifInputEnabled(index: 1) { return 2 }
+        for idx in stride(from: spdifInputCount - 1, through: 1, by: -1)
+        where spdifInputEnabled(index: idx) {
+            return idx + 1
+        }
         return 1
     }
 
@@ -1164,6 +1165,7 @@ class DSPViewModel: ObservableObject {
         case INPUT_SOURCE_SPDIF:  return anyOptionalSpdifEnabled ? "S/PDIF 1" : "S/PDIF"
         case INPUT_SOURCE_SPDIF2: return "S/PDIF 2"
         case INPUT_SOURCE_SPDIF3: return "S/PDIF 3"
+        case INPUT_SOURCE_SPDIF4: return "S/PDIF 4"
         case INPUT_SOURCE_I2S:    return "I2S"
         case INPUT_SOURCE_ADAT:   return "ADAT"
         default: return "Source \(source)"
@@ -1348,14 +1350,14 @@ class DSPViewModel: ObservableObject {
     ///   - USB: the host-selected USB format from CoreAudio (which stays correct
     ///     while the device idles to alt 0), falling back to the live
     ///     device-reported active count only when CoreAudio can't be resolved.
-    ///   - S/PDIF (1/4/5): always stereo.
+    ///   - S/PDIF (1/4/5/6): always stereo.
     ///   - I2S: the configured I2S input channel count (2/4/6/8).
     /// CoreAudio only reflects the USB stream's format, so it must not drive the
     /// layout when a non-USB source is selected.
     var effectiveInputChannels: Int {
         let base: Int
         switch inputSource {
-        case INPUT_SOURCE_SPDIF, INPUT_SOURCE_SPDIF2, INPUT_SOURCE_SPDIF3:
+        case INPUT_SOURCE_SPDIF, INPUT_SOURCE_SPDIF2, INPUT_SOURCE_SPDIF3, INPUT_SOURCE_SPDIF4:
             base = BASE_MATRIX_INPUTS
         case INPUT_SOURCE_I2S:
             base = i2sInputChannels
@@ -1576,7 +1578,7 @@ class DSPViewModel: ObservableObject {
             if pin == i2sBckPinSlave &+ 1 { return "I2S Slave LRCLK" }
         }
         if consumer != .mck && pin == mckPin { return "I2S MCK" }
-        // S/PDIF RX pins.  Input 1 is always reserved; the optional inputs 2/3
+        // S/PDIF RX pins.  Input 1 is always reserved; the optional inputs 2/3/4
         // are reserved only while enabled (a disabled input's pin is invisible
         // to conflict checks, mirroring the firmware's per-input reservation).
         if inputSourceSupported {

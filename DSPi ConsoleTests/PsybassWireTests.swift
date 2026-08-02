@@ -29,7 +29,7 @@ final class PsybassWireTests: XCTestCase {
     /// V23 appends WirePsybassParams (24 bytes) as the final section at offset
     /// 5876, growing the flat layout from 5876 to 5900 bytes (spec §4).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 26)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 28)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
         XCTAssertEqual(BULK_PSYBASS_OFFSET, 5876)
         // The psybass section is 24 bytes; the upmixer section follows it (V25).

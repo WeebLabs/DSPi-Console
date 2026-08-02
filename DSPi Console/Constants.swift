@@ -103,9 +103,12 @@ let UPMIX_PARAM_DECORR:        UInt16 = 12
 // and presets it is packed into config byte 3 as `presence_q1` (i8 = dB x 2).
 let UPMIX_PARAM_PRESENCE:      UInt16 = 13
 
-// Centre engine modes (UPMIX_PARAM_CENTER_MODE).
+// Centre engine modes (UPMIX_PARAM_CENTER_MODE).  OFF was appended as 2 rather
+// than renumbered to match the surround enum's OFF-first layout, because moving
+// 0/1 would have silently remapped existing hosts and saved presets.
 let UPMIX_CENTER_MODE_PASSIVE:  Int = 0
 let UPMIX_CENTER_MODE_ADAPTIVE: Int = 1
+let UPMIX_CENTER_MODE_OFF:      Int = 2   // V27+: no C output, L/R bit-exact
 // Surround engine modes (UPMIX_PARAM_SURROUND_MODE).
 let UPMIX_SURROUND_MODE_OFF:      Int = 0
 let UPMIX_SURROUND_MODE_PASSIVE:  Int = 1
@@ -249,6 +252,14 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
+/// Wire format V28 (fourth selectable S/PDIF input): WireInputConfig's
+/// `spdif_rx_pin_ext` grows from 2 to 3 entries, consuming that section's last
+/// reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and
+/// the three ADAT input fields down one byte each.  The section stays 16 bytes,
+/// so no later section moved and the total size is unchanged.
+/// Wire format V27 (Upmixer centre OFF): widens the centre-mode enum with
+/// OFF (2) - a surrounds-only mode that leaves L/R bit-exact.  No struct or
+/// offset change; the bump exists only because version discipline is strict.
 /// Wire format V26 (Upmixer presence): claims the WireUpmixParams reserved byte
 /// at offset +3 for `presence_q1` (i8 = dB x 2), so the section and total size are
 /// unchanged from V25.  Version discipline is strict - a V26 client's bulk image
@@ -278,9 +289,9 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 26
-/// Full V26 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// Unchanged from V25 - the presence byte reuses a WireUpmixParams reserved byte.
+let WIRE_FORMAT_VERSION: Int            = 28
+/// Full V28 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// Unchanged since V25 - V26/V27/V28 all reuse bytes inside existing sections.
 let BULK_PARAMS_SIZE: UInt16            = 5944
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
@@ -303,16 +314,17 @@ let BULK_LEVELLER_OFFSET: Int           = 4648  // WireLevellerConfig, 20 bytes 
 let BULK_PREAMP_OFFSET: Int             = 4668  // preamp_db[8]
 let BULK_MASTER_VOLUME_OFFSET: Int      = 4700
 let BULK_INPUT_CONFIG_OFFSET: Int       = 4716  // input_source, spdif_rx_pin, i2s_rx_pin, i2s_rate
-/// Byte +11 within WireInputConfig: i2s_clock_mode (0=master, 1=slave; V21+).
-/// Bytes +8/+9/+10 are the optional SPDIF 2/3 pins and enable mask.
-let BULK_INPUT_I2S_CLOCK_MODE_OFFSET: Int = 4727
-/// ADAT input (V24+), claimed from WireInputConfig reserved bytes +12/+13/+14.
+/// Byte +12 within WireInputConfig: i2s_clock_mode (0=master, 1=slave; V21+).
+/// Bytes +8/+9/+10 are the optional SPDIF 2/3/4 pins and +11 the enable mask
+/// (V28 grew the pin array from 2 to 3, pushing everything below it down one).
+let BULK_INPUT_I2S_CLOCK_MODE_OFFSET: Int = 4728
+/// ADAT input (V24+), claimed from WireInputConfig reserved bytes +13/+14/+15.
 /// All use the 0 = "absent, keep live" convention; enable/clock-mode are +1
 /// encoded (0=absent, 1=disabled/master, 2=enabled/slave) and the pin is a raw
 /// GPIO with 0 = unset (0xFF never appears on the wire).
-let BULK_INPUT_ADAT_PIN_OFFSET: Int          = 4728
-let BULK_INPUT_ADAT_ENABLED_P1_OFFSET: Int   = 4729
-let BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET: Int = 4730
+let BULK_INPUT_ADAT_PIN_OFFSET: Int          = 4729
+let BULK_INPUT_ADAT_ENABLED_P1_OFFSET: Int   = 4730
+let BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET: Int = 4731
 let BULK_LG_OFFSET: Int                 = 4732
 let BULK_USER_VOLUME_OFFSET: Int        = 4748  // user_volume_db, user_mute
 let BULK_DAC_HW_MUTE_OFFSET: Int        = 4764
@@ -403,22 +415,28 @@ let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
 // Multiple-S/PDIF-input commands (firmware v1.1.5+).  STALL on older firmware,
 // which the app treats as "single S/PDIF input only".
 let REQ_SET_SPDIF_INPUT_ENABLE: UInt8 = 0xE9   // IN: wValue = (index<<8)|enable, returns status
-let REQ_GET_SPDIF_INPUT_CONFIG: UInt8 = 0xEF   // IN 5 bytes: count, enable_mask, pin[0..2]
+// IN, 2 + count bytes: count, enable_mask, then one GPIO per input.  Firmware
+// that predates the fourth input answers with 5 bytes rather than 6, so read
+// the count and treat the pin list as short rather than assuming a fixed size.
+let REQ_GET_SPDIF_INPUT_CONFIG: UInt8 = 0xEF
 
 // Input source enum values (payload of 0xE0 / response of 0xE1, and
 // WireInputConfig byte 0).  Value 3 is the 8-channel ADAT input (RP2350 only);
-// values 4/5 are the two optional S/PDIF inputs.
+// values 4/5/6 are the three optional S/PDIF inputs.
 let INPUT_SOURCE_USB: Int    = 0
 let INPUT_SOURCE_SPDIF: Int  = 1
 let INPUT_SOURCE_I2S: Int    = 2
 let INPUT_SOURCE_ADAT: Int   = 3
 let INPUT_SOURCE_SPDIF2: Int = 4
 let INPUT_SOURCE_SPDIF3: Int = 5
+let INPUT_SOURCE_SPDIF4: Int = 6
 
-// S/PDIF input inventory: input 1 is always present; inputs 2/3 are optional and
-// disabled by default.  Default RX GPIOs are 5 / 20 / 21 for inputs 1 / 2 / 3.
-let SPDIF_RX_NUM_INPUTS: Int         = 3
-let SPDIF_RX_PIN_DEFAULTS: [UInt8]   = [5, 20, 21]
+// S/PDIF input inventory: input 1 is always present; inputs 2/3/4 are optional
+// and disabled by default.  Default RX GPIOs are 5 / 20 / 21 / 22.  This is the
+// count the app is built for; the live count comes from the device (0xEF byte 0)
+// so a three-input firmware still drives the UI correctly.
+let SPDIF_RX_NUM_INPUTS: Int         = 4
+let SPDIF_RX_PIN_DEFAULTS: [UInt8]   = [5, 20, 21, 22]
 
 // I2S input request codes (firmware wire format V12+).  See
 // Documentation/Features/i2s_input_spec.md.  The SET pin command is an

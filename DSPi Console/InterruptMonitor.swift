@@ -378,11 +378,12 @@ private enum ParamOffsetDecoder {
             return ("master_volume.master_volume_db", v)
         }
 
-        // Input config (4712..)
+        // Input config
         if off == BULK_INPUT_CONFIG_OFFSET && sz == 1 {
             let src = payload.first ?? 0
-            let label = src == 0 ? "USB" : (src == 1 ? "SPDIF" : (src == 2 ? "I2S" : "?"))
-            return ("input_config.input_source", "\(src) (\(label))")
+            let names: [UInt8: String] = [0: "USB", 1: "SPDIF", 2: "I2S", 3: "ADAT",
+                                          4: "SPDIF2", 5: "SPDIF3", 6: "SPDIF4"]
+            return ("input_config.input_source", "\(src) (\(names[src] ?? "?"))")
         }
         if off == BULK_INPUT_CONFIG_OFFSET + 1 && sz == 1 {
             return ("input_config.spdif_rx_pin", fmtUInt8(payload))

@@ -27,7 +27,7 @@ final class AdatWireTests: XCTestCase {
         // V22 (Linkwitz Transform) reuses WireBandParams reserved bytes as qp.
         // V23 (Psychoacoustic Bass) appends WirePsybassParams (24 bytes), growing
         // the flat layout 5876 -> 5900; the ADAT section is no longer the last.
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 26)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 28)
         XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
         XCTAssertEqual(WIRE_BULK_PARAMS_V19_SIZE, 5876)
         XCTAssertEqual(BULK_ADAT_OFFSET, 5868)

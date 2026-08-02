@@ -73,6 +73,7 @@ struct SpdifRxStatus {
         case INPUT_SOURCE_SPDIF:  return "S/PDIF 1"
         case INPUT_SOURCE_SPDIF2: return "S/PDIF 2"
         case INPUT_SOURCE_SPDIF3: return "S/PDIF 3"
+        case INPUT_SOURCE_SPDIF4: return "S/PDIF 4"
         case INPUT_SOURCE_I2S:    return "I2S"
         default: return "USB"
         }
@@ -507,14 +508,12 @@ class StatsViewModel: ObservableObject {
             }
         }
 
-        // Resolve the GPIO of whichever S/PDIF input is active (inputs 2/3 have
-        // their own pins) so the RX Pin row stays accurate.
-        let srcIndex: Int
-        switch Int(status.inputSource) {
-        case INPUT_SOURCE_SPDIF2: srcIndex = 1
-        case INPUT_SOURCE_SPDIF3: srcIndex = 2
-        default: srcIndex = 0
-        }
+        // Resolve the GPIO of whichever S/PDIF input is active (inputs 2/3/4 have
+        // their own pins) so the RX Pin row stays accurate.  The optional sources
+        // are contiguous from INPUT_SOURCE_SPDIF2, matching the firmware helpers.
+        let src = Int(status.inputSource)
+        let extIndex = src - INPUT_SOURCE_SPDIF2 + 1
+        let srcIndex = (1..<SPDIF_RX_NUM_INPUTS).contains(extIndex) ? extIndex : 0
         var activePin = self.spdifRxPin
         if let pd = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(srcIndex), index: 2, length: 1),
            pd.count >= 1, pd[0] != 0 {
