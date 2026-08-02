@@ -1712,7 +1712,9 @@ class DSPViewModel: ObservableObject {
             let clamped = max(BASE_MATRIX_INPUTS, min(channels, self.chOut1))
             if self.activeInputChannels != clamped {
                 self.activeInputChannels = clamped
-                if self.isOverviewMode { self.updateSelection(to: nil) }
+                // The channel set changed, so re-derive which curves are shown -
+                // otherwise inputs that just became active would stay hidden.
+                self.resetDefaultVisibility()
             }
         }
 
@@ -1725,7 +1727,7 @@ class DSPViewModel: ObservableObject {
             guard let self = self else { return }
             if self.hostConfiguredInputChannels != channels {
                 self.hostConfiguredInputChannels = channels
-                if self.isOverviewMode { self.updateSelection(to: nil) }
+                self.resetDefaultVisibility()
             }
         }
         hostAudioFormatMonitor.start()
@@ -1850,11 +1852,21 @@ class DSPViewModel: ObservableObject {
         usb.reconnect()
     }
 
+    /// Pill states as they were on the dashboard, stashed when a channel page
+    /// takes the graph over to its single curve and handed back when the user
+    /// returns.  nil means "no snapshot to restore" - fall back to the defaults.
+    var savedOverviewVisibility: [Int: Bool]?
+
     /// Select an input channel for editing (unified EQ channel index 0..chOut1-1),
-    /// or pass nil for the overview.  Drives graph curve visibility.
+    /// or pass nil for the overview.  Opening a channel page solos its curve;
+    /// leaving one restores whatever the user had shown or hidden on the
+    /// dashboard, rather than re-deriving the defaults.
     func updateSelection(to inputChannel: Int?) {
         withAnimation(.easeInOut(duration: 0.2)) {
             if let ch = inputChannel {
+                // Only snapshot on the way in from the dashboard: hopping
+                // between channel pages must not capture a soloed state.
+                if isOverviewMode { savedOverviewVisibility = channelVisibility }
                 isOverviewMode = false
                 activeEqChannel = ch
                 // Link L/R: selecting a stereo input (0/1) with link on shows
@@ -1870,12 +1882,7 @@ class DSPViewModel: ObservableObject {
             } else {
                 isOverviewMode = true
                 activeEqChannel = nil
-                // Overview: show active input channels + all enabled outputs.
-                for eqCh in 0..<numChannels { channelVisibility[eqCh] = false }
-                for i in 0..<effectiveInputChannels { channelVisibility[i] = true }
-                for outputIdx in 0..<numOutputChannels {
-                    channelVisibility[eqChannel(forOutput: outputIdx)] = outputEnabled[outputIdx]
-                }
+                restoreOverviewVisibility()
             }
         }
     }
@@ -1889,13 +1896,45 @@ class DSPViewModel: ObservableObject {
     }
 
     func updateSelectionToOutput(_ outputIdx: Int) {
-        isOverviewMode = false
         let eqCh = eqChannel(forOutput: outputIdx)
+        if isOverviewMode { savedOverviewVisibility = channelVisibility }
+        isOverviewMode = false
         activeEqChannel = eqCh
         withAnimation(.easeInOut(duration: 0.2)) {
             for c in 0..<numChannels {
                 channelVisibility[c] = (c == eqCh)
             }
+        }
+    }
+
+    /// Hand the dashboard back its pills, or derive the defaults if the channel
+    /// set has changed since the snapshot was taken.
+    private func restoreOverviewVisibility() {
+        if let saved = savedOverviewVisibility {
+            channelVisibility = saved
+            savedOverviewVisibility = nil
+        } else {
+            applyDefaultVisibility()
+        }
+    }
+
+    /// Curve-visibility defaults: every active input plus every enabled output.
+    /// Called when the channel set itself changes (host format switch, device
+    /// data arriving); any dashboard snapshot is stale at that point, and a
+    /// channel page keeps its soloed curve until the user leaves it.
+    func resetDefaultVisibility() {
+        savedOverviewVisibility = nil
+        guard isOverviewMode else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            applyDefaultVisibility()
+        }
+    }
+
+    private func applyDefaultVisibility() {
+        for eqCh in 0..<numChannels { channelVisibility[eqCh] = false }
+        for i in 0..<effectiveInputChannels { channelVisibility[i] = true }
+        for outputIdx in 0..<numOutputChannels {
+            channelVisibility[eqChannel(forOutput: outputIdx)] = outputEnabled[outputIdx]
         }
     }
 

@@ -2938,7 +2938,10 @@ extension DSPViewModel {
             self.xoverData = bulkCrossovers
 
             // Refresh channel visibility now that platform/outputs are populated.
-            // (chOut1 reflects the freshly-set platformName.)
+            // (chOut1 reflects the freshly-set platformName.)  Any dashboard
+            // snapshot predates this channel set, so drop it - leaving a channel
+            // page now re-derives the defaults instead of restoring stale pills.
+            self.savedOverviewVisibility = nil
             if self.isOverviewMode {
                 for i in 0..<self.chOut1 {
                     self.channelVisibility[i] = (i < self.effectiveInputChannels)
