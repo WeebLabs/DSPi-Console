@@ -328,7 +328,10 @@ struct ContentView: View {
                             .onOptionClick { startRename(ch) }
                             .onTapGesture {
                                 if renamingChannel != nil { commitRename() }
-                                if selection == .input(ch) {
+                                // Deselect on any row the current page already
+                                // covers: with Link L/R on that page is the
+                                // stereo pair's, so either row closes it.
+                                if rowSelected {
                                     selection = .overview
                                     vm.updateSelection(to: nil)
                                 } else {
