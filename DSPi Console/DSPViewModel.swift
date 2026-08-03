@@ -562,12 +562,13 @@ struct CsNounDesc: Equatable {
     }
 }
 
-/// REQ_GET_CS_STATUS response (32 bytes in v3; spec §2.6).  `lastStatus`/
+/// REQ_GET_CS_STATUS response (41 bytes in v6; spec §2.6).  `lastStatus`/
 /// `lastSlot` report the most recent deferred SET's outcome (`lastSlot` =
 /// 0x80|n for an IR sub-slot, 0xFF for save/revert); `dirty` = the live config
 /// differs from flash (unsaved preview); `activeMask` (uint16) bit N = binding N
 /// is live; `slotStatus[N]` = that slot's per-apply health.  The v3 tail adds
-/// the IR component's active mask, learn state, and per-command health.
+/// the IR component's active mask, learn state, and per-command health; v6
+/// widens that tail to 16 sub-slots (spec §11.0).
 struct CsStatusPacket: Equatable {
     var lastStatus: UInt8 = 0
     var lastSlot: UInt8 = 0
@@ -575,9 +576,9 @@ struct CsStatusPacket: Equatable {
     var dirty: Bool = false        // Byte 3: 1 = unsaved live changes (v3)
     var activeMask: UInt16 = 0     // Bytes 4-5 (LE): bit N = binding N is live
     var slotStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_BINDINGS)   // Bytes 6-21
-    var irActiveMask: UInt8 = 0    // Byte 22: bit N = IR command N is live (v3)
-    var irLearnState: UInt8 = 0    // Byte 23: CS_IR_LEARN_STATE_* (v3)
-    var irCmdStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_IR_COMMANDS)   // Bytes 24-31
+    var irActiveMask: UInt16 = 0   // Bytes 22-23 (LE): bit N = IR command N is live (v6; uint8 @22 in v3-v5)
+    var irLearnState: UInt8 = 0    // Byte 24: CS_IR_LEARN_STATE_* (v6; byte 23 in v3-v5)
+    var irCmdStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_IR_COMMANDS)   // Bytes 25-40 (v6; 24-31 in v3-v5)
 
     /// True when binding `slot` is live (its `activeMask` bit is set).
     func isSlotActive(_ slot: Int) -> Bool {
@@ -591,7 +592,7 @@ struct CsStatusPacket: Equatable {
 
     /// True when IR command sub-slot `n` is live (valid, learned, receiver up).
     func isIrCmdActive(_ sub: Int) -> Bool {
-        sub >= 0 && sub < CS_MAX_IR_COMMANDS && (irActiveMask & (UInt8(1) << UInt8(sub))) != 0
+        sub >= 0 && sub < CS_MAX_IR_COMMANDS && (irActiveMask & (UInt16(1) << UInt16(sub))) != 0
     }
 
     /// This IR sub-slot's per-apply health code (0 = ok / cleared).
@@ -600,18 +601,26 @@ struct CsStatusPacket: Equatable {
     }
 
     static func fromData(_ data: Data) -> CsStatusPacket? {
-        // Base (v2) layout is 22 bytes; the v3 tail (IR fields) runs to 32.
+        // Three layouts share a prefix: v2 is 22 bytes, v3-v5 add an 8-command
+        // IR tail (32 bytes), v6 widens the active mask to uint16 and the
+        // command table to 16, pushing learn state to 24 and the statuses to
+        // 25 (41 bytes).  Reading a v6 packet at the v3 offsets would take the
+        // mask's high byte as the learn state, so the size gate matters.
         guard data.count >= 22 else { return nil }
         let b = data.startIndex
         var slots: [UInt8] = []
         for i in 0..<CS_MAX_BINDINGS { slots.append(data[b + 6 + i]) }
         var irStatus = Array(repeating: UInt8(0), count: CS_MAX_IR_COMMANDS)
-        var irActive: UInt8 = 0
+        var irActive: UInt16 = 0
         var learn: UInt8 = 0
-        if data.count >= 32 {
-            irActive = data[b + 22]
+        if data.count >= 41 {
+            irActive = UInt16(data[b + 22]) | (UInt16(data[b + 23]) << 8)
+            learn = data[b + 24]
+            for i in 0..<CS_MAX_IR_COMMANDS { irStatus[i] = data[b + 25 + i] }
+        } else if data.count >= 32 {
+            irActive = UInt16(data[b + 22])
             learn = data[b + 23]
-            for i in 0..<CS_MAX_IR_COMMANDS { irStatus[i] = data[b + 24 + i] }
+            for i in 0..<8 { irStatus[i] = data[b + 24 + i] }
         }
         return CsStatusPacket(
             lastStatus: data[b + 0], lastSlot: data[b + 1], maxBindings: data[b + 2],

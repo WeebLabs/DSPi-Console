@@ -565,21 +565,23 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 4
-// (spec §"Wire reference" / §11.1): v2 grew the binding 16 -> 24 bytes, the
+// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 6
+// (spec §"Wire reference" / §11): v2 grew the binding 16 -> 24 bytes, the
 // noun descriptor 8 -> 12, added per-slot names; v3 adds the IR remote receiver
 // component with a learned-command table, and the Apply/Save/Revert preview
-// model.  The caps header is now 40 bytes (8 types + max_ir_commands tail) and
-// the status packet 32 bytes (byte 3 = dirty, plus the IR tail).  v4 changes no
-// structure: it adds nouns 35-48 (stereo upmixer, psychoacoustic bass,
-// per-output delay, preset reload) and the CS_UNIT_MS unit.
+// model.  The caps header is 40 bytes (8 types + max_ir_commands tail).  v4
+// changes no structure: it adds nouns 35-48 (stereo upmixer, psychoacoustic
+// bass, per-output delay, preset reload) and the CS_UNIT_MS unit.  v5 is
+// enum-only (UPMIX_CENTER_MODE gains Off = 2).  v6 raises the IR command table
+// 8 -> 16 sub-slots, which widens the status packet 32 -> 41 bytes (see
+// CsStatusPacket); the caps header is unchanged but max_ir_commands reads 16.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
-let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN 32 bytes: CsStatusPacket
+let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN CS_STATUS_LEN bytes: CsStatusPacket
 let REQ_SET_CS_NAME: UInt8    = 0x8B   // OUT 1-32 byte name, wValue = slot; deferred, persists immediately
 let REQ_GET_CS_NAME: UInt8    = 0x8C   // IN 32-byte NUL-terminated name, wValue = slot
-let REQ_SET_CS_IR_CMD: UInt8  = 0x8D   // OUT 16 bytes: IrCommand, wValue = sub-slot (0-7); live-only preview
+let REQ_SET_CS_IR_CMD: UInt8  = 0x8D   // OUT 16 bytes: IrCommand, wValue = sub-slot (0-15); live-only preview
 let REQ_GET_CS_IR_CMD: UInt8  = 0x8E   // IN 16 bytes: live IrCommand, wValue = sub-slot
 let REQ_CS_IR_LEARN: UInt8    = 0x8F   // IN: wValue 1=arm/0=cancel -> 1 ack byte; wValue 2=read -> 8-byte result
 let REQ_CS_SAVE: UInt8        = 0x9D   // IN 1 ack byte: persist the whole live config (deferred, lastSlot=0xFF)
@@ -587,7 +589,7 @@ let REQ_CS_REVERT: UInt8      = 0x9E   // IN 1 ack byte: discard the preview, re
 
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
-let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16 (IR sub-slot >= 8)
+let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16 (IR sub-slot >= 16)
 let CS_STATUS_INVALID_TYPE: UInt8    = 0x11   // type >= CS_TYPE_COUNT
 let CS_STATUS_INVALID_NOUN: UInt8    = 0x12   // noun >= CS_NOUN_COUNT
 let CS_STATUS_INVALID_ACTION: UInt8  = 0x13   // action not allowed for this type+noun (incl. platform-disabled noun)
@@ -605,11 +607,15 @@ let CS_STATUS_NO_IR: UInt8           = 0x1E   // learn was armed with no live CS
 
 // Limits / sentinels (spec §2).
 let CS_MAX_BINDINGS: Int       = 16
-let CS_MAX_IR_COMMANDS: Int    = 8    // IR command sub-slots per device (spec §2.4)
+let CS_MAX_IR_COMMANDS: Int    = 16   // IR command sub-slots per device, caps v6 (spec §2.4)
 let CS_NAME_LEN: Int           = 32   // per-slot name buffer, NUL-terminated (spec §3.4)
 let CS_GPIO_UNUSED: UInt8      = 0xFF
-let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v4
-let CS_IR_CONFIG_VERSION: UInt8 = 1   // CsIrConfig.version (IR command table)
+let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v6
+let CS_IR_CONFIG_VERSION: UInt8 = 2   // CsIrConfig.version (IR command table; v2 = 16 sub-slots)
+/// REQ_GET_CS_STATUS response length: 41 bytes since caps v6 (16 IR sub-slots).
+/// Older firmware short-reads it (32 bytes for caps v3-v5, 22 pre-v3) and
+/// CsStatusPacket parses whichever of the three layouts comes back.
+let CS_STATUS_LEN: UInt16      = 41
 let CS_CAPS_ALL: UInt16        = 0xFFFF   // wValue selecting the caps header + type table
 /// `lastSlot` sentinel for a save/revert outcome (spec §2.6).
 let CS_LAST_SLOT_SAVE: UInt8   = 0xFF

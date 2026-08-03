@@ -2275,10 +2275,12 @@ extension DSPViewModel {
         }
     }
 
-    /// Read the 32-byte status packet (last-apply outcome, dirty flag, active
-    /// mask, per-slot health, IR tail).  Cheap enough to poll after a SET.
+    /// Read the status packet (last-apply outcome, dirty flag, active mask,
+    /// per-slot health, IR tail).  Cheap enough to poll after a SET.  We always
+    /// ask for the v6 length; older firmware short-reads and CsStatusPacket
+    /// parses whichever layout comes back.
     func fetchCsStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 32),
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: CS_STATUS_LEN),
               let st = CsStatusPacket.fromData(d) else { return }
         DispatchQueue.main.async { self.csStatus = st }
     }
@@ -2295,7 +2297,7 @@ extension DSPViewModel {
             // Stop polling if a device switch lands mid-wait - the new
             // device's status says nothing about our deferred apply.
             guard usb.generation == generation else { return 0xFF }
-            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: 32),
+            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: CS_STATUS_LEN),
                   let st = CsStatusPacket.fromData(d) else { continue }
             if st.lastSlot == expectedSlot && st.lastStatus != CS_STATUS_PENDING {
                 result = st.lastStatus
@@ -2353,7 +2355,7 @@ extension DSPViewModel {
         return result
     }
 
-    /// Persist the whole live Control Surfaces config (16 bindings + 8 IR
+    /// Persist the whole live Control Surfaces config (16 bindings + 16 IR
     /// commands) in one flash write and clear `dirty` (REQ_CS_SAVE, 0x9D; spec
     /// §3.5).  Deferred, reported with `lastSlot == 0xFF`.  Returns the status
     /// code.  USB-only; must be called off the main thread (blocks).

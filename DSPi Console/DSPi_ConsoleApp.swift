@@ -3013,7 +3013,8 @@ struct ControlSurfacesSettingsTab: View {
     // MARK: IR remote command table (spec §2.7 / §3.6)
     //
     // The IR receiver is one container binding; its remote buttons are separate
-    // 16-byte IrCommand sub-slots, device-global (8 of them).  Each is a
+    // 16-byte IrCommand sub-slots, device-global (16 of them since caps v6, 8
+    // before; the live count comes from caps.maxIrCommands).  Each is a
     // button-shaped command (noun/action/target/value/step) fired by a learned
     // protocol+code instead of a GPIO edge.
 

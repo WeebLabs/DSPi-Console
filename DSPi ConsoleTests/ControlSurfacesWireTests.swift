@@ -225,7 +225,7 @@ final class ControlSurfacesWireTests: XCTestCase {
     }
 
     /// The v3 status packet is 32 bytes: byte 3 = dirty, uint16 active_mask
-    /// (bytes 4-5), 16 slot-status bytes (6-21), then the IR tail
+    /// (bytes 4-5), 16 slot-status bytes (6-21), then the v3-v5 IR tail
     /// (ir_active_mask @22, ir_learn_state @23, ir_cmd_status[8] @24-31).
     func testStatusPacketDecode() {
         // lastStatus=SUCCESS, lastSlot=9, maxBindings=16, dirty=1,
@@ -272,6 +272,82 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertTrue(st.isSlotActive(0))
         XCTAssertEqual(st.irActiveMask, 0)
         XCTAssertFalse(st.isIrCmdActive(0))
+    }
+
+    /// v6 widens the IR tail for 16 sub-slots (§11.0): ir_active_mask becomes a
+    /// uint16 at 22, pushing ir_learn_state to 24 and ir_cmd_status[16] to
+    /// 25-40, for 41 bytes total.  The prefix through byte 21 is unchanged.
+    func testStatusPacketV6Decode() {
+        var d = Data([PIN_CONFIG_SUCCESS, CS_LAST_SLOT_IR_FLAG | 12, 16, 1, 0x05, 0x02])
+        d.append(contentsOf: [UInt8](repeating: 0, count: 16))
+        // IR tail: commands 0, 2 and 12 live - bit 12 only exists in the uint16.
+        d.append(contentsOf: [0x05, 0x10])   // ir_active_mask = 0x1005
+        d.append(CS_IR_LEARN_STATE_ARMED)    // ir_learn_state @24
+        var irStatus = [UInt8](repeating: 0, count: 16)
+        irStatus[12] = CS_STATUS_INVALID_TARGET
+        d.append(contentsOf: irStatus)
+        XCTAssertEqual(d.count, Int(CS_STATUS_LEN))
+        guard let st = CsStatusPacket.fromData(d) else { return XCTFail("status parse failed") }
+        XCTAssertEqual(st.lastSlot, 0x8C)   // IR sub-slot 12's outcome
+        XCTAssertTrue(st.dirty)
+        XCTAssertEqual(st.activeMask, 0x0205)
+        XCTAssertEqual(st.irActiveMask, 0x1005)
+        XCTAssertTrue(st.isIrCmdActive(0))
+        XCTAssertFalse(st.isIrCmdActive(1))
+        XCTAssertTrue(st.isIrCmdActive(2))
+        XCTAssertTrue(st.isIrCmdActive(12))   // beyond the old 8-command / u8 limit
+        XCTAssertFalse(st.isIrCmdActive(13))
+        // Read at the v3 offsets, byte 23 (the mask's high half) would land here.
+        XCTAssertEqual(st.irLearnState, CS_IR_LEARN_STATE_ARMED)
+        XCTAssertEqual(st.irCmdHealth(12), CS_STATUS_INVALID_TARGET)
+        XCTAssertEqual(st.irCmdHealth(0), PIN_CONFIG_SUCCESS)
+    }
+
+    /// A v3-v5 device short-reads the v6-length request: the 32-byte packet must
+    /// still parse at the old offsets, with sub-slots 8-15 reading back idle.
+    func testStatusPacketV5ShortReadStillParses() {
+        var d = Data([PIN_CONFIG_SUCCESS, 0, 16, 0, 0x01, 0x00])
+        d.append(contentsOf: [UInt8](repeating: 0, count: 16))
+        d.append(0x81)                        // ir_active_mask (u8) @22
+        d.append(CS_IR_LEARN_STATE_DONE)      // ir_learn_state @23
+        var irStatus = [UInt8](repeating: 0, count: 8)
+        irStatus[7] = CS_STATUS_INVALID_VALUE
+        d.append(contentsOf: irStatus)
+        XCTAssertEqual(d.count, 32)
+        guard let st = CsStatusPacket.fromData(d) else { return XCTFail("status parse failed") }
+        XCTAssertEqual(st.irActiveMask, 0x0081)
+        XCTAssertTrue(st.isIrCmdActive(0))
+        XCTAssertTrue(st.isIrCmdActive(7))
+        XCTAssertFalse(st.isIrCmdActive(8))   // no bits above 7 exist in the u8 mask
+        XCTAssertEqual(st.irLearnState, CS_IR_LEARN_STATE_DONE)
+        XCTAssertEqual(st.irCmdHealth(7), CS_STATUS_INVALID_VALUE)
+        XCTAssertEqual(st.irCmdHealth(8), 0)
+    }
+
+    /// v6 leaves the caps header at 40 bytes; only the version and
+    /// max_ir_commands move (§11.0).  Hosts size the command list from the
+    /// latter rather than assuming 8.
+    func testCapsHeaderV6MaxIrCommands() {
+        var d = Data([6, 16, 8, 49])   // capsVersion 6, maxBindings, typeCount, nounCount
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 0, 0, 0])
+        XCTAssertEqual(d.count, 40)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.capsVersion, 6)
+        XCTAssertEqual(caps.maxIrCommands, 16)
+        XCTAssertEqual(Int(caps.maxIrCommands), CS_MAX_IR_COMMANDS)
+    }
+
+    /// A v6 IR command may address sub-slot 15; the record itself is unchanged
+    /// at 16 bytes, and its deferred outcome is reported as 0x80 | sub-slot.
+    func testIrCommandHighSubSlotOutcomeEncoding() {
+        XCTAssertEqual(CS_LAST_SLOT_IR_FLAG | UInt8(15), 0x8F)
+        XCTAssertNotEqual(CS_LAST_SLOT_IR_FLAG | UInt8(15), CS_LAST_SLOT_SAVE)
+        let c = IrCommand(
+            noun: UInt8(CS_NOUN_USER_MUTE), action: UInt8(CS_ACT_TOGGLE),
+            proto: CS_IR_PROTO_RC5, code: 0x0000100D)
+        XCTAssertEqual(c.toData().count, 16)
+        XCTAssertTrue(c.isConfigured)
     }
 
     // MARK: - IR commands (§2.7) and learn results (§3.6.1)
@@ -336,10 +412,11 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CS_STATUS_IR_IN_USE, 0x1D)
         XCTAssertEqual(CS_STATUS_NO_IR, 0x1E)
         XCTAssertEqual(CS_MAX_BINDINGS, 16)
-        XCTAssertEqual(CS_MAX_IR_COMMANDS, 8)
+        XCTAssertEqual(CS_MAX_IR_COMMANDS, 16)   // 8 before caps v6 (§11.0)
         XCTAssertEqual(CS_TYPE_IR, 7)
         XCTAssertEqual(CS_CONFIG_VERSION, 2)
-        XCTAssertEqual(CS_IR_CONFIG_VERSION, 1)
+        XCTAssertEqual(CS_IR_CONFIG_VERSION, 2)  // CsIrConfig grew to 16 sub-slots
+        XCTAssertEqual(CS_STATUS_LEN, 41)
         // Request codes for the v3 additions.
         XCTAssertEqual(REQ_SET_CS_NAME, 0x8B)
         XCTAssertEqual(REQ_GET_CS_NAME, 0x8C)
