@@ -377,9 +377,13 @@ struct ChannelVisibilityPill: View {
                 .frame(minWidth: 32)
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background(Capsule().fill(isVisible ? color.opacity(0.15)
+                // The shown state carries most of its weight in the outline, so
+                // the stroke runs much hotter than the fill - a tint strong
+                // enough to read on the dark sidebar would otherwise close on
+                // the label's own color and mush the two together.
+                .background(Capsule().fill(isVisible ? color.opacity(0.21)
                                                      : Color.gray.opacity(0.12)))
-                .overlay(Capsule().stroke(isVisible ? color.opacity(0.4)
+                .overlay(Capsule().stroke(isVisible ? color.opacity(0.62)
                                                     : Color.gray.opacity(0.35),
                                           lineWidth: 1))
                 .fixedSize(horizontal: true, vertical: false)
