@@ -1201,6 +1201,19 @@ class DSPViewModel: ObservableObject {
     @Published var dacHwMuteConfig: DacHwMuteConfig = DacHwMuteConfig()
     @Published var dacHwMuteSupported: Bool = false
 
+    // Selectable system clock / core voltage — device-global overclock setting
+    // stored in the firmware's directory sector (not per preset).
+    // `sysClockSupported` flips true when the firmware answers
+    // REQ_GET_SYS_CLOCK (0x41); older firmware STALLs and the Settings page
+    // hides itself.  See selectable_sys_clock.md.
+    @Published var sysClock: SysClockState = SysClockState()
+    @Published var sysClockSupported: Bool = false
+
+    /// Highest core voltage this platform's firmware will accept - 1.50 V on
+    /// RP2350 (POWMAN limit unlocked), 1.30 V elsewhere.  Anything above it
+    /// STALLs, so both the picker and the send path filter against this.
+    var sysClockVregCeiling: UInt8 { SysClockModeInfo.vregCeiling(platform: platformName) }
+
     // ADAT bulk output — streams all 8 main output channels as one ADAT
     // lightpipe signal on a single GPIO (RP2350 only).  `adatSupported` flips
     // true when the firmware answers REQ_GET_ADAT_STATUS (0xCE); older firmware

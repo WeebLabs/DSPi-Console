@@ -45,6 +45,7 @@ extension DSPViewModel {
         fetchUserVolume()
         fetchLgSoundSyncEnabled()
         fetchDacHwMuteConfig()
+        fetchSysClock()
         fetchControlInterfaces()
         fetchControlSurfaces()
         guard usb.generation == generation else { return }
@@ -649,6 +650,75 @@ extension DSPViewModel {
             return 0xFF
         }
         return d[0]
+    }
+
+    // MARK: - System Clock / Core Voltage
+
+    /// Read the device-global clock setting.  STALLs on firmware without the
+    /// selectable system clock; if the call returns nil, `sysClockSupported`
+    /// stays false and the Settings page hides itself.
+    func fetchSysClock() {
+        guard let d = usb.getControlRequest(request: REQ_GET_SYS_CLOCK,
+                                            value: 0, index: 0, length: 8),
+              let state = SysClockState.fromData(d) else { return }
+        DispatchQueue.main.async {
+            self.sysClock = state
+            self.sysClockSupported = true
+        }
+    }
+
+    /// Change the system clock and/or core voltage, then confirm the outcome by
+    /// reading the device back.
+    ///
+    /// The firmware defers the switch to its main loop, where it mutes, writes
+    /// the directory, steps vreg/PLL, rebuilds every output slot's divider and
+    /// restarts the pipeline - hundreds of milliseconds during which control
+    /// transfers go unanswered.  A chip that cannot run the requested clock
+    /// instead trips the watchdog, re-enumerates and boots at 307.2 MHz with
+    /// the fallback flag set.  Both look identical to a fire-and-forget send,
+    /// so poll the readback until the device settles rather than assuming.
+    ///
+    /// Blocking (up to `timeout` seconds); call from a background queue.
+    @discardableResult
+    func setSysClock(mode: UInt8, vregSelection: UInt8,
+                     timeout: TimeInterval = 10.0) -> SysClockApplyResult {
+        // The firmware STALLs an invalid combination instead of clamping it,
+        // and a STALL on a fire-and-forget OUT is invisible to us - so reject
+        // it here where we can report it.
+        guard mode < UInt8(SYS_CLOCK_MODE_COUNT),
+              SysClockModeInfo.info(for: mode).accepts(vregSelection: vregSelection,
+                                                       ceiling: sysClockVregCeiling) else {
+            return .invalid
+        }
+
+        usb.sendControlRequest(request: REQ_SET_SYS_CLOCK, value: 0, index: 0,
+                               data: Data([mode, vregSelection]))
+
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastState: SysClockState?
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.25)
+            guard let d = usb.getControlRequest(request: REQ_GET_SYS_CLOCK,
+                                                value: 0, index: 0, length: 8),
+                  let state = SysClockState.fromData(d) else { continue }
+            lastState = state
+            DispatchQueue.main.async {
+                self.sysClock = state
+                self.sysClockSupported = true
+            }
+            // Stored-only agreement isn't enough: the directory is written
+            // BEFORE the PLL step, so a mid-switch read would otherwise look
+            // like a fallback (stored != active).  Wait for the active clock
+            // to catch up, or for the device to declare a fallback.
+            if state.fallbackActive { return .fellBack }
+            if state.storedMode == mode,
+               state.storedVregSelection == vregSelection,
+               state.activeMode == mode {
+                return .applied
+            }
+        }
+        // Timed out mid-switch: report a fallback only if the device said so.
+        return (lastState?.fallbackActive ?? false) ? .fellBack : .unconfirmed
     }
 
     /// Probe the firmware for LG Sound Sync support and read the current

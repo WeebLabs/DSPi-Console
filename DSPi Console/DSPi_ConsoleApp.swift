@@ -69,6 +69,7 @@ class AppSettings: ObservableObject {
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case general, graphing, advanced
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
+    case systemClock
 
     var id: Self { self }
 
@@ -83,6 +84,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .spdifInput:       return "Inputs"
         case .controlInterfaces: return "Control Interfaces"
         case .controlSurfaces:  return "Control Surfaces"
+        case .systemClock:      return "System Clock"
         }
     }
 
@@ -97,6 +99,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .spdifInput:       return "arrow.down.to.line"
         case .controlInterfaces: return "cpu"
         case .controlSurfaces:  return "dial.medium"
+        case .systemClock:      return "speedometer"
         }
     }
 
@@ -114,6 +117,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .spdifInput:       return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
         case .controlInterfaces: return Color(red: 0.30, green: 0.44, blue: 0.66) // dusk blue
         case .controlSurfaces:  return Color(red: 0.27, green: 0.52, blue: 0.70)  // steel cyan
+        case .systemClock:      return Color(red: 0.19, green: 0.35, blue: 0.55)  // midnight blue
         }
     }
 
@@ -127,6 +131,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // Shown while disconnected too (the page carries its own placeholder);
         // hidden only when a connected device lacks the feature.
         case .controlSurfaces:   return vm.controlSurfacesSupported || !vm.isDeviceConnected
+        case .systemClock:       return vm.sysClockSupported
         default:                 return true
         }
     }
@@ -135,7 +140,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     static let groups: [(title: String, items: [SettingsCategory])] = [
         ("Application", [.general, .advanced]),
         ("Display",     [.graphing]),
-        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .controlInterfaces, .controlSurfaces, .globalParams]),
+        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .controlInterfaces, .controlSurfaces, .globalParams, .systemClock]),
     ]
 }
 
@@ -382,6 +387,7 @@ struct SettingsView: View {
         case .spdifInput:       HardwareSettingsTab(section: .spdif)
         case .controlInterfaces: ControlInterfacesSettingsTab()
         case .controlSurfaces:  ControlSurfacesSettingsTab()
+        case .systemClock:      SystemClockSettingsTab()
         }
     }
 }
@@ -1355,6 +1361,316 @@ struct AdvancedSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - System Clock Settings Tab
+//
+// Selectable system clock and core voltage (selectable_sys_clock.md).  This is
+// a device-global setting in the firmware's flash directory - it is never part
+// of a preset and a preset load never touches it.
+//
+// Model notes:
+//   • Modes 1 and 2 are overclocks, bought purely for DSP headroom.  480 MHz in
+//     particular is beyond the chip's rating and beyond many individual chips at
+//     any voltage, so the page leads with that and confirms before applying.
+//   • The voltage knob only goes UP from the mode's default: the firmware
+//     STALLs an undervolt rather than clamping it, because a below-default
+//     voltage is a guaranteed-unstable persisted setting.
+//   • Applying is disruptive (mute, flash write, PLL relock, full output
+//     restart) and a chip that can't run the clock watchdog-reboots instead.
+//     `setSysClock` therefore confirms the outcome by reading the device back;
+//     we surface all three outcomes inline.
+//   • A device running a clock it doesn't store is in the firmware's fallback
+//     latch: the stored setting survives untouched so the user can raise the
+//     voltage and retry, or drop back to stock from here.
+struct SystemClockSettingsTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+
+    /// Staged selection, seeded from what the device stores.  "Dirty" (Apply
+    /// enabled) means the draft differs from the stored setting.
+    @State private var draftMode: UInt8 = SYS_CLOCK_MODE_307P2
+    @State private var draftVreg: UInt8 = SYS_CLOCK_VREG_DEFAULT
+
+    @State private var applying = false
+    @State private var status: (message: String, isError: Bool)?
+    @State private var confirmingApply = false
+
+    private var draftInfo: SysClockModeInfo { SysClockModeInfo.info(for: draftMode) }
+
+    /// Voltage steps above the staged mode's default, up to this platform's
+    /// ceiling.  The default itself is offered as the 0xFF sentinel instead, so
+    /// it isn't listed twice.
+    private var higherVregs: [UInt8] {
+        draftInfo.allowedVregs(ceiling: vm.sysClockVregCeiling)
+            .filter { $0 > draftInfo.defaultVreg }
+    }
+
+    private var dirty: Bool {
+        draftMode != vm.sysClock.storedMode || draftVreg != vm.sysClock.storedVregSelection
+    }
+
+    /// Anything other than stock clock at stock voltage gets a confirmation
+    /// step - including a raised voltage at 307.2 MHz, which can brown out a
+    /// marginal regulator just as effectively as an overclock.
+    private var draftNeedsConfirmation: Bool {
+        draftMode != SYS_CLOCK_MODE_307P2 || draftVreg != SYS_CLOCK_VREG_DEFAULT
+    }
+
+    var body: some View {
+        Form {
+            statusSection
+            clockSection
+            notesSection
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            seedDraft()
+            DispatchQueue.global(qos: .userInitiated).async { vm.fetchSysClock() }
+        }
+        // Adopt an externally-changed setting (another host, a fallback boot)
+        // only while the user has nothing staged.
+        .onReceive(vm.$sysClock) { newState in
+            if !applying && !dirty { seedDraft(newState) }
+        }
+        // Staged edits belong to the previously selected device; a clock
+        // setting flashed into the wrong unit is a bricking-class mistake.
+        .onChange(of: vm.selectedDevice) { _ in
+            seedDraft()
+            status = nil
+        }
+        .alert("Change the system clock?", isPresented: $confirmingApply) {
+            Button("Cancel", role: .cancel) { }
+            Button("Apply \(draftInfo.label)", role: .destructive) { apply() }
+        } message: {
+            Text(confirmationMessage)
+        }
+    }
+
+    private func seedDraft(_ state: SysClockState? = nil) {
+        let s = state ?? vm.sysClock
+        draftMode = s.storedMode
+        draftVreg = s.storedVregSelection
+    }
+
+    // MARK: Current state
+
+    @ViewBuilder
+    private var statusSection: some View {
+        Section {
+            let state = vm.sysClock
+
+            HStack {
+                settingLabel(title: "Running",
+                             detail: "Clock the device is using right now.",
+                             icon: "bolt.fill")
+                Spacer()
+                Text(state.activeInfo.label)
+                    .font(.body.monospacedDigit())
+            }
+
+            HStack {
+                settingLabel(title: "Core Voltage",
+                             detail: "Live regulator setting.",
+                             icon: "battery.100.bolt")
+                Spacer()
+                Text(sysClockVregLabel(state.liveVreg))
+                    .font(.body.monospacedDigit())
+            }
+
+            if state.isFallenBack {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.orange)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Running on the safe default")
+                                .font(.callout.weight(.semibold))
+                            Text("This device could not run its stored \(state.storedInfo.label) setting and restarted at \(state.activeInfo.label). The setting is still stored - raise the core voltage and apply again, or power-cycle the device to retry it as-is.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    HStack {
+                        Spacer()
+                        Button("Restore Stock Clock") {
+                            draftMode = SYS_CLOCK_MODE_307P2
+                            draftVreg = SYS_CLOCK_VREG_DEFAULT
+                            apply()
+                        }
+                        .disabled(applying || !vm.isDeviceConnected)
+                    }
+                }
+            }
+        } header: {
+            Label("Current", systemImage: "speedometer")
+        }
+    }
+
+    // MARK: Selection
+
+    @ViewBuilder
+    private var clockSection: some View {
+        Section {
+            settingRow(title: "Clock",
+                       detail: "Applied now and at every boot.",
+                       icon: "metronome") {
+                Picker("", selection: $draftMode) {
+                    ForEach(SysClockModeInfo.all) { info in
+                        Text(info.label).tag(info.mode)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            settingRow(title: "Core Voltage",
+                       detail: "Raise only if the clock is unstable. Runs hotter.",
+                       icon: "battery.100.bolt") {
+                Picker("", selection: $draftVreg) {
+                    Text("Default (\(sysClockVregLabel(draftInfo.defaultVreg)))")
+                        .tag(SYS_CLOCK_VREG_DEFAULT)
+                    ForEach(higherVregs, id: \.self) { v in
+                        // Past 1.30 V the part is outside Raspberry Pi's
+                        // sanctioned range, so the option says so rather than
+                        // reading like one more step on the same ladder.
+                        Text(v > SYS_CLOCK_VREG_1_30
+                             ? "\(sysClockVregLabel(v)) (over spec)"
+                             : sysClockVregLabel(v))
+                            .tag(v)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                // At 480 MHz on RP2040 the mode's default is already the
+                // platform ceiling, so there is nothing left to offer.
+                .disabled(higherVregs.isEmpty)
+            }
+
+            applyRow
+        } header: {
+            Label("Clock Speed", systemImage: "gauge.with.dots.needle.67percent")
+        }
+        // A mode change can strand the staged voltage below the new mode's
+        // floor, which the firmware would STALL - fall back to its default.
+        .onChange(of: draftMode) { newMode in
+            if !SysClockModeInfo.info(for: newMode).accepts(vregSelection: draftVreg,
+                                                           ceiling: vm.sysClockVregCeiling) {
+                draftVreg = SYS_CLOCK_VREG_DEFAULT
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var applyRow: some View {
+        HStack(spacing: 8) {
+            if let status = status, !dirty {
+                Image(systemName: status.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundColor(status.isError ? .orange : .green)
+                    .font(.caption)
+                Text(status.message)
+                    .font(.caption)
+                    .foregroundColor(status.isError ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if dirty {
+                Text("Unapplied changes")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            if applying {
+                ProgressView().controlSize(.small)
+            }
+            Button("Revert") { seedDraft(); status = nil }
+                .buttonStyle(.plain)
+                .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+                .disabled(!dirty || applying)
+            Button("Apply") {
+                if draftNeedsConfirmation { confirmingApply = true } else { apply() }
+            }
+            .disabled(!dirty || applying || !vm.isDeviceConnected)
+        }
+    }
+
+    @ViewBuilder
+    private var notesSection: some View {
+        Section {
+            Text("The clock is stored on the device itself, not in a preset - saving or loading a preset never changes it.\n\nApplying interrupts audio for about a second while the device mutes, relocks its PLL and restarts every output. USB stays connected throughout.\n\nThe core voltage only goes up from a clock's default: a lower one is a guaranteed-unstable setting, so the device rejects it. On RP2350 it can reach 1.50 V; RP2040 stops at 1.30 V. Everything above 1.30 V is outside Raspberry Pi's sanctioned range - the on-chip regulator dissipates more at both higher voltage and higher clock, so expect substantially more heat and treat those steps as bench tools.\n\nAt 384 and 480 MHz the 44.1 kHz family runs on fractional clock dividers. Free-running outputs (no USB stream, no S/PDIF or ADAT input to follow) sit +55.5 ppm off at 384 MHz and +32.5 ppm at 480 MHz - fine for any S/PDIF receiver, but outside AES3 Grade 1. Fractional dividers also add up to one clock period of jitter on BCK, MCK and S/PDIF edges, which a jitter-sensitive DAC clocked from MCK may measure.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        } header: {
+            Label("Notes", systemImage: "info.circle")
+        }
+    }
+
+    // MARK: Copy
+
+    private var confirmationMessage: String {
+        let voltage = draftVreg == SYS_CLOCK_VREG_DEFAULT
+            ? "\(sysClockVregLabel(draftInfo.defaultVreg)) (default)"
+            : sysClockVregLabel(draftVreg)
+        return """
+        The device will switch to \(draftInfo.label) at \(voltage) now and at every boot. Audio stops for about a second.
+
+        If this chip cannot run it, the device restarts itself on the stock 307.2 MHz clock and keeps the setting stored so you can raise the voltage and retry.
+        """
+    }
+
+    // MARK: Apply
+
+    private func apply() {
+        let mode = draftMode
+        let vreg = draftVreg
+        applying = true
+        status = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = vm.setSysClock(mode: mode, vregSelection: vreg)
+            DispatchQueue.main.async {
+                applying = false
+                seedDraft()
+                switch result {
+                case .applied:
+                    status = ("Running at \(SysClockModeInfo.info(for: mode).label)", false)
+                case .fellBack:
+                    status = ("The device could not run \(SysClockModeInfo.info(for: mode).label) and restarted on the stock clock. The setting is still stored.", true)
+                case .unconfirmed:
+                    status = ("The device did not confirm the change. Check that it is still connected, then reopen this page.", true)
+                case .invalid:
+                    status = ("That clock and voltage combination was rejected.", true)
+                }
+            }
+        }
+    }
+
+    // MARK: Row helpers (mirror the Control Interfaces page)
+
+    @ViewBuilder
+    private func settingLabel(title: String, detail: String, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.body)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func settingRow<Control: View>(title: String, detail: String, icon: String,
+                                           @ViewBuilder control: () -> Control) -> some View {
+        HStack {
+            settingLabel(title: title, detail: detail, icon: icon)
+            Spacer()
+            control()
+        }
     }
 }
 

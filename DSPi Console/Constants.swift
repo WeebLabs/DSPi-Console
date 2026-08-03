@@ -125,6 +125,59 @@ let UPMIX_CONFIG_PACKET_SIZE: Int    = 44
 /// Byte length of the UpmixStatus telemetry response (spec §6.3).
 let UPMIX_STATUS_SIZE: UInt16        = 16
 
+// MARK: - Selectable System Clock / Core Voltage
+//
+// Device-global overclock setting (firmware `selectable_sys_clock.md`), stored
+// in the preset directory rather than in any preset, applied at boot and live
+// at runtime.  SET is an OUT transfer carrying {mode, vreg_sel}; the firmware
+// STALLs an invalid mode or a voltage outside the mode's window instead of
+// clamping, because a below-default voltage is a guaranteed-unstable persisted
+// setting.  GET returns 8 bytes (see `SysClockState`).
+let REQ_SET_SYS_CLOCK: UInt8       = 0x40
+let REQ_GET_SYS_CLOCK: UInt8       = 0x41
+
+let SYS_CLOCK_MODE_307P2: UInt8    = 0
+let SYS_CLOCK_MODE_384: UInt8      = 1
+let SYS_CLOCK_MODE_480: UInt8      = 2
+let SYS_CLOCK_MODE_COUNT: Int      = 3
+
+/// vreg_sel sentinel meaning "use this mode's default voltage".  Persisted as
+/// 0xFF so the stored setting keeps following the mode's default if that
+/// default ever changes.
+let SYS_CLOCK_VREG_DEFAULT: UInt8  = 0xFF
+
+// Raw pico-sdk `vreg_voltage` enum values.  0.85 V .. 1.50 V is the whole span
+// this feature can reach; the encodings are identical on RP2040 and RP2350.
+// The ladder is NOT uniform - it steps 0.05 V up to 1.40 V and then jumps
+// straight to 1.50 V - so millivolts come from a table, not arithmetic.
+let SYS_CLOCK_VREG_MIN: UInt8      = 6    // VREG_VOLTAGE_0_85
+let SYS_CLOCK_VREG_MAX: UInt8      = 18   // VREG_VOLTAGE_1_50
+
+/// Highest voltage the firmware accepts (`SYS_CLOCK_VREG_CEIL` in sys_clock.c).
+/// RP2350 unlocks the POWMAN voltage limit for a bench overvolt up to 1.50 V;
+/// the RP2040's regulator field stops at 1.30 V.  Everything above 1.30 V sits
+/// outside Raspberry Pi's sanctioned operating range, and the on-chip LDO's
+/// dissipation grows with both voltage and clock - bench tool, not a shipping
+/// configuration.
+let SYS_CLOCK_VREG_1_30: UInt8     = 15
+let SYS_CLOCK_VREG_1_50: UInt8     = 18
+
+/// Millivolts per raw vreg enum value over the range this feature can select,
+/// mirroring firmware `vreg_voltage_to_mv`.  nil outside it (the app never
+/// offers those steps).
+func sysClockVregMillivolts(_ vreg: UInt8) -> Int? {
+    // Index 0 is VREG_VOLTAGE_0_85 (raw 6).  Note the non-uniform final step.
+    let mv = [850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1500]
+    guard vreg >= SYS_CLOCK_VREG_MIN, vreg <= SYS_CLOCK_VREG_MAX else { return nil }
+    return mv[Int(vreg - SYS_CLOCK_VREG_MIN)]
+}
+
+/// "1.20 V" for a raw vreg enum value, or "-" when it isn't on the ladder.
+func sysClockVregLabel(_ vreg: UInt8) -> String {
+    guard let mv = sysClockVregMillivolts(vreg) else { return "-" }
+    return String(format: "%.2f V", Double(mv) / 1000.0)
+}
+
 // Matrix mixer request codes
 let REQ_SET_MATRIX_ROUTE: UInt8    = 0x70
 let REQ_GET_MATRIX_ROUTE: UInt8    = 0x71
