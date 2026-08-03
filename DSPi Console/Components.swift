@@ -2177,16 +2177,32 @@ class ValueFieldScrollNSView: NSView {
 
     /// Be transparent to mouse clicks so the underlying SwiftUI `TextField`
     /// gets focus when the user clicks on the value (enabling click-to-edit).
-    /// Only claim the hit target when the current event is a scrollWheel —
-    /// matches the `RightClickHandler` pattern used elsewhere in this file.
+    /// Only claim the hit target for a Cmd-held scrollWheel - matches the
+    /// `RightClickHandler` pattern used elsewhere in this file.  Cmd rather
+    /// than Ctrl because Ctrl-scroll is macOS's accessibility zoom gesture,
+    /// which the system swallows before the app sees it.
+    ///
+    /// Refusing an unmodified scroll is what keeps a filter list scrollable:
+    /// declining the hit lets the event fall through to the enclosing
+    /// ScrollView, so a cursor resting over a value can't turn a scroll
+    /// through the bands into an edit of one.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if let event = NSApp.currentEvent, event.type == .scrollWheel {
+        if let event = NSApp.currentEvent, event.type == .scrollWheel,
+           event.modifierFlags.contains(.command) {
             return self
         }
         return nil
     }
 
     override func scrollWheel(with event: NSEvent) {
+        // A gesture that starts Cmd-held keeps being routed here after the
+        // key is released, so re-check rather than trusting the hit test, and
+        // hand the rest of the gesture back to the scroll view.
+        guard event.modifierFlags.contains(.command) else {
+            super.scrollWheel(with: event)
+            return
+        }
+
         let delta = Double(event.scrollingDeltaY)
         guard abs(delta) > 0.01 else { return }
 
