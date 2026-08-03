@@ -279,7 +279,12 @@ extension DSPViewModel {
 
     func setFilter(ch: Int, band: Int, p: FilterParams) {
         var p = p
-        p.gain = (p.gain * 10).rounded() / 10
+        // Gain is quantized to 0.001 dB - the precision the band row shows.  A
+        // grid (rather than the raw float) keeps the value the device echoes
+        // back identical to the one we sent, so preset dirty-tracking compares
+        // cleanly.  For a Linkwitz Transform this field is fp in Hz, so the
+        // same grid applies there.
+        p.gain = (p.gain * 1000).rounded() / 1000
         if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
 

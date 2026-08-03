@@ -1646,7 +1646,7 @@ struct FilterRowView: View {
 
                     // Gain
                     if params.type.usesGain {
-                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 2) {
+                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 3) {
                             var p = params; p.gain = $0; onChange(p)
                         }
                     } else {
@@ -1687,10 +1687,10 @@ struct FilterRowView: View {
     /// True when the draft holds edits that haven't been applied to the device.
     ///
     /// Compared with tolerances, not exactly, because applying quantises:
-    /// `setFilter` rounds the gain field (fp, in Hz for LT) to 0.1, and qp goes
-    /// over the wire as `round(qp x 512)`.  An exact comparison would leave the
-    /// panel permanently dirty after applying, say, fp = 33.33 - the value that
-    /// comes back is 33.3, which never equals the draft again.
+    /// `setFilter` rounds the gain field (fp, in Hz for LT) to 0.001, and qp
+    /// goes over the wire as `round(qp x 512)`.  An exact comparison would
+    /// leave the panel permanently dirty after applying a value the round trip
+    /// can't reproduce exactly.
     private var linkwitzDirty: Bool {
         guard let d = linkwitzDraft else { return false }
         return abs(d.freq - params.freq) >= 0.05

@@ -70,7 +70,9 @@ enum FilterFile {
             // distinct labels so the target alignment survives a round-trip.
             line += String(format: "  Q %5.2f  Fp %7.1f Hz  Qp %5.2f", band.q, band.gain, band.qp)
         } else {
-            if band.type.usesGain { line += String(format: "  Gain %+5.1f dB", band.gain) }
+            // Three decimals: gain is quantized to 0.001 dB, so a coarser field
+            // would silently round every band on an export/import round-trip.
+            if band.type.usesGain { line += String(format: "  Gain %+7.3f dB", band.gain) }
             if band.type.usesQ    { line += String(format: "  Q %5.2f", band.q) }
         }
 
