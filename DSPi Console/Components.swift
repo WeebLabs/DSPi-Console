@@ -1568,6 +1568,16 @@ struct FilterRowView: View {
     /// widening the table.
     @State private var showLinkwitzPanel = false
 
+    /// Working copy of the LT parameters while the popover is open.  Edits stage
+    /// here instead of reaching the device keystroke by keystroke: a Linkwitz
+    /// Transform trades headroom for bass extension, and a mistyped fp is tens
+    /// of dB of boost into a driver.  Staging lets the panel show the resulting
+    /// DC boost first and makes the commit deliberate.  nil while closed.
+    ///
+    /// There's no separate baseline - `params` is by definition what's applied,
+    /// so Revert is "draft = params" and dirty is "draft != params".
+    @State private var linkwitzDraft: FilterParams? = nil
+
     var isActive: Bool { params.type != .flat }
     var isBypassed: Bool { params.bypass }
 
@@ -1658,13 +1668,42 @@ struct FilterRowView: View {
         }
     }
 
-    /// Implied DC boost of the Linkwitz Transform, `40 x log10(f0/fp)` dB.
+    /// Implied DC boost of a Linkwitz Transform, `40 x log10(f0/fp)` dB.
     /// Positive when fp < f0 (bass extension).  Real low-frequency gain that
     /// consumes driver excursion and amp headroom - surfaced so the user can
     /// apply a matching preamp cut.  See peq_filters.md §3.3.
-    private var linkwitzDCBoostDB: Float {
-        guard params.gain > 0, params.freq > 0 else { return 0 }
-        return 40 * log10(params.freq / params.gain)
+    ///
+    /// Takes the band explicitly so the popover can show the boost the *draft*
+    /// would produce, before it's applied.
+    private func linkwitzDCBoostDB(_ p: FilterParams) -> Float {
+        guard p.gain > 0, p.freq > 0 else { return 0 }
+        return 40 * log10(p.freq / p.gain)
+    }
+
+    /// The LT values the popover is editing: the draft once open, otherwise the
+    /// applied band.
+    private var linkwitzEditing: FilterParams { linkwitzDraft ?? params }
+
+    /// True when the draft holds edits that haven't been applied to the device.
+    ///
+    /// Compared with tolerances, not exactly, because applying quantises:
+    /// `setFilter` rounds the gain field (fp, in Hz for LT) to 0.1, and qp goes
+    /// over the wire as `round(qp x 512)`.  An exact comparison would leave the
+    /// panel permanently dirty after applying, say, fp = 33.33 - the value that
+    /// comes back is 33.3, which never equals the draft again.
+    private var linkwitzDirty: Bool {
+        guard let d = linkwitzDraft else { return false }
+        return abs(d.freq - params.freq) >= 0.05
+            || abs(d.q - params.q) >= 0.0005
+            || abs(d.gain - params.gain) >= 0.05
+            || abs(d.qp - params.qp) >= 1.0 / 512.0
+    }
+
+    /// Stage one LT field edit into the draft without touching the device.
+    private func editLinkwitz(_ mutate: (inout FilterParams) -> Void) {
+        var d = linkwitzEditing
+        mutate(&d)
+        linkwitzDraft = d
     }
 
     /// The filter-type name picker (a hierarchical Menu).  Extracted so the
@@ -1739,27 +1778,27 @@ struct FilterRowView: View {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                 GridRow {
                     Text("Driver").font(.caption.weight(.semibold)).foregroundColor(.secondary)
-                    linkwitzField(label: "f0", unit: "Hz", value: params.freq, width: 64, scrollStep: 1, minValue: 10, decimals: 1) {
-                        var p = params; p.freq = $0; onChange(p)
+                    linkwitzField(label: "f0", unit: "Hz", value: linkwitzEditing.freq, width: 64, scrollStep: 1, minValue: 10, decimals: 1) { v in
+                        editLinkwitz { $0.freq = v }
                     }
-                    linkwitzField(label: "Q0", unit: "", value: params.q, width: 56, scrollStep: 0.01, minValue: 0.1, decimals: 3) {
-                        var p = params; p.q = $0; onChange(p)
+                    linkwitzField(label: "Q0", unit: "", value: linkwitzEditing.q, width: 56, scrollStep: 0.01, minValue: 0.1, decimals: 3) { v in
+                        editLinkwitz { $0.q = v }
                     }
                 }
                 GridRow {
                     Text("Target").font(.caption.weight(.semibold)).foregroundColor(.secondary)
-                    linkwitzField(label: "fp", unit: "Hz", value: params.gain, width: 64, scrollStep: 1, minValue: 10, decimals: 1) {
-                        var p = params; p.gain = $0; onChange(p)
+                    linkwitzField(label: "fp", unit: "Hz", value: linkwitzEditing.gain, width: 64, scrollStep: 1, minValue: 10, decimals: 1) { v in
+                        editLinkwitz { $0.gain = v }
                     }
-                    linkwitzField(label: "Qp", unit: "", value: params.qp, width: 56, scrollStep: 0.01, minValue: 0.1, decimals: 3) {
-                        var p = params; p.qp = $0; onChange(p)
+                    linkwitzField(label: "Qp", unit: "", value: linkwitzEditing.qp, width: 56, scrollStep: 0.01, minValue: 0.1, decimals: 3) { v in
+                        editLinkwitz { $0.qp = v }
                     }
                 }
             }
 
             Divider()
 
-            let boost = linkwitzDCBoostDB
+            let boost = linkwitzDCBoostDB(linkwitzEditing)
             HStack(spacing: 6) {
                 Text("DC boost")
                     .font(.caption)
@@ -1777,9 +1816,32 @@ struct FilterRowView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Text(linkwitzDirty ? "Not applied yet" : "Applied")
+                    .font(.caption)
+                    .foregroundColor(linkwitzDirty ? .orange : .secondary)
+
+                Spacer()
+
+                Button("Revert") { linkwitzDraft = params }
+                    .disabled(!linkwitzDirty)
+                Button("Apply") {
+                    if let d = linkwitzDraft { onChange(d) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!linkwitzDirty)
+            }
         }
         .padding(16)
         .frame(width: 300)
+        // Seed the draft from the applied band each time the panel opens, and
+        // drop it on close so unapplied edits are discarded rather than
+        // lingering into the next visit.
+        .onAppear { linkwitzDraft = params }
+        .onDisappear { linkwitzDraft = nil }
     }
 
     /// A labelled numeric field for the LT popover: caption label, the value
