@@ -233,14 +233,12 @@ extension DSPViewModel {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
         let data = Data(bytes: &val, count: 4)
-        // Link couples only the stereo USB L/R pair (inputs 0/1) via two
-        // per-channel writes; never the legacy all-channel REQ_SET_PREAMP, which
-        // would clobber the 8-channel input trims (inputs 2-7).
-        if preampLinked && channel < BASE_MATRIX_INPUTS {
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: 0, index: 0, data: data)
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: 1, index: 0, data: data)
-        } else {
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        // A linked pair gets one per-channel write each; never the legacy
+        // all-channel REQ_SET_PREAMP, which would clobber the trims of the
+        // inputs outside this pair.
+        usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        if let partner = linkedPartner(of: channel) {
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(partner), index: 0, data: data)
         }
     }
 
@@ -452,8 +450,7 @@ extension DSPViewModel {
     }
 
     /// Clear all PEQ bands on a single channel by writing the default
-    /// (FLAT, 1000 Hz, Q=0.707, gain=0) recipe to each.  Mirrors
-    /// `clearAllMaster` but scoped to one channel — used by the Clear All
+    /// (FLAT, 1000 Hz, Q=0.707, gain=0) recipe to each.  Used by the Clear All
     /// button on output channel PEQ tabs.
     func clearPEQBands(ch: Int) {
         let bandCount = channelData[ch]?.count ?? 10
@@ -516,16 +513,13 @@ extension DSPViewModel {
         if val == -0.0 { val = 0.0 }
         self.preampDB[channel] = val
         let data = Data(bytes: &val, count: 4)
-        // Link couples only the stereo USB L/R pair (inputs 0/1) via two
-        // per-channel writes; never the legacy all-channel REQ_SET_PREAMP, which
-        // would clobber the 8-channel input trims (inputs 2-7).
-        if preampLinked && channel < BASE_MATRIX_INPUTS {
-            let other = 1 - channel
-            self.preampDB[other] = val
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(other), index: 0, data: data)
-        } else {
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        // A linked pair gets one per-channel write each; never the legacy
+        // all-channel REQ_SET_PREAMP, which would clobber the trims of the
+        // inputs outside this pair.
+        usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        if let partner = linkedPartner(of: channel) {
+            self.preampDB[partner] = val
+            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(partner), index: 0, data: data)
         }
     }
 
@@ -740,10 +734,16 @@ extension DSPViewModel {
         }
     }
     
-    func clearAllMaster() {
-        // Stereo input pair (channels 0/1).
-        clearChannelPEQ(0)
-        clearChannelPEQ(1)
+    /// Copy every PEQ band and the input trim from one input onto the other.
+    /// Linking a pair only mirrors future edits, so this is how a mismatched
+    /// pair is reconciled at the moment it's linked.  `setFilter` carries the
+    /// per-band bypass flag, so bypassed bands travel too.  Call before setting
+    /// the link bit: the writes are one-way and must not mirror back.
+    func syncInputPair(from source: Int, to dest: Int) {
+        for (band, p) in (channelData[source] ?? []).enumerated() {
+            setFilter(ch: dest, band: band, p: p)
+        }
+        setPreampChannel(channel: dest, db: preampValue(source))
     }
 
     /// Reset all 10 PEQ bands of a single channel to flat.

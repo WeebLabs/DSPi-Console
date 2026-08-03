@@ -885,7 +885,21 @@ class DSPViewModel: ObservableObject {
     /// USB channels in RP2350 8-channel input mode.  Indices 2-7 stay 0 on
     /// stereo-only firmware.
     @Published var preampDB: [Float] = Array(repeating: 0.0, count: MAX_MATRIX_INPUTS)
-    @Published var preampLinked: Bool = true
+
+    /// Stereo input pair links, one bit per adjacent pair: bit p couples input
+    /// channels 2p and 2p+1.  A linked pair mirrors preamp and PEQ edits across
+    /// both halves and draws both curves together - what Link L/R has always
+    /// done for inputs 1/2 (pair 0, the only one on by default), now available
+    /// on 3/4, 5/6 and 7/8 too.  Persisted per device serial.
+    @Published var linkedInputPairs: UInt8 = DSPViewModel.defaultLinkedInputPairs {
+        didSet {
+            guard linkedInputPairs != oldValue, !isRestoringInputPairLinks else { return }
+            Self.storeLinkedInputPairs(linkedInputPairs, serial: selectedDevice?.serial)
+        }
+    }
+    /// Set while a stored mask is being applied so the restore doesn't write
+    /// straight back out under the newly selected device's key.
+    private var isRestoringInputPairLinks = false
     @Published var masterVolumeDB: Float = 0.0
     /// Vendor-channel "user volume" — same field as the UAC1 host slider
     /// (`audio_state.volume`), driven via REQ_SET_USER_VOLUME (0xDA).
@@ -1372,6 +1386,93 @@ class DSPViewModel: ObservableObject {
     /// Number of input strips to render (sidebar + matrix).
     var numMatrixInputs: Int { effectiveInputChannels }
 
+    // MARK: - Input Pair Links
+
+    /// Number of linkable adjacent input pairs (1/2, 3/4, 5/6, 7/8).
+    static let inputPairCount = MAX_MATRIX_INPUTS / 2
+    /// Pair 0 (inputs 1/2) linked, matching the long-standing Link L/R default.
+    static let defaultLinkedInputPairs: UInt8 = 0b0000_0001
+
+    /// Pair index for an input channel, or nil for anything that isn't an input.
+    func inputPair(for channel: Int) -> Int? {
+        guard channel >= 0, channel < chOut1 else { return nil }
+        return channel / 2
+    }
+
+    func isInputPairLinked(_ pair: Int) -> Bool {
+        guard pair >= 0, pair < Self.inputPairCount else { return false }
+        return linkedInputPairs & (UInt8(1) << pair) != 0
+    }
+
+    func setInputPairLinked(_ pair: Int, _ linked: Bool) {
+        guard pair >= 0, pair < Self.inputPairCount else { return }
+        if linked {
+            linkedInputPairs |= UInt8(1) << pair
+        } else {
+            linkedInputPairs &= ~(UInt8(1) << pair)
+        }
+    }
+
+    /// The channel an edit on `channel` must be mirrored onto, or nil when the
+    /// channel isn't half of a linked pair.  Both halves have to be live, so
+    /// dropping to fewer active inputs suspends the higher pairs' links without
+    /// forgetting them - they come back when those channels do.
+    func linkedPartner(of channel: Int) -> Int? {
+        guard let pair = inputPair(for: channel), isInputPairLinked(pair) else { return nil }
+        let partner = channel ^ 1
+        guard channel < numMatrixInputs, partner < numMatrixInputs else { return nil }
+        return partner
+    }
+
+    /// Settings that differ between the two halves of a pair.  Linking only
+    /// mirrors *future* edits, so anything already divergent stays that way
+    /// unless it's reconciled at the moment the link is made.
+    ///
+    /// Band data that hasn't been fetched yet (an empty side) reports no
+    /// mismatch rather than a false one - there's nothing to copy either way.
+    func inputPairMismatch(_ a: Int, _ b: Int) -> (bands: Bool, preamp: Bool) {
+        let bandsA = channelData[a] ?? []
+        let bandsB = channelData[b] ?? []
+        let bands = bandsA.isEmpty || bandsB.isEmpty ? false : bandsA != bandsB
+        // Trims are stored rounded to 0.1 dB, so anything finer is noise.
+        let preamp = abs(preampValue(a) - preampValue(b)) > 0.05
+        return (bands, preamp)
+    }
+
+    /// Input trim for a channel, 0 for an index outside the preamp array.
+    func preampValue(_ channel: Int) -> Float {
+        preampDB.indices.contains(channel) ? preampDB[channel] : 0
+    }
+
+    /// Reapply the link mask stored for a device.  Called when the selected
+    /// device changes; an absent serial (no device) leaves the current mask
+    /// alone rather than resetting it on every disconnect.
+    func restoreInputPairLinks(forSerial serial: String?) {
+        guard let serial, !serial.isEmpty else { return }
+        let restored = Self.loadLinkedInputPairs(serial: serial)
+        guard restored != linkedInputPairs else { return }
+        isRestoringInputPairLinks = true
+        linkedInputPairs = restored
+        isRestoringInputPairLinks = false
+        refreshLinkedVisibility()
+    }
+
+    private static func linkedInputPairsKey(_ serial: String) -> String {
+        "linkedInputPairs.\(serial)"
+    }
+
+    static func storeLinkedInputPairs(_ mask: UInt8, serial: String?) {
+        guard let serial, !serial.isEmpty else { return }
+        UserDefaults.standard.set(Int(mask), forKey: linkedInputPairsKey(serial))
+    }
+
+    static func loadLinkedInputPairs(serial: String?) -> UInt8 {
+        guard let serial, !serial.isEmpty,
+              let stored = UserDefaults.standard.object(forKey: linkedInputPairsKey(serial)) as? Int
+        else { return defaultLinkedInputPairs }
+        return UInt8(truncatingIfNeeded: stored)
+    }
+
     // Firmware version tuple parsed from REQ_GET_PLATFORM (data[1] = major,
     // data[2] high nibble = minor, data[2] low nibble = patch).  nil before
     // the first successful fetchPlatform().
@@ -1830,6 +1931,9 @@ class DSPViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] device in
                 self?.hostAudioFormatMonitor.setPreferredSerial(device?.serial)
+                // Input pair links are an app-side preference, so they follow
+                // the unit by serial rather than living in the preset.
+                self?.restoreInputPairLinks(forSerial: device?.serial)
             }
             .store(in: &cancellables)
 
@@ -1869,15 +1973,11 @@ class DSPViewModel: ObservableObject {
                 if isOverviewMode { savedOverviewVisibility = channelVisibility }
                 isOverviewMode = false
                 activeEqChannel = ch
-                // Link L/R: selecting a stereo input (0/1) with link on shows
-                // both curves together (and the right pane stays on the click).
-                let showBothMasters = ch < BASE_MATRIX_INPUTS && preampLinked
+                // Selecting half of a linked input pair shows both curves
+                // together (and the right pane stays on the clicked channel).
+                let partner = linkedPartner(of: ch)
                 for eqCh in 0..<numChannels {
-                    if showBothMasters && eqCh < BASE_MATRIX_INPUTS {
-                        channelVisibility[eqCh] = true
-                    } else {
-                        channelVisibility[eqCh] = (eqCh == ch)
-                    }
+                    channelVisibility[eqCh] = (eqCh == ch || eqCh == partner)
                 }
             } else {
                 isOverviewMode = true
@@ -1887,11 +1987,11 @@ class DSPViewModel: ObservableObject {
         }
     }
 
-    /// Re-runs the current selection's graph-visibility logic.  Called after
-    /// `preampLinked` changes so the graph reflects whether both stereo input
-    /// curves should be drawn together.  No-op outside a stereo-input selection.
+    /// Re-runs the current selection's graph-visibility logic.  Called after a
+    /// pair's link changes so the graph reflects whether both of its curves
+    /// should be drawn together.  No-op outside an input selection.
     func refreshLinkedVisibility() {
-        guard let ch = activeEqChannel, ch < BASE_MATRIX_INPUTS else { return }
+        guard let ch = activeEqChannel, ch < chOut1 else { return }
         updateSelection(to: ch)
     }
 
@@ -2164,10 +2264,10 @@ class DSPViewModel: ObservableObject {
 
     func pasteChannelParams(eqChannel: Int) {
         guard let cb = channelClipboard else { return }
-        // Link L/R mirrors every other filter edit across the stereo input pair
-        // (the FilterListView callbacks do it per band), so a paste has to
-        // mirror too or the two channels drift apart.
-        let mirror: Int? = (preampLinked && eqChannel < BASE_MATRIX_INPUTS) ? (1 - eqChannel) : nil
+        // A linked pair mirrors every other filter edit (the FilterListView
+        // callbacks do it per band), so a paste has to mirror too or the two
+        // channels drift apart.
+        let mirror = linkedPartner(of: eqChannel)
         for (i, filter) in cb.filters.prefix(10).enumerated() {
             setFilter(ch: eqChannel, band: i, p: filter)
             if let m = mirror { setFilter(ch: m, band: i, p: filter) }

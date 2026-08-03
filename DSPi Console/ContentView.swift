@@ -303,13 +303,13 @@ struct ContentView: View {
                     // Show exactly the live active input count (2/4/6/8).  Each
                     // input is a first-class EQ channel (index == channel index).
                     ForEach(0..<vm.numMatrixInputs, id: \.self) { ch in
-                        // When Link L/R is on, both stereo input rows highlight
-                        // together if either is selected.  The right pane still
-                        // tracks the actually-clicked channel.
+                        // Both rows of a linked pair highlight together if
+                        // either is selected.  The right pane still tracks the
+                        // actually-clicked channel.
                         let rowSelected: Bool = {
                             if selection == .input(ch) { return true }
-                            if vm.preampLinked && ch < BASE_MATRIX_INPUTS {
-                                return selection == .input(0) || selection == .input(1)
+                            if let partner = vm.linkedPartner(of: ch) {
+                                return selection == .input(partner)
                             }
                             return false
                         }()
@@ -782,15 +782,15 @@ struct ContentView: View {
                 VStack {
                     switch selection {
                     case .input(let ch):
-                        // Link L/R mirrors edits only across the stereo pair (0/1).
-                        let mirrorLink = vm.preampLinked && ch < BASE_MATRIX_INPUTS
+                        // Edits mirror onto the other half of a linked pair.
+                        let mirrorLink = vm.linkedPartner(of: ch)
                         VStack(spacing: 16) {
                             InputChannelHeader(
                                 channel: ch,
                                 vm: vm,
-                                onClearMasterPEQ: {
-                                    if ch < BASE_MATRIX_INPUTS { vm.clearAllMaster() }
-                                    else { vm.clearChannelPEQ(ch) }
+                                onClearPEQ: {
+                                    vm.clearChannelPEQ(ch)
+                                    if let m = mirrorLink { vm.clearChannelPEQ(m) }
                                 }
                             )
                             .padding(.horizontal)
@@ -802,14 +802,14 @@ struct ContentView: View {
                                 bypassSupported: vm.firmwareSupportsBandBypass,
                                 onUpdate: { band, params in
                                     vm.setFilter(ch: ch, band: band, p: params)
-                                    if mirrorLink {
-                                        vm.setFilter(ch: 1 - ch, band: band, p: params)
+                                    if let m = mirrorLink {
+                                        vm.setFilter(ch: m, band: band, p: params)
                                     }
                                 },
                                 onBypassToggle: { band, bypass in
                                     vm.setBandBypass(ch: ch, band: band, bypass: bypass)
-                                    if mirrorLink {
-                                        vm.setBandBypass(ch: 1 - ch, band: band, bypass: bypass)
+                                    if let m = mirrorLink {
+                                        vm.setBandBypass(ch: m, band: band, bypass: bypass)
                                     }
                                 },
                                 onClear: nil  // handled by InputChannelHeader's Clear button

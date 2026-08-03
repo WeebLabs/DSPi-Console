@@ -775,26 +775,87 @@ private struct InputRoutingRow: View {
 
 // MARK: - Per-Channel Preamp Control
 
+// MARK: - Input Pair Link Alert
+
+/// What the user chose when asked how to reconcile a mismatched pair.
+enum InputLinkChoice {
+    /// Copy this channel's filters and trim onto its partner, then link.
+    case keep(Int)
+    case cancel
+}
+
+enum InputLinkAlerts {
+    /// Ask which channel's settings to keep before linking a pair that doesn't
+    /// already match.  `pageChannel` is the input whose page the Link button
+    /// was clicked on, and it's offered first so the default keeps the tuning
+    /// the user is actually looking at.
+    static func showMismatchAlert(pageChannel: Int, partner: Int,
+                                  bandsDiffer: Bool, preampDiffers: Bool) -> InputLinkChoice {
+        let pageLabel = "IN\(pageChannel + 1)"
+        let partnerLabel = "IN\(partner + 1)"
+        let differences: String
+        switch (bandsDiffer, preampDiffers) {
+        case (true, true):  differences = "different filters and input trims"
+        case (true, false): differences = "different filters"
+        default:            differences = "different input trims"
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Inputs \(pageChannel + 1) and \(partner + 1) don't match"
+        alert.informativeText = """
+            These inputs have \(differences). Linking mirrors future edits across \
+            both channels, but it cannot merge settings that already differ.
+
+            Choose which channel's filters and trim to copy onto the other. This \
+            overwrites the other channel and cannot be undone.
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Keep \(pageLabel)")
+        alert.addButton(withTitle: "Keep \(partnerLabel)")
+        alert.addButton(withTitle: "Cancel")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:  return .keep(pageChannel)
+        case .alertSecondButtonReturn: return .keep(partner)
+        default:                       return .cancel
+        }
+    }
+}
+
 // MARK: - Input Channel Header
 //
-// Top-of-page header for input (master L/R) channel pages.  Combines:
-//   • Link L/R button — toggles `vm.preampLinked`, which (a) synchronizes the
-//     preamp dB values across both channels and (b) mirrors subsequent PEQ
-//     filter edits between L and R (mirroring is wired at the call site that
-//     dispatches filter updates).
+// Top-of-page header for input channel pages.  Combines:
+//   • Link button - toggles this channel's adjacent pair (1/2, 3/4, 5/6, 7/8)
+//     in `vm.linkedInputPairs`, which (a) synchronizes the preamp dB values
+//     across both halves and (b) mirrors subsequent PEQ filter edits between
+//     them (mirroring is wired at the call site that dispatches filter updates).
 //   • Preamp slider with inline label and dB value field.
-//   • Clear Master PEQ button — resets all bands on both master channels.
+//   • Clear PEQ button - resets all bands on this channel, and on its partner
+//     when the pair is linked.
 struct InputChannelHeader: View {
     let channel: Int  // input channel index (0 = L, 1 = R, 2..7 = surround)
     @ObservedObject var vm: DSPViewModel
-    let onClearMasterPEQ: () -> Void
+    let onClearPEQ: () -> Void
 
     @State private var localPreamp: Float = 0
     @State private var isDragging = false
 
-    private var linked: Bool { vm.preampLinked }
-    /// Link L/R only applies to the stereo USB pair (inputs 0/1).
-    private var isStereoPair: Bool { channel < BASE_MATRIX_INPUTS }
+    /// Adjacent pair this input belongs to, and the channel it pairs with.
+    private var pair: Int { channel / 2 }
+    private var partner: Int { channel ^ 1 }
+    /// A pair can only be linked while both of its channels are live.
+    private var pairAvailable: Bool { max(channel, partner) < vm.numMatrixInputs }
+    private var linked: Bool { vm.linkedPartner(of: channel) != nil }
+    /// "Link 1/2", "Link 3/4", … keyed to the sidebar's IN1..IN8 numbering.
+    private var pairLabel: String { "\(min(channel, partner) + 1)/\(max(channel, partner) + 1)" }
+
+    // Fixed label widths keep both pills the same size whatever their state:
+    // the link icon swaps glyphs and the clear label gains the pair number.
+    // Sized to the widest variants ("Link 3/4" 39.7pt, "Clear 7/8 PEQ" 68.0pt
+    // at caption/medium) plus a little slack.
+    private let linkIconWidth: CGFloat = 14
+    private let linkLabelWidth: CGFloat = 42
+    private let clearLabelWidth: CGFloat = 70
 
     var body: some View {
         // Three sections separated by Dividers, mirroring the output channel
@@ -802,14 +863,17 @@ struct InputChannelHeader: View {
         // 12-pt horizontal / 8-pt vertical padding so dividers extend the
         // full card height.
         HStack(spacing: 0) {
-            // LINK L/R section (stereo pair only)
-            if isStereoPair {
+            // LINK section (hidden when this input's partner isn't live)
+            if pairAvailable {
                 Button(action: toggleLink) {
                     HStack(spacing: 6) {
                         Image(systemName: linked ? "link" : "link.badge.plus")
                             .font(.caption).fontWeight(.medium)
-                        Text("Link L/R")
+                            .frame(width: linkIconWidth)
+                        Text("Link \(pairLabel)")
                             .font(.caption).fontWeight(.medium)
+                            .fixedSize()
+                            .frame(width: linkLabelWidth)
                     }
                     .foregroundColor(linked ? .accentColor : .secondary)
                     .padding(.horizontal, 10)
@@ -827,7 +891,8 @@ struct InputChannelHeader: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .help(linked ? "Unlink L/R (preamp & PEQ stay independent)" : "Link L/R (preamp & PEQ edits mirrored)")
+                .help(linked ? "Unlink \(pairLabel) (preamp & PEQ stay independent)"
+                             : "Link \(pairLabel) (preamp & PEQ edits mirrored)")
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
 
@@ -855,12 +920,12 @@ struct InputChannelHeader: View {
                     .onChange(of: localPreamp) { val in
                         if isDragging {
                             vm.sendPreampChannelToDevice(channel: channel, db: val)
-                            if vm.preampLinked && isStereoPair {
-                                // Update the other channel's @Published value so its
+                            if let mirror = vm.linkedPartner(of: channel) {
+                                // Update the partner's @Published value so its
                                 // sidebar peak meter / cards reflect the mirrored value
                                 // immediately during drag.
                                 let rounded = (val * 10).rounded() / 10
-                                vm.preampDB[1 - channel] = rounded == -0.0 ? 0.0 : rounded
+                                vm.preampDB[mirror] = rounded == -0.0 ? 0.0 : rounded
                             }
                         }
                     }
@@ -891,9 +956,11 @@ struct InputChannelHeader: View {
             Divider()
 
             // CLEAR PEQ section
-            Button(action: onClearMasterPEQ) {
-                Text(isStereoPair ? "Clear Master PEQ" : "Clear PEQ")
+            Button(action: onClearPEQ) {
+                Text(linked ? "Clear \(pairLabel) PEQ" : "Clear PEQ")
                     .font(.caption).fontWeight(.medium)
+                    .fixedSize()
+                    .frame(width: clearLabelWidth)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
@@ -907,7 +974,8 @@ struct InputChannelHeader: View {
                     )
             }
             .buttonStyle(.plain)
-            .help(isStereoPair ? "Reset all PEQ bands on both master channels" : "Reset all PEQ bands on this input")
+            .help(linked ? "Reset all PEQ bands on both channels of the linked pair"
+                         : "Reset all PEQ bands on this input")
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
@@ -918,16 +986,34 @@ struct InputChannelHeader: View {
     }
 
     private func toggleLink() {
-        guard isStereoPair else { return }
-        vm.preampLinked.toggle()
-        if vm.preampLinked {
-            // Sync the other channel to this channel's value on link-on, matching
-            // the prior PreampControlView behavior.  PEQ filters are not bulk-synced
-            // here — only forward edits are mirrored, per the design note.
-            vm.setPreampChannel(channel: 1 - channel, db: vm.preampDB[channel])
+        guard pairAvailable else { return }
+
+        if vm.isInputPairLinked(pair) {
+            vm.setInputPairLinked(pair, false)
+            vm.refreshLinkedVisibility()
+            return
         }
-        // Re-evaluate which master curves are shown on the graph so toggling
-        // link while a master is selected updates immediately.
+
+        // Linking only mirrors future edits, so a pair that already differs
+        // has to be reconciled here - otherwise "linked" would quietly mean
+        // "still mismatched on every band nobody happens to touch".  Matching
+        // channels link with no prompt at all.
+        let mismatch = vm.inputPairMismatch(channel, partner)
+        if mismatch.bands || mismatch.preamp {
+            let choice = InputLinkAlerts.showMismatchAlert(
+                pageChannel: channel, partner: partner,
+                bandsDiffer: mismatch.bands, preampDiffers: mismatch.preamp)
+            switch choice {
+            case .cancel:
+                return
+            case .keep(let keeper):
+                vm.syncInputPair(from: keeper, to: keeper == channel ? partner : channel)
+            }
+        }
+
+        vm.setInputPairLinked(pair, true)
+        // Re-evaluate which curves are shown on the graph so toggling link
+        // while this input is selected updates immediately.
         vm.refreshLinkedVisibility()
     }
 }
@@ -941,6 +1027,8 @@ struct PreampControlView: View {
     @State private var localPreamp: Float = 0
     @State private var isDragging = false
 
+    private var linked: Bool { vm.linkedPartner(of: channel) != nil }
+
     var body: some View {
         HStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -950,18 +1038,19 @@ struct PreampControlView: View {
                             .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
 
                         Button(action: {
-                            vm.preampLinked.toggle()
-                            if vm.preampLinked {
+                            let nowLinked = !vm.isInputPairLinked(channel / 2)
+                            vm.setInputPairLinked(channel / 2, nowLinked)
+                            if nowLinked {
                                 // Sync other channel to this channel's value
-                                vm.setPreampChannel(channel: 1 - channel, db: vm.preampDB[channel])
+                                vm.setPreampChannel(channel: channel ^ 1, db: vm.preampDB[channel])
                             }
                         }) {
-                            Image(systemName: vm.preampLinked ? "link" : "link.badge.plus")
+                            Image(systemName: linked ? "link" : "link.badge.plus")
                                 .font(.caption2)
-                                .foregroundColor(vm.preampLinked ? .accentColor : .secondary)
+                                .foregroundColor(linked ? .accentColor : .secondary)
                         }
                         .buttonStyle(.plain)
-                        .help(vm.preampLinked ? "Unlink L/R preamp" : "Link L/R preamp")
+                        .help(linked ? "Unlink L/R preamp" : "Link L/R preamp")
                     }
                     ValueField(label: "dB", value: localPreamp, width: 60) {
                         localPreamp = $0
@@ -979,10 +1068,10 @@ struct PreampControlView: View {
                 .onChange(of: localPreamp) { val in
                     if isDragging {
                         vm.sendPreampChannelToDevice(channel: channel, db: val)
-                        if vm.preampLinked {
+                        if let mirror = vm.linkedPartner(of: channel) {
                             // Update other channel's @Published value so its view updates
                             let rounded = (val * 10).rounded() / 10
-                            vm.preampDB[1 - channel] = rounded == -0.0 ? 0.0 : rounded
+                            vm.preampDB[mirror] = rounded == -0.0 ? 0.0 : rounded
                         }
                     }
                 }
