@@ -421,6 +421,39 @@ struct FilterParams: Equatable, Identifiable {
     static func decodeQp(_ raw: UInt16) -> Float {
         raw == 0 ? defaultQp : Float(Double(raw) / 512.0)
     }
+
+    /// The Q range the firmware accepts, and the clamp the UI fields enforce.
+    static let qRange: ClosedRange<Float> = 0.1...20
+    /// Lowest frequency any band field accepts.
+    static let minFreq: Float = 10
+
+    /// Change the band's shape, rewriting the shared fields that the new type
+    /// would otherwise read in the wrong unit.
+    ///
+    /// Only the Linkwitz Transform needs this: it repurposes `gain` as fp in Hz
+    /// and `qp` as the target Q.  Carrying a dB value across turns a +6 dB
+    /// peaking band into fp = 6 Hz, which for an f0 of 1 kHz is a ~90 dB DC
+    /// boost - loud enough to damage a driver on the next sample.  Crossing the
+    /// other way is just as bad in reverse (fp = 28 Hz read as +28 dB).
+    ///
+    /// Entering LT seeds a neutral transform - target alignment equal to the
+    /// driver's, so the band is flat until the user edits it - and clamps f0/Q0
+    /// into range.  Leaving LT drops fp back to 0 dB.
+    func retyped(to newType: FilterType) -> FilterParams {
+        var p = self
+        p.type = newType
+
+        if newType.isLinkwitzTransform, !type.isLinkwitzTransform {
+            p.freq = max(freq, FilterParams.minFreq)
+            p.q = min(max(q, FilterParams.qRange.lowerBound), FilterParams.qRange.upperBound)
+            p.gain = p.freq   // fp = f0
+            p.qp = p.q        // Qp = Q0
+        } else if !newType.isLinkwitzTransform, type.isLinkwitzTransform {
+            p.gain = 0
+        }
+
+        return p
+    }
 }
 
 class DSPMath {

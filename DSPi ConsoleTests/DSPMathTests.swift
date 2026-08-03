@@ -134,4 +134,44 @@ final class DSPMathTests: XCTestCase {
         pk.qp = 1.0
         XCTAssertEqual(pk.qpEncoded, 0, "non-LT bands never emit a qp")
     }
+
+    // MARK: Type changes
+
+    /// Switching into LT must not read the old dB gain as fp (Hz): a +6 dB
+    /// peaking band would become fp = 6 Hz, a ~90 dB DC boost.  The seeded
+    /// band is a neutral transform - flat until the user edits it.
+    func testRetypingIntoLinkwitzSeedsNeutralTransform() {
+        let peaking = FilterParams(type: .peaking, freq: 1000, q: 1.5, gain: 6.0)
+        let lt = peaking.retyped(to: .linkwitzTransform)
+
+        XCTAssertEqual(lt.gain, lt.freq, "fp seeded from f0, not from the old dB gain")
+        XCTAssertEqual(lt.qp, lt.q, "Qp seeded from Q0")
+        for f: Float in [10, 100, 1000, 10000] {
+            XCTAssertEqual(mag([lt], f), 0, accuracy: 0.05, "seeded LT is flat at \(f) Hz")
+        }
+    }
+
+    /// f0 and Q0 are clamped into the range the firmware accepts.
+    func testRetypingIntoLinkwitzClampsDriverValues() {
+        let steep = FilterParams(type: .peaking, freq: 2, q: 40, gain: -3)
+        let lt = steep.retyped(to: .linkwitzTransform)
+        XCTAssertEqual(lt.freq, FilterParams.minFreq, "f0 clamped up to the field minimum")
+        XCTAssertEqual(lt.q, FilterParams.qRange.upperBound, "Q0 clamped to the firmware maximum")
+    }
+
+    /// Leaving LT drops fp so it can't be read as a large dB boost.
+    func testRetypingOutOfLinkwitzClearsGain() {
+        var lt = FilterParams(type: .linkwitzTransform, freq: 55, q: 1.1)
+        lt.gain = 28          // fp in Hz
+        XCTAssertEqual(lt.retyped(to: .peaking).gain, 0, "fp does not survive as +28 dB")
+    }
+
+    /// A change between two ordinary types leaves the values alone.
+    func testRetypingBetweenOrdinaryTypesPreservesValues() {
+        let peaking = FilterParams(type: .peaking, freq: 120, q: 0.9, gain: -4.5)
+        let shelf = peaking.retyped(to: .lowShelf)
+        XCTAssertEqual(shelf.freq, 120)
+        XCTAssertEqual(shelf.q, 0.9)
+        XCTAssertEqual(shelf.gain, -4.5)
+    }
 }

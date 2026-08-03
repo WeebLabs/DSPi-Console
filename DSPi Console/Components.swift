@@ -1898,20 +1898,10 @@ struct FilterRowView: View {
     @ViewBuilder
     private func peqTypeButton(_ type: FilterType, title: String) -> some View {
         Button {
-            var p = params
-            let wasLT = p.type.isLinkwitzTransform
-            p.type = type
-            // The Linkwitz Transform repurposes the gain field as fp (Hz).
-            // Seed it on entry so the band starts neutral (fp = f0 => 0 dB DC
-            // boost) rather than flat (fp <= 0) or with a leftover dB value;
-            // reset it to 0 dB on exit so a stale fp isn't read as gain.
-            if type.isLinkwitzTransform && !wasLT {
-                if p.gain <= 0 { p.gain = p.freq }
-                p.qp = FilterParams.defaultQp
-            } else if !type.isLinkwitzTransform && wasLT {
-                p.gain = 0
-            }
-            onChange(p)
+            // `retyped` sanitizes the fields the Linkwitz Transform repurposes,
+            // so a leftover dB gain can't land in the band as an fp of a few Hz
+            // (and a huge DC boost) the moment the type changes.
+            onChange(params.retyped(to: type))
         } label: {
             if params.type == type {
                 Label(title, systemImage: "checkmark")
