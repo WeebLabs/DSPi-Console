@@ -64,13 +64,22 @@ enum Channel: Int, CaseIterable {
         }
     }
 
+    /// Legacy 5-channel view of the palette.  Every value is the one this
+    /// enum has always returned; they just come from `ChannelPalette` now
+    /// instead of being a third copy of the same literals.
+    ///
+    /// `outRight` maps to output *2*, not output 1, which is what its literal
+    /// has always been.  By the channel model it should be output 1 (EQ channel
+    /// = output + 2, so Out R is matrix output 1), so this looks like drift
+    /// that crept in while the copies were separate - preserved here rather
+    /// than silently recolored.
     var color: Color {
         switch self {
-        case .masterLeft: return Color(red: 0.29, green: 0.56, blue: 0.89)
-        case .masterRight: return Color(red: 0.96, green: 0.45, blue: 0.45)
-        case .outLeft: return Color(red: 0.27, green: 0.76, blue: 0.64)
-        case .outRight: return Color(red: 0.94, green: 0.77, blue: 0.35)
-        case .sub: return Color(red: 0.73, green: 0.53, blue: 0.95)
+        case .masterLeft:  return ChannelPalette.input(0)
+        case .masterRight: return ChannelPalette.input(1)
+        case .outLeft:     return ChannelPalette.output(0)
+        case .outRight:    return ChannelPalette.output(2)
+        case .sub:         return ChannelPalette.pdm
         }
     }
 }

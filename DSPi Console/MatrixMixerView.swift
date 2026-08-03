@@ -8,18 +8,18 @@ struct MatrixOutput {
     let descriptor: String
     let color: Color
 
-    static let pdmColor = Color(red: 0.73, green: 0.53, blue: 0.95)
+    static let pdmColor = ChannelPalette.pdm
 
     /// All outputs for RP2350 (9 outputs: 4 SPDIF pairs + PDM at index 8)
     static let all: [MatrixOutput] = [
-        MatrixOutput(index: 0, name: "SPDIF 1 L", descriptor: "OUT1", color: Color(red: 0.27, green: 0.76, blue: 0.64)),
-        MatrixOutput(index: 1, name: "SPDIF 1 R", descriptor: "OUT2", color: Color(red: 0.35, green: 0.82, blue: 0.50)),
-        MatrixOutput(index: 2, name: "SPDIF 2 L", descriptor: "OUT3", color: Color(red: 0.94, green: 0.77, blue: 0.35)),
-        MatrixOutput(index: 3, name: "SPDIF 2 R", descriptor: "OUT4", color: Color(red: 0.95, green: 0.65, blue: 0.30)),
-        MatrixOutput(index: 4, name: "SPDIF 3 L", descriptor: "OUT5", color: Color(red: 0.35, green: 0.55, blue: 0.95)),
-        MatrixOutput(index: 5, name: "SPDIF 3 R", descriptor: "OUT6", color: Color(red: 0.55, green: 0.70, blue: 0.95)),
-        MatrixOutput(index: 6, name: "SPDIF 4 L", descriptor: "OUT7", color: Color(red: 0.85, green: 0.45, blue: 0.55)),
-        MatrixOutput(index: 7, name: "SPDIF 4 R", descriptor: "OUT8", color: Color(red: 0.95, green: 0.60, blue: 0.65)),
+        MatrixOutput(index: 0, name: "SPDIF 1 L", descriptor: "OUT1", color: ChannelPalette.output(0)),
+        MatrixOutput(index: 1, name: "SPDIF 1 R", descriptor: "OUT2", color: ChannelPalette.output(1)),
+        MatrixOutput(index: 2, name: "SPDIF 2 L", descriptor: "OUT3", color: ChannelPalette.output(2)),
+        MatrixOutput(index: 3, name: "SPDIF 2 R", descriptor: "OUT4", color: ChannelPalette.output(3)),
+        MatrixOutput(index: 4, name: "SPDIF 3 L", descriptor: "OUT5", color: ChannelPalette.output(4)),
+        MatrixOutput(index: 5, name: "SPDIF 3 R", descriptor: "OUT6", color: ChannelPalette.output(5)),
+        MatrixOutput(index: 6, name: "SPDIF 4 L", descriptor: "OUT7", color: ChannelPalette.output(6)),
+        MatrixOutput(index: 7, name: "SPDIF 4 R", descriptor: "OUT8", color: ChannelPalette.output(7)),
         MatrixOutput(index: 8, name: "PDM",        descriptor: "OUT9", color: pdmColor),
     ]
 
@@ -66,18 +66,10 @@ struct MatrixInput {
     let name: String
     let color: Color
 
-    /// Distinct row colors for up to 8 matrix inputs.  Indices 0/1 keep the
-    /// existing stereo blue/red so the 2-input view is unchanged.
-    static let palette: [Color] = [
-        Color(red: 0.29, green: 0.56, blue: 0.89),  // 0 FL - blue
-        Color(red: 0.96, green: 0.45, blue: 0.45),  // 1 FR - red
-        Color(red: 0.45, green: 0.78, blue: 0.55),  // 2 FC - green
-        Color(red: 0.93, green: 0.70, blue: 0.30),  // 3 LFE - amber
-        Color(red: 0.60, green: 0.55, blue: 0.92),  // 4 BL - violet
-        Color(red: 0.90, green: 0.55, blue: 0.78),  // 5 BR - pink
-        Color(red: 0.40, green: 0.78, blue: 0.82),  // 6 SL - teal
-        Color(red: 0.80, green: 0.72, blue: 0.42),  // 7 SR - olive
-    ]
+    /// Distinct row colors for up to 8 matrix inputs.  Defined once in
+    /// `ChannelPalette`; indices 0/1 keep the stereo blue/red so the 2-input
+    /// view is unchanged.
+    static let palette: [Color] = ChannelPalette.inputs
 
     /// 7.1 USB input order used in 8-channel mode (spec §5).
     static let surroundShortNames = ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]
