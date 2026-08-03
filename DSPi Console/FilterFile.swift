@@ -36,6 +36,17 @@ enum FilterFile {
         case crossover = "Xover"
     }
 
+    /// Line keywords accepted on read.  No keyword is a prefix of another, so
+    /// the order is presentational.  "Crossover" is the DSPi Console for
+    /// Windows spelling of the same bank: the two apps write the
+    /// keyword differently, and a file that lost its crossovers silently on the
+    /// way across is worse than a slightly wider parser.
+    private static let readKeywords: [(keyword: String, bank: Bank)] = [
+        ("Crossover", .crossover),
+        ("Filter", .peq),
+        ("Xover", .crossover),
+    ]
+
     /// One parsed line.  `enabled` is false for "OFF" lines and for shapes this
     /// build doesn't know (REW's "None", a type from newer firmware); the caller
     /// decides whether that means "skip the entry" or "leave the band flat".
@@ -101,11 +112,12 @@ enum FilterFile {
 
         // "<keyword> <n>:" - requiring the index keeps unrelated prose (e.g. a
         // "Filters: 5" summary line) from being read as a band.
-        guard let bank = Bank.allCases.first(where: {
-                  line.lowercased().hasPrefix($0.rawValue.lowercased())
+        guard let match = readKeywords.first(where: {
+                  line.lowercased().hasPrefix($0.keyword.lowercased())
               }),
               let colon = line.firstIndex(of: ":") else { return nil }
-        let keywordEnd = line.index(line.startIndex, offsetBy: bank.rawValue.count)
+        let bank = match.bank
+        let keywordEnd = line.index(line.startIndex, offsetBy: match.keyword.count)
         guard keywordEnd <= colon else { return nil }
         let indexText = line[keywordEnd..<colon].trimmingCharacters(in: .whitespaces)
         guard Int(indexText) != nil else { return nil }
@@ -116,11 +128,22 @@ enum FilterFile {
 
         let off = Band(bank: bank, params: FilterParams(type: .flat), enabled: false)
         guard !tokens.isEmpty, tokens.removeFirst().uppercased() == "ON" else { return off }
-        guard !tokens.isEmpty, let type = FilterType(fileCode: tokens.removeFirst()) else { return off }
+        guard !tokens.isEmpty else { return off }
+
+        let typeToken = tokens.removeFirst()
+        let values = labelledValues(tokens)
+
+        // A crossover band may be written either as a single code ("LR4LP",
+        // what this app writes) or as family + shape + slope ("LR  HP ...
+        // Slope 24 dB/oct", what the Windows app writes).  Both describe the
+        // same firmware type.
+        guard let type = FilterType(fileCode: typeToken)
+                ?? crossoverType(family: typeToken, shape: tokens.first, slope: values["SLOPE"])
+        else { return off }
 
         var params = FilterParams(type: type)
         var fp: Float? = nil
-        for (label, value) in labelledValues(tokens) {
+        for (label, value) in values {
             switch label {
             case "FC":   params.freq = value
             case "GAIN": params.gain = value
@@ -134,9 +157,36 @@ enum FilterFile {
         // a file hand-written in the plain "Gain" style still lands correctly.
         if type == .linkwitzTransform, let fp { params.gain = fp }
 
+        // "[Bypassed]" is this app's marker, a bare "BYP" token the Windows
+        // app's.  Matched as a whole token so a channel name can't trip it.
         params.bypass = line.uppercased().contains("[BYPASSED]")
+            || tokens.contains { $0.uppercased() == "BYP" }
 
         return Band(bank: bank, params: params, enabled: true)
+    }
+
+    /// Compose a crossover type from the family/shape/slope spelling.  Returns
+    /// nil when any part is missing or the combination isn't a real filter (an
+    /// odd-order Linkwitz-Riley, say).
+    private static func crossoverType(family token: String, shape: String?, slope: Float?) -> FilterType? {
+        guard let family = crossoverFamily(token), let shape, let slope, slope >= 6 else { return nil }
+        let lowPass: Bool
+        switch shape.uppercased() {
+        case "LP": lowPass = true
+        case "HP": lowPass = false
+        default:   return nil
+        }
+        return family.filterType(order: Int(slope) / 6, lowPass: lowPass)
+    }
+
+    /// "BES" is this app's short name for Bessel, "Bessel" the Windows one.
+    private static func crossoverFamily(_ token: String) -> CrossoverFamily? {
+        switch token.uppercased() {
+        case "LR":            return .linkwitzRiley
+        case "BW":            return .butterworth
+        case "BES", "BESSEL": return .bessel
+        default:              return nil
+        }
     }
 
     /// Reads the "# Format: N" stamp.  Returns nil for any other line; a file
@@ -149,22 +199,73 @@ enum FilterFile {
             .first
     }
 
+    /// Resolve a DSPi Console for Windows channel header - a bare default name
+    /// like "Master L", "SPDIF 2 R", "PDM" or "Input 5" - to a channel here.
+    ///
+    /// The Windows export keys its sections by name rather than by index, and
+    /// always writes the built-in default names (a user rename doesn't reach the
+    /// file), so this small table is the whole mapping.  Returns nil for any
+    /// header that isn't one of them, including this app's own index-keyed
+    /// headers, which the caller has already tried.
+    static func windowsChannel(header: String, pdmOutput: Int) -> PresetChannelRef? {
+        let name = header.trimmingCharacters(in: .whitespaces).uppercased()
+
+        if name == "MASTER L" { return .input(0) }
+        if name == "MASTER R" { return .input(1) }
+        if name == "PDM" { return .output(pdmOutput) }
+
+        // "Input N" numbers from 1, so input 3 is wire input 2.
+        if name.hasPrefix("INPUT "), let index = Int(name.dropFirst("INPUT ".count)),
+           index > BASE_MATRIX_INPUTS, index <= MAX_MATRIX_INPUTS {
+            return .input(index - 1)
+        }
+
+        // "SPDIF k L" / "SPDIF k R" - output pair k, left then right.
+        if name.hasPrefix("SPDIF ") {
+            let parts = name.dropFirst("SPDIF ".count).split(separator: " ")
+            guard parts.count == 2, let pair = Int(parts[0]), pair >= 1 else { return nil }
+            switch parts[1] {
+            case "L": return .output((pair - 1) * 2)
+            case "R": return .output((pair - 1) * 2 + 1)
+            default:  return nil
+            }
+        }
+
+        return nil
+    }
+
     /// Pairs each non-numeric token with the number that follows it, skipping
-    /// unit tokens and anything else that isn't a label/value pair.
-    private static func labelledValues(_ tokens: [String]) -> [(String, Float)] {
-        guard tokens.count > 1 else { return [] }
-        var pairs: [(String, Float)] = []
+    /// unit tokens and anything else that isn't a label/value pair.  A repeated
+    /// label keeps its last value, matching the order a line is read in.
+    private static func labelledValues(_ tokens: [String]) -> [String: Float] {
+        guard tokens.count > 1 else { return [:] }
+        var pairs: [String: Float] = [:]
         for i in 0..<(tokens.count - 1) {
             guard number(tokens[i]) == nil, let value = number(tokens[i + 1]) else { continue }
-            pairs.append((tokens[i].uppercased(), value))
+            pairs[tokens[i].uppercased()] = value
         }
         return pairs
     }
 
-    /// Parses a numeric token, tolerating a glued unit ("100Hz").
+    /// Parses a numeric token, tolerating a glued unit ("100Hz") and either
+    /// decimal separator.
+    ///
+    /// Separator rule, matching the Windows app so the two agree on the same
+    /// file: when a token carries both '.' and ',' the last one is the decimal
+    /// point and the other is thousands grouping; a lone ',' is a decimal point.
+    /// That reads "1.234,5" and "0,707" correctly and gives up only on a
+    /// thousands-grouped integer like "1,000", which neither app writes.
     private static func number(_ token: String) -> Float? {
         var text = token
-        while let last = text.last, !last.isNumber, last != "." { text.removeLast() }
-        return text.isEmpty ? nil : Float(text)
+        while let last = text.last, !last.isNumber, last != ".", last != "," { text.removeLast() }
+        guard !text.isEmpty else { return nil }
+
+        let lastDot = text.lastIndex(of: ".")
+        let lastComma = text.lastIndex(of: ",")
+        if let lastDot, let lastComma {
+            let strip: Character = lastDot > lastComma ? "," : "."
+            text = text.replacingOccurrences(of: String(strip), with: "")
+        }
+        return Float(text.replacingOccurrences(of: ",", with: "."))
     }
 }

@@ -1497,6 +1497,45 @@ class DSPViewModel: ObservableObject {
     /// shipped in wire format V14.  Hidden from the PEQ picker until confirmed.
     var firmwareSupportsFirstOrderShelves: Bool { firmwareWireFormatVersion >= 14 }
 
+    /// Volume-leveller detector/apply channel masks (cmds 0xDE/0xDF) shipped in
+    /// wire format V18.  Older firmware levels on a fixed channel set, so the
+    /// mask grid is hidden and the app leaves both masks alone.
+    var firmwareSupportsLevellerMasks: Bool { firmwareWireFormatVersion >= 18 }
+
+    /// True when the connected firmware can represent a filter type.  Every
+    /// path that writes bands the user didn't pick one at a time (file import,
+    /// configuration import) checks this first: an unrecognised type byte is
+    /// rejected or misread by the firmware rather than ignored.
+    ///
+    /// Only meaningful while connected - every capability flag reads false
+    /// before we've confirmed a version, and an offline edit is re-validated
+    /// when a device next connects.
+    func firmwareSupports(filterType type: FilterType) -> Bool {
+        guard isDeviceConnected else { return true }
+        switch type {
+        case .notch:                  return firmwareSupportsNotch
+        case .allPass:                return firmwareSupportsAllPass
+        case .allPass1:               return firmwareSupportsFirstOrderAllPass
+        case .lowShelf1, .highShelf1: return firmwareSupportsFirstOrderShelves
+        case .linkwitzTransform:      return firmwareSupportsLinkwitzTransform
+        default:                      return !type.isCrossover || firmwareSupportsCrossover
+        }
+    }
+
+    /// True when enabling this output would collide with something already on.
+    /// PDM and the Core 1 EQ workers share the same core, so only one side can
+    /// run at a time; the firmware refuses the second one rather than choosing.
+    func outputEnableWouldConflict(_ output: Int) -> Bool {
+        let eqRange = eqWorkerRange
+        if output == pdmOutputIndex {
+            return eqRange.contains(where: { outputEnabled[$0] })
+        }
+        if eqRange.contains(output) {
+            return outputEnabled[pdmOutputIndex]
+        }
+        return false
+    }
+
     /// Per-output loudness mask (cmds 0xFA/0xFB) shipped in wire format V19.
     /// Gate the mask UI on this so older firmware (which applies loudness to
     /// everything) never shows the selector.

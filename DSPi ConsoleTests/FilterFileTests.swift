@@ -190,6 +190,90 @@ final class FilterFileTests: XCTestCase {
         XCTAssertEqual(parsed?.params.type, .flat)
     }
 
+    // MARK: - DSPi Console for Windows dialect
+
+    /// The Windows app writes the same format with different spellings.  Its
+    /// files used to lose their crossovers and bypass flags on the way in here,
+    /// which reads as "the import worked" right up until you listen.
+
+    func testWindowsCrossoverLineParses() {
+        let parsed = FilterFile.parse(
+            line: "Crossover  1: ON  LR     HP  Fc    80.0 Hz  Slope  24 dB/oct")
+        XCTAssertEqual(parsed?.bank, .crossover)
+        XCTAssertEqual(parsed?.enabled, true)
+        XCTAssertEqual(parsed?.params.type, .lr4_hp)
+        XCTAssertEqual(parsed?.params.freq ?? 0, 80.0, accuracy: 0.05)
+    }
+
+    /// Family and slope together pick the type, so both have to be read - not
+    /// defaulted to the common case.
+    func testWindowsCrossoverFamiliesAndSlopes() {
+        let cases: [(String, FilterType)] = [
+            ("Crossover  1: ON  LR     LP  Fc  2000.0 Hz  Slope  48 dB/oct", .lr8_lp),
+            ("Crossover  2: ON  BW     HP  Fc   100.0 Hz  Slope  18 dB/oct", .bw3_hp),
+            ("Crossover  3: ON  Bessel LP  Fc   500.0 Hz  Slope  12 dB/oct", .bes2_lp),
+        ]
+        for (line, expected) in cases {
+            XCTAssertEqual(FilterFile.parse(line: line)?.params.type, expected, "line: \(line)")
+        }
+    }
+
+    func testWindowsDisabledCrossoverParsesAsDisabled() {
+        let parsed = FilterFile.parse(line: "Crossover  2: OFF")
+        XCTAssertEqual(parsed?.bank, .crossover)
+        XCTAssertEqual(parsed?.enabled, false)
+    }
+
+    /// An unresolvable family/slope combination is a disabled entry, not a
+    /// guess - an odd-order Linkwitz-Riley doesn't exist.
+    func testWindowsCrossoverWithImpossibleSlopeIsDisabled() {
+        let parsed = FilterFile.parse(line: "Crossover  1: ON  LR     HP  Fc 80.0 Hz  Slope  18 dB/oct")
+        XCTAssertEqual(parsed?.enabled, false)
+    }
+
+    func testWindowsBypassTagParses() {
+        let parsed = FilterFile.parse(line: "Filter  3: ON  PK      Fc 100.0 Hz  Gain +3.0 dB  Q 1.00  BYP")
+        XCTAssertEqual(parsed?.params.bypass, true)
+        XCTAssertEqual(FilterFile.parse(line: "Filter  3: ON  PK      Fc 100.0 Hz  Gain +3.0 dB  Q 1.00")?
+            .params.bypass, false)
+    }
+
+    /// REW exports from comma-decimal locales, and the Windows app reads them.
+    func testCommaDecimalsParse() {
+        let parsed = FilterFile.parse(line: "Filter  1: ON  PK  Fc 1.234,5 Hz  Gain -4,2 dB  Q 0,707")
+        XCTAssertEqual(parsed?.params.freq ?? 0, 1234.5, accuracy: 0.05)
+        XCTAssertEqual(parsed?.params.gain ?? 0, -4.2, accuracy: 0.005)
+        XCTAssertEqual(parsed?.params.q ?? 0, 0.707, accuracy: 0.0005)
+    }
+
+    func testWindowsChannelHeadersResolve() {
+        // PDM's output index is platform-dependent, so it is passed in.
+        XCTAssertEqual(FilterFile.windowsChannel(header: "Master L", pdmOutput: 8), .input(0))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "Master R", pdmOutput: 8), .input(1))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "Input 5", pdmOutput: 8), .input(4))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "SPDIF 1 L", pdmOutput: 8), .output(0))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "SPDIF 2 R", pdmOutput: 8), .output(3))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "SPDIF 4 L", pdmOutput: 8), .output(6))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "PDM", pdmOutput: 8), .output(8))
+        XCTAssertEqual(FilterFile.windowsChannel(header: "PDM", pdmOutput: 4), .output(4))
+
+        // This app's own headers and anything else are left to the index parser.
+        XCTAssertNil(FilterFile.windowsChannel(header: "Input 0: USB L", pdmOutput: 8))
+        XCTAssertNil(FilterFile.windowsChannel(header: "Input 2", pdmOutput: 8))   // 1-based: no such input
+        XCTAssertNil(FilterFile.windowsChannel(header: "Sub", pdmOutput: 8))
+        XCTAssertNil(FilterFile.windowsChannel(header: "SPDIF 2", pdmOutput: 8))
+    }
+
+    /// The dialect additions must not change what this app writes: an export
+    /// still has to read back as itself.
+    func testOwnCrossoverSpellingStillParses() {
+        let band = FilterParams(type: .lr4_lp, freq: 2000)
+        let parsed = FilterFile.parse(line: FilterFile.format(bank: .crossover, index: 1, band: band))
+        XCTAssertEqual(parsed?.bank, .crossover)
+        XCTAssertEqual(parsed?.params.type, .lr4_lp)
+        XCTAssertEqual(parsed?.params.freq ?? 0, 2000, accuracy: 0.05)
+    }
+
     // MARK: - Type metadata
 
     /// usesGain / usesQ drive both the row layout and what the exporter writes,

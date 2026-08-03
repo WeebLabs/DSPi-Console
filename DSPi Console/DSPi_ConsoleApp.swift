@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 
 // MARK: - App State (Shared USB Device and View Model)
 class AppState: ObservableObject {
@@ -6179,6 +6180,54 @@ struct GraphPopOutView: View {
     }
 }
 
+/// Sheet showing how far a configuration import has got.  Applying a document
+/// is several hundred control transfers; without it the window sits looking
+/// unresponsive while the device is half-configured.
+///
+/// Presented as a sheet rather than a modal alert so the apply's main-queue
+/// steps keep running: a nested modal loop would stall them.
+private final class ConfigurationProgressSheet {
+    private let bar = NSProgressIndicator()
+    private var sheet: NSWindow?
+    private weak var host: NSWindow?
+
+    func begin() {
+        guard let host = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+
+        let label = NSTextField(labelWithString: "Writing settings to the device...")
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 1
+        bar.doubleValue = 0
+        bar.widthAnchor.constraint(equalToConstant: 280).isActive = true
+
+        let stack = NSStackView(views: [label, bar])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
+
+        let sheet = NSWindow(contentRect: .zero, styleMask: [.titled],
+                             backing: .buffered, defer: false)
+        sheet.contentView = stack
+        sheet.setContentSize(stack.fittingSize)
+
+        self.host = host
+        self.sheet = sheet
+        host.beginSheet(sheet)
+    }
+
+    func update(_ fraction: Double) {
+        bar.doubleValue = fraction
+    }
+
+    func end() {
+        guard let sheet else { return }
+        host?.endSheet(sheet)
+        self.sheet = nil
+    }
+}
+
 // MARK: - File Menu Actions
 struct FileMenuActions {
     static func importFilters() {
@@ -6228,6 +6277,184 @@ struct FileMenuActions {
             showSuccess("Filters exported successfully")
         } catch {
             showError("Failed to write file: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Device Configuration Files
+
+    /// Content types offered by the configuration panels.  The `.dspipreset`
+    /// type is created from the extension rather than declared in the bundle:
+    /// the app's Info.plist is generated, so there is nowhere to export a real
+    /// UTI, and a dynamic type is enough for the panels to filter correctly.
+    private static var configurationTypes: [UTType] {
+        var types: [UTType] = []
+        if let type = UTType(filenameExtension: PresetDocument.fileExtension) { types.append(type) }
+        types.append(.json)
+        return types
+    }
+
+    static func exportConfiguration() {
+        let vm = AppState.shared.viewModel
+        guard vm.isDeviceConnected else {
+            showError("No device connected.")
+            return
+        }
+
+        // The document's channel ids depend on the platform (id 6 is S/PDIF 3 L
+        // on RP2350 and PDM on RP2040), so a file written before the device has
+        // identified itself could land on the wrong channels elsewhere.
+        guard !vm.platformName.isEmpty else {
+            showError("Still identifying the device. Try again in a moment.")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "Export Device Configuration"
+        panel.nameFieldStringValue = "DSPi Configuration.\(PresetDocument.fileExtension)"
+        panel.allowedContentTypes = configurationTypes
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let doc = PresetDocument.capture(from: vm,
+                                         name: url.deletingPathExtension().lastPathComponent)
+        do {
+            try PresetDocumentFile.encode(doc).write(to: url, options: .atomic)
+        } catch {
+            showError("Failed to write file: \(error.localizedDescription)")
+            return
+        }
+
+        // Count the bands that actually do something, not the empty slots that
+        // pad every bank out to its full width.
+        let bands = doc.channels.reduce(0) { $0 + $1.eq.filter { $0.type != 0 }.count }
+        let xover = doc.channels.reduce(0) { $0 + $1.crossover.filter { $0.type != 0 }.count }
+        showSuccess("""
+            Configuration exported.
+
+            \(doc.channels.count) channels, \(bands) active EQ bands, \
+            \(xover) crossover bands, \(doc.matrix.count) crosspoints.
+            """)
+    }
+
+    static func importConfiguration() {
+        let vm = AppState.shared.viewModel
+        guard vm.isDeviceConnected else {
+            showError("No device connected.")
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = "Import Device Configuration"
+        panel.allowedContentTypes = configurationTypes
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let doc: PresetDocument
+        do {
+            doc = try PresetDocumentFile.decode(try Data(contentsOf: url))
+        } catch {
+            showError(error.localizedDescription)
+            return
+        }
+
+        guard let options = askImportOptions(doc, vm: vm) else { return }
+
+        let progress = ConfigurationProgressSheet()
+        progress.begin()
+        PresetDocumentApply.apply(doc, to: vm, options: options,
+                                  progress: { progress.update($0) }) { report in
+            progress.end()
+            showImportResult(report)
+        }
+    }
+
+    /// Ask what to bring in.  Audio processing is the point of the file so it is
+    /// fixed on; volume and physical wiring are opt-in, since neither
+    /// necessarily belongs to the machine the file is being applied to.
+    /// Returns nil when the user cancels.
+    private static func askImportOptions(_ doc: PresetDocument, vm: DSPViewModel) -> PresetApplyOptions? {
+        let alert = NSAlert()
+        alert.messageText = "Import Device Configuration"
+        alert.alertStyle = .informational
+
+        var provenance: [String] = []
+        if let platform = doc.meta.platform, !platform.isEmpty { provenance.append(platform) }
+        if let firmware = doc.meta.firmwareVersion, !firmware.isEmpty {
+            provenance.append("firmware \(firmware)")
+        }
+        if !doc.meta.savedUtc.isEmpty, let saved = ISO8601DateFormatter().date(from: doc.meta.savedUtc) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH:mm"
+            provenance.append(formatter.string(from: saved))
+        }
+
+        var informative = provenance.isEmpty
+            ? "Applies the settings in this file to the connected device."
+            : "Saved from \(provenance.joined(separator: ", "))."
+
+        // A file from a device with a different channel count still applies; say
+        // so up front rather than leaving it to be discovered in the report.
+        if let source = doc.meta.platform, !source.isEmpty, !vm.platformName.isEmpty,
+           source.caseInsensitiveCompare(vm.platformName) != .orderedSame {
+            informative += "\n\nThis file came from a \(source) device and you are connected to "
+                         + "\(vm.platformName). Anything the connected device doesn't have will be skipped."
+        }
+        informative += "\n\nEQ, crossover, delays, gains, routing and the DSP features are always applied."
+        alert.informativeText = informative
+
+        let volumeCheck = NSButton(checkboxWithTitle: "Volume levels (master and listening volume)",
+                                   target: nil, action: nil)
+        let ioCheck = NSButton(checkboxWithTitle: "Hardware I/O (GPIO pins, clocks, ADAT, inputs)",
+                               target: nil, action: nil)
+
+        let accessory = NSStackView(views: [volumeCheck, ioCheck])
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.spacing = 6
+        accessory.setFrameSize(NSSize(width: 340, height: 48))
+        alert.accessoryView = accessory
+
+        alert.addButton(withTitle: "Import")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+
+        return PresetApplyOptions(audioProcessing: true,
+                                  volumeLevels: volumeCheck.state == .on,
+                                  hardwareIO: ioCheck.state == .on)
+    }
+
+    private static func showImportResult(_ report: PresetApplyReport) {
+        var lines = ["""
+            Applied \(report.channelsApplied) channels, \(report.bandsApplied) EQ bands, \
+            \(report.crossoverBandsApplied) crossover bands, \(report.crosspointsApplied) crosspoints.
+            """]
+
+        if !report.missingChannels.isEmpty {
+            lines.append("Not present on this device: \(report.missingChannels.joined(separator: ", "))")
+        }
+        for skipped in report.skipped {
+            lines.append("Skipped: \(skipped)")
+        }
+
+        // Everything landed in RAM.  Saying so avoids the trap of power-cycling
+        // and losing the whole import.  "Preset slot" rather than "preset", to
+        // keep it distinct from the file that was just imported.
+        lines.append("These changes are live but not yet stored on the device. "
+                   + "Save them to a preset slot to keep them.")
+
+        let text = lines.joined(separator: "\n\n")
+        // Anything the device refused or couldn't do isn't a success, so don't
+        // put a "Success" heading over it.
+        if report.isClean {
+            showSuccess(text)
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Import Device Configuration"
+            alert.informativeText = text
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
         }
     }
 
@@ -6375,6 +6602,22 @@ struct FileMenuActions {
                         .map { headerContent[$0] == "Enabled" }
                     currentChannel = eqCh
                     result[eqCh] = ParsedChannelData(filters: [], enableState: enabled)
+                }
+                // A file from DSPi Console for Windows, whose sections are keyed
+                // by the built-in channel name rather than by index.
+                else if let ref = FilterFile.windowsChannel(header: headerContent,
+                                                            pdmOutput: vm.pdmOutputIndex) {
+                    switch ref {
+                    case .input(let input) where input < vm.chOut1:
+                        currentChannel = input
+                        result[input] = ParsedChannelData(filters: [], enableState: nil)
+                    case .output(let output) where output < vm.numOutputChannels:
+                        let eqCh = vm.eqChannel(forOutput: output)
+                        currentChannel = eqCh
+                        result[eqCh] = ParsedChannelData(filters: [], enableState: nil)
+                    default:
+                        break   // a channel this platform doesn't have
+                    }
                 }
                 // Backward compat: old channel names (map to V16 output channels)
                 else if headerContent == "Out L" {
@@ -6666,20 +6909,9 @@ struct FileMenuActions {
         }
     }
 
-    /// True when the connected firmware would reject this filter type.  Only
-    /// meaningful while connected: every capability flag reads false before
-    /// we've confirmed a version, and an offline import is a local edit that
-    /// gets re-validated when a device next connects.
+    /// True when the connected firmware would reject this filter type.
     private static func isUnsupported(_ type: FilterType, vm: DSPViewModel) -> Bool {
-        guard vm.isDeviceConnected else { return false }
-        switch type {
-        case .notch:                  return !vm.firmwareSupportsNotch
-        case .allPass:                return !vm.firmwareSupportsAllPass
-        case .allPass1:               return !vm.firmwareSupportsFirstOrderAllPass
-        case .lowShelf1, .highShelf1: return !vm.firmwareSupportsFirstOrderShelves
-        case .linkwitzTransform:      return !vm.firmwareSupportsLinkwitzTransform
-        default:                      return type.isCrossover && !vm.firmwareSupportsCrossover
-        }
+        !vm.firmwareSupports(filterType: type)
     }
 
     // MARK: - Alerts
@@ -7248,6 +7480,18 @@ struct DSPi_ConsoleApp: App {
                     FileMenuActions.exportFilters()
                 }
                 .keyboardShortcut("e", modifiers: .command)
+
+                Divider()
+
+                // No shortcuts: Cmd+Shift+I and Cmd+Shift+E are already spoken
+                // for by the Tools menu windows.
+                Button("Import Device Configuration...") {
+                    FileMenuActions.importConfiguration()
+                }
+
+                Button("Export Device Configuration...") {
+                    FileMenuActions.exportConfiguration()
+                }
 
                 Divider()
 

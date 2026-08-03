@@ -224,14 +224,7 @@ struct MatrixMixerView: View {
 
     /// Check if enabling this output would conflict with current state (client-side check).
     private func wouldConflict(_ outputIndex: Int) -> Bool {
-        let pdm = vm.pdmOutputIndex
-        let eqRange = vm.eqWorkerRange
-        if outputIndex == pdm {
-            return eqRange.contains(where: { vm.outputEnabled[$0] })
-        } else if eqRange.contains(outputIndex) {
-            return vm.outputEnabled[pdm]
-        }
-        return false
+        vm.outputEnableWouldConflict(outputIndex)
     }
 
     /// Handle enable button tap with conflict detection.
