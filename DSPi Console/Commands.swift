@@ -3286,9 +3286,19 @@ extension DSPViewModel {
     // MARK: - Notification → State Mirroring
 
     /// Apply a v2 PARAM_CHANGED notification (already filtered to non-HOST
-    /// sources) to local UI state.  Currently mirrors channel-name edits
-    /// from BULK / PRESET / FACTORY / GPIO writes; extend as more fields
-    /// need cross-source live updates.  Runs on the main thread.
+    /// sources) to local UI state.  Runs on the main thread.
+    ///
+    /// This is an opt-in list, not a general mirror: EQ and crossover bands,
+    /// channel names, dac_hw_mute, user volume, LG, and the input / I2S / ADAT
+    /// config.  An unlisted offset is dropped silently, so the DSP feature
+    /// blocks (loudness, crossfeed, leveller, psybass, upmixer, preamp, output
+    /// gain / mute / delay) do NOT track a non-HOST write live - their windows
+    /// only catch up on the next fetch.  That matters most for Control Surfaces,
+    /// where a bound pot or IR button writes those very parameters (spec §7.3,
+    /// PARAM_SRC_GPIO); worth extending when one of those windows needs to
+    /// follow a knob.  Note InterruptMonitor.decode names every offset, but
+    /// that is the diagnostics log only - naming an offset there mirrors
+    /// nothing.
     func applyNotifiedParamChange(offset: UInt16, size: UInt16, payload: Data) {
         let off = Int(offset)
         let sz = Int(size)

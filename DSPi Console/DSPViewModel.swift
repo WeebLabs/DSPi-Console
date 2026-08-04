@@ -568,7 +568,7 @@ struct CsNounDesc: Equatable {
 /// differs from flash (unsaved preview); `activeMask` (uint16) bit N = binding N
 /// is live; `slotStatus[N]` = that slot's per-apply health.  The v3 tail adds
 /// the IR component's active mask, learn state, and per-command health; v6
-/// widens that tail to 16 sub-slots (spec §11.0).
+/// widens that tail to 16 sub-slots (spec §11.2).
 struct CsStatusPacket: Equatable {
     var lastStatus: UInt8 = 0
     var lastSlot: UInt8 = 0

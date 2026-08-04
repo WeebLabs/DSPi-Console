@@ -565,7 +565,7 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 6
+// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 7
 // (spec §"Wire reference" / §11): v2 grew the binding 16 -> 24 bytes, the
 // noun descriptor 8 -> 12, added per-slot names; v3 adds the IR remote receiver
 // component with a learned-command table, and the Apply/Save/Revert preview
@@ -575,6 +575,8 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // enum-only (UPMIX_CENTER_MODE gains Off = 2).  v6 raises the IR command table
 // 8 -> 16 sub-slots, which widens the status packet 32 -> 41 bytes (see
 // CsStatusPacket); the caps header is unchanged but max_ir_commands reads 16.
+// v7 changes no structure either: it appends nouns 49-50, the loudness
+// reference SPL and intensity.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
@@ -636,8 +638,8 @@ let CS_TYPE_LED_PWM: Int  = 6   // hardware-PWM-dimmed LED (IND_LEVEL meter)
 let CS_TYPE_IR: Int       = 7   // IR remote receiver (container: one pin + learned command sub-slots)
 
 // CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns,
-// v4 = 49); the app reads the live count and per-noun descriptors from the
-// caps, so these are only used by the display-label helpers.
+// v4 = 49, v7 = 51); the app reads the live count and per-noun descriptors from
+// the caps, so these are only used by the display-label helpers.
 let CS_NOUN_USER_VOLUME: Int       = 0
 let CS_NOUN_MASTER_VOLUME: Int     = 1
 let CS_NOUN_USER_MUTE: Int         = 2
@@ -673,7 +675,7 @@ let CS_NOUN_USB_STREAMING: Int     = 31
 let CS_NOUN_ADAT_ACTIVE: Int       = 32
 let CS_NOUN_LG_PRESENT: Int        = 33
 let CS_NOUN_LG_MUTED: Int          = 34
-// Caps v4 additions (spec §11.1).  The six upmixer nouns are RP2350-only: on
+// Caps v4 additions (spec §11.4).  The six upmixer nouns are RP2350-only: on
 // RP2040 their descriptor action masks read 0, like ADAT_ACTIVE.
 let CS_NOUN_UPMIX: Int             = 35
 let CS_NOUN_UPMIX_CENTER_MODE: Int = 36
@@ -689,6 +691,10 @@ let CS_NOUN_PSYBASS_CHARACTER: Int = 45
 let CS_NOUN_PSYBASS_ORIGINAL: Int  = 46
 let CS_NOUN_OUTPUT_DELAY: Int      = 47
 let CS_NOUN_PRESET_RELOAD: Int     = 48
+// Caps v7 additions (spec §11.1).  Intensity binds over 0..127 % only: the
+// vendor command takes 0..200 %, but 8.8 percent cannot encode more in an int16.
+let CS_NOUN_LOUDNESS_SPL: Int       = 49
+let CS_NOUN_LOUDNESS_INTENSITY: Int = 50
 
 // CsAction (operation applied).  Action bit position in the caps masks is
 // (1 << action); CS_ACT_BIT(a) below builds that mask.

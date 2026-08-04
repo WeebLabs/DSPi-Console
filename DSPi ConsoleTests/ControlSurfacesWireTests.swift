@@ -1,12 +1,12 @@
 import XCTest
 @testable import DSPi_Console
 
-/// Pure-logic tests for the Control Surfaces wire format, capability format v4
+/// Pure-logic tests for the Control Surfaces wire format, capability format v7
 /// (control_surfaces_spec.md §2 / §8.2).  Verifies `CsBinding` / `IrCommand`
 /// serialization matches the spec's byte-exact hex examples and that every wire
-/// struct round-trips at the v3/v4 sizes (24-byte binding, 40-byte caps header,
-/// 12-byte noun descriptor, 32-byte status packet, 16-byte IR command; v4
-/// changes no structure).  A wrong byte offset here would silently
+/// struct round-trips at its current size (24-byte binding, 40-byte caps header,
+/// 12-byte noun descriptor, 41-byte status packet since v6, 16-byte IR command;
+/// v4, v5 and v7 change no structure).  A wrong byte offset here would silently
 /// misconfigure real hardware, so these guard the encoding.  No device.
 final class ControlSurfacesWireTests: XCTestCase {
 
@@ -274,7 +274,7 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertFalse(st.isIrCmdActive(0))
     }
 
-    /// v6 widens the IR tail for 16 sub-slots (§11.0): ir_active_mask becomes a
+    /// v6 widens the IR tail for 16 sub-slots (§11.2): ir_active_mask becomes a
     /// uint16 at 22, pushing ir_learn_state to 24 and ir_cmd_status[16] to
     /// 25-40, for 41 bytes total.  The prefix through byte 21 is unchanged.
     func testStatusPacketV6Decode() {
@@ -325,7 +325,7 @@ final class ControlSurfacesWireTests: XCTestCase {
     }
 
     /// v6 leaves the caps header at 40 bytes; only the version and
-    /// max_ir_commands move (§11.0).  Hosts size the command list from the
+    /// max_ir_commands move (§11.2).  Hosts size the command list from the
     /// latter rather than assuming 8.
     func testCapsHeaderV6MaxIrCommands() {
         var d = Data([6, 16, 8, 49])   // capsVersion 6, maxBindings, typeCount, nounCount
@@ -412,7 +412,7 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CS_STATUS_IR_IN_USE, 0x1D)
         XCTAssertEqual(CS_STATUS_NO_IR, 0x1E)
         XCTAssertEqual(CS_MAX_BINDINGS, 16)
-        XCTAssertEqual(CS_MAX_IR_COMMANDS, 16)   // 8 before caps v6 (§11.0)
+        XCTAssertEqual(CS_MAX_IR_COMMANDS, 16)   // 8 before caps v6 (§11.2)
         XCTAssertEqual(CS_TYPE_IR, 7)
         XCTAssertEqual(CS_CONFIG_VERSION, 2)
         XCTAssertEqual(CS_IR_CONFIG_VERSION, 2)  // CsIrConfig grew to 16 sub-slots
@@ -427,7 +427,7 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(REQ_CS_REVERT, 0x9E)
     }
 
-    // MARK: - Caps v4 additions (§11.1)
+    // MARK: - Caps v4 additions (§11.4)
 
     /// v4 appends nouns 35-48 without renumbering any earlier value, so a
     /// mis-numbered constant would bind the wrong parameter on real hardware.
@@ -477,7 +477,7 @@ final class ControlSurfacesWireTests: XCTestCase {
     }
 
     /// A v4 caps header is byte-identical to v3 apart from the version and the
-    /// grown noun count, so the v3 parser must read it unchanged (§11.1).
+    /// grown noun count, so the v3 parser must read it unchanged (§11.4).
     func testCapsHeaderV4SameLayout() {
         var d = Data([4, 16, 8, 49]) // capsVersion 4, maxBindings, typeCount, nounCount 49
         for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
@@ -527,6 +527,61 @@ final class ControlSurfacesWireTests: XCTestCase {
             event: CS_EVENT_LONG)
         XCTAssertEqual(hex(b.toData()),
                        "01 30 07 00 0f ff 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    // MARK: - Caps v7 additions (§11.1)
+
+    /// v7 appends the two loudness nouns without renumbering anything earlier
+    /// and without touching a structure, so only the numbering can go wrong.
+    func testV7NounNumbering() {
+        XCTAssertEqual(CS_NOUN_PRESET_RELOAD, 48)     // last v4 noun, unmoved
+        XCTAssertEqual(CS_NOUN_LOUDNESS_SPL, 49)
+        XCTAssertEqual(CS_NOUN_LOUDNESS_INTENSITY, 50)
+    }
+
+    /// A v7 caps header is byte-identical to v6 apart from the version and the
+    /// grown noun count (51); the parser must read it unchanged (§11.1).
+    func testCapsHeaderV7SameLayout() {
+        var d = Data([7, 16, 8, 51])   // capsVersion 7, maxBindings, typeCount, nounCount
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 0, 0, 0])
+        XCTAssertEqual(d.count, 40)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.capsVersion, 7)
+        XCTAssertEqual(caps.nounCount, 51)
+        XCTAssertEqual(caps.maxIrCommands, 16)
+    }
+
+    /// A loudness reference-SPL pot: dB unit, custom 60..90 span of the noun's
+    /// 40..100 dB SPL range, on ADC GPIO 26.
+    func testLoudnessSplPotBinding() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_POT), noun: UInt8(CS_NOUN_LOUDNESS_SPL),
+            action: UInt8(CS_ACT_ADJUST), gpio0: 26, gpio1: CS_GPIO_UNUSED,
+            rangeMin: csEncodeValue(60, unit: CS_UNIT_DB),
+            rangeMax: csEncodeValue(90, unit: CS_UNIT_DB))
+        // The noun's full range fits 8.8 comfortably at both ends.
+        XCTAssertEqual(csEncodeValue(40, unit: CS_UNIT_DB), 10240)
+        XCTAssertEqual(csEncodeValue(100, unit: CS_UNIT_DB), 25600)
+        XCTAssertEqual(hex(b.toData()),
+                       "03 31 00 00 1a ff 00 00 00 00 00 00 00 00 00 3c 00 5a 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// A loudness-intensity encoder stepping 5 % per detent.  The noun stops at
+    /// 127 % because 8.8 percent has no room for more in an int16: 128 % would
+    /// need 32768 and clamps, which is why the bindable span is capped (§11.1).
+    func testLoudnessIntensityEncoderBinding() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_ENCODER), noun: UInt8(CS_NOUN_LOUDNESS_INTENSITY),
+            action: UInt8(CS_ACT_STEP), gpio0: 12, gpio1: 13,
+            step: csEncodeStep(5, unit: CS_UNIT_PERCENT))   // 5 % = 1280 in 8.8
+        XCTAssertEqual(b.step, 1280)
+        XCTAssertEqual(csEncodeValue(127, unit: CS_UNIT_PERCENT), 32512)
+        XCTAssertEqual(csEncodeValue(128, unit: CS_UNIT_PERCENT), Int16.max)
+        XCTAssertEqual(hex(b.toData()),
+                       "04 32 01 00 0c 0d 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00 00 00 00")
         XCTAssertEqual(CsBinding.fromData(b.toData()), b)
     }
 

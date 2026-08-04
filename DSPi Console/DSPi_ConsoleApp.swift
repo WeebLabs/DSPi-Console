@@ -3630,7 +3630,9 @@ struct ControlSurfacesSettingsTab: View {
     private static let nounCategories: [NounCategory] = [
         NounCategory(name: "Volume & Mute",
                      nouns: [CS_NOUN_USER_VOLUME, CS_NOUN_MASTER_VOLUME, CS_NOUN_USER_MUTE]),
-        NounCategory(name: "Sound", nouns: [CS_NOUN_LOUDNESS, CS_NOUN_EQ_BYPASS]),
+        NounCategory(name: "Loudness",
+                     nouns: [CS_NOUN_LOUDNESS, CS_NOUN_LOUDNESS_SPL, CS_NOUN_LOUDNESS_INTENSITY],
+                     strip: ["Loudness"], enableNoun: CS_NOUN_LOUDNESS),
         NounCategory(name: "Crossfeed",
                      nouns: [CS_NOUN_CROSSFEED, CS_NOUN_CROSSFEED_PRESET, CS_NOUN_CROSSFEED_ITD],
                      strip: ["Crossfeed"], enableNoun: CS_NOUN_CROSSFEED),
@@ -3654,8 +3656,8 @@ struct ControlSurfacesSettingsTab: View {
                      nouns: [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE,
                              CS_NOUN_OUTPUT_ENABLE, CS_NOUN_OUTPUT_DELAY]),
         NounCategory(name: "Filters",
-                     nouns: [CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN, CS_NOUN_FILTER_Q,
-                             CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS],
+                     nouns: [CS_NOUN_EQ_BYPASS, CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN,
+                             CS_NOUN_FILTER_Q, CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS],
                      strip: ["Filter"]),
         NounCategory(name: "Tools", nouns: [CS_NOUN_SIGGEN, CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
         NounCategory(name: "Status",
@@ -3982,6 +3984,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_PSYBASS_ORIGINAL:   return "Psych Bass Original Level"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
+        case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
+        case CS_NOUN_LOUDNESS_INTENSITY: return "Loudness Intensity"
         default:                         return "Parameter \(noun)"
         }
     }
