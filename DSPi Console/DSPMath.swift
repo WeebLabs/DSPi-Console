@@ -4,8 +4,9 @@ enum FilterType: Int, CaseIterable, Identifiable {
     // PEQ types.  Raw values MUST match the firmware FilterType enum (config.h)
     // exactly - they are sent verbatim as the type byte in REQ_SET_EQ_PARAM and
     // persisted in flash.  The value space is partitioned (firmware "FilterType
-    // value-space contract"): 0..7 core PEQ, 8..10 first-order PEQ, 11..31
-    // reserved for future PEQ, 32..63 crossover.
+    // value-space contract"): 0..7 core PEQ, 8..10 first-order PEQ, 11 Linkwitz
+    // Transform, 12..13 first-order pass, 14..31 reserved for future PEQ,
+    // 32..63 crossover.
     case flat = 0
     case peaking = 1
     case lowShelf = 2
@@ -28,7 +29,14 @@ enum FilterType: Int, CaseIterable, Identifiable {
     // plus a dedicated `qp` sidecar (Qp x 512).  See peq_filters.md §3.
     case linkwitzTransform = 11
 
-    // 12..31 reserved for future PEQ types.
+    // First-order low/high pass.  Single-pole 6 dB/oct rolloff, -3 dB at the
+    // corner, no resonance - the gentle counterparts to the RBJ second-order
+    // pair (4/5), which the UI presents as the 12 dB/oct variants of the same
+    // High Cut / Low Cut shapes.  freq only; Q and gain are unused.
+    case lowPass1 = 12
+    case highPass1 = 13
+
+    // 14..31 reserved for future PEQ types.
 
     // Crossover types (32..63, wire format V13+).  Each value encodes
     // (family, order, LP/HP).  Renumbered from the old 8..39 range on
@@ -72,10 +80,11 @@ enum FilterType: Int, CaseIterable, Identifiable {
     /// Mirrors the firmware FILTER_XOVER_FIRST..FILTER_XOVER_LAST range.
     var isCrossover: Bool { rawValue >= 32 && rawValue <= 63 }
 
-    /// True if this is one of the first-order PEQ sections (all-pass / shelves).
+    /// True if this is one of the first-order PEQ sections (all-pass, shelves,
+    /// low/high pass) - the types the firmware runs with Q ignored.
     var isFirstOrderPEQ: Bool {
         switch self {
-        case .allPass1, .lowShelf1, .highShelf1: return true
+        case .allPass1, .lowShelf1, .highShelf1, .lowPass1, .highPass1: return true
         default: return false
         }
     }
@@ -85,15 +94,16 @@ enum FilterType: Int, CaseIterable, Identifiable {
     /// bespoke row layout and an 18-byte REQ_SET_EQ_PARAM payload.
     var isLinkwitzTransform: Bool { self == .linkwitzTransform }
 
-    /// Order/phase label for the shelf & all-pass variants - used as the
+    /// Order/phase label for the shapes that come in two orders (shelves, cuts,
+    /// all-pass) - used as the
     /// submenu child title on the PEQ type picker, where the shape name is the
     /// parent menu (e.g. "Low Shelf" ▸ "6 dB/oct" / "12 dB/oct").  Spells out
     /// "/oct" here since the submenu has room; the compact selected-face label
     /// (FilterType.name) drops it.  nil for shapes with no order choice.
     var orderLabel: String? {
         switch self {
-        case .lowShelf1, .highShelf1: return "6 dB/oct"
-        case .lowShelf, .highShelf:   return "12 dB/oct"
+        case .lowShelf1, .highShelf1, .lowPass1, .highPass1: return "6 dB/oct"
+        case .lowShelf, .highShelf, .lowPass, .highPass:     return "12 dB/oct"
         case .allPass1:               return "180°"
         case .allPass:                return "360°"
         default:                      return nil
@@ -106,13 +116,15 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .peaking: return "Peaking"
         case .lowShelf: return "Low Shelf (12dB)"
         case .highShelf: return "High Shelf (12dB)"
-        case .lowPass: return "High Cut"
-        case .highPass: return "Low Cut"
+        case .lowPass: return "High Cut (12dB)"
+        case .highPass: return "Low Cut (12dB)"
         case .notch: return "Notch"
         case .allPass: return "All Pass (360°)"
         case .allPass1: return "All Pass (180°)"
         case .lowShelf1: return "Low Shelf (6dB)"
         case .highShelf1: return "High Shelf (6dB)"
+        case .lowPass1: return "High Cut (6dB)"
+        case .highPass1: return "Low Cut (6dB)"
         case .linkwitzTransform: return "Linkwitz Transform"
         case .lr2_lp: return "LR2 Low Pass"
         case .lr2_hp: return "LR2 High Pass"
@@ -163,6 +175,8 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .allPass1: return "AP1"
         case .lowShelf1: return "LS1"
         case .highShelf1: return "HS1"
+        case .lowPass1: return "LP1"
+        case .highPass1: return "HP1"
         case .linkwitzTransform: return "LT"
         case .lr2_lp: return "LR2 LP"
         case .lr2_hp: return "LR2 HP"
@@ -289,6 +303,8 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case "AP1":        self = .allPass1
         case "LS1":        self = .lowShelf1
         case "HS1":        self = .highShelf1
+        case "LP1":        self = .lowPass1
+        case "HP1":        self = .highPass1
         case "LT":         self = .linkwitzTransform
         case let code:
             guard let xover = FilterType.allCases.first(where: {
@@ -648,6 +664,16 @@ class DSPMath {
             // at Nyquist.  Q unused.  Matches firmware FILTER_HIGHSHELF1.
             b0 = sn + A + (A * cs); b1 = sn - A - (A * cs); b2 = 0
             a0 = sn + (1 / A) + (cs / A); a1 = sn - (1 / A) - (cs / A); a2 = 0
+        case .lowPass1:
+            // First-order low pass (degenerate biquad): unity at DC, -3 dB at
+            // the corner, 6 dB/oct.  Q/gain unused.  Matches FILTER_LOWPASS1.
+            b0 = sn; b1 = sn; b2 = 0
+            a0 = sn + 1 + cs; a1 = sn - 1 - cs; a2 = 0
+        case .highPass1:
+            // First-order high pass (degenerate biquad): -3 dB at the corner,
+            // unity toward Nyquist.  Matches FILTER_HIGHPASS1.
+            b0 = 1 + cs; b1 = -1 - cs; b2 = 0
+            a0 = sn + 1 + cs; a1 = sn - 1 - cs; a2 = 0
         default: break
         }
 

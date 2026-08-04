@@ -1862,7 +1862,7 @@ struct FilterRowView: View {
 
     /// A shape in the PEQ type menu and its order variants (gentler first).
     /// Single-variant shapes render as a plain item; multi-variant shapes
-    /// (shelves, all-pass) render as a submenu of their `orderLabel`s.
+    /// (shelves, cuts, all-pass) render as a submenu of their `orderLabel`s.
     private struct PEQMenuGroup { let name: String; let variants: [FilterType] }
 
     private static let peqMenuGroups: [PEQMenuGroup] = [
@@ -1870,8 +1870,8 @@ struct FilterRowView: View {
         PEQMenuGroup(name: "Peaking",    variants: [.peaking]),
         PEQMenuGroup(name: "Low Shelf",  variants: [.lowShelf1, .lowShelf]),
         PEQMenuGroup(name: "High Shelf", variants: [.highShelf1, .highShelf]),
-        PEQMenuGroup(name: "High Cut",   variants: [.lowPass]),
-        PEQMenuGroup(name: "Low Cut",    variants: [.highPass]),
+        PEQMenuGroup(name: "High Cut",   variants: [.lowPass1, .lowPass]),
+        PEQMenuGroup(name: "Low Cut",    variants: [.highPass1, .highPass]),
         PEQMenuGroup(name: "Notch",      variants: [.notch]),
         PEQMenuGroup(name: "All Pass",   variants: [.allPass1, .allPass]),
         PEQMenuGroup(name: "Linkwitz Transform", variants: [.linkwitzTransform]),

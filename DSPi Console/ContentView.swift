@@ -13,8 +13,9 @@ enum SidebarSelection: Hashable {
 /// tab and never appear here.  Notch / AllPass were added in firmware 1.1.4 -
 /// older firmware would reject the type byte, so they're hidden until we've
 /// confirmed support.  The first-order all-pass (wire V13) and first-order
-/// shelves (wire V14) are gated on the bulk wire-format version, since the
-/// firmware release version did not advance with them.
+/// shelves (wire V14) and the first-order low/high pass (V28) are gated on the
+/// bulk wire-format version, since the firmware release version did not
+/// advance with them.
 ///
 /// `includeLinkwitz` is false for input channels: the Linkwitz Transform is a
 /// driver/sealed-box bass-extension tool that only makes sense on the outputs
@@ -36,6 +37,10 @@ fileprivate func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = 
 
     if vm.firmwareSupportsFirstOrderShelves == false {
         filters = filters.filter { $0 != .lowShelf1 && $0 != .highShelf1 }
+    }
+
+    if vm.firmwareSupportsFirstOrderPass == false {
+        filters = filters.filter { $0 != .lowPass1 && $0 != .highPass1 }
     }
 
     if vm.firmwareSupportsLinkwitzTransform == false || includeLinkwitz == false {

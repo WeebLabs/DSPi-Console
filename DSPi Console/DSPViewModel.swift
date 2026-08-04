@@ -1506,6 +1506,15 @@ class DSPViewModel: ObservableObject {
     /// shipped in wire format V14.  Hidden from the PEQ picker until confirmed.
     var firmwareSupportsFirstOrderShelves: Bool { firmwareWireFormatVersion >= 14 }
 
+    /// First-order low/high pass (FilterType.lowPass1 / .highPass1) arrived as
+    /// an enum-only addition that never bumped the wire format, so there is no
+    /// version that marks them exactly.  V27 is ambiguous - it was bumped on
+    /// main while the filter branch was still in flight, so early V27 builds
+    /// lack the types and post-merge V27 builds have them - which leaves V28 as
+    /// the first version that unambiguously carries them.  A post-merge V27
+    /// build loses nothing but the 6 dB/oct menu entries.
+    var firmwareSupportsFirstOrderPass: Bool { firmwareWireFormatVersion >= 28 }
+
     /// Volume-leveller detector/apply channel masks (cmds 0xDE/0xDF) shipped in
     /// wire format V18.  Older firmware levels on a fixed channel set, so the
     /// mask grid is hidden and the app leaves both masks alone.
@@ -1526,6 +1535,7 @@ class DSPViewModel: ObservableObject {
         case .allPass:                return firmwareSupportsAllPass
         case .allPass1:               return firmwareSupportsFirstOrderAllPass
         case .lowShelf1, .highShelf1: return firmwareSupportsFirstOrderShelves
+        case .lowPass1, .highPass1:   return firmwareSupportsFirstOrderPass
         case .linkwitzTransform:      return firmwareSupportsLinkwitzTransform
         default:                      return !type.isCrossover || firmwareSupportsCrossover
         }

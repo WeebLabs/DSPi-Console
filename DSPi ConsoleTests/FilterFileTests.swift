@@ -15,6 +15,7 @@ final class FilterFileTests: XCTestCase {
     private static let peqTypes: [FilterType] = [
         .peaking, .lowShelf, .highShelf, .lowPass, .highPass,
         .notch, .allPass, .allPass1, .lowShelf1, .highShelf1, .linkwitzTransform,
+        .lowPass1, .highPass1,
     ]
 
     // MARK: - Round-trip
@@ -282,14 +283,16 @@ final class FilterFileTests: XCTestCase {
         for type in [FilterType.peaking, .lowShelf, .highShelf, .lowShelf1, .highShelf1] {
             XCTAssertTrue(type.usesGain, "\(type.name) should use gain")
         }
-        for type in [FilterType.lowPass, .highPass, .notch, .allPass, .allPass1, .linkwitzTransform, .flat] {
+        for type in [FilterType.lowPass, .highPass, .notch, .allPass, .allPass1,
+                     .lowPass1, .highPass1, .linkwitzTransform, .flat] {
             XCTAssertFalse(type.usesGain, "\(type.name) should not use gain")
         }
 
         for type in [FilterType.peaking, .lowShelf, .highShelf, .lowPass, .highPass, .notch, .allPass] {
             XCTAssertTrue(type.usesQ, "\(type.name) should use Q")
         }
-        for type in [FilterType.allPass1, .lowShelf1, .highShelf1, .linkwitzTransform, .flat, .lr4_lp] {
+        for type in [FilterType.allPass1, .lowShelf1, .highShelf1, .lowPass1, .highPass1,
+                     .linkwitzTransform, .flat, .lr4_lp] {
             XCTAssertFalse(type.usesQ, "\(type.name) should not use Q")
         }
     }

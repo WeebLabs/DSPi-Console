@@ -57,6 +57,25 @@ final class DSPMathTests: XCTestCase {
         XCTAssertEqual(phase(ap, 1000), -90, accuracy: 2.0, "all-pass phase at fc")
     }
 
+    func testFirstOrderPassIsMinus3dBAtCornerAndHalfAsSteep() {
+        // Single-pole rolloff: -3 dB at fc, 6 dB/oct (so ~-20 dB a decade out),
+        // and monotonic - no resonant peak whatever the (ignored) Q says.
+        let lp1 = [FilterParams(type: .lowPass1, freq: 1000, q: 5.0)]
+        let hp1 = [FilterParams(type: .highPass1, freq: 1000, q: 5.0)]
+
+        XCTAssertEqual(mag(lp1, 1000), -3.01, accuracy: 0.2, "LP1 is -3 dB at fc")
+        XCTAssertEqual(mag(hp1, 1000), -3.01, accuracy: 0.2, "HP1 is -3 dB at fc")
+        XCTAssertEqual(mag(lp1, 50), 0, accuracy: 0.2, "LP1 passband is flat below fc")
+        XCTAssertEqual(mag(hp1, 18000), 0, accuracy: 0.3, "HP1 passband is flat above fc")
+        XCTAssertEqual(mag(lp1, 10000), -20, accuracy: 1.5, "LP1 loses ~20 dB a decade above fc")
+        XCTAssertEqual(mag(hp1, 100), -20, accuracy: 1.5, "HP1 loses ~20 dB a decade below fc")
+
+        // Half the slope of the second-order pair, two octaves out.
+        let lp2 = [FilterParams(type: .lowPass, freq: 1000, q: 0.7071)]
+        XCTAssertEqual(mag(lp1, 4000), mag(lp2, 4000) / 2, accuracy: 1.5,
+                       "LP1 rolls off at half the rate of the 12 dB/oct low pass")
+    }
+
     // MARK: Crossover cascade (guards the merge fix to phaseAt)
 
     func testLinkwitzRiley4LowPassShape() {
@@ -173,5 +192,29 @@ final class DSPMathTests: XCTestCase {
         XCTAssertEqual(shelf.freq, 120)
         XCTAssertEqual(shelf.q, 0.9)
         XCTAssertEqual(shelf.gain, -4.5)
+    }
+
+    // MARK: Firmware capability gates
+
+    /// The first-order low/high pass types never bumped the wire format, and
+    /// V27 is ambiguous (bumped on main while the filter branch was in flight,
+    /// so early V27 builds lack the types).  V28 is the first version that
+    /// always carries them, so that is where the picker may offer them.
+    func testFirstOrderPassGateIsV28() {
+        let vm = DSPViewModel()
+        vm.isDeviceConnected = true
+
+        vm.firmwareWireFormatVersion = 27
+        XCTAssertFalse(vm.firmwareSupportsFirstOrderPass, "V27 is ambiguous, so treated as unsupported")
+        XCTAssertFalse(vm.firmwareSupports(filterType: .lowPass1))
+        XCTAssertFalse(vm.firmwareSupports(filterType: .highPass1))
+        // The second-order pair is ancient and stays available either way.
+        XCTAssertTrue(vm.firmwareSupports(filterType: .lowPass))
+        XCTAssertTrue(vm.firmwareSupports(filterType: .highPass))
+
+        vm.firmwareWireFormatVersion = 28
+        XCTAssertTrue(vm.firmwareSupportsFirstOrderPass)
+        XCTAssertTrue(vm.firmwareSupports(filterType: .lowPass1))
+        XCTAssertTrue(vm.firmwareSupports(filterType: .highPass1))
     }
 }
