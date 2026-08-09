@@ -2135,6 +2135,10 @@ struct ValueField: View {
     var scrollStep: Float = 0.1
     var minValue: Float? = nil
     var maxDecimals: Int = 1
+    /// Width of the trailing unit label.  The default suits the one- and
+    /// two-character symbols this field was built for (dB, Hz, %, s); a longer
+    /// one (min) needs more room or it truncates.
+    var labelWidth: CGFloat = 20
     /// When true, an all-zero decimal portion is dropped entirely (e.g.
     /// "1.000" → "1") instead of being collapsed to a single trailing zero.
     /// Useful for Q where "1.0" reads as awkward but mid-precision values
@@ -2183,7 +2187,7 @@ struct ValueField: View {
             Text(label)
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .frame(width: 20, alignment: .leading)
+                .frame(width: labelWidth, alignment: .leading)
         }
         .overlay(
             ValueFieldScrollHandler(value: value, step: scrollStep, minValue: minValue, onCommit: onCommit)

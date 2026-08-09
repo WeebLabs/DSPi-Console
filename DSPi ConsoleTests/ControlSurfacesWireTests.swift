@@ -904,6 +904,25 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CsBinding.fromData(b.toData()), b)
     }
 
+    /// The indicator delays are entered as whole minutes and seconds, so the
+    /// editor's ceiling is the whole second below the field's 6553.5 s.  That
+    /// value must still land inside the uint16 rather than saturating, or the
+    /// top of the range would silently become "as long as possible".
+    func testWholeSecondDelayCeiling() {
+        let maxWhole = Int(CS_DELAY_MAX_SECONDS)
+        XCTAssertEqual(maxWhole, 6553)
+        XCTAssertEqual(maxWhole / 60, 109)      // 109 min
+        XCTAssertEqual(maxWhole % 60, 13)       // 13 s
+        XCTAssertEqual(csEncodeDelay(Float(maxWhole)), 65530)
+        XCTAssertLessThan(csEncodeDelay(Float(maxWhole)), UInt16.max)
+        // Whole seconds round-trip exactly, so the fields never drift a tenth
+        // each time the card is redrawn.
+        for seconds in [0, 1, 59, 60, 600, 3600, maxWhole] {
+            XCTAssertEqual(csDecodeDelay(csEncodeDelay(Float(seconds))), Float(seconds),
+                           accuracy: 0.0001)
+        }
+    }
+
     /// An IR command driving an upmixer mode: INC + WRAP cycles the enum.
     func testUpmixModeIrCommand() {
         let c = IrCommand(

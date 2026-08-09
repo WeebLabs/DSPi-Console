@@ -3905,16 +3905,69 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    /// Longest delay the editor can express.  The wire field is 0.1 s units and
+    /// tops out at 6553.5 s, but these delays are entered in whole seconds -
+    /// tenths mean nothing to "hold the LED through a blip" or "hold the amp on
+    /// through a quiet passage" - so the usable ceiling is the whole second
+    /// below it.  Derived from the wire constant so the two cannot drift.
+    private static let csDelayMaxWholeSeconds = Int(CS_DELAY_MAX_SECONDS)
+
+    /// "109 min 13 s", for the field's detail line.
+    private var csDelayMaxText: String {
+        "\(Self.csDelayMaxWholeSeconds / 60) min \(Self.csDelayMaxWholeSeconds % 60) s"
+    }
+
+    /// Minutes and seconds, both whole.  Two fields rather than one seconds box
+    /// because the delays that matter here are minutes long: an amplifier
+    /// trigger holding on through ten minutes of silence is 600 in a seconds
+    /// box, which is a number you have to work out before you can type it.
     private func csDelayRow(_ slot: Int, title: String,
                             keyPath: WritableKeyPath<CsBinding, UInt16>,
                             detail: String, icon: String) -> some View {
-        settingRow(title: title, detail: detail, icon: icon) {
-            ValueField(label: "s", value: csDecodeDelay(drafts[slot][keyPath: keyPath]),
-                       width: 64, scrollStep: 0.1, minValue: 0, maxDecimals: 1) { v in
-                var nb = drafts[slot]
-                nb[keyPath: keyPath] = csEncodeDelay(v)   // clamps to 0 .. 6553.5 s
-                drafts[slot] = nb
+        let total = Int(drafts[slot][keyPath: keyPath]) / 10   // whole seconds
+        let mins = total / 60
+        let secs = total % 60
+        return settingRow(title: title,
+                          detail: "\(detail) Up to \(csDelayMaxText).",
+                          icon: icon) {
+            HStack(alignment: .bottom, spacing: 6) {
+                csDelayField(value: mins, width: 34, unit: "m") { v in
+                    setDelay(slot, keyPath, seconds: Int(v.rounded()) * 60 + secs)
+                }
+                csDelayField(value: secs, width: 28, unit: "s") { v in
+                    setDelay(slot, keyPath, seconds: mins * 60 + Int(v.rounded()))
+                }
             }
+        }
+    }
+
+    /// Store a delay given in whole seconds.  Seconds are not capped at 59 on
+    /// the way in: typing 90 reads as 1 min 30 s and normalizes on redraw,
+    /// which is friendlier than refusing it.
+    private func setDelay(_ slot: Int, _ keyPath: WritableKeyPath<CsBinding, UInt16>,
+                          seconds: Int) {
+        let clamped = min(max(0, seconds), Self.csDelayMaxWholeSeconds)
+        var nb = drafts[slot]
+        nb[keyPath: keyPath] = csEncodeDelay(Float(clamped))
+        drafts[slot] = nb
+    }
+
+    /// One whole-number box with its unit tucked against the bottom right of
+    /// the digits.  ValueField's own label slot is a fixed-width column set to
+    /// one side, which is what keeps units aligned down a page of dB and Hz
+    /// rows - useful there, far too airy for a minutes-and-seconds pair - so
+    /// the box is given no label and the unit is placed here instead.  Boxes
+    /// are sized to their contents: minutes reach 109, seconds 59.
+    private func csDelayField(value: Int, width: CGFloat, unit: String,
+                              onCommit: @escaping (Float) -> Void) -> some View {
+        HStack(alignment: .bottom, spacing: 0) {
+            ValueField(label: "", value: Float(value), width: width,
+                       scrollStep: 1, minValue: 0, maxDecimals: 0, labelWidth: 0,
+                       onCommit: onCommit)
+            Text(unit)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.bottom, 3)
         }
     }
 
@@ -5328,12 +5381,14 @@ struct ControlSurfacesSettingsTab: View {
         return phrase + " Delayed \(parts.joined(separator: ", "))."
     }
 
-    /// A delay in the most readable unit: seconds under a minute, else minutes.
+    /// A delay in the same words its fields use: whole minutes and seconds, so
+    /// the summary and the editor cannot disagree about what is set.
     private func fmtDelay(_ raw: UInt16) -> String {
-        let s = csDecodeDelay(raw)
-        if s < 60 { return String(format: s < 10 ? "%.1f s" : "%.0f s", s) }
-        let mins = s / 60
-        return String(format: mins == mins.rounded() ? "%.0f min" : "%.1f min", mins)
+        let total = Int(raw) / 10
+        let m = total / 60
+        let s = total % 60
+        if m == 0 { return "\(s) s" }
+        return s == 0 ? "\(m) min" : "\(m) min \(s) s"
     }
 
     private func actionPhrase(_ b: CsBinding) -> String {
