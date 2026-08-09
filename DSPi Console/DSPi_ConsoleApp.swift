@@ -2352,48 +2352,81 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    /// Cards then the add row, the shape the Controls page uses: the button
+    /// belongs after the list it appends to, and an empty list gets a centered
+    /// empty state carrying the button instead.
     @ViewBuilder
     private var groupsSection: some View {
-        Section {
-            if visibleGroups.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("A group is a named set of channels one control can drive together - a stereo pair, a zone, every output at once.")
-                        .font(.caption)
+        if visibleGroups.isEmpty {
+            Section {
+                VStack(spacing: 14) {
+                    Image(systemName: "rectangle.3.group")
+                        .font(.system(size: 28))
                         .foregroundColor(.secondary)
-                    Text("Turn on \"Address a Group\" in a control above to use one.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 2)
-            }
-            HStack {
-                Button {
-                    guard let g = firstFreeGroup else { return }
-                    var fresh = CsGroup()
-                    fresh.targetKind = CS_TARGET_OUTPUT_CH
-                    fresh.name = "Group \(g + 1)"
-                    // One transaction, like addControl: creating the card and
-                    // opening it are a single layout change.  Split across two
-                    // (or left partly unanimated) the row inserts instantly and
-                    // then springs open, and everything below it moves twice.
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        groupDrafts[g] = fresh
-                        expandedGroups.insert(g)
+                    VStack(spacing: 3) {
+                        Text("No Channel Groups Configured")
+                            .font(.headline)
+                        Text("Name a set of channels so one control can drive them together - a stereo pair, a zone, every output at once.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 340)
                     }
-                } label: {
-                    Label("Add a Group", systemImage: "plus")
+                    addGroupButton(prominent: true)
                 }
-                .disabled(firstFreeGroup == nil)
-                Spacer()
-                if firstFreeGroup == nil {
-                    Text("All \(vm.csGroupCount) group slots are in use.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            }
+        } else {
+            ForEach(cardIDs("group", visibleGroups)) { key in
+                groupCard(key.index)
+            }
+            Section {
+                HStack {
+                    addGroupButton(prominent: false)
+                    Spacer()
+                    if firstFreeGroup == nil {
+                        Text("All \(vm.csGroupCount) group slots are in use.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
         }
-        ForEach(cardIDs("group", visibleGroups)) { key in
-            groupCard(key.index)
+    }
+
+    @ViewBuilder
+    private func addGroupButton(prominent: Bool) -> some View {
+        let button = Button { addGroup() } label: {
+            Label("Add Group", systemImage: "plus")
+        }
+        .fixedSize()
+        .disabled(firstFreeGroup == nil || !vm.isDeviceConnected)
+
+        if prominent {
+            button.buttonStyle(.borderedProminent).controlSize(.regular)
+        } else {
+            // Explicitly bordered: "Add Control" is a Menu with
+            // .menuStyle(.button), which is always drawn as a bordered button,
+            // so a bare Button left on .automatic would not match it.
+            button.buttonStyle(.bordered).controlSize(.regular)
+        }
+    }
+
+    /// Create a group in the first free slot and open its card.  One animation
+    /// transaction, like addControl: split in two, the row inserts instantly
+    /// and then springs open, moving everything below it twice.  Unlike a new
+    /// control this is not applied yet - a group with no members is not a group
+    /// the device will store.
+    private func addGroup() {
+        guard let g = firstFreeGroup else { return }
+        var fresh = CsGroup()
+        fresh.targetKind = CS_TARGET_OUTPUT_CH
+        fresh.name = "Group \(g + 1)"
+        groupMessages[g] = nil
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            groupDrafts[g] = fresh
+            expandedGroups.insert(g)
         }
     }
 
@@ -2623,41 +2656,73 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private var macrosSection: some View {
-        Section {
-            if visibleMacros.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("A macro runs a short sequence of changes from one press: select an input and load a preset, switch monitors, mute after a delay.")
-                        .font(.caption)
+        if visibleMacros.isEmpty {
+            Section {
+                VStack(spacing: 14) {
+                    Image(systemName: "list.number")
+                        .font(.system(size: 28))
                         .foregroundColor(.secondary)
-                    Text("Bind a button or remote key to \"Macro\" to fire one.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 2)
-            }
-            HStack {
-                Button {
-                    guard let m = firstFreeMacro else { return }
-                    var fresh = CsMacro()
-                    fresh.name = "Macro \(m + 1)"
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        macroDrafts[m] = fresh
-                        expandedMacros.insert(m)
+                    VStack(spacing: 3) {
+                        Text("No Macros Configured")
+                            .font(.headline)
+                        Text("Run a short sequence of changes from a single press: select an input and load a preset, switch monitors, mute after a delay.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 340)
                     }
-                } label: {
-                    Label("Add a Macro", systemImage: "plus")
+                    addMacroButton(prominent: true)
                 }
-                .disabled(firstFreeMacro == nil)
-                Spacer()
-                if firstFreeMacro == nil {
-                    Text("All \(vm.csMacroCount) macro slots are in use.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            }
+        } else {
+            ForEach(cardIDs("macro", visibleMacros)) { key in
+                macroCard(key.index)
+            }
+            Section {
+                HStack {
+                    addMacroButton(prominent: false)
+                    Spacer()
+                    if firstFreeMacro == nil {
+                        Text("All \(vm.csMacroCount) macro slots are in use.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
         }
-        ForEach(cardIDs("macro", visibleMacros)) { key in
-            macroCard(key.index)
+    }
+
+    @ViewBuilder
+    private func addMacroButton(prominent: Bool) -> some View {
+        let button = Button { addMacro() } label: {
+            Label("Add Macro", systemImage: "plus")
+        }
+        .fixedSize()
+        .disabled(firstFreeMacro == nil || !vm.isDeviceConnected)
+
+        if prominent {
+            button.buttonStyle(.borderedProminent).controlSize(.regular)
+        } else {
+            // Explicitly bordered: "Add Control" is a Menu with
+            // .menuStyle(.button), which is always drawn as a bordered button,
+            // so a bare Button left on .automatic would not match it.
+            button.buttonStyle(.bordered).controlSize(.regular)
+        }
+    }
+
+    /// Create a macro in the first free slot and open its card.  Not applied
+    /// yet: an empty macro is a valid no-op on the device, but there is nothing
+    /// worth storing until it has steps.
+    private func addMacro() {
+        guard let m = firstFreeMacro else { return }
+        var fresh = CsMacro()
+        fresh.name = "Macro \(m + 1)"
+        macroMessages[m] = nil
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            macroDrafts[m] = fresh
+            expandedMacros.insert(m)
         }
     }
 
@@ -2736,7 +2801,7 @@ struct ControlSurfacesSettingsTab: View {
                         macroDrafts[m].steps[n] = defaultMacroStep()
                         macroDrafts[m].stepCount = UInt8(n + 1)
                     } label: {
-                        Label("Add a Step", systemImage: "plus")
+                        Label("Add Step", systemImage: "plus")
                     }
                     .disabled(Int(macroDrafts[m].stepCount) >= vm.csMacroStepCount)
                     Spacer()
