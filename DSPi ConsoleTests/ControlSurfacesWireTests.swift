@@ -676,6 +676,234 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CsNounDesc().actions, 0)
     }
 
+    // MARK: - Caps v9: target groups and macros
+
+    /// v9 appends one noun and renumbers nothing earlier.
+    func testV9NounNumbering() {
+        XCTAssertEqual(CS_NOUN_INPUT_LEVEL_MAX, 51)   // last v8 noun, unmoved
+        XCTAssertEqual(CS_NOUN_MACRO, 52)
+    }
+
+    /// The three group flags occupy the free high bits, leaving every earlier
+    /// flag where it was.  A collision here would silently repurpose an
+    /// existing binding's wiring options.
+    func testV9FlagBits() {
+        XCTAssertEqual(CS_FLAG_GROUP, 0x20)
+        XCTAssertEqual(CS_FLAG_LINK_ABS, 0x40)
+        XCTAssertEqual(CS_FLAG_GROUP_ALL, 0x80)
+        let earlier: [UInt8] = [CS_FLAG_INVERT, CS_FLAG_REVERSE, CS_FLAG_WRAP,
+                                CS_FLAG_ACCEL, CS_FLAG_REPEAT]
+        for f in earlier {
+            XCTAssertEqual(f & (CS_FLAG_GROUP | CS_FLAG_LINK_ABS | CS_FLAG_GROUP_ALL), 0)
+        }
+    }
+
+    /// The v9 caps header keeps its 40 bytes and carves max_groups / max_macros
+    /// / max_macro_steps out of the three bytes after max_ir_commands.
+    func testCapsHeaderV9GroupMacroCounts() {
+        var d = Data([9, 16, 8, 53])   // capsVersion 9, maxBindings, typeCount, nounCount
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 8, 8, 8])   // max_ir_commands, groups, macros, steps
+        XCTAssertEqual(d.count, 40)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.capsVersion, 9)
+        XCTAssertEqual(caps.nounCount, 53)
+        XCTAssertEqual(caps.maxIrCommands, 16)
+        XCTAssertEqual(caps.maxGroups, 8)
+        XCTAssertEqual(caps.maxMacros, 8)
+        XCTAssertEqual(caps.maxMacroSteps, 8)
+    }
+
+    /// A v8 header carries zeros where v9 puts the counts, which must read as
+    /// "no groups, no macros" rather than tripping the parser - that zero is
+    /// the whole reason the app needs no caps-version test for the feature.
+    func testCapsHeaderV8ReadsZeroGroupCounts() {
+        var d = Data([8, 16, 8, 52])
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 0, 0, 0])
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.maxIrCommands, 16)
+        XCTAssertEqual(caps.maxGroups, 0)
+        XCTAssertEqual(caps.maxMacros, 0)
+        XCTAssertEqual(caps.maxMacroSteps, 0)
+    }
+
+    /// A pre-v3 header stops before the tail entirely; every count must read 0
+    /// instead of running off the end.
+    func testCapsHeaderShortTailReadsZeros() {
+        var d = Data([2, 16, 7, 35])
+        for _ in 0..<7 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        XCTAssertEqual(d.count, 32)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.maxIrCommands, 0)
+        XCTAssertEqual(caps.maxGroups, 0)
+        XCTAssertEqual(caps.maxMacroSteps, 0)
+    }
+
+    /// A 40-byte group: kind, 32-bit member mask, 32-byte name.
+    func testGroupRoundTrip() {
+        let g = CsGroup(targetKind: CS_TARGET_OUTPUT_CH,
+                        memberMask: 0b1010, name: "Front Pair")
+        let d = g.toData()
+        XCTAssertEqual(d.count, 40)
+        XCTAssertEqual(d[0], CS_TARGET_OUTPUT_CH)
+        XCTAssertEqual(Array(d[1...3]), [0, 0, 0])              // reserved
+        XCTAssertEqual(Array(d[4...7]), [0x0A, 0x00, 0x00, 0x00])   // mask, little-endian
+        XCTAssertEqual(d[8], UInt8(ascii: "F"))
+        XCTAssertEqual(d[18], 0)                                 // NUL terminator
+        XCTAssertEqual(CsGroup.fromData(d), g)
+        XCTAssertEqual(g.members, [1, 3])
+        XCTAssertEqual(g.memberCount, 2)
+    }
+
+    /// The mask is 32 bits wide because the RP2350 DSP channel space runs past
+    /// 16; a 16-bit read would drop the top half of a large group.
+    func testGroupMaskIsThirtyTwoBit() {
+        let g = CsGroup(targetKind: CS_TARGET_DSP_CH, memberMask: 0x8001_0001, name: "Wide")
+        let d = g.toData()
+        XCTAssertEqual(Array(d[4...7]), [0x01, 0x00, 0x01, 0x80])
+        XCTAssertEqual(CsGroup.fromData(d)?.memberMask, 0x8001_0001)
+        XCTAssertEqual(CsGroup.fromData(d)?.members, [0, 16, 31])
+    }
+
+    /// An empty group slot is the strict all-zero record, like a cleared binding.
+    func testEmptyGroupIsAllZero() {
+        XCTAssertEqual(CsGroup().toData(), Data(count: 40))
+        XCTAssertFalse(CsGroup().isConfigured)
+        // A kind with no members is not a usable group either.
+        XCTAssertFalse(CsGroup(targetKind: CS_TARGET_DSP_CH, memberMask: 0).isConfigured)
+    }
+
+    /// A 12-byte macro step, grouped, with a delay before it runs.
+    func testMacroStepRoundTrip() {
+        let st = CsMacroStep(noun: UInt8(CS_NOUN_OUTPUT_MUTE), action: UInt8(CS_ACT_SET),
+                             flags: CS_FLAG_GROUP, target: 2, value: 1,
+                             preDelay: csEncodeStepDelay(1.5))
+        let d = st.toData()
+        XCTAssertEqual(d.count, 12)
+        XCTAssertEqual(st.preDelay, 150)   // 1.5 s in 10 ms units
+        XCTAssertEqual(hex(d), "12 05 20 02 00 00 01 00 00 00 96 00")
+        XCTAssertEqual(CsMacroStep.fromData(d), st)
+        XCTAssertTrue(st.isGrouped)
+    }
+
+    /// An all-zero step record is the empty step the sequencer skips.
+    func testEmptyMacroStepIsAllZero() {
+        XCTAssertEqual(CsMacroStep().toData(), Data(count: 12))
+        XCTAssertFalse(CsMacroStep().isConfigured)
+    }
+
+    /// The 36-byte header payload: name then step count.  Steps are written
+    /// separately, so this is all a macro SET carries.
+    func testMacroHeaderPayload() {
+        let macro = CsMacro(name: "Movie", stepCount: 3)
+        let d = macro.headerData()
+        XCTAssertEqual(d.count, 36)
+        XCTAssertEqual(String(decoding: d.prefix(5), as: UTF8.self), "Movie")
+        XCTAssertEqual(d[5], 0)             // NUL terminator inside the name field
+        XCTAssertEqual(d[32], 3)            // step_count
+        XCTAssertEqual(Array(d[33...35]), [0, 0, 0])   // reserved
+    }
+
+    /// A 132-byte macro GET decodes name, count and all 8 step records at their
+    /// 12-byte stride.  A wrong stride would shuffle the sequence.
+    func testMacroDecodeFromWire() {
+        var d = Data(count: 132)
+        for (i, b) in Array("Night".utf8).enumerated() { d[i] = b }
+        d[32] = 2
+        // Step 0 at offset 36, step 1 at 48.
+        let s0 = CsMacroStep(noun: UInt8(CS_NOUN_INPUT_SOURCE), action: UInt8(CS_ACT_SET), value: 1)
+        let s1 = CsMacroStep(noun: UInt8(CS_NOUN_PRESET), action: UInt8(CS_ACT_SET),
+                             value: 2, preDelay: 50)
+        d.replaceSubrange(36..<48, with: s0.toData())
+        d.replaceSubrange(48..<60, with: s1.toData())
+        guard let macro = CsMacro.fromData(d) else { return XCTFail("macro parse failed") }
+        XCTAssertEqual(macro.name, "Night")
+        XCTAssertEqual(macro.stepCount, 2)
+        XCTAssertEqual(macro.steps[0], s0)
+        XCTAssertEqual(macro.steps[1], s1)
+        XCTAssertEqual(macro.steps[2], CsMacroStep())
+        XCTAssertEqual(Array(macro.activeSteps), [s0, s1])
+    }
+
+    /// A macro name is truncated to 31 bytes so the terminator always survives.
+    func testMacroNameTruncatesWithTerminator() {
+        let long = String(repeating: "x", count: 60)
+        let d = CsMacro(name: long).headerData()
+        XCTAssertEqual(d[30], UInt8(ascii: "x"))
+        XCTAssertEqual(d[31], 0)   // last name byte stays NUL
+        XCTAssertEqual(d[32], 0)   // step_count, not overwritten by the name
+    }
+
+    /// The 24-byte extended status: limits, sequencer state, and the two
+    /// validity tables at offsets 8 and 16.
+    func testExtStatusDecode() {
+        var d = Data(count: 24)
+        d[0] = 8; d[1] = 8; d[2] = 8
+        d[3] = 3                    // macro 3 running
+        d[4] = 1                    // on its second step
+        d[8 + 2] = CS_STATUS_INVALID_GROUP
+        d[16 + 5] = CS_STATUS_INVALID_STEP
+        guard let st = CsExtStatusPacket.fromData(d) else { return XCTFail("ext status parse failed") }
+        XCTAssertEqual(st.maxGroups, 8)
+        XCTAssertEqual(st.maxMacroSteps, 8)
+        XCTAssertEqual(st.macroRunning, 3)
+        XCTAssertEqual(st.macroStep, 1)
+        XCTAssertTrue(st.isRunning)
+        XCTAssertEqual(st.groupStatus[2], CS_STATUS_INVALID_GROUP)
+        XCTAssertEqual(st.macroStatus[5], CS_STATUS_INVALID_STEP)
+    }
+
+    /// An idle sequencer reports 0xFF, which is also the MACRO noun's live read
+    /// and matches no IND_EQUALS comparand - that is what keeps macro LEDs dark.
+    func testExtStatusIdleSentinel() {
+        var d = Data(count: 24)
+        d[3] = CS_MACRO_NONE
+        let st = CsExtStatusPacket.fromData(d)
+        XCTAssertEqual(st?.macroRunning, 0xFF)
+        XCTAssertEqual(st?.isRunning, false)
+        XCTAssertGreaterThan(Int(CS_MACRO_NONE), CS_MAX_MACROS - 1)
+    }
+
+    /// Step delays are 10 ms units, ten times finer than the binding's
+    /// indicator delays - mixing the two scales would be off by 10x.
+    func testStepDelayEncoding() {
+        XCTAssertEqual(csEncodeStepDelay(0), 0)
+        XCTAssertEqual(csEncodeStepDelay(0.01), 1)
+        XCTAssertEqual(csEncodeStepDelay(1), 100)
+        XCTAssertEqual(csEncodeStepDelay(-1), 0)
+        XCTAssertEqual(csEncodeStepDelay(CS_STEP_DELAY_MAX_SECONDS), UInt16.max)
+        XCTAssertEqual(csEncodeStepDelay(99999), UInt16.max)
+        XCTAssertEqual(csDecodeStepDelay(150), 1.5, accuracy: 0.0001)
+        // The two delay scales are deliberately different; pin that.
+        XCTAssertEqual(csEncodeDelay(1), 10)
+        XCTAssertEqual(csEncodeStepDelay(1), 100)
+    }
+
+    /// The four deferred-outcome tags must stay mutually distinguishable: one
+    /// poll of `lastSlot` has to say which kind of SET just landed.
+    func testDeferredOutcomeTagsAreDisjoint() {
+        let bindingSlots = (0..<CS_MAX_BINDINGS).map { UInt8($0) }
+        let groupTags = (0..<CS_MAX_GROUPS).map { CS_LAST_SLOT_GROUP_FLAG | UInt8($0) }
+        let macroTags = (0..<CS_MAX_MACROS).map { CS_LAST_SLOT_MACRO_FLAG | UInt8($0) }
+        let irTags = (0..<CS_MAX_IR_COMMANDS).map { CS_LAST_SLOT_IR_FLAG | UInt8($0) }
+        let all = bindingSlots + groupTags + macroTags + irTags + [CS_LAST_SLOT_SAVE]
+        XCTAssertEqual(Set(all).count, all.count, "deferred outcome tags collide")
+    }
+
+    /// A grouped binding is byte-identical to an ungrouped one apart from the
+    /// flag bit; `target` changes meaning, not position.
+    func testGroupedBindingBytes() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_ENCODER), noun: UInt8(CS_NOUN_OUTPUT_GAIN),
+            action: UInt8(CS_ACT_STEP), flags: CS_FLAG_GROUP,
+            gpio0: 14, gpio1: 15, target: 1,          // group 1, not channel 1
+            step: csEncodeStep(1, unit: CS_UNIT_DB))
+        XCTAssertEqual(hex(b.toData()),
+                       "04 11 01 20 0e 0f 00 01 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
     /// An IR command driving an upmixer mode: INC + WRAP cycles the enum.
     func testUpmixModeIrCommand() {
         let c = IrCommand(

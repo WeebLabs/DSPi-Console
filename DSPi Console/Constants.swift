@@ -578,7 +578,12 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // v7 changes no structure either: it appends nouns 49-50, the loudness
 // reference SPL and intensity.  v8 keeps every structure size but carves
 // on_delay/off_delay out of the binding's reserved2 tail (indicator condition
-// timing) and appends noun 51, INPUT_LEVEL_MAX.
+// timing) and appends noun 51, INPUT_LEVEL_MAX.  v9 leaves CsBinding,
+// IrCommand and CsStatusPacket byte-identical and adds a whole second surface
+// alongside them: target groups and macros on commands 0x20-0x26, noun 52, the
+// three group flags, and the caps header's three former reserved bytes
+// (max_groups / max_macros / max_macro_steps).  See
+// control_surfaces_groups_macros_spec.md.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
@@ -590,6 +595,19 @@ let REQ_GET_CS_IR_CMD: UInt8  = 0x8E   // IN 16 bytes: live IrCommand, wValue = 
 let REQ_CS_IR_LEARN: UInt8    = 0x8F   // IN: wValue 1=arm/0=cancel -> 1 ack byte; wValue 2=read -> 8-byte result
 let REQ_CS_SAVE: UInt8        = 0x9D   // IN 1 ack byte: persist the whole live config (deferred, lastSlot=0xFF)
 let REQ_CS_REVERT: UInt8      = 0x9E   // IN 1 ack byte: discard the preview, reload flash (deferred, lastSlot=0xFF)
+
+// Target-group and macro commands (caps v9; groups+macros spec §3).  Same
+// conventions as the rest of the feature: SETs are deferred previews polled
+// back through REQ_GET_CS_STATUS, and REQ_CS_SAVE / REQ_CS_REVERT cover this
+// config too.  A whole 132-byte CsMacro exceeds the 64-byte vendor SET buffer,
+// so a macro is written as a header plus one SET per step.
+let REQ_SET_CS_GROUP: UInt8       = 0x20   // OUT 40 bytes: CsGroup, wValue = group (0-7); all-zero clears
+let REQ_GET_CS_GROUP: UInt8       = 0x21   // IN 40 bytes: live CsGroup, wValue = group
+let REQ_SET_CS_MACRO: UInt8       = 0x22   // OUT 36 bytes: CsMacroHeaderWire (name + step count), wValue = macro
+let REQ_GET_CS_MACRO: UInt8       = 0x23   // IN 132 bytes: live CsMacro, wValue = macro
+let REQ_SET_CS_MACRO_STEP: UInt8  = 0x24   // OUT 12 bytes: CsMacroStep, wValue = (step << 8) | macro; all-zero clears
+let REQ_CS_MACRO_FIRE: UInt8      = 0x25   // IN 1 status byte: wValue = macro fires it, 0xFFFF cancels
+let REQ_GET_CS_EXT_STATUS: UInt8  = 0x26   // IN 24 bytes: CsExtStatusPacket
 
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
@@ -608,13 +626,16 @@ let CS_STATUS_BUSY: UInt8            = 0x1B   // SET dropped; a previous SET (or
 let CS_STATUS_FLASH_ERROR: UInt8     = 0x1C   // the directory persist failed (name SET or REQ_CS_SAVE)
 let CS_STATUS_IR_IN_USE: UInt8       = 0x1D   // another slot already holds the IR component (one receiver per device)
 let CS_STATUS_NO_IR: UInt8           = 0x1E   // learn was armed with no live CS_TYPE_IR binding
+let CS_STATUS_INVALID_GROUP: UInt8   = 0x1F   // group reference empty, out of range, or the wrong kind for the noun
+let CS_STATUS_INVALID_MACRO: UInt8   = 0x20   // bad macro index or step_count
+let CS_STATUS_INVALID_STEP: UInt8    = 0x21   // macro step record invalid
 
 // Limits / sentinels (spec §2).
 let CS_MAX_BINDINGS: Int       = 16
 let CS_MAX_IR_COMMANDS: Int    = 16   // IR command sub-slots per device, caps v6 (spec §2.4)
 let CS_NAME_LEN: Int           = 32   // per-slot name buffer, NUL-terminated (spec §3.4)
 let CS_GPIO_UNUSED: UInt8      = 0xFF
-let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v8
+let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v9
 let CS_IR_CONFIG_VERSION: UInt8 = 2   // CsIrConfig.version (IR command table; v2 = 16 sub-slots)
 /// REQ_GET_CS_STATUS response length: 41 bytes since caps v6 (16 IR sub-slots).
 /// Older firmware short-reads it (32 bytes for caps v3-v5, 22 pre-v3) and
@@ -625,6 +646,45 @@ let CS_CAPS_ALL: UInt16        = 0xFFFF   // wValue selecting the caps header + 
 let CS_LAST_SLOT_SAVE: UInt8   = 0xFF
 /// `lastSlot` high bit marks an IR sub-slot outcome: 0x80 | sub-slot.
 let CS_LAST_SLOT_IR_FLAG: UInt8 = 0x80
+/// `lastSlot` tags for the caps v9 deferred SETs (groups+macros spec §3): a
+/// group outcome is 0x40 | group, a macro header or step outcome 0x60 | macro.
+/// Both stay clear of the 0x00-0x0F binding slots, 0x80 | sub IR range and the
+/// 0xFF save/revert sentinel, so one poll distinguishes all five kinds.
+let CS_LAST_SLOT_GROUP_FLAG: UInt8 = 0x40
+let CS_LAST_SLOT_MACRO_FLAG: UInt8 = 0x60
+
+// Target group / macro limits (caps v9).  The device reports its own in the
+// caps header (`maxGroups` / `maxMacros` / `maxMacroSteps`); these are the wire
+// maxima the app allocates for, mirroring the firmware's frozen table sizes.
+let CS_MAX_GROUPS: Int      = 8
+let CS_MAX_MACROS: Int      = 8
+let CS_MAX_MACRO_STEPS: Int = 8
+let CS_GROUP_CONFIG_VERSION: UInt8 = 1   // CsGroupConfig.version
+let CS_MACRO_CONFIG_VERSION: UInt8 = 1   // CsMacroConfig.version
+/// `REQ_CS_MACRO_FIRE` wValue that cancels the running macro instead of firing.
+let CS_MACRO_FIRE_CANCEL: UInt16 = 0xFFFF
+/// Wire sizes for the v9 records, used for the GET lengths.
+let CS_GROUP_LEN: UInt16        = 40
+let CS_MACRO_LEN: UInt16        = 132
+let CS_MACRO_HEADER_LEN: UInt16 = 36
+let CS_MACRO_STEP_LEN: UInt16   = 12
+let CS_EXT_STATUS_LEN: UInt16   = 24
+
+/// A macro step's `pre_delay` is in 10 ms units, unlike the binding's 0.1 s
+/// indicator delays - the sequencer needs finer grain for timed sequences.
+/// Encodes seconds, saturating at the uint16 field's 655.35 s.
+let CS_STEP_DELAY_MAX_SECONDS: Float = Float(UInt16.max) / 100
+func csEncodeStepDelay(_ seconds: Float) -> UInt16 {
+    let units = (seconds * 100).rounded()
+    if !(units > 0) { return 0 }   // also catches NaN
+    return units >= Float(UInt16.max) ? UInt16.max : UInt16(units)
+}
+func csDecodeStepDelay(_ raw: UInt16) -> Float { Float(raw) / 100 }
+
+/// Actions a macro step may carry (groups+macros spec §2.3).  A step is a
+/// stripped button press, so it gets the button repertoire minus MOMENTARY
+/// (nothing holds it) and minus the indicator actions.
+let CS_MACRO_STEP_ACTIONS: [Int] = [CS_ACT_SET, CS_ACT_TOGGLE, CS_ACT_INC, CS_ACT_DEC, CS_ACT_TRIGGER]
 /// ADC-capable GPIOs (ADC0..2 on both platforms) - the only pins a
 /// potentiometer may occupy.  GPIO 29 (VSYS/3 monitor) is excluded.
 let CS_ADC_PINS: [UInt8]      = [26, 27, 28]
@@ -701,6 +761,14 @@ let CS_NOUN_LOUDNESS_INTENSITY: Int = 50
 // read-only over -60..0 dB.  Untargeted - it answers "is anything playing?"
 // for the whole source, which is what an amplifier trigger needs.
 let CS_NOUN_INPUT_LEVEL_MAX: Int    = 51
+// Caps v9 addition (groups+macros spec §1.4): an enum of `maxMacros` positions.
+// SET fires macro `value`; IND_EQUALS lights while it runs.  The live read is
+// the running macro's index, or 255 when idle - which matches no comparand, so
+// an idle sequencer leaves every macro LED dark.
+let CS_NOUN_MACRO: Int              = 52
+/// `CS_NOUN_MACRO` live value while no macro is running (also
+/// `CsExtStatusPacket.macroRunning` when idle).
+let CS_MACRO_NONE: UInt8            = 0xFF
 
 // CsAction (operation applied).  Action bit position in the caps masks is
 // (1 << action); CS_ACT_BIT(a) below builds that mask.
@@ -726,6 +794,13 @@ let CS_FLAG_REVERSE: UInt8 = 0x02   // pot / encoder: invert direction
 let CS_FLAG_WRAP: UInt8    = 0x04   // enum STEP/INC/DEC wraps around the ends
 let CS_FLAG_ACCEL: UInt8   = 0x08   // encoder only: fast rotation multiplies the step
 let CS_FLAG_REPEAT: UInt8  = 0x10   // button INC/DEC on the press event: auto-repeat while held
+// Group flags (caps v9, groups+macros spec §1.1-1.3).  GROUP re-reads `target`
+// as a group index instead of a channel; the other two modify what the group
+// does and are rejected without it.  All three must be 0 on an ungrouped
+// binding, and IrCommand still accepts only WRAP | REPEAT.
+let CS_FLAG_GROUP: UInt8     = 0x20   // target = group index; the op fans out to its members
+let CS_FLAG_LINK_ABS: UInt8  = 0x40   // pot ADJUST drives members identical (default preserves offsets)
+let CS_FLAG_GROUP_ALL: UInt8 = 0x80   // indicator needs every member, not any (invalid on IND_LEVEL)
 
 // CsBinding.event (buttons only; MUST be 0 for other types).  Spec §6.1.
 let CS_EVENT_PRESS: UInt8  = 0   // short press

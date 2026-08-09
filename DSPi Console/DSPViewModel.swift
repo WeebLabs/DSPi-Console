@@ -520,6 +520,12 @@ struct CsCapsHeader: Equatable {
     var nounCount: UInt8 = 0
     var types: [CsTypeDesc] = []
     var maxIrCommands: UInt8 = 0   // v3 tail: IR command sub-slots (0 if pre-v3)
+    // v9 tail: the three bytes after max_ir_commands, formerly reserved and so
+    // read as zeros on a pre-v9 device - which is exactly "no groups, no
+    // macros" and needs no separate version test.
+    var maxGroups: UInt8 = 0
+    var maxMacros: UInt8 = 0
+    var maxMacroSteps: UInt8 = 0
 
     static func fromData(_ data: Data) -> CsCapsHeader? {
         guard data.count >= 4 else { return nil }
@@ -535,12 +541,18 @@ struct CsCapsHeader: Equatable {
                 pinClass: data[o + 3]))
         }
         // The v3 tail (max_ir_commands) sits after the variable-length type
-        // table; absent on a v2 header, in which case IR is unavailable.
-        let tail = b + 4 + Int(typeCount) * 4
-        let maxIr: UInt8 = data.count > tail ? data[tail] : 0
+        // table; absent on a v2 header, in which case IR is unavailable.  The
+        // v9 counts follow it in the same tail, so read each only if present.
+        let tailOffset = 4 + Int(typeCount) * 4
+        func tailByte(_ i: Int) -> UInt8 {
+            let o = tailOffset + i
+            return o < data.count ? data[b + o] : 0
+        }
         return CsCapsHeader(capsVersion: data[b + 0], maxBindings: data[b + 1],
                             typeCount: typeCount, nounCount: data[b + 3], types: types,
-                            maxIrCommands: maxIr)
+                            maxIrCommands: tailByte(0),
+                            maxGroups: tailByte(1), maxMacros: tailByte(2),
+                            maxMacroSteps: tailByte(3))
     }
 }
 
@@ -717,6 +729,184 @@ struct CsIrLearnResult: Equatable {
         let b = data.startIndex
         let code = (0..<4).reduce(UInt32(0)) { $0 | (UInt32(data[b + 4 + $1]) << (8 * UInt32($1))) }
         return CsIrLearnResult(state: data[b + 0], proto: data[b + 1], code: code)
+    }
+}
+
+// MARK: - Control Surfaces: target groups and macros (caps v9)
+//
+// Wire-format structs mirroring firmware `control_surfaces.h`
+// (control_surfaces_groups_macros_spec.md §2).  A group names a set of
+// channels a single control addresses as a unit; a macro is a short sequence
+// of parameter changes a button-shaped event fires.  Both are device-global,
+// live in the preset directory beside the bindings, and are covered by the
+// same Apply / Save / Revert preview model.
+
+/// Reads a fixed-width NUL-terminated name field, the 32-byte convention
+/// shared by preset, channel, control-surface slot, group and macro names.
+private func csReadName(_ data: Data, at offset: Int, length: Int = CS_NAME_LEN) -> String {
+    let b = data.startIndex + offset
+    guard b + length <= data.endIndex else { return "" }
+    return String(decoding: data[b..<(b + length)].prefix { $0 != 0 }, as: UTF8.self)
+}
+
+/// Writes a name into a fixed-width NUL-padded field.  Truncates to
+/// `length - 1` bytes so the terminator always survives, exactly as the
+/// firmware does on its side.
+private func csWriteName(_ name: String, into d: inout Data, at offset: Int, length: Int = CS_NAME_LEN) {
+    for (i, byte) in name.utf8.prefix(length - 1).enumerated() { d[offset + i] = byte }
+}
+
+/// One target group (40 bytes; groups+macros spec §2.1).  `targetKind` picks
+/// the channel space and `memberMask` bit N selects channel N of it, so the
+/// same group record means different channels under different kinds - which is
+/// why a kind change has to re-validate every binding that references it.
+/// An empty slot is the strict all-zero record, like a cleared binding.
+struct CsGroup: Equatable {
+    var targetKind: UInt8 = 0     // Byte 0: CS_TARGET_INPUT_CH / _OUTPUT_CH / _DSP_CH; 0 = empty
+    // Bytes 1-3: reserved (0)
+    var memberMask: UInt32 = 0    // Bytes 4-7: bit N = channel N of the kind's space
+    var name: String = ""         // Bytes 8-39: NUL-terminated
+
+    /// True when the slot holds a group (a kind and at least one member).
+    var isConfigured: Bool { targetKind != CS_TARGET_NONE && memberMask != 0 }
+    /// Member channel indices, ascending.  The lowest is the anchor the
+    /// firmware computes bool and enum actions against (spec §1.2).
+    var members: [Int] { (0..<32).filter { memberMask & (UInt32(1) << UInt32($0)) != 0 } }
+    var memberCount: Int { memberMask.nonzeroBitCount }
+
+    func toData() -> Data {
+        var d = Data(count: 40)
+        d[0] = targetKind
+        // 1-3 reserved (0)
+        for i in 0..<4 { d[4 + i] = UInt8((memberMask >> (8 * UInt32(i))) & 0xFF) }
+        csWriteName(name, into: &d, at: 8)
+        return d
+    }
+
+    static func fromData(_ data: Data) -> CsGroup? {
+        guard data.count >= 40 else { return nil }
+        let b = data.startIndex
+        let mask = (0..<4).reduce(UInt32(0)) { $0 | (UInt32(data[b + 4 + $1]) << (8 * UInt32($1))) }
+        return CsGroup(targetKind: data[b + 0], memberMask: mask, name: csReadName(data, at: 8))
+    }
+}
+
+/// One macro step (12 bytes; groups+macros spec §2.3): a stripped button-shaped
+/// binding the sequencer fires after `preDelay`.  Actions are the SET / TOGGLE /
+/// INC / DEC / TRIGGER subset and the only legal flags are WRAP and GROUP - a
+/// step has no pin, no gesture and nothing to hold, so the rest are meaningless.
+/// An all-zero record is an empty step, skipped at execution.
+struct CsMacroStep: Equatable {
+    var noun: UInt8 = 0        // Byte 0: CsNoun; never CS_NOUN_MACRO (no nesting)
+    var action: UInt8 = 0      // Byte 1: CsAction (step subset)
+    var flags: UInt8 = 0       // Byte 2: CS_FLAG_WRAP | CS_FLAG_GROUP
+    var target: UInt8 = 0      // Byte 3: channel, or group index when GROUP is set
+    var index: UInt8 = 0       // Byte 4: filter band for CS_TARGET_DSP_BAND nouns
+    // Byte 5: reserved (0)
+    var value: Int16 = 0       // Bytes 6-7: as CsBinding.value
+    var step: Int16 = 0        // Bytes 8-9: INC/DEC size; 0 = the unit default
+    var preDelay: UInt16 = 0   // Bytes 10-11: wait before this step runs, 10 ms units
+
+    /// True when the step does something (an all-zero record is a skipped hole).
+    var isConfigured: Bool { self != CsMacroStep() }
+    /// True when `target` addresses a group rather than a channel.
+    var isGrouped: Bool { flags & CS_FLAG_GROUP != 0 }
+
+    func toData() -> Data {
+        var d = Data(count: 12)
+        d[0] = noun; d[1] = action; d[2] = flags; d[3] = target; d[4] = index
+        // 5 reserved (0)
+        func put16(_ v: Int16, _ off: Int) {
+            let u = UInt16(bitPattern: v)
+            d[off] = UInt8(u & 0xFF); d[off + 1] = UInt8((u >> 8) & 0xFF)
+        }
+        put16(value, 6)
+        put16(step, 8)
+        d[10] = UInt8(preDelay & 0xFF); d[11] = UInt8((preDelay >> 8) & 0xFF)
+        return d
+    }
+
+    static func fromData(_ data: Data) -> CsMacroStep? {
+        guard data.count >= 12 else { return nil }
+        let b = data.startIndex
+        func i16(_ off: Int) -> Int16 {
+            Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
+        }
+        return CsMacroStep(
+            noun: data[b + 0], action: data[b + 1], flags: data[b + 2],
+            target: data[b + 3], index: data[b + 4],
+            value: i16(6), step: i16(8),
+            preDelay: UInt16(data[b + 10]) | (UInt16(data[b + 11]) << 8))
+    }
+}
+
+/// One macro (132 bytes read back whole via REQ_GET_CS_MACRO; spec §2.4).  It
+/// is written in pieces: a 36-byte header carrying the name and step count,
+/// plus one SET per step, because the whole record exceeds the 64-byte vendor
+/// SET buffer.  Only `steps[0..<stepCount]` execute.
+struct CsMacro: Equatable {
+    var name: String = ""
+    var stepCount: UInt8 = 0
+    var steps: [CsMacroStep] = Array(repeating: CsMacroStep(), count: CS_MAX_MACRO_STEPS)
+
+    /// True when the macro would do something if fired.
+    var isConfigured: Bool { stepCount > 0 || !name.isEmpty }
+    /// The steps that actually execute, in order.
+    var activeSteps: ArraySlice<CsMacroStep> { steps.prefix(Int(stepCount)) }
+
+    /// The 36-byte REQ_SET_CS_MACRO payload (name + step count only).
+    func headerData() -> Data {
+        var d = Data(count: 36)
+        csWriteName(name, into: &d, at: 0)
+        d[32] = stepCount
+        // 33-35 reserved (0)
+        return d
+    }
+
+    /// Parse the 132-byte REQ_GET_CS_MACRO response.
+    static func fromData(_ data: Data) -> CsMacro? {
+        guard data.count >= 132 else { return nil }
+        let b = data.startIndex
+        var steps: [CsMacroStep] = []
+        for i in 0..<CS_MAX_MACRO_STEPS {
+            let o = b + 36 + i * 12
+            steps.append(CsMacroStep.fromData(data[o..<(o + 12)]) ?? CsMacroStep())
+        }
+        // Clamp the count to the steps that actually exist.  The UI iterates
+        // 0..<stepCount over a fixed 8-element array, so an implausible value
+        // from a corrupt record would be an out-of-bounds crash rather than a
+        // display glitch.  The firmware sanitizes its own copy on load; this
+        // makes the host independent of that.
+        return CsMacro(name: csReadName(data, at: 0),
+                       stepCount: min(data[b + 32], UInt8(CS_MAX_MACRO_STEPS)),
+                       steps: steps)
+    }
+}
+
+/// REQ_GET_CS_EXT_STATUS response (24 bytes; spec §2.6).  Carries the device's
+/// group and macro limits again (the caps header has them too), what the
+/// sequencer is doing right now, and the stored-record validity of every group
+/// and macro - the group/macro counterpart of `CsStatusPacket.slotStatus`.
+struct CsExtStatusPacket: Equatable {
+    var maxGroups: UInt8 = 0
+    var maxMacros: UInt8 = 0
+    var maxMacroSteps: UInt8 = 0
+    var macroRunning: UInt8 = CS_MACRO_NONE   // running macro index; 0xFF = idle
+    var macroStep: UInt8 = 0                  // current step index while running
+    var groupStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_GROUPS)
+    var macroStatus: [UInt8] = Array(repeating: 0, count: CS_MAX_MACROS)
+
+    /// True while the sequencer is running a macro.
+    var isRunning: Bool { macroRunning != CS_MACRO_NONE }
+
+    static func fromData(_ data: Data) -> CsExtStatusPacket? {
+        guard data.count >= 24 else { return nil }
+        let b = data.startIndex
+        return CsExtStatusPacket(
+            maxGroups: data[b + 0], maxMacros: data[b + 1], maxMacroSteps: data[b + 2],
+            macroRunning: data[b + 3], macroStep: data[b + 4],
+            groupStatus: (0..<CS_MAX_GROUPS).map { data[b + 8 + $0] },
+            macroStatus: (0..<CS_MAX_MACROS).map { data[b + 16 + $0] })
     }
 }
 
@@ -1279,6 +1469,35 @@ class DSPViewModel: ObservableObject {
     /// a v7 device rejects a binding carrying a non-zero delay outright (its
     /// reserved2 all-zero check), which is why the fields stay hidden below v8.
     var csIndicatorDelaysSupported: Bool { csCaps.capsVersion >= 8 }
+
+    // Target groups and macros (caps v9).  Device-global like the bindings, in
+    // the same directory and under the same Apply / Save / Revert preview.
+    @Published var csGroups: [CsGroup] = Array(repeating: CsGroup(), count: CS_MAX_GROUPS)
+    @Published var csMacros: [CsMacro] = Array(repeating: CsMacro(), count: CS_MAX_MACROS)
+    @Published var csExtStatus: CsExtStatusPacket = CsExtStatusPacket()
+    /// True when the firmware exposes groups and macros.  The counts live in
+    /// the caps header's formerly-reserved tail, so a pre-v9 device reports
+    /// zeros and the feature simply stays hidden - no version test needed.
+    var csGroupsSupported: Bool { csCaps.maxGroups > 0 }
+    var csMacrosSupported: Bool { csCaps.maxMacros > 0 && csCaps.maxMacroSteps > 0 }
+    /// Group / macro slot counts to show, clamped to what the app allocates.
+    var csGroupCount: Int { min(Int(csCaps.maxGroups), CS_MAX_GROUPS) }
+    var csMacroCount: Int { min(Int(csCaps.maxMacros), CS_MAX_MACROS) }
+    var csMacroStepCount: Int { min(Int(csCaps.maxMacroSteps), CS_MAX_MACRO_STEPS) }
+
+    /// Display name for a group slot, falling back to its index when unnamed.
+    func csGroupName(_ index: Int) -> String {
+        guard csGroups.indices.contains(index) else { return "Group \(index + 1)" }
+        let n = csGroups[index].name
+        return n.isEmpty ? "Group \(index + 1)" : n
+    }
+
+    /// Display name for a macro slot, falling back to its index when unnamed.
+    func csMacroName(_ index: Int) -> String {
+        guard csMacros.indices.contains(index) else { return "Macro \(index + 1)" }
+        let n = csMacros[index].name
+        return n.isEmpty ? "Macro \(index + 1)" : n
+    }
     /// The live Control Surfaces config as of the last moment the device
     /// reported it clean (matching flash): the connect load, a Save, or a
     /// Revert.  Compared against the current live config so a false "unsaved
@@ -1290,6 +1509,8 @@ class DSPViewModel: ObservableObject {
     private var csCleanBindings: [CsBinding]? = nil
     private var csCleanIrCommands: [IrCommand]? = nil
     private var csCleanNames: [String]? = nil
+    private var csCleanGroups: [CsGroup]? = nil
+    private var csCleanMacros: [CsMacro]? = nil
 
     /// True when the live Control Surfaces config has unsaved preview changes.
     /// Requires the firmware's sticky dirty flag AND a real difference from the
@@ -1299,10 +1520,14 @@ class DSPViewModel: ObservableObject {
     var csDirty: Bool {
         guard csStatus.dirty else { return false }
         guard let cleanBindings = csCleanBindings, let cleanIr = csCleanIrCommands,
-              let cleanNames = csCleanNames else {
+              let cleanNames = csCleanNames, let cleanGroups = csCleanGroups,
+              let cleanMacros = csCleanMacros else {
             return true   // no known-clean baseline: defer to the firmware flag
         }
+        // Groups and macros share the one dirty flag and the one Save, so an
+        // edit to either has to keep the banner up on its own.
         return csBindings != cleanBindings || csIrCommands != cleanIr || csNames != cleanNames
+            || csGroups != cleanGroups || csMacros != cleanMacros
     }
 
     /// Record the current live config as the clean (== flash) baseline.  Call
@@ -1312,6 +1537,8 @@ class DSPViewModel: ObservableObject {
         csCleanBindings = csBindings
         csCleanIrCommands = csIrCommands
         csCleanNames = csNames
+        csCleanGroups = csGroups
+        csCleanMacros = csMacros
     }
 
     // Test signal generator (siggen) - onboard measurement/diagnostic signals

@@ -1866,6 +1866,20 @@ struct ControlSurfacesSettingsTab: View {
     // one opens for editing (mirrors the component cards' `expandedSlots`).
     @State private var expandedSubs: Set<Int> = []
 
+    // Target groups and macros (caps v9), device-global like the bindings and
+    // covered by the same Apply / Save / Revert.  Both mirror their vm tables
+    // for local editing, exactly as `drafts` and `irDrafts` do.  A macro's name
+    // lives inside its draft rather than in a separate buffer: unlike a slot
+    // name (which persists immediately) it is part of the macro's own record.
+    @State private var groupDrafts: [CsGroup] = Array(repeating: CsGroup(), count: CS_MAX_GROUPS)
+    @State private var macroDrafts: [CsMacro] = Array(repeating: CsMacro(), count: CS_MAX_MACROS)
+    @State private var expandedGroups: Set<Int> = []
+    @State private var expandedMacros: Set<Int> = []
+    @State private var applyingGroup: Int? = nil
+    @State private var applyingMacro: Int? = nil
+    @State private var groupMessages: [Int: (message: String, isError: Bool)] = [:]
+    @State private var macroMessages: [Int: (message: String, isError: Bool)] = [:]
+
     // User-given names, shown in the card header so collapsed cards are
     // tellable apart.  Names are device-persistent (spec §3.4), read into
     // `vm.csNames`; this is a local editing buffer committed on submit / close
@@ -1916,6 +1930,11 @@ struct ControlSurfacesSettingsTab: View {
                     }
                     addSection
                 }
+                // Groups and macros follow the controls: a group is only useful
+                // once something addresses it, and a macro reads as a control
+                // without a pin.  Both are hidden on pre-v9 firmware.
+                if vm.csGroupsSupported { groupsSection }
+                if vm.csMacrosSupported { macrosSection }
             }
 
             Section {
@@ -1965,6 +1984,18 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
         }
+        // Re-seed group and macro drafts the same way: follow the device unless
+        // this slot has an edit staged against it.
+        .onReceive(vm.$csGroups) { newGroups in
+            for g in 0..<min(groupDrafts.count, newGroups.count) {
+                if applyingGroup != g && groupDrafts[g] == vm.csGroups[g] { groupDrafts[g] = newGroups[g] }
+            }
+        }
+        .onReceive(vm.$csMacros) { newMacros in
+            for m in 0..<min(macroDrafts.count, newMacros.count) {
+                if applyingMacro != m && macroDrafts[m] == vm.csMacros[m] { macroDrafts[m] = newMacros[m] }
+            }
+        }
         // Staged edits belong to the previously selected device - discard them
         // on a switch so Apply can't push one device's bindings, names, or IR
         // commands onto another. The clean drafts then follow the new device's
@@ -1973,6 +2004,8 @@ struct ControlSurfacesSettingsTab: View {
             seedDrafts()
             slotMessages = [:]
             subMessages = [:]
+            groupMessages = [:]
+            macroMessages = [:]
             nameEdits = [:]
             // Drop the learn without a device round-trip - the arm belonged to
             // the device we just left.
@@ -1997,6 +2030,12 @@ struct ControlSurfacesSettingsTab: View {
             seededIr[sub] = vm.csIrCommands[sub]
         }
         irDrafts = seededIr
+        var seededGroups = Array(repeating: CsGroup(), count: CS_MAX_GROUPS)
+        for g in 0..<min(CS_MAX_GROUPS, vm.csGroups.count) { seededGroups[g] = vm.csGroups[g] }
+        groupDrafts = seededGroups
+        var seededMacros = Array(repeating: CsMacro(), count: CS_MAX_MACROS)
+        for m in 0..<min(CS_MAX_MACROS, vm.csMacros.count) { seededMacros[m] = vm.csMacros[m] }
+        macroDrafts = seededMacros
     }
 
     // MARK: Custom names (device-persistent; spec §3.4)
@@ -2170,6 +2209,843 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
         }
+    }
+
+    // MARK: Target groups (caps v9; groups+macros spec §1.1)
+
+    /// Group slots holding a group, or with one staged.  Empty slots stay
+    /// hidden behind "Add a Group", mirroring the control cards.
+    private var visibleGroups: [Int] {
+        (0..<vm.csGroupCount).filter { groupDrafts[$0].isConfigured || vm.csGroups[$0].isConfigured }
+    }
+
+    private var firstFreeGroup: Int? {
+        (0..<vm.csGroupCount).first { !groupDrafts[$0].isConfigured && !vm.csGroups[$0].isConfigured }
+    }
+
+    /// Bindings currently pointed at a group, so removing one can say what it
+    /// will break.  The firmware deactivates dependants rather than refusing
+    /// the edit (spec §4.4), which is easy to do by accident without a warning.
+    private func bindingsUsingGroup(_ g: Int) -> [Int] {
+        (0..<slotCount).filter {
+            let b = vm.csBindings[$0]
+            return b.isConfigured && b.flags & CS_FLAG_GROUP != 0 && Int(b.target) == g
+        }
+    }
+
+    @ViewBuilder
+    private var groupsSection: some View {
+        Section("Channel Groups") {
+            if visibleGroups.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("A group is a named set of channels one control can drive together - a stereo pair, a zone, every output at once.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Turn on \"Address a Group\" in a control above to use one.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+            HStack {
+                Button {
+                    guard let g = firstFreeGroup else { return }
+                    var fresh = CsGroup()
+                    fresh.targetKind = CS_TARGET_OUTPUT_CH
+                    fresh.name = "Group \(g + 1)"
+                    groupDrafts[g] = fresh
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        _ = expandedGroups.insert(g)
+                    }
+                } label: {
+                    Label("Add a Group", systemImage: "plus")
+                }
+                .disabled(firstFreeGroup == nil)
+                Spacer()
+                if firstFreeGroup == nil {
+                    Text("All \(vm.csGroupCount) group slots are in use.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        ForEach(visibleGroups, id: \.self) { g in
+            groupCard(g)
+        }
+    }
+
+    @ViewBuilder
+    private func groupCard(_ g: Int) -> some View {
+        let draft = groupDrafts[g]
+        let expanded = expandedGroups.contains(g)
+        let dirty = draft != vm.csGroups[g]
+        Section {
+            HStack(spacing: 12) {
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        if expanded { expandedGroups.remove(g) } else { expandedGroups.insert(g) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+
+                Image(systemName: "rectangle.3.group")
+                    .font(.system(size: 13))
+                    .foregroundColor(.accentColor)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    LeftAlignedTextField(text: Binding(
+                        get: { groupDrafts[g].name },
+                        set: { groupDrafts[g].name = String($0.prefix(CS_NAME_LEN - 1)) }),
+                                         placeholder: "Group \(g + 1)")
+                        .frame(maxWidth: 240, alignment: .leading)
+                    Text(groupSummary(draft))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if let s = vm.csExtStatus.groupStatus.indices.contains(g) ? vm.csExtStatus.groupStatus[g] : nil,
+                   s != 0, vm.csGroups[g].isConfigured {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.caption)
+                        .help(statusMessage(s).message)
+                }
+                Button(role: .destructive) { removeGroup(g) } label: {
+                    Image(systemName: "trash").font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .disabled(applyingGroup == g || (vm.csGroups[g].isConfigured && !vm.isDeviceConnected))
+            }
+            .padding(.vertical, 4)
+
+            if expanded {
+                settingRow(title: "Channel Type",
+                           detail: "Which set of channels the members are numbered in.",
+                           icon: "square.stack.3d.up") {
+                    Picker("", selection: Binding(
+                        get: { groupDrafts[g].targetKind },
+                        set: { newKind in
+                            // The mask means different channels under a
+                            // different kind, so it cannot carry over.
+                            groupDrafts[g].targetKind = newKind
+                            groupDrafts[g].memberMask = 0
+                        })) {
+                        Text("Inputs").tag(CS_TARGET_INPUT_CH)
+                        Text("Outputs").tag(CS_TARGET_OUTPUT_CH)
+                        Text("All Channels").tag(CS_TARGET_DSP_CH)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                groupMemberGrid(g)
+                if !bindingsUsingGroup(g).isEmpty {
+                    Text("Used by \(bindingsUsingGroup(g).count) control\(bindingsUsingGroup(g).count == 1 ? "" : "s"). Emptying this group or changing its channel type deactivates them until it fits again.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if expanded || dirty || applyingGroup == g || groupMessages[g] != nil {
+                HStack(spacing: 8) {
+                    if let msg = groupMessages[g], msg.isError, !dirty {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange).font(.caption)
+                        Text(msg.message).font(.caption).foregroundColor(.orange)
+                    }
+                    Spacer(minLength: 8)
+                    if applyingGroup == g { ProgressView().controlSize(.small) }
+                    Button("Revert") { groupDrafts[g] = vm.csGroups[g]; groupMessages[g] = nil }
+                        .buttonStyle(.plain)
+                        .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+                        .disabled(!dirty || applyingGroup == g)
+                    Button("Apply") { applyGroup(g) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!dirty || applyingGroup == g || csBusy || !vm.isDeviceConnected)
+                }
+            }
+        }
+    }
+
+    /// The member checkboxes.  Channel numbering follows the group's kind, so
+    /// the labels come from the same helper the binding's channel picker uses.
+    @ViewBuilder
+    private func groupMemberGrid(_ g: Int) -> some View {
+        let kind = groupDrafts[g].targetKind
+        let count = groupChannelCount(kind)
+        VStack(alignment: .leading, spacing: 6) {
+            settingLabel(title: "Members",
+                         detail: "Every channel this group drives together.",
+                         icon: "checklist")
+            if count == 0 {
+                Text("No channels of this type on the connected device.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 6)],
+                          alignment: .leading, spacing: 6) {
+                    ForEach(Array(0..<count), id: \.self) { ch in
+                        Toggle(isOn: Binding(
+                            get: { groupDrafts[g].memberMask & (UInt32(1) << UInt32(ch)) != 0 },
+                            set: { on in
+                                let bit = UInt32(1) << UInt32(ch)
+                                if on { groupDrafts[g].memberMask |= bit }
+                                else { groupDrafts[g].memberMask &= ~bit }
+                            })) {
+                            Text(groupChannelName(kind, ch)).font(.caption)
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// How many channels a group kind addresses on this device.  Taken from a
+    /// noun that targets that space so the counts stay device-served, the same
+    /// rule the rest of the page follows.
+    private func groupChannelCount(_ kind: UInt8) -> Int {
+        for nd in vm.csNounDescs where nd.actions != 0 && nd.targetCount > 0 {
+            if nd.targetKind == kind { return Int(nd.targetCount) }
+            // DSP_BAND nouns are numbered in the DSP channel space too.
+            if kind == CS_TARGET_DSP_CH && nd.targetKind == CS_TARGET_DSP_BAND { return Int(nd.targetCount) }
+        }
+        return 0
+    }
+
+    private func groupChannelName(_ kind: UInt8, _ ch: Int) -> String {
+        targetName(CsNounDesc(targetKind: kind, targetCount: 255), ch)
+    }
+
+    /// "4 outputs - Out 1, Out 2, ..." for the collapsed card.
+    private func groupSummary(_ group: CsGroup) -> String {
+        guard group.isConfigured else { return "No channels selected." }
+        let names = group.members.map { groupChannelName(group.targetKind, $0) }
+        let head = names.prefix(4).joined(separator: ", ")
+        return names.count > 4 ? "\(head) +\(names.count - 4) more" : head
+    }
+
+    private func removeGroup(_ g: Int) {
+        guard vm.csGroups[g].isConfigured else {
+            // Never applied: dropping the draft is enough.
+            groupDrafts[g] = CsGroup()
+            expandedGroups.remove(g)
+            groupMessages[g] = nil
+            return
+        }
+        groupDrafts[g] = CsGroup()
+        applyGroup(g)
+        expandedGroups.remove(g)
+    }
+
+    private func applyGroup(_ g: Int) {
+        let group = groupDrafts[g]
+        applyingGroup = g
+        groupMessages[g] = nil
+        coordinator.beginCsOperation()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setCsGroup(g, group: group)
+            DispatchQueue.main.async {
+                applyingGroup = nil
+                coordinator.endCsOperation()
+                groupDrafts[g] = vm.csGroups[g]
+                let msg = statusMessage(status)
+                groupMessages[g] = msg.isError ? msg : nil
+            }
+        }
+    }
+
+    // MARK: Macros (caps v9; groups+macros spec §1.4)
+    //
+    // A macro is a short sequence of parameter changes any button-shaped event
+    // can fire through the MACRO noun.  Each step is a stripped binding - noun,
+    // action, target, operands - plus a delay that elapses before it runs, so
+    // the editor below reuses the same caps-driven pickers the IR command cards
+    // use.  One macro runs at a time; firing another cancels it.
+
+    private var visibleMacros: [Int] {
+        (0..<vm.csMacroCount).filter { macroDrafts[$0].isConfigured || vm.csMacros[$0].isConfigured }
+    }
+
+    private var firstFreeMacro: Int? {
+        (0..<vm.csMacroCount).first { !macroDrafts[$0].isConfigured && !vm.csMacros[$0].isConfigured }
+    }
+
+    @ViewBuilder
+    private var macrosSection: some View {
+        Section("Macros") {
+            if visibleMacros.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("A macro runs a short sequence of changes from one press: select an input and load a preset, switch monitors, mute after a delay.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Bind a button or remote key to \"Macro\" to fire one.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 2)
+            }
+            HStack {
+                Button {
+                    guard let m = firstFreeMacro else { return }
+                    var fresh = CsMacro()
+                    fresh.name = "Macro \(m + 1)"
+                    macroDrafts[m] = fresh
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        _ = expandedMacros.insert(m)
+                    }
+                } label: {
+                    Label("Add a Macro", systemImage: "plus")
+                }
+                .disabled(firstFreeMacro == nil)
+                Spacer()
+                if firstFreeMacro == nil {
+                    Text("All \(vm.csMacroCount) macro slots are in use.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        ForEach(visibleMacros, id: \.self) { m in
+            macroCard(m)
+        }
+    }
+
+    @ViewBuilder
+    private func macroCard(_ m: Int) -> some View {
+        let draft = macroDrafts[m]
+        let expanded = expandedMacros.contains(m)
+        let dirty = draft != vm.csMacros[m]
+        let running = Int(vm.csExtStatus.macroRunning) == m
+        Section {
+            HStack(spacing: 12) {
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        if expanded { expandedMacros.remove(m) } else { expandedMacros.insert(m) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+
+                Image(systemName: running ? "play.circle.fill" : "list.number")
+                    .font(.system(size: 13))
+                    .foregroundColor(running ? .green : .accentColor)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    LeftAlignedTextField(text: Binding(
+                        get: { macroDrafts[m].name },
+                        set: { macroDrafts[m].name = String($0.prefix(CS_NAME_LEN - 1)) }),
+                                         placeholder: "Macro \(m + 1)")
+                        .frame(maxWidth: 240, alignment: .leading)
+                    Text(macroSummary(draft, running: running))
+                        .font(.caption)
+                        .foregroundColor(running ? .green : .secondary)
+                }
+                Spacer()
+                if let s = vm.csExtStatus.macroStatus.indices.contains(m) ? vm.csExtStatus.macroStatus[m] : nil,
+                   s != 0, vm.csMacros[m].isConfigured {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.caption)
+                        .help(statusMessage(s).message)
+                }
+                // Firing tests the sequence as stored on the device, so it is
+                // offered only once the draft has been applied.
+                Button { fireMacro(m) } label: {
+                    Image(systemName: running ? "stop.fill" : "play.fill").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .help(running ? "Stop this macro" : "Run this macro now")
+                .disabled(!vm.isDeviceConnected || (!running && vm.csMacros[m].stepCount == 0))
+
+                Button(role: .destructive) { removeMacro(m) } label: {
+                    Image(systemName: "trash").font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .disabled(applyingMacro == m || (vm.csMacros[m].isConfigured && !vm.isDeviceConnected))
+            }
+            .padding(.vertical, 4)
+
+            if expanded {
+                ForEach(Array(0..<Int(macroDrafts[m].stepCount)), id: \.self) { s in
+                    macroStepRows(m, s)
+                }
+                HStack {
+                    Button {
+                        let n = Int(macroDrafts[m].stepCount)
+                        guard n < vm.csMacroStepCount else { return }
+                        macroDrafts[m].steps[n] = defaultMacroStep()
+                        macroDrafts[m].stepCount = UInt8(n + 1)
+                    } label: {
+                        Label("Add a Step", systemImage: "plus")
+                    }
+                    .disabled(Int(macroDrafts[m].stepCount) >= vm.csMacroStepCount)
+                    Spacer()
+                    if Int(macroDrafts[m].stepCount) >= vm.csMacroStepCount {
+                        Text("A macro holds up to \(vm.csMacroStepCount) steps.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            if expanded || dirty || applyingMacro == m || macroMessages[m] != nil {
+                HStack(spacing: 8) {
+                    if let msg = macroMessages[m], msg.isError, !dirty {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange).font(.caption)
+                        Text(msg.message).font(.caption).foregroundColor(.orange)
+                    }
+                    Spacer(minLength: 8)
+                    if applyingMacro == m { ProgressView().controlSize(.small) }
+                    Button("Revert") { macroDrafts[m] = vm.csMacros[m]; macroMessages[m] = nil }
+                        .buttonStyle(.plain)
+                        .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+                        .disabled(!dirty || applyingMacro == m)
+                    Button("Apply") { applyMacro(m) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!dirty || applyingMacro == m || csBusy || !vm.isDeviceConnected)
+                }
+            }
+        }
+    }
+
+    /// One step's editor: the header row (number, summary, reorder, delete) and
+    /// the same noun / action / target / operand pickers a binding gets, minus
+    /// everything that only means something on a physical control.
+    @ViewBuilder
+    private func macroStepRows(_ m: Int, _ s: Int) -> some View {
+        let step = macroDrafts[m].steps[s]
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("\(s + 1)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                    .frame(width: 16, alignment: .trailing)
+                Text(macroStepSummary(step))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button { moveMacroStep(m, s, by: -1) } label: {
+                    Image(systemName: "arrow.up").font(.system(size: 10))
+                }
+                .buttonStyle(.borderless).foregroundColor(.secondary)
+                .disabled(s == 0)
+                Button { moveMacroStep(m, s, by: 1) } label: {
+                    Image(systemName: "arrow.down").font(.system(size: 10))
+                }
+                .buttonStyle(.borderless).foregroundColor(.secondary)
+                .disabled(s >= Int(macroDrafts[m].stepCount) - 1)
+                Button(role: .destructive) { removeMacroStep(m, s) } label: {
+                    Image(systemName: "minus.circle").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless).foregroundColor(.secondary)
+            }
+
+            macroStepNounRow(m, s)
+            macroStepActionRow(m, s)
+            macroStepTargetRows(m, s)
+            macroStepOperandRows(m, s)
+            settingRow(title: "Wait Before",
+                       detail: "Delay after the previous step before this one runs.",
+                       icon: "clock") {
+                ValueField(label: "s", value: csDecodeStepDelay(macroDrafts[m].steps[s].preDelay),
+                           width: 64, scrollStep: 0.1, minValue: 0, maxDecimals: 2) { v in
+                    macroDrafts[m].steps[s].preDelay = csEncodeStepDelay(v)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// Nouns a macro step can drive: those accepting at least one step action.
+    private func macroStepNouns() -> [Int] {
+        let mask = CS_MACRO_STEP_ACTIONS.reduce(UInt16(0)) { $0 | CS_ACT_BIT($1) }
+        return (0..<vm.csNounDescs.count).filter { n in
+            n != CS_NOUN_MACRO && (vm.csNounDescs[n].actions & mask) != 0
+        }
+    }
+
+    private func macroStepActions(_ noun: Int) -> [Int] {
+        guard let nd = nounDesc(noun) else { return [] }
+        return CS_MACRO_STEP_ACTIONS.filter { (nd.actions & CS_ACT_BIT($0)) != 0 }
+    }
+
+    @ViewBuilder
+    private func macroStepNounRow(_ m: Int, _ s: Int) -> some View {
+        let nouns = macroStepNouns()
+        settingRow(title: "Change", detail: "Which function this step changes.", icon: "slider.horizontal.3") {
+            Picker("", selection: Binding(
+                get: { Int(macroDrafts[m].steps[s].noun) },
+                set: { newNoun in
+                    var st = macroDrafts[m].steps[s]
+                    guard newNoun != Int(st.noun) else { return }
+                    st.noun = UInt8(newNoun)
+                    st.target = 0; st.index = 0
+                    let acts = macroStepActions(newNoun)
+                    if !acts.contains(Int(st.action)) { st.action = UInt8(acts.first ?? CS_ACT_SET) }
+                    macroDrafts[m].steps[s] = defaultMacroStepOperands(st)
+                })) {
+                ForEach(nouns, id: \.self) { n in
+                    Text(nounName(n, forType: CS_TYPE_BUTTON)).tag(n)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func macroStepActionRow(_ m: Int, _ s: Int) -> some View {
+        let noun = Int(macroDrafts[m].steps[s].noun)
+        let acts = macroStepActions(noun)
+        if acts.count > 1 {
+            settingRow(title: "How", detail: "What this step does to it.", icon: "hand.tap") {
+                Picker("", selection: Binding(
+                    get: { Int(macroDrafts[m].steps[s].action) },
+                    set: { newAction in
+                        var st = macroDrafts[m].steps[s]
+                        guard newAction != Int(st.action) else { return }
+                        st.action = UInt8(newAction)
+                        macroDrafts[m].steps[s] = defaultMacroStepOperands(st)
+                    })) {
+                    ForEach(acts, id: \.self) { a in
+                        Text(actionName(a, noun: noun)).tag(a)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func macroStepTargetRows(_ m: Int, _ s: Int) -> some View {
+        let step = macroDrafts[m].steps[s]
+        let noun = Int(step.noun)
+        if let nd = nounDesc(noun), nd.isTargeted {
+            let grouped = step.isGrouped
+            if vm.csGroupsSupported && Int(step.action) != CS_ACT_TRIGGER
+                && (!compatibleGroups(forNoun: noun).isEmpty || grouped) {
+                Toggle(isOn: Binding(
+                    get: { grouped },
+                    set: { on in
+                        var st = macroDrafts[m].steps[s]
+                        if on {
+                            st.flags |= CS_FLAG_GROUP
+                            st.target = UInt8(compatibleGroups(forNoun: noun).first ?? 0)
+                        } else {
+                            st.flags &= ~CS_FLAG_GROUP
+                            st.target = 0
+                        }
+                        macroDrafts[m].steps[s] = st
+                    })) {
+                    settingLabel(title: "Address a Group",
+                                 detail: "Apply this step to a named set of channels.",
+                                 icon: "rectangle.3.group")
+                }
+                .toggleStyle(.switch)
+            }
+            if grouped {
+                let usable = compatibleGroups(forNoun: noun)
+                settingRow(title: "Group",
+                           detail: usable.isEmpty ? "No group matches this function's channel type."
+                                                  : "Which group this step affects.",
+                           icon: "rectangle.3.group") {
+                    Picker("", selection: Binding(
+                        get: { Int(macroDrafts[m].steps[s].target) },
+                        set: { macroDrafts[m].steps[s].target = UInt8($0) })) {
+                        ForEach(usable, id: \.self) { g in Text(groupMenuLabel(g)).tag(g) }
+                        if !usable.contains(Int(step.target)) {
+                            Text(groupMenuLabel(Int(step.target))).tag(Int(step.target))
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            } else {
+                settingRow(title: "Channel", detail: "Which channel this step affects.",
+                           icon: "square.stack.3d.up") {
+                    Picker("", selection: Binding(
+                        get: { Int(macroDrafts[m].steps[s].target) },
+                        set: { macroDrafts[m].steps[s].target = UInt8($0) })) {
+                        ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                            Text(targetName(nd, t)).tag(t)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+            if nd.hasBand {
+                let bands = bandOptions(noun: noun, target: Int(step.target), grouped: grouped)
+                settingRow(title: "Band", detail: "Which filter band this step affects.",
+                           icon: "waveform.path.ecg") {
+                    Picker("", selection: Binding(
+                        get: { Int(macroDrafts[m].steps[s].index) },
+                        set: { macroDrafts[m].steps[s].index = UInt8($0) })) {
+                        ForEach(bands, id: \.self) { b in Text(bandName(b)).tag(b) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func macroStepOperandRows(_ m: Int, _ s: Int) -> some View {
+        let step = macroDrafts[m].steps[s]
+        let noun = Int(step.noun)
+        let nd = nounDesc(noun)
+        let kind = nd?.kind ?? CS_KIND_BOOL
+        let unit = nd?.unit ?? CS_UNIT_DB
+        switch Int(step.action) {
+        case CS_ACT_SET:
+            if kind == CS_KIND_CONTINUOUS {
+                let lo = csDecodeValue(nd?.minQ8 ?? 0, unit: unit)
+                let hi = csDecodeValue(nd?.maxQ8 ?? 0, unit: unit)
+                settingRow(title: "Set To",
+                           detail: "The value this step applies (\(fmtUnit(lo, unit)) to \(fmtUnit(hi, unit))).",
+                           icon: "target") {
+                    ValueField(label: csUnitSymbol(unit),
+                               value: csDecodeValue(macroDrafts[m].steps[s].value, unit: unit),
+                               width: 64, scrollStep: unitScrollStep(unit),
+                               maxDecimals: unitDecimals(unit)) { v in
+                        macroDrafts[m].steps[s].value = csEncodeValue(min(hi, max(lo, v)), unit: unit)
+                    }
+                }
+            } else if kind == CS_KIND_BOOL {
+                settingRow(title: "Set To", detail: "The state this step applies.", icon: "switch.2") {
+                    Picker("", selection: Binding(
+                        get: { macroDrafts[m].steps[s].value != 0 },
+                        set: { macroDrafts[m].steps[s].value = $0 ? 1 : 0 })) {
+                        Text(boolLabel(noun, on: true)).tag(true)
+                        Text(boolLabel(noun, on: false)).tag(false)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            } else {
+                settingRow(title: "Set To", detail: "The selection this step applies.", icon: "list.number") {
+                    Picker("", selection: Binding(
+                        get: { Int(macroDrafts[m].steps[s].value) },
+                        set: { macroDrafts[m].steps[s].value = Int16($0) })) {
+                        ForEach(Array(0..<max(1, Int(nd?.enumCount ?? 1))), id: \.self) { i in
+                            Text(enumValueLabel(noun: noun, value: i)).tag(i)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+        case CS_ACT_INC, CS_ACT_DEC:
+            if kind == CS_KIND_CONTINUOUS {
+                let isLog = csUnitIsLog(unit)
+                let cur = macroDrafts[m].steps[s].step == 0
+                    ? csDefaultStep(unit)
+                    : csDecodeStep(macroDrafts[m].steps[s].step, unit: unit)
+                settingRow(title: "Step Size",
+                           detail: isLog ? "How far each run moves it, in octaves."
+                                         : "How far each run moves it.",
+                           icon: "arrow.up.arrow.down") {
+                    ValueField(label: isLog ? "oct" : csUnitSymbol(unit), value: cur, width: 64,
+                               scrollStep: isLog ? csDefaultStep(unit) : unitScrollStep(unit),
+                               minValue: 0, maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
+                        macroDrafts[m].steps[s].step = csEncodeStep(v, unit: unit)
+                    }
+                }
+            } else if kind == CS_KIND_ENUM {
+                flagStepToggleForMacro(m, s)
+            }
+        default:
+            EmptyView()   // TOGGLE and TRIGGER carry no operand
+        }
+    }
+
+    /// Enum steps can wrap past the ends, the one flag a macro step shares with
+    /// a button binding.
+    @ViewBuilder
+    private func flagStepToggleForMacro(_ m: Int, _ s: Int) -> some View {
+        Toggle(isOn: Binding(
+            get: { macroDrafts[m].steps[s].flags & CS_FLAG_WRAP != 0 },
+            set: { on in
+                if on { macroDrafts[m].steps[s].flags |= CS_FLAG_WRAP }
+                else { macroDrafts[m].steps[s].flags &= ~CS_FLAG_WRAP }
+            })) {
+            settingLabel(title: "Wrap Around",
+                         detail: "Step past the last position back to the first.",
+                         icon: "arrow.triangle.2.circlepath")
+        }
+        .toggleStyle(.switch)
+    }
+
+    /// A fresh step: the first noun that accepts a step action, with sensible
+    /// operands, so a newly added step is already valid.
+    private func defaultMacroStep() -> CsMacroStep {
+        var st = CsMacroStep()
+        let noun = macroStepNouns().first ?? CS_NOUN_USER_MUTE
+        st.noun = UInt8(noun)
+        st.action = UInt8(macroStepActions(noun).first ?? CS_ACT_SET)
+        return defaultMacroStepOperands(st)
+    }
+
+    /// Reset a step's operands for its action and noun kind, mirroring
+    /// `defaultOperands` for bindings.
+    private func defaultMacroStepOperands(_ step: CsMacroStep) -> CsMacroStep {
+        var st = step
+        let nd = nounDesc(Int(st.noun))
+        let kind = nd?.kind ?? CS_KIND_BOOL
+        st.value = 0
+        st.step = 0
+        // Only WRAP and GROUP are legal on a step; drop WRAP where it means
+        // nothing so a leftover bit can't fail validation.
+        let isEnumStep = kind == CS_KIND_ENUM
+            && (Int(st.action) == CS_ACT_INC || Int(st.action) == CS_ACT_DEC)
+        if !isEnumStep { st.flags &= ~CS_FLAG_WRAP }
+        switch Int(st.action) {
+        case CS_ACT_SET:
+            if kind == CS_KIND_CONTINUOUS { st.value = nd?.maxQ8 ?? 0 }
+            else if kind == CS_KIND_BOOL { st.value = 1 }
+        default:
+            break
+        }
+        // A trigger is never grouped, the same rule bindings follow.
+        if Int(st.action) == CS_ACT_TRIGGER || nd?.isTargeted != true {
+            st.flags &= ~CS_FLAG_GROUP
+            st.target = 0
+        }
+        return st
+    }
+
+    private func moveMacroStep(_ m: Int, _ s: Int, by delta: Int) {
+        let dest = s + delta
+        guard dest >= 0, dest < Int(macroDrafts[m].stepCount) else { return }
+        macroDrafts[m].steps.swapAt(s, dest)
+    }
+
+    /// Remove a step and close the gap: the sequencer runs `steps[0..<count]`,
+    /// so a hole in the middle would execute as a skipped empty record rather
+    /// than shortening the macro.
+    private func removeMacroStep(_ m: Int, _ s: Int) {
+        var steps = macroDrafts[m].steps
+        let count = Int(macroDrafts[m].stepCount)
+        guard s < count else { return }
+        steps.remove(at: s)
+        steps.append(CsMacroStep())
+        macroDrafts[m].steps = steps
+        macroDrafts[m].stepCount = UInt8(count - 1)
+    }
+
+    private func removeMacro(_ m: Int) {
+        guard vm.csMacros[m].isConfigured else {
+            macroDrafts[m] = CsMacro()
+            expandedMacros.remove(m)
+            macroMessages[m] = nil
+            return
+        }
+        macroDrafts[m] = CsMacro()
+        applyMacro(m)
+        expandedMacros.remove(m)
+    }
+
+    private func applyMacro(_ m: Int) {
+        let macro = macroDrafts[m]
+        applyingMacro = m
+        macroMessages[m] = nil
+        coordinator.beginCsOperation()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setCsMacro(m, macro: macro)
+            DispatchQueue.main.async {
+                applyingMacro = nil
+                coordinator.endCsOperation()
+                macroDrafts[m] = vm.csMacros[m]
+                let msg = statusMessage(status)
+                macroMessages[m] = msg.isError ? msg : nil
+            }
+        }
+    }
+
+    private func fireMacro(_ m: Int) {
+        let running = Int(vm.csExtStatus.macroRunning) == m
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = vm.csMacroFire(running ? CS_MACRO_FIRE_CANCEL : UInt16(m))
+            // Nothing pushes sequencer progress to the host, so the running
+            // badge would otherwise stick at whatever the single post-fire read
+            // saw.  Follow the run until it ends, with a ceiling: a macro whose
+            // steps carry minute-scale delays can outlast any sane poll, and a
+            // stale badge is better than a poll that never stops.
+            for _ in 0..<120 {
+                Thread.sleep(forTimeInterval: 0.25)
+                // Test the returned packet, not the @Published copy: that one
+                // is updated on the main thread and would not be visible here.
+                guard let st = vm.fetchCsExtStatus(), st.isRunning else { break }
+            }
+        }
+    }
+
+    /// "3 steps - 1.5 s total" for the collapsed card.
+    private func macroSummary(_ macro: CsMacro, running: Bool) -> String {
+        if running {
+            let step = Int(vm.csExtStatus.macroStep) + 1
+            return "Running - step \(step) of \(macro.stepCount)."
+        }
+        let n = Int(macro.stepCount)
+        guard n > 0 else { return "No steps yet." }
+        let total = macro.activeSteps.reduce(Float(0)) { $0 + csDecodeStepDelay($1.preDelay) }
+        let base = "\(n) step\(n == 1 ? "" : "s")"
+        return total > 0 ? "\(base), \(fmtDelaySeconds(total)) total" : base
+    }
+
+    /// One step in words, for the row header.
+    private func macroStepSummary(_ step: CsMacroStep) -> String {
+        let noun = nounName(Int(step.noun), forType: CS_TYPE_BUTTON)
+        let target: String
+        if let nd = nounDesc(Int(step.noun)), nd.isTargeted {
+            target = step.isGrouped
+                ? " (\(vm.csGroupName(Int(step.target))))"
+                : " (\(targetName(nd, Int(step.target))))"
+        } else {
+            target = ""
+        }
+        let wait = step.preDelay == 0 ? "" : "After \(fmtDelaySeconds(csDecodeStepDelay(step.preDelay))), "
+        let verb: String
+        switch Int(step.action) {
+        case CS_ACT_SET:     verb = "set \(noun)\(target)"
+        case CS_ACT_TOGGLE:  verb = "toggle \(noun)\(target)"
+        case CS_ACT_INC:     verb = "raise \(noun)\(target)"
+        case CS_ACT_DEC:     verb = "lower \(noun)\(target)"
+        case CS_ACT_TRIGGER: verb = noun.lowercased()
+        default:             verb = noun
+        }
+        return wait.isEmpty ? verb.prefix(1).uppercased() + verb.dropFirst() : wait + verb
+    }
+
+    /// Seconds in the most readable unit, shared by the macro summaries.
+    private func fmtDelaySeconds(_ s: Float) -> String {
+        if s < 60 { return String(format: s < 10 ? "%.2g s" : "%.0f s", s) }
+        let mins = s / 60
+        return String(format: mins == mins.rounded() ? "%.0f min" : "%.1f min", mins)
     }
 
     // MARK: Apply / Save / Revert (preview model; spec §3.5)
@@ -2527,21 +3403,61 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func targetRows(_ slot: Int) -> some View {
         if let nd = nounDesc(Int(drafts[slot].noun)), nd.isTargeted {
-            settingRow(title: "Channel",
-                       detail: "Which channel this control affects.",
-                       icon: "square.stack.3d.up") {
-                Picker("", selection: targetBinding(slot)) {
-                    ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
-                        Text(targetName(nd, t)).tag(t)
-                    }
+            let grouped = drafts[slot].flags & CS_FLAG_GROUP != 0
+            // Groups (caps v9) re-read `target` as a group index, so the toggle
+            // and the picker below it are one control in two states.  TRIGGER is
+            // never groupable - the firmware has no targeted trigger noun.
+            if csGroupsAvailable(slot) {
+                Toggle(isOn: Binding(
+                    get: { grouped },
+                    set: { on in setGrouped(slot, on) })) {
+                    settingLabel(title: "Address a Group",
+                                 detail: "Drive a named set of channels together instead of one.",
+                                 icon: "rectangle.3.group")
                 }
-                .labelsHidden()
-                .fixedSize()
+                .toggleStyle(.switch)
+            }
+            if grouped {
+                let usable = compatibleGroups(forNoun: Int(drafts[slot].noun))
+                settingRow(title: "Group",
+                           detail: usable.isEmpty
+                               ? "No group matches this function's channel type. Define one below."
+                               : "Which group of channels this control affects.",
+                           icon: "rectangle.3.group") {
+                    Picker("", selection: targetBinding(slot)) {
+                        ForEach(usable, id: \.self) { g in
+                            Text(groupMenuLabel(g)).tag(g)
+                        }
+                        // Keep an unusable stored selection visible rather than
+                        // silently retargeting the binding behind the user.
+                        if !usable.contains(Int(drafts[slot].target)) {
+                            Text(groupMenuLabel(Int(drafts[slot].target)))
+                                .tag(Int(drafts[slot].target))
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            } else {
+                settingRow(title: "Channel",
+                           detail: "Which channel this control affects.",
+                           icon: "square.stack.3d.up") {
+                    Picker("", selection: targetBinding(slot)) {
+                        ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                            Text(targetName(nd, t)).tag(t)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
             }
             if nd.hasBand {
-                let bands = bandOptions(noun: Int(drafts[slot].noun), dspChannel: Int(drafts[slot].target))
+                let bands = bandOptions(noun: Int(drafts[slot].noun),
+                                        target: Int(drafts[slot].target), grouped: grouped)
                 settingRow(title: "Band",
-                           detail: "Which filter band this control affects.",
+                           detail: grouped
+                               ? "Which filter band this control affects, on every member of the group."
+                               : "Which filter band this control affects.",
                            icon: "waveform.path.ecg") {
                     Picker("", selection: indexBinding(slot)) {
                         ForEach(bands, id: \.self) { band in
@@ -2567,19 +3483,94 @@ struct ControlSurfacesSettingsTab: View {
         return bands
     }
 
+    /// Bands offerable for a target that may be a group.  The firmware requires
+    /// the band to be valid for *every* member, so a mixed input/output group
+    /// offers only the bands they share (groups+macros spec §6) - picking a
+    /// crossover band on such a group would just fail validation.
+    private func bandOptions(noun: Int, target: Int, grouped: Bool) -> [Int] {
+        guard grouped else { return bandOptions(noun: noun, dspChannel: target) }
+        let members = (vm.csGroups.indices.contains(target) ? vm.csGroups[target] : CsGroup()).members
+        guard !members.isEmpty else { return Array(0..<10) }
+        var common: Set<Int>? = nil
+        for m in members {
+            let s = Set(bandOptions(noun: noun, dspChannel: m))
+            common = common.map { $0.intersection(s) } ?? s
+        }
+        return (common ?? []).sorted()
+    }
+
     private func targetBinding(_ slot: Int) -> Binding<Int> {
         Binding(
             get: { Int(drafts[slot].target) },
             set: { newTarget in
                 var b = drafts[slot]
                 b.target = UInt8(newTarget)
-                // Re-clamp the band if the new channel doesn't offer the current one.
+                // Re-clamp the band if the new channel (or group) doesn't offer
+                // the current one.
                 if nounDesc(Int(b.noun))?.hasBand == true {
-                    let opts = bandOptions(noun: Int(b.noun), dspChannel: newTarget)
+                    let opts = bandOptions(noun: Int(b.noun), target: newTarget,
+                                           grouped: b.flags & CS_FLAG_GROUP != 0)
                     if !opts.contains(Int(b.index)) { b.index = UInt8(opts.first ?? 0) }
                 }
                 drafts[slot] = b
             })
+    }
+
+    // MARK: Target groups in a binding (caps v9)
+
+    /// Whether the "Address a Group" toggle belongs on this slot: the device
+    /// must support groups, the action must be one that can fan out, and a
+    /// group of the right channel space must exist to point at.  `TRIGGER` is
+    /// excluded because no targeted trigger noun exists, which is exactly the
+    /// case the firmware rejects.  Offering the toggle with nothing to select
+    /// would only produce a binding the device refuses.
+    private func csGroupsAvailable(_ slot: Int) -> Bool {
+        guard vm.csGroupsSupported, Int(drafts[slot].action) != CS_ACT_TRIGGER else { return false }
+        // An already-grouped binding keeps its toggle so it can be turned off,
+        // even if the group it used has since been emptied.
+        return !compatibleGroups(forNoun: Int(drafts[slot].noun)).isEmpty
+            || drafts[slot].flags & CS_FLAG_GROUP != 0
+    }
+
+    /// Group slots whose channel space matches what the noun targets
+    /// (groups+macros spec §1.1).  A band noun addresses DSP channels, so it
+    /// takes a DSP_CH group.
+    private func compatibleGroups(forNoun noun: Int) -> [Int] {
+        guard let nd = nounDesc(noun), nd.isTargeted else { return [] }
+        let wanted = nd.targetKind == CS_TARGET_DSP_BAND ? CS_TARGET_DSP_CH : nd.targetKind
+        return (0..<vm.csGroupCount).filter { g in
+            let grp = vm.csGroups[g]
+            return grp.isConfigured && grp.targetKind == wanted
+        }
+    }
+
+    /// "Front Pair (2 channels)" for the group picker.
+    private func groupMenuLabel(_ g: Int) -> String {
+        guard vm.csGroups.indices.contains(g) else { return "Group \(g + 1)" }
+        let grp = vm.csGroups[g]
+        guard grp.isConfigured else { return "\(vm.csGroupName(g)) (empty)" }
+        let n = grp.memberCount
+        return "\(vm.csGroupName(g)) (\(n) channel\(n == 1 ? "" : "s"))"
+    }
+
+    /// Turn group addressing on or off for a binding.  `target` changes meaning
+    /// between the two states, so it is re-seeded rather than reinterpreted -
+    /// leaving channel 3 behind as "group 3" would silently retarget the
+    /// control.  The two group modifier flags only exist while GROUP is set.
+    private func setGrouped(_ slot: Int, _ on: Bool) {
+        var b = drafts[slot]
+        if on {
+            b.flags |= CS_FLAG_GROUP
+            b.target = UInt8(compatibleGroups(forNoun: Int(b.noun)).first ?? 0)
+        } else {
+            b.flags &= ~(CS_FLAG_GROUP | CS_FLAG_LINK_ABS | CS_FLAG_GROUP_ALL)
+            b.target = 0
+        }
+        if nounDesc(Int(b.noun))?.hasBand == true {
+            let opts = bandOptions(noun: Int(b.noun), target: Int(b.target), grouped: on)
+            if !opts.contains(Int(b.index)) { b.index = UInt8(opts.first ?? 0) }
+        }
+        drafts[slot] = b
     }
 
     private func indexBinding(_ slot: Int) -> Binding<Int> {
@@ -2950,6 +3941,25 @@ struct ControlSurfacesSettingsTab: View {
                        title: "Repeat While Held",
                        detail: "After holding ~0.4 s the press repeats automatically.",
                        icon: "repeat")
+        }
+        // Group modifiers (caps v9).  Both require GROUP and each is legal for
+        // exactly one shape of control, which is why they appear only there:
+        // ADJUST is the sole action where the two link laws differ (SET is
+        // inherently identical, STEP inherently relative), and an any/all
+        // choice needs a boolean condition to combine.
+        if b.flags & CS_FLAG_GROUP != 0 {
+            if action == CS_ACT_ADJUST && kind == CS_KIND_CONTINUOUS {
+                flagToggle(slot, CS_FLAG_LINK_ABS,
+                           title: "Match Members Exactly",
+                           detail: "Drive every member to the same value. Off keeps the offsets between them, moving the group's average to the knob.",
+                           icon: "equal.square")
+            }
+            if action == CS_ACT_IND_EQUALS || action == CS_ACT_IND_ABOVE {
+                flagToggle(slot, CS_FLAG_GROUP_ALL,
+                           title: "Require Every Member",
+                           detail: "Light only when all members match. Off lights when any one does.",
+                           icon: "checklist")
+            }
         }
         flagToggle(slot, CS_FLAG_INVERT,
                    title: invertTitle(type),
@@ -3718,7 +4728,8 @@ struct ControlSurfacesSettingsTab: View {
                      nouns: [CS_NOUN_EQ_BYPASS, CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN,
                              CS_NOUN_FILTER_Q, CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS],
                      strip: ["Filter"]),
-        NounCategory(name: "Tools", nouns: [CS_NOUN_SIGGEN, CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
+        NounCategory(name: "Tools", nouns: [CS_NOUN_MACRO, CS_NOUN_SIGGEN,
+                                            CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
         NounCategory(name: "Status",
                      nouns: [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_INPUT_LEVEL_MAX,
                              CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
@@ -3838,6 +4849,38 @@ struct ControlSurfacesSettingsTab: View {
             }
         default:
             break   // IND_LEVEL / ADJUST use the full range (0,0)
+        }
+        return sanitizeGroupFlags(b)
+    }
+
+    /// Bring the caps v9 group flags back into the set the firmware accepts
+    /// after a noun or action edit (groups+macros spec §6).  The whole binding
+    /// is rejected if any of the three bits is set where it does not belong, so
+    /// a stale bit left over from a previous noun would break Apply with a
+    /// message that points at nothing the user can see.
+    private func sanitizeGroupFlags(_ binding: CsBinding) -> CsBinding {
+        var b = binding
+        guard b.flags & CS_FLAG_GROUP != 0 else {
+            b.flags &= ~(CS_FLAG_LINK_ABS | CS_FLAG_GROUP_ALL)
+            return b
+        }
+        let noun = Int(b.noun)
+        let action = Int(b.action)
+        // Grouping needs a targeted noun with a group of the right channel
+        // space behind it, and never applies to a trigger.
+        let usable = compatibleGroups(forNoun: noun)
+        if usable.isEmpty || action == CS_ACT_TRIGGER {
+            b.flags &= ~(CS_FLAG_GROUP | CS_FLAG_LINK_ABS | CS_FLAG_GROUP_ALL)
+            b.target = 0
+            return b
+        }
+        if !usable.contains(Int(b.target)) { b.target = UInt8(usable[0]) }
+        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        if !(action == CS_ACT_ADJUST && kind == CS_KIND_CONTINUOUS) {
+            b.flags &= ~CS_FLAG_LINK_ABS
+        }
+        if !(action == CS_ACT_IND_EQUALS || action == CS_ACT_IND_ABOVE) {
+            b.flags &= ~CS_FLAG_GROUP_ALL
         }
         return b
     }
@@ -4053,6 +5096,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
         case CS_NOUN_LOUDNESS_INTENSITY: return "Loudness Intensity"
         case CS_NOUN_INPUT_LEVEL_MAX:    return "Input Signal Level"
+        case CS_NOUN_MACRO:              return isIndicatorType(type) ? "Running Macro" : "Macro"
         default:                         return "Parameter \(noun)"
         }
     }
@@ -4130,9 +5174,13 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     /// " (Output 1)" / " (Band 3)" suffix for a targeted binding's summary.
+    /// A grouped binding names the group instead of a channel - `target` means
+    /// something entirely different in that state.
     private func targetSuffix(_ b: CsBinding) -> String {
         guard let nd = nounDesc(Int(b.noun)), nd.isTargeted else { return "" }
-        var s = " (\(targetName(nd, Int(b.target)))"
+        var s = b.flags & CS_FLAG_GROUP != 0
+            ? " (\(vm.csGroupName(Int(b.target)))"
+            : " (\(targetName(nd, Int(b.target)))"
         if nd.hasBand { s += ", \(bandName(Int(b.index)))" }
         return s + ")"
     }
@@ -4150,6 +5198,8 @@ struct ControlSurfacesSettingsTab: View {
 
     private func enumValueLabel(noun: Int, value: Int) -> String {
         switch noun {
+        case CS_NOUN_MACRO:
+            return vm.csMacroName(value)
         case CS_NOUN_PRESET:
             let name = (value >= 0 && value < vm.presetNames.count) ? vm.presetNames[value] : ""
             return name.isEmpty ? "Preset \(value + 1)" : "Preset \(value + 1) - \(name)"
@@ -4309,6 +5359,9 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_FLASH_ERROR:     return ("The device could not write to flash", true)
         case CS_STATUS_IR_IN_USE:       return ("Another slot already holds the IR receiver (one per device)", true)
         case CS_STATUS_NO_IR:           return ("Add an IR receiver before learning a remote button", true)
+        case CS_STATUS_INVALID_GROUP:   return ("That group is empty, missing, or holds the wrong kind of channel", true)
+        case CS_STATUS_INVALID_MACRO:   return ("Invalid macro or step count", true)
+        case CS_STATUS_INVALID_STEP:    return ("A macro step isn't valid", true)
         default:                        return ("Failed to apply the binding", true)
         }
     }

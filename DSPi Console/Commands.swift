@@ -2240,6 +2240,12 @@ extension DSPViewModel {
                 fetchCsIrCommand(sub: sub)
             }
         }
+        // Target groups and macros (caps v9).  The counts sit in the caps
+        // header's formerly-reserved tail, so a pre-v9 device reports 0 here
+        // and these loops simply do not run.
+        for g in 0..<min(Int(caps.maxGroups), CS_MAX_GROUPS) { fetchCsGroup(g) }
+        for m in 0..<min(Int(caps.maxMacros), CS_MAX_MACROS) { fetchCsMacro(m) }
+        if caps.maxGroups > 0 || caps.maxMacros > 0 { fetchCsExtStatus() }
         // Runs after every fetch above (all dispatch to main in FIFO order): if
         // the device is clean, snapshot the loaded config as the saved baseline
         // so csDirty can tell net-zero edits from real ones.
@@ -2391,11 +2397,121 @@ extension DSPViewModel {
             fetchCsName(slot: slot)   // revert restores the stored names too (spec 3.4)
         }
         for sub in 0..<CS_MAX_IR_COMMANDS { fetchCsIrCommand(sub: sub) }
+        // Revert restores the stored groups and macros as well, and cancels a
+        // running macro, so re-read both tables and the sequencer state.  Loops
+        // run to the wire maximum rather than the caps count, like the two
+        // above: `csCaps` is main-thread state and this runs off it, and a
+        // pre-v9 device simply STALLs each GET and leaves the table alone.
+        for g in 0..<CS_MAX_GROUPS { fetchCsGroup(g) }
+        for m in 0..<CS_MAX_MACROS { fetchCsMacro(m) }
+        fetchCsExtStatus()
         fetchCsStatus()
         // Live now mirrors flash again; rebase the clean baseline after the
         // re-fetches above land (FIFO on main).
         DispatchQueue.main.async { self.captureCsCleanSnapshot() }
         return result
+    }
+
+    // MARK: - Control Surfaces: target groups and macros (caps v9)
+
+    /// Read one live 40-byte group record into `csGroups[index]`.
+    func fetchCsGroup(_ index: Int) {
+        guard index >= 0, index < CS_MAX_GROUPS,
+              let d = usb.getControlRequest(request: REQ_GET_CS_GROUP, value: UInt16(index), index: 2, length: CS_GROUP_LEN),
+              let group = CsGroup.fromData(d) else { return }
+        DispatchQueue.main.async {
+            if index < self.csGroups.count { self.csGroups[index] = group }
+        }
+    }
+
+    /// Read one live 132-byte macro (name, step count and all 8 steps) into
+    /// `csMacros[index]`.  The GET returns the whole record even though a SET
+    /// has to be split into a header plus one write per step.
+    func fetchCsMacro(_ index: Int) {
+        guard index >= 0, index < CS_MAX_MACROS,
+              let d = usb.getControlRequest(request: REQ_GET_CS_MACRO, value: UInt16(index), index: 2, length: CS_MACRO_LEN),
+              let macro = CsMacro.fromData(d) else { return }
+        DispatchQueue.main.async {
+            if index < self.csMacros.count { self.csMacros[index] = macro }
+        }
+    }
+
+    /// Read the 24-byte extended status: group and macro record validity plus
+    /// what the sequencer is doing right now (groups+macros spec §2.6).
+    /// Returns the packet as well as publishing it, so a caller polling the
+    /// sequencer can test the result directly instead of reading back the
+    /// @Published copy it just scheduled onto the main thread.
+    @discardableResult
+    func fetchCsExtStatus() -> CsExtStatusPacket? {
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_EXT_STATUS, value: 0, index: 2, length: CS_EXT_STATUS_LEN),
+              let st = CsExtStatusPacket.fromData(d) else { return nil }
+        DispatchQueue.main.async { self.csExtStatus = st }
+        return st
+    }
+
+    /// Apply one target group (live-only preview).  Send an all-zero record to
+    /// clear the slot.  The outcome is reported with `lastSlot == 0x40 | group`.
+    /// Applying a group re-validates every binding that references one, so the
+    /// binding slot statuses are re-read too: emptying a group in use
+    /// deactivates its dependants rather than being refused (spec §4.4).
+    /// Returns the status code.  USB-only; must be called off the main thread.
+    @discardableResult
+    func setCsGroup(_ index: Int, group: CsGroup) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_CS_GROUP, value: UInt16(index), index: 2, data: group.toData())
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_GROUP_FLAG | UInt8(index))
+        fetchCsGroup(index)
+        for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
+        fetchCsStatus()
+        fetchCsExtStatus()
+        return result
+    }
+
+    /// Apply one macro step (live-only preview).  All-zero clears the step.
+    /// wValue packs the step index above the macro index.  Reported with
+    /// `lastSlot == 0x60 | macro`, the same tag as the header SET.
+    @discardableResult
+    func setCsMacroStep(macro: Int, step: Int, value: CsMacroStep) -> UInt8 {
+        let wValue = UInt16(step << 8) | UInt16(macro)
+        usb.sendControlRequest(request: REQ_SET_CS_MACRO_STEP, value: wValue, index: 2, data: value.toData())
+        return pollCsDeferred(expectedSlot: CS_LAST_SLOT_MACRO_FLAG | UInt8(macro))
+    }
+
+    /// Apply one macro's name and step count (the 36-byte header).
+    @discardableResult
+    func setCsMacroHeader(_ index: Int, macro: CsMacro) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_CS_MACRO, value: UInt16(index), index: 2, data: macro.headerData())
+        return pollCsDeferred(expectedSlot: CS_LAST_SLOT_MACRO_FLAG | UInt8(index))
+    }
+
+    /// Apply a whole macro: every step first, then the header carrying the
+    /// final step count.  That order matters - the spec's recommendation exists
+    /// because a macro fired mid-edit must never see a `step_count` reaching
+    /// past the steps actually written.  Returns the first failing status, or
+    /// success.  USB-only; must be called off the main thread (blocks).
+    @discardableResult
+    func setCsMacro(_ index: Int, macro: CsMacro) -> UInt8 {
+        var worst: UInt8 = PIN_CONFIG_SUCCESS
+        for (s, step) in macro.steps.enumerated() where s < CS_MAX_MACRO_STEPS {
+            let r = setCsMacroStep(macro: index, step: s, value: step)
+            if r != PIN_CONFIG_SUCCESS && worst == PIN_CONFIG_SUCCESS { worst = r }
+        }
+        let r = setCsMacroHeader(index, macro: macro)
+        if r != PIN_CONFIG_SUCCESS && worst == PIN_CONFIG_SUCCESS { worst = r }
+        fetchCsMacro(index)
+        fetchCsStatus()
+        fetchCsExtStatus()
+        return worst
+    }
+
+    /// Fire a macro now, or cancel the running one with
+    /// `CS_MACRO_FIRE_CANCEL`.  Immediate, not deferred: the reply is the
+    /// accept/reject status, and the sequence then runs on the device.  Firing
+    /// while another macro runs cancels that one at its current step boundary.
+    @discardableResult
+    func csMacroFire(_ index: UInt16) -> UInt8 {
+        let r = usb.getControlRequest(request: REQ_CS_MACRO_FIRE, value: index, index: 2, length: 1)
+        fetchCsExtStatus()
+        return r?.first ?? CS_STATUS_INVALID_MACRO
     }
 
     /// Arm the IR learn listener (REQ_CS_IR_LEARN wValue=1; spec §3.6.1).  The
