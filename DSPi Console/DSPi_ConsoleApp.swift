@@ -69,6 +69,7 @@ class AppSettings: ObservableObject {
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case general, graphing, advanced
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
+    case channelGroups, macros
 
     var id: Self { self }
 
@@ -83,6 +84,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .spdifInput:       return "Inputs"
         case .controlInterfaces: return "Control Interfaces"
         case .controlSurfaces:  return "Control Surfaces"
+        case .channelGroups:    return "Channel Groups"
+        case .macros:           return "Macros"
         }
     }
 
@@ -97,6 +100,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .spdifInput:       return "arrow.down.to.line"
         case .controlInterfaces: return "cpu"
         case .controlSurfaces:  return "dial.medium"
+        case .channelGroups:    return "rectangle.3.group"
+        case .macros:           return "list.number"
         }
     }
 
@@ -114,6 +119,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .spdifInput:       return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
         case .controlInterfaces: return Color(red: 0.30, green: 0.44, blue: 0.66) // dusk blue
         case .controlSurfaces:  return Color(red: 0.27, green: 0.52, blue: 0.70)  // steel cyan
+        case .channelGroups:    return Color(red: 0.22, green: 0.56, blue: 0.66)  // muted teal
+        case .macros:           return Color(red: 0.36, green: 0.42, blue: 0.72)  // periwinkle
         }
     }
 
@@ -127,6 +134,10 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // Shown while disconnected too (the page carries its own placeholder);
         // hidden only when a connected device lacks the feature.
         case .controlSurfaces:   return vm.controlSurfacesSupported || !vm.isDeviceConnected
+        // Groups and macros arrived with caps v9; the counts come from the caps
+        // header, so a pre-v9 device reports zero and the pages stay hidden.
+        case .channelGroups:     return vm.csGroupsSupported
+        case .macros:            return vm.csMacrosSupported
         default:                 return true
         }
     }
@@ -135,7 +146,13 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     static let groups: [(title: String, items: [SettingsCategory])] = [
         ("Application", [.general, .advanced]),
         ("Display",     [.graphing]),
-        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .controlInterfaces, .controlSurfaces, .globalParams]),
+        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .globalParams]),
+        // Everything the user drives the device *with*: the panel they wire, the
+        // bus an external MCU talks over, and the two shared resources both of
+        // those reference.  Groups and macros are referenced by many controls
+        // rather than owned by one, which is why they are peers here and not
+        // nested inside the Control Surfaces page.
+        ("Control",     [.controlSurfaces, .controlInterfaces, .channelGroups, .macros]),
     ]
 }
 
@@ -381,7 +398,9 @@ struct SettingsView: View {
         case .i2sConfig:        HardwareSettingsTab(section: .i2s)
         case .spdifInput:       HardwareSettingsTab(section: .spdif)
         case .controlInterfaces: ControlInterfacesSettingsTab()
-        case .controlSurfaces:  ControlSurfacesSettingsTab()
+        case .controlSurfaces:  ControlSurfacesSettingsTab(section: .controls)
+        case .channelGroups:    ControlSurfacesSettingsTab(section: .groups)
+        case .macros:           ControlSurfacesSettingsTab(section: .macros)
         }
     }
 }
@@ -1896,57 +1915,75 @@ struct ControlSurfacesSettingsTab: View {
     // flag every deferred CS operation serializes on.
     @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
 
+    /// Which of the three Control pages this instance renders.  One struct, like
+    /// `HardwareSettingsTab`: the group and macro editors lean on the same
+    /// caps-driven noun / action / target / operand pickers the binding editor
+    /// uses, and splitting them into separate views would mean duplicating that
+    /// machinery or hoisting it somewhere artificial.  Separate pages also give
+    /// each list a sidebar of its own, so the three card lists stop being
+    /// siblings in one flattened Form.
+    enum Page { case controls, groups, macros }
+    var section: Page = .controls
+
     /// Number of binding slots the device exposes (falls back to the wire max).
     private var slotCount: Int {
         let n = Int(vm.csCaps.maxBindings)
         return n > 0 ? min(n, CS_MAX_BINDINGS) : CS_MAX_BINDINGS
     }
 
-    var body: some View {
-        Form {
-            if vm.csCaps.types.isEmpty {
-                // No capability tables yet: either the device is still being
-                // read, or there is no device to read.  The picker UI is built
-                // entirely from device-served tables, so without them the page
-                // can only explain itself.
-                if vm.isDeviceConnected {
-                    Section {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Reading control-surface capabilities from the device...")
-                                .font(.caption).foregroundColor(.secondary)
-                        }
-                    }
-                } else {
-                    disconnectedSection
-                }
-            } else {
-                if visibleSlots.isEmpty {
-                    // The empty state carries its own Add Control button.
-                    emptyStateSection
-                } else {
-                    ForEach(visibleSlots, id: \.self) { slot in
-                        slotSection(slot)
-                    }
-                    addSection
-                }
-                // Groups and macros follow the controls: a group is only useful
-                // once something addresses it, and a macro reads as a control
-                // without a pin.  Both are hidden on pre-v9 firmware.
-                if vm.csGroupsSupported { groupsSection }
-                if vm.csMacrosSupported { macrosSection }
-            }
-
+    /// Shared placeholder for the group and macro pages while the device has
+    /// not served its capability tables yet.
+    @ViewBuilder
+    private var awaitingCapsSection: some View {
+        if vm.isDeviceConnected {
             Section {
-                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, indicator LEDs, and an IR remote receiver to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC pin (GPIO 26, 27, or 28) between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default. An IR receiver module's OUT pin connects to any GPIO, and its remote buttons are learned by pressing them at the device.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes take effect immediately as a live preview; use Save to Device to keep them across a reboot, or Revert to discard them.")
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading control-surface capabilities from the device...")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+        } else {
+            disconnectedSection
+        }
+    }
+
+    /// The Channel Groups page.
+    @ViewBuilder
+    private var groupsPage: some View {
+        if vm.csCaps.types.isEmpty {
+            awaitingCapsSection
+        } else {
+            groupsSection
+            Section {
+                Text("A group is a named set of channels one control can drive as a unit: mute a zone, trim a stereo pair, light an LED when any member clips. Turn on \"Address a Group\" in a control, or in a macro step, to use one.\n\nRelative moves (an encoder, a button) step every member from its own value, so the balance between them survives. A knob moves the group's average and keeps those offsets unless \"Match Members Exactly\" is on.\n\nGroups are stored on the device alongside the controls and share their Save and Revert.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
-            } footer: {
-                if vm.csCaps.capsVersion != 0 {
-                    Text("Control-surface capability version \(vm.csCaps.capsVersion).")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+            }
+        }
+    }
+
+    /// The Macros page.
+    @ViewBuilder
+    private var macrosPage: some View {
+        if vm.csCaps.types.isEmpty {
+            awaitingCapsSection
+        } else {
+            macrosSection
+            Section {
+                Text("A macro runs a short sequence of changes from a single press: select an input and load a preset, switch monitors, mute after a delay. Bind a button, switch, or remote key to \"Macro\" to fire one.\n\nEach step can wait before it runs, and can address a channel group. One macro runs at a time - firing another cancels the first at its current step.\n\nMacros are stored on the device alongside the controls and share their Save and Revert.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    var body: some View {
+        Form {
+            switch section {
+            case .controls: controlsPage
+            case .groups:   groupsPage
+            case .macros:   macrosPage
             }
         }
         .formStyle(.grouped)
@@ -1955,7 +1992,13 @@ struct ControlSurfacesSettingsTab: View {
         // and output-config edits so only ever one bar is stacked at the bottom.
         .onAppear {
             seedDrafts()
-            DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
+            // One page owns the load.  All three render from the same vm tables
+            // and all three seed drafts, but re-reading caps, 53 noun
+            // descriptors, 16 bindings, 16 names, 16 IR commands, 8 groups and
+            // 8 macros on every hop between sidebar pages would be pure cost.
+            if section == .controls {
+                DispatchQueue.global(qos: .userInitiated).async { vm.fetchControlSurfaces() }
+            }
         }
         // A shared-bar Revert restores the stored config on the device; re-seed
         // the drafts (and drop stale name edits / status messages) from it.
@@ -1974,7 +2017,11 @@ struct ControlSurfacesSettingsTab: View {
             }
         }
         // Once the device names arrive, migrate any legacy app-side names.
-        .onReceive(vm.$csNames) { _ in migrateLegacyNamesIfNeeded() }
+        // Controls page only: the guard flag is per-instance @State, so letting
+        // all three pages run it would attempt the migration three times.
+        .onReceive(vm.$csNames) { _ in
+            if section == .controls { migrateLegacyNamesIfNeeded() }
+        }
         // Re-seed an IR command draft when its live value changes and there is
         // no pending edit for it (mirror of the binding re-seed above).
         .onReceive(vm.$csIrCommands) { newCmds in
@@ -2016,7 +2063,51 @@ struct ControlSurfacesSettingsTab: View {
         // bar is reachable from every page - so leaving while armed would let a
         // Save/Revert onto the same status channel (spec §3.2). Applies need no
         // such handling: they are bounded and release their own claim.
-        .onDisappear { cancelLearn() }
+        .onDisappear { if section == .controls { cancelLearn() } }
+    }
+
+    /// The Control Surfaces page: the wired components themselves.
+    @ViewBuilder
+    private var controlsPage: some View {
+            if vm.csCaps.types.isEmpty {
+                // No capability tables yet: either the device is still being
+                // read, or there is no device to read.  The picker UI is built
+                // entirely from device-served tables, so without them the page
+                // can only explain itself.
+                if vm.isDeviceConnected {
+                    Section {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Reading control-surface capabilities from the device...")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    disconnectedSection
+                }
+            } else {
+                if visibleSlots.isEmpty {
+                    // The empty state carries its own Add Control button.
+                    emptyStateSection
+                } else {
+                    ForEach(cardIDs("control", visibleSlots)) { key in
+                        slotSection(key.index)
+                    }
+                    addSection
+                }
+            }
+
+            Section {
+                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, indicator LEDs, and an IR remote receiver to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC pin (GPIO 26, 27, or 28) between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default. An IR receiver module's OUT pin connects to any GPIO, and its remote buttons are learned by pressing them at the device.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes take effect immediately as a live preview; use Save to Device to keep them across a reboot, or Revert to discard them.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } footer: {
+                if vm.csCaps.capsVersion != 0 {
+                    Text("Control-surface capability version \(vm.csCaps.capsVersion).")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
     }
 
     private func seedDrafts() {
@@ -2134,6 +2225,23 @@ struct ControlSurfacesSettingsTab: View {
 
     // MARK: Add / remove
 
+    /// Identity for one card in the three card lists on this page (controls,
+    /// groups, macros).  They are sibling `ForEach`es whose data are all slot
+    /// indices, and `.formStyle(.grouped)` flattens every `Section` they emit
+    /// into one list: with a bare `id: \.self` control 0, group 0 and macro 0
+    /// all present identity 0, and the list happily matches a macro card to a
+    /// group card's row - which is what puts a newly added macro inside the
+    /// groups. Prefixing the kind keeps the three namespaces apart.
+    private struct CsCardID: Identifiable, Hashable {
+        let kind: String
+        let index: Int
+        var id: String { "\(kind)-\(index)" }
+    }
+
+    private func cardIDs(_ kind: String, _ indices: [Int]) -> [CsCardID] {
+        indices.map { CsCardID(kind: kind, index: $0) }
+    }
+
     /// Slots that currently hold a control (edited draft or live on the device),
     /// shown as cards.  Empty slots are hidden until "Add a Control" fills one.
     private var visibleSlots: [Int] {
@@ -2215,12 +2323,23 @@ struct ControlSurfacesSettingsTab: View {
 
     /// Group slots holding a group, or with one staged.  Empty slots stay
     /// hidden behind "Add a Group", mirroring the control cards.
+    /// Whether a group slot is occupied *in the editor*.  Deliberately weaker
+    /// than `CsGroup.isConfigured`, which means "a group the device will
+    /// accept" and so demands at least one member: a slot being edited holds a
+    /// kind and a name well before it holds members, and if visibility keyed
+    /// off wire-validity the card would not appear when added and would vanish
+    /// again the moment its last member was unchecked.
+    private func groupSlotInUse(_ g: Int) -> Bool {
+        let d = groupDrafts[g]
+        return d.targetKind != CS_TARGET_NONE || !d.name.isEmpty || vm.csGroups[g].isConfigured
+    }
+
     private var visibleGroups: [Int] {
-        (0..<vm.csGroupCount).filter { groupDrafts[$0].isConfigured || vm.csGroups[$0].isConfigured }
+        (0..<vm.csGroupCount).filter { groupSlotInUse($0) }
     }
 
     private var firstFreeGroup: Int? {
-        (0..<vm.csGroupCount).first { !groupDrafts[$0].isConfigured && !vm.csGroups[$0].isConfigured }
+        (0..<vm.csGroupCount).first { !groupSlotInUse($0) }
     }
 
     /// Bindings currently pointed at a group, so removing one can say what it
@@ -2235,7 +2354,7 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private var groupsSection: some View {
-        Section("Channel Groups") {
+        Section {
             if visibleGroups.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("A group is a named set of channels one control can drive together - a stereo pair, a zone, every output at once.")
@@ -2253,9 +2372,13 @@ struct ControlSurfacesSettingsTab: View {
                     var fresh = CsGroup()
                     fresh.targetKind = CS_TARGET_OUTPUT_CH
                     fresh.name = "Group \(g + 1)"
-                    groupDrafts[g] = fresh
+                    // One transaction, like addControl: creating the card and
+                    // opening it are a single layout change.  Split across two
+                    // (or left partly unanimated) the row inserts instantly and
+                    // then springs open, and everything below it moves twice.
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        _ = expandedGroups.insert(g)
+                        groupDrafts[g] = fresh
+                        expandedGroups.insert(g)
                     }
                 } label: {
                     Label("Add a Group", systemImage: "plus")
@@ -2269,8 +2392,8 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
         }
-        ForEach(visibleGroups, id: \.self) { g in
-            groupCard(g)
+        ForEach(cardIDs("group", visibleGroups)) { key in
+            groupCard(key.index)
         }
     }
 
@@ -2360,6 +2483,12 @@ struct ControlSurfacesSettingsTab: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange).font(.caption)
                         Text(msg.message).font(.caption).foregroundColor(.orange)
+                    } else if dirty && !draft.isConfigured {
+                        // The device only stores a group with members; an
+                        // all-zero record means "clear the slot", which is what
+                        // the trash button is for.
+                        Text("Pick at least one channel.")
+                            .font(.caption).foregroundColor(.secondary)
                     }
                     Spacer(minLength: 8)
                     if applyingGroup == g { ProgressView().controlSize(.small) }
@@ -2370,7 +2499,8 @@ struct ControlSurfacesSettingsTab: View {
                     Button("Apply") { applyGroup(g) }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
-                        .disabled(!dirty || applyingGroup == g || csBusy || !vm.isDeviceConnected)
+                        .disabled(!dirty || !draft.isConfigured || applyingGroup == g
+                                  || csBusy || !vm.isDeviceConnected)
                 }
             }
         }
@@ -2391,7 +2521,11 @@ struct ControlSurfacesSettingsTab: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: 6)],
+                // Fixed column count, not `.adaptive`: an adaptive grid picks
+                // its columns from the width it is offered, which inside a Form
+                // settles a frame after the card opens - so the card's height
+                // changes once more mid-animation and the rows below it kick.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3),
                           alignment: .leading, spacing: 6) {
                     ForEach(Array(0..<count), id: \.self) { ch in
                         Toggle(isOn: Binding(
@@ -2436,16 +2570,22 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     private func removeGroup(_ g: Int) {
+        groupMessages[g] = nil
         guard vm.csGroups[g].isConfigured else {
             // Never applied: dropping the draft is enough.
-            groupDrafts[g] = CsGroup()
-            expandedGroups.remove(g)
-            groupMessages[g] = nil
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                groupDrafts[g] = CsGroup()
+                expandedGroups.remove(g)
+            }
             return
         }
-        groupDrafts[g] = CsGroup()
+        // Collapse and clear in one transaction, then push the all-zero record
+        // that clears the slot on the device.
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            groupDrafts[g] = CsGroup()
+            expandedGroups.remove(g)
+        }
         applyGroup(g)
-        expandedGroups.remove(g)
     }
 
     private func applyGroup(_ g: Int) {
@@ -2483,7 +2623,7 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private var macrosSection: some View {
-        Section("Macros") {
+        Section {
             if visibleMacros.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("A macro runs a short sequence of changes from one press: select an input and load a preset, switch monitors, mute after a delay.")
@@ -2500,9 +2640,9 @@ struct ControlSurfacesSettingsTab: View {
                     guard let m = firstFreeMacro else { return }
                     var fresh = CsMacro()
                     fresh.name = "Macro \(m + 1)"
-                    macroDrafts[m] = fresh
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        _ = expandedMacros.insert(m)
+                        macroDrafts[m] = fresh
+                        expandedMacros.insert(m)
                     }
                 } label: {
                     Label("Add a Macro", systemImage: "plus")
@@ -2516,8 +2656,8 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
         }
-        ForEach(visibleMacros, id: \.self) { m in
-            macroCard(m)
+        ForEach(cardIDs("macro", visibleMacros)) { key in
+            macroCard(key.index)
         }
     }
 
@@ -2745,57 +2885,47 @@ struct ControlSurfacesSettingsTab: View {
         let noun = Int(step.noun)
         if let nd = nounDesc(noun), nd.isTargeted {
             let grouped = step.isGrouped
-            if vm.csGroupsSupported && Int(step.action) != CS_ACT_TRIGGER
-                && (!compatibleGroups(forNoun: noun).isEmpty || grouped) {
-                Toggle(isOn: Binding(
-                    get: { grouped },
-                    set: { on in
+            // Same merged picker as a binding's target (see targetRows).
+            let usable = Int(step.action) == CS_ACT_TRIGGER ? [] : compatibleGroups(forNoun: noun)
+            settingRow(title: usable.isEmpty && !grouped ? "Channel" : "Channel or Group",
+                       detail: "Which channel, or named set of channels, this step affects.",
+                       icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
+                Picker("", selection: Binding<CsTargetChoice>(
+                    get: {
+                        let st = macroDrafts[m].steps[s]
+                        return st.isGrouped ? .group(Int(st.target)) : .channel(Int(st.target))
+                    },
+                    set: { choice in
                         var st = macroDrafts[m].steps[s]
-                        if on {
-                            st.flags |= CS_FLAG_GROUP
-                            st.target = UInt8(compatibleGroups(forNoun: noun).first ?? 0)
-                        } else {
-                            st.flags &= ~CS_FLAG_GROUP
-                            st.target = 0
+                        switch choice {
+                        case .channel(let c): st.flags &= ~CS_FLAG_GROUP; st.target = UInt8(c)
+                        case .group(let g):   st.flags |= CS_FLAG_GROUP;  st.target = UInt8(g)
+                        }
+                        if nounDesc(Int(st.noun))?.hasBand == true {
+                            let opts = bandOptions(noun: Int(st.noun), target: Int(st.target),
+                                                   grouped: st.isGrouped)
+                            if !opts.contains(Int(st.index)) { st.index = UInt8(opts.first ?? 0) }
                         }
                         macroDrafts[m].steps[s] = st
                     })) {
-                    settingLabel(title: "Address a Group",
-                                 detail: "Apply this step to a named set of channels.",
-                                 icon: "rectangle.3.group")
-                }
-                .toggleStyle(.switch)
-            }
-            if grouped {
-                let usable = compatibleGroups(forNoun: noun)
-                settingRow(title: "Group",
-                           detail: usable.isEmpty ? "No group matches this function's channel type."
-                                                  : "Which group this step affects.",
-                           icon: "rectangle.3.group") {
-                    Picker("", selection: Binding(
-                        get: { Int(macroDrafts[m].steps[s].target) },
-                        set: { macroDrafts[m].steps[s].target = UInt8($0) })) {
-                        ForEach(usable, id: \.self) { g in Text(groupMenuLabel(g)).tag(g) }
-                        if !usable.contains(Int(step.target)) {
-                            Text(groupMenuLabel(Int(step.target))).tag(Int(step.target))
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-            } else {
-                settingRow(title: "Channel", detail: "Which channel this step affects.",
-                           icon: "square.stack.3d.up") {
-                    Picker("", selection: Binding(
-                        get: { Int(macroDrafts[m].steps[s].target) },
-                        set: { macroDrafts[m].steps[s].target = UInt8($0) })) {
+                    Section("Channels") {
                         ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
-                            Text(targetName(nd, t)).tag(t)
+                            Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
                     }
-                    .labelsHidden()
-                    .fixedSize()
+                    if !usable.isEmpty {
+                        Section("Groups") {
+                            ForEach(usable, id: \.self) { g in
+                                Text(groupMenuLabel(g)).tag(CsTargetChoice.group(g))
+                            }
+                        }
+                    }
+                    if grouped, !usable.contains(Int(step.target)) {
+                        Text(groupMenuLabel(Int(step.target))).tag(CsTargetChoice.group(Int(step.target)))
+                    }
                 }
+                .labelsHidden()
+                .fixedSize()
             }
             if nd.hasBand {
                 let bands = bandOptions(noun: noun, target: Int(step.target), grouped: grouped)
@@ -2958,15 +3088,19 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     private func removeMacro(_ m: Int) {
+        macroMessages[m] = nil
         guard vm.csMacros[m].isConfigured else {
-            macroDrafts[m] = CsMacro()
-            expandedMacros.remove(m)
-            macroMessages[m] = nil
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                macroDrafts[m] = CsMacro()
+                expandedMacros.remove(m)
+            }
             return
         }
-        macroDrafts[m] = CsMacro()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            macroDrafts[m] = CsMacro()
+            expandedMacros.remove(m)
+        }
         applyMacro(m)
-        expandedMacros.remove(m)
     }
 
     private func applyMacro(_ m: Int) {
@@ -3404,52 +3538,42 @@ struct ControlSurfacesSettingsTab: View {
     private func targetRows(_ slot: Int) -> some View {
         if let nd = nounDesc(Int(drafts[slot].noun)), nd.isTargeted {
             let grouped = drafts[slot].flags & CS_FLAG_GROUP != 0
-            // Groups (caps v9) re-read `target` as a group index, so the toggle
-            // and the picker below it are one control in two states.  TRIGGER is
-            // never groupable - the firmware has no targeted trigger noun.
-            if csGroupsAvailable(slot) {
-                Toggle(isOn: Binding(
-                    get: { grouped },
-                    set: { on in setGrouped(slot, on) })) {
-                    settingLabel(title: "Address a Group",
-                                 detail: "Drive a named set of channels together instead of one.",
-                                 icon: "rectangle.3.group")
-                }
-                .toggleStyle(.switch)
-            }
-            if grouped {
-                let usable = compatibleGroups(forNoun: Int(drafts[slot].noun))
-                settingRow(title: "Group",
-                           detail: usable.isEmpty
-                               ? "No group matches this function's channel type. Define one below."
-                               : "Which group of channels this control affects.",
-                           icon: "rectangle.3.group") {
-                    Picker("", selection: targetBinding(slot)) {
-                        ForEach(usable, id: \.self) { g in
-                            Text(groupMenuLabel(g)).tag(g)
-                        }
-                        // Keep an unusable stored selection visible rather than
-                        // silently retargeting the binding behind the user.
-                        if !usable.contains(Int(drafts[slot].target)) {
-                            Text(groupMenuLabel(Int(drafts[slot].target)))
-                                .tag(Int(drafts[slot].target))
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-            } else {
-                settingRow(title: "Channel",
-                           detail: "Which channel this control affects.",
-                           icon: "square.stack.3d.up") {
-                    Picker("", selection: targetBinding(slot)) {
+            // Channels and groups are one question - what does this control
+            // affect - so they are one picker.  `target` meaning a channel or a
+            // group index depending on CS_FLAG_GROUP is a wire detail; the
+            // selection type carries it instead of a switch the user has to
+            // find first.  TRIGGER is never groupable (the firmware has no
+            // targeted trigger noun), so it simply contributes no group rows.
+            let usable = Int(drafts[slot].action) == CS_ACT_TRIGGER
+                ? [] : compatibleGroups(forNoun: Int(drafts[slot].noun))
+            settingRow(title: usable.isEmpty && !grouped ? "Channel" : "Channel or Group",
+                       detail: usable.isEmpty && !grouped
+                           ? "Which channel this control affects."
+                           : "Which channel, or named set of channels, this control affects.",
+                       icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
+                Picker("", selection: targetChoiceBinding(slot)) {
+                    Section("Channels") {
                         ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
-                            Text(targetName(nd, t)).tag(t)
+                            Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
                     }
-                    .labelsHidden()
-                    .fixedSize()
+                    if !usable.isEmpty {
+                        Section("Groups") {
+                            ForEach(usable, id: \.self) { g in
+                                Text(groupMenuLabel(g)).tag(CsTargetChoice.group(g))
+                            }
+                        }
+                    }
+                    // A group that has since been emptied or re-kinded still
+                    // has to show, or the picker would silently retarget the
+                    // binding to a channel behind the user's back.
+                    if grouped, !usable.contains(Int(drafts[slot].target)) {
+                        Text(groupMenuLabel(Int(drafts[slot].target)))
+                            .tag(CsTargetChoice.group(Int(drafts[slot].target)))
+                    }
                 }
+                .labelsHidden()
+                .fixedSize()
             }
             if nd.hasBand {
                 let bands = bandOptions(noun: Int(drafts[slot].noun),
@@ -3518,18 +3642,12 @@ struct ControlSurfacesSettingsTab: View {
 
     // MARK: Target groups in a binding (caps v9)
 
-    /// Whether the "Address a Group" toggle belongs on this slot: the device
-    /// must support groups, the action must be one that can fan out, and a
-    /// group of the right channel space must exist to point at.  `TRIGGER` is
-    /// excluded because no targeted trigger noun exists, which is exactly the
-    /// case the firmware rejects.  Offering the toggle with nothing to select
-    /// would only produce a binding the device refuses.
-    private func csGroupsAvailable(_ slot: Int) -> Bool {
-        guard vm.csGroupsSupported, Int(drafts[slot].action) != CS_ACT_TRIGGER else { return false }
-        // An already-grouped binding keeps its toggle so it can be turned off,
-        // even if the group it used has since been emptied.
-        return !compatibleGroups(forNoun: Int(drafts[slot].noun)).isEmpty
-            || drafts[slot].flags & CS_FLAG_GROUP != 0
+    /// What a targeted binding or macro step points at.  One selection type for
+    /// the merged channel/group picker, so the UI never asks the user to set a
+    /// flag before choosing a target.
+    enum CsTargetChoice: Hashable {
+        case channel(Int)
+        case group(Int)
     }
 
     /// Group slots whose channel space matches what the noun targets
@@ -3544,33 +3662,46 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// "Front Pair (2 channels)" for the group picker.
+    /// "Front Pair (2 ch)" for the group picker.  Abbreviated because the
+    /// picker is `.fixedSize()`, so every label sets the row's width.
     private func groupMenuLabel(_ g: Int) -> String {
         guard vm.csGroups.indices.contains(g) else { return "Group \(g + 1)" }
         let grp = vm.csGroups[g]
         guard grp.isConfigured else { return "\(vm.csGroupName(g)) (empty)" }
-        let n = grp.memberCount
-        return "\(vm.csGroupName(g)) (\(n) channel\(n == 1 ? "" : "s"))"
+        return "\(vm.csGroupName(g)) (\(grp.memberCount) ch)"
     }
 
-    /// Turn group addressing on or off for a binding.  `target` changes meaning
-    /// between the two states, so it is re-seeded rather than reinterpreted -
-    /// leaving channel 3 behind as "group 3" would silently retarget the
-    /// control.  The two group modifier flags only exist while GROUP is set.
-    private func setGrouped(_ slot: Int, _ on: Bool) {
-        var b = drafts[slot]
-        if on {
-            b.flags |= CS_FLAG_GROUP
-            b.target = UInt8(compatibleGroups(forNoun: Int(b.noun)).first ?? 0)
-        } else {
-            b.flags &= ~(CS_FLAG_GROUP | CS_FLAG_LINK_ABS | CS_FLAG_GROUP_ALL)
-            b.target = 0
-        }
-        if nounDesc(Int(b.noun))?.hasBand == true {
-            let opts = bandOptions(noun: Int(b.noun), target: Int(b.target), grouped: on)
-            if !opts.contains(Int(b.index)) { b.index = UInt8(opts.first ?? 0) }
-        }
-        drafts[slot] = b
+    /// The merged channel/group selection for a binding.  Switching between the
+    /// two kinds rewrites both `target` and CS_FLAG_GROUP together, and drops
+    /// the two group modifier flags on the way out - they exist only while the
+    /// binding addresses a group, and the firmware rejects the whole binding if
+    /// one is left set.
+    private func targetChoiceBinding(_ slot: Int) -> Binding<CsTargetChoice> {
+        Binding(
+            get: {
+                let b = drafts[slot]
+                return b.flags & CS_FLAG_GROUP != 0
+                    ? .group(Int(b.target)) : .channel(Int(b.target))
+            },
+            set: { choice in
+                var b = drafts[slot]
+                switch choice {
+                case .channel(let c):
+                    b.flags &= ~(CS_FLAG_GROUP | CS_FLAG_LINK_ABS | CS_FLAG_GROUP_ALL)
+                    b.target = UInt8(c)
+                case .group(let g):
+                    b.flags |= CS_FLAG_GROUP
+                    b.target = UInt8(g)
+                }
+                // A group's bands are only those every member shares, so the
+                // band can stop being valid when the target changes.
+                if nounDesc(Int(b.noun))?.hasBand == true {
+                    let opts = bandOptions(noun: Int(b.noun), target: Int(b.target),
+                                           grouped: b.flags & CS_FLAG_GROUP != 0)
+                    if !opts.contains(Int(b.index)) { b.index = UInt8(opts.first ?? 0) }
+                }
+                drafts[slot] = b
+            })
     }
 
     private func indexBinding(_ slot: Int) -> Binding<Int> {
