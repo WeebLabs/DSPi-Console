@@ -2211,12 +2211,17 @@ extension DSPViewModel {
             return
         }
         // Per-noun descriptors (kind, enum count, unit-encoded range, unit,
-        // target addressing, accepted actions).
+        // target addressing, accepted actions).  The picker indexes this array
+        // by noun number, so a failed read must leave a hole rather than close
+        // the gap: skipping would shift every later noun down one and silently
+        // hand the UI the wrong unit, range, and action mask for the rest of
+        // the table.  An all-zero descriptor reads as actions == 0, which is
+        // already the "unavailable on this platform" encoding (ADAT on RP2040),
+        // so the noun simply drops out of the menus.
         var nouns: [CsNounDesc] = []
         for n in 0..<Int(caps.nounCount) {
-            guard let d = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: UInt16(n), index: 2, length: 12),
-                  let desc = CsNounDesc.fromData(d) else { continue }
-            nouns.append(desc)
+            let d = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: UInt16(n), index: 2, length: 12)
+            nouns.append(d.flatMap(CsNounDesc.fromData) ?? CsNounDesc())
         }
         DispatchQueue.main.async {
             self.controlSurfacesSupported = true

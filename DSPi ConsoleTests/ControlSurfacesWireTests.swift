@@ -668,6 +668,14 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(csDecodeDelay(csEncodeDelay(12.3)), 12.3, accuracy: 0.001)
     }
 
+    /// `fetchControlSurfaces` indexes the descriptor array by noun number, so a
+    /// descriptor it cannot read is filled with a default rather than skipped.
+    /// That placeholder only behaves if it reads as "unavailable on this
+    /// platform" - the actions == 0 convention the picker already honours.
+    func testDefaultNounDescReadsAsUnavailable() {
+        XCTAssertEqual(CsNounDesc().actions, 0)
+    }
+
     /// An IR command driving an upmixer mode: INC + WRAP cycles the enum.
     func testUpmixModeIrCommand() {
         let c = IrCommand(
