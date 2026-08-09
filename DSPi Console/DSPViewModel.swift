@@ -436,12 +436,19 @@ struct CsBinding: Equatable {
     var step: Int16 = 0            // Bytes 12-13: STEP/INC/DEC size; 0 = the unit default
     var rangeMin: Int16 = 0       // Bytes 14-15: pot / IND_LEVEL span low; both 0 = the noun's full range
     var rangeMax: Int16 = 0       // Bytes 16-17: pot / IND_LEVEL span high
-    // Bytes 18-23: reserved2[6] (0)
+    // Indicator condition timing (caps v8, spec §6.5), carved from the former
+    // reserved2 tail: the raw IND_EQUALS/IND_ABOVE condition must hold this
+    // long before the LED follows it, like a PLC TON/TOF timer.  0.1 s units,
+    // 0 = immediate.  Legal only on the LED types with those two actions;
+    // anything else must write 0 or the device rejects the binding.
+    var onDelay: UInt16 = 0       // Bytes 18-19
+    var offDelay: UInt16 = 0      // Bytes 20-21
+    // Bytes 22-23: reserved2[2] (0)
 
     /// True when the slot holds a component (not CS_TYPE_NONE).
     var isConfigured: Bool { type != UInt8(CS_TYPE_NONE) }
 
-    /// Serialize to the 24-byte wire layout.  Bytes 9 and 18-23 are reserved (0).
+    /// Serialize to the 24-byte wire layout.  Bytes 9 and 22-23 are reserved (0).
     func toData() -> Data {
         var d = Data(count: 24)
         d[0] = type
@@ -463,7 +470,13 @@ struct CsBinding: Equatable {
         put(step, 12)
         put(rangeMin, 14)
         put(rangeMax, 16)
-        // 18-23 reserved2 (0)
+        func putU16(_ v: UInt16, _ off: Int) {
+            d[off] = UInt8(v & 0xFF)
+            d[off + 1] = UInt8((v >> 8) & 0xFF)
+        }
+        putU16(onDelay, 18)
+        putU16(offDelay, 20)
+        // 22-23 reserved2 (0)
         return d
     }
 
@@ -474,11 +487,15 @@ struct CsBinding: Equatable {
         func i16(_ off: Int) -> Int16 {
             Int16(bitPattern: UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8))
         }
+        func u16(_ off: Int) -> UInt16 {
+            UInt16(data[b + off]) | (UInt16(data[b + off + 1]) << 8)
+        }
         return CsBinding(
             type: data[b + 0], noun: data[b + 1], action: data[b + 2], flags: data[b + 3],
             gpio0: data[b + 4], gpio1: data[b + 5],
             event: data[b + 6], target: data[b + 7], index: data[b + 8],
-            value: i16(10), step: i16(12), rangeMin: i16(14), rangeMax: i16(16))
+            value: i16(10), step: i16(12), rangeMin: i16(14), rangeMax: i16(16),
+            onDelay: u16(18), offDelay: u16(20))
     }
 }
 
@@ -1257,6 +1274,11 @@ class DSPViewModel: ObservableObject {
     var csIrSupported: Bool {
         csCaps.maxIrCommands > 0 && csCaps.typeCount > UInt8(CS_TYPE_IR)
     }
+    /// True when the firmware honours the binding's on/off indicator delays
+    /// (caps v8).  Nothing in the structure changes, so this is the only signal:
+    /// a v7 device rejects a binding carrying a non-zero delay outright (its
+    /// reserved2 all-zero check), which is why the fields stay hidden below v8.
+    var csIndicatorDelaysSupported: Bool { csCaps.capsVersion >= 8 }
     /// The live Control Surfaces config as of the last moment the device
     /// reported it clean (matching flash): the connect load, a Save, or a
     /// Revert.  Compared against the current live config so a false "unsaved

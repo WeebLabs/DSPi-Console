@@ -565,7 +565,7 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 7
+// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 8
 // (spec §"Wire reference" / §11): v2 grew the binding 16 -> 24 bytes, the
 // noun descriptor 8 -> 12, added per-slot names; v3 adds the IR remote receiver
 // component with a learned-command table, and the Apply/Save/Revert preview
@@ -576,7 +576,9 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // 8 -> 16 sub-slots, which widens the status packet 32 -> 41 bytes (see
 // CsStatusPacket); the caps header is unchanged but max_ir_commands reads 16.
 // v7 changes no structure either: it appends nouns 49-50, the loudness
-// reference SPL and intensity.
+// reference SPL and intensity.  v8 keeps every structure size but carves
+// on_delay/off_delay out of the binding's reserved2 tail (indicator condition
+// timing) and appends noun 51, INPUT_LEVEL_MAX.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
@@ -612,7 +614,7 @@ let CS_MAX_BINDINGS: Int       = 16
 let CS_MAX_IR_COMMANDS: Int    = 16   // IR command sub-slots per device, caps v6 (spec §2.4)
 let CS_NAME_LEN: Int           = 32   // per-slot name buffer, NUL-terminated (spec §3.4)
 let CS_GPIO_UNUSED: UInt8      = 0xFF
-let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v6
+let CS_CONFIG_VERSION: UInt8   = 2    // CsFlashConfig.version (binding table); caps format is v8
 let CS_IR_CONFIG_VERSION: UInt8 = 2   // CsIrConfig.version (IR command table; v2 = 16 sub-slots)
 /// REQ_GET_CS_STATUS response length: 41 bytes since caps v6 (16 IR sub-slots).
 /// Older firmware short-reads it (32 bytes for caps v3-v5, 22 pre-v3) and
@@ -695,6 +697,10 @@ let CS_NOUN_PRESET_RELOAD: Int     = 48
 // vendor command takes 0..200 %, but 8.8 percent cannot encode more in an int16.
 let CS_NOUN_LOUDNESS_SPL: Int       = 49
 let CS_NOUN_LOUDNESS_INTENSITY: Int = 50
+// Caps v8 addition (spec §11.1): the loudest channel of the active input,
+// read-only over -60..0 dB.  Untargeted - it answers "is anything playing?"
+// for the whole source, which is what an amplifier trigger needs.
+let CS_NOUN_INPUT_LEVEL_MAX: Int    = 51
 
 // CsAction (operation applied).  Action bit position in the caps masks is
 // (1 << action); CS_ACT_BIT(a) below builds that mask.
@@ -755,6 +761,21 @@ func csDefaultStep(_ unit: UInt8) -> Float {
 func csUnitIsLog(_ unit: UInt8) -> Bool {
     unit == CS_UNIT_HZ || unit == CS_UNIT_Q
 }
+
+/// Longest indicator delay the uint16 0.1 s field can hold (spec §2.2): 6553.5 s,
+/// a little under two hours.
+let CS_DELAY_MAX_SECONDS: Float = Float(UInt16.max) / 10
+
+/// Wire encoding for the caps v8 indicator delays: seconds -> 0.1 s units,
+/// clamped to the field's 0 .. CS_DELAY_MAX_SECONDS span.
+func csEncodeDelay(_ seconds: Float) -> UInt16 {
+    let tenths = (seconds * 10).rounded()
+    if !(tenths > 0) { return 0 }   // also catches NaN
+    return tenths >= Float(UInt16.max) ? UInt16.max : UInt16(tenths)
+}
+
+/// Inverse of `csEncodeDelay`: 0.1 s units -> seconds.
+func csDecodeDelay(_ raw: UInt16) -> Float { Float(raw) / 10 }
 
 // CsNounDesc.target_kind values (spec §4.4).
 let CS_TARGET_NONE: UInt8      = 0

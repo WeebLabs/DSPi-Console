@@ -1,13 +1,14 @@
 import XCTest
 @testable import DSPi_Console
 
-/// Pure-logic tests for the Control Surfaces wire format, capability format v7
+/// Pure-logic tests for the Control Surfaces wire format, capability format v8
 /// (control_surfaces_spec.md §2 / §8.2).  Verifies `CsBinding` / `IrCommand`
 /// serialization matches the spec's byte-exact hex examples and that every wire
 /// struct round-trips at its current size (24-byte binding, 40-byte caps header,
 /// 12-byte noun descriptor, 41-byte status packet since v6, 16-byte IR command;
-/// v4, v5 and v7 change no structure).  A wrong byte offset here would silently
-/// misconfigure real hardware, so these guard the encoding.  No device.
+/// v4, v5, v7 and v8 change no size, though v8 does carve the binding's
+/// indicator delays out of its reserved tail).  A wrong byte offset here would
+/// silently misconfigure real hardware, so these guard the encoding.  No device.
 final class ControlSurfacesWireTests: XCTestCase {
 
     private func hex(_ data: Data) -> String {
@@ -583,6 +584,88 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(hex(b.toData()),
                        "04 32 01 00 0c 0d 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00 00 00 00")
         XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    // MARK: - Caps v8 additions (§11.1)
+
+    /// v8 appends one noun and renumbers nothing earlier.
+    func testV8NounNumbering() {
+        XCTAssertEqual(CS_NOUN_LOUDNESS_INTENSITY, 50)   // last v7 noun, unmoved
+        XCTAssertEqual(CS_NOUN_INPUT_LEVEL_MAX, 51)
+    }
+
+    /// A v8 caps header is byte-identical to v7 apart from the version and the
+    /// grown noun count (52).
+    func testCapsHeaderV8SameLayout() {
+        var d = Data([8, 16, 8, 52])   // capsVersion 8, maxBindings, typeCount, nounCount
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 0, 0, 0])
+        XCTAssertEqual(d.count, 40)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.capsVersion, 8)
+        XCTAssertEqual(caps.nounCount, 52)
+        XCTAssertEqual(caps.maxIrCommands, 16)
+    }
+
+    /// §8.2g: an amplifier trigger on GPIO 22.  High the moment any channel of
+    /// the active input crosses -50 dB, low only after 10 unbroken minutes
+    /// below it.  The delays sit at offsets 18 and 20, inside the bytes v7
+    /// required to be zero, so a wrong offset here would have the device reject
+    /// the binding (or silently time the wrong edge).
+    func testAmplifierTriggerExampleBytes() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_LED),                // 0x05
+            noun: UInt8(CS_NOUN_INPUT_LEVEL_MAX),    // 0x33
+            action: UInt8(CS_ACT_IND_ABOVE),         // 0x0A
+            gpio0: 22, gpio1: CS_GPIO_UNUSED,        // 0x16 0xFF
+            value: csEncodeValue(-50, unit: CS_UNIT_DB),
+            offDelay: csEncodeDelay(600))            // 600 s = 6000 tenths = 0x1770
+        XCTAssertEqual(b.value, -12800)              // -50 dB in 8.8
+        XCTAssertEqual(b.offDelay, 6000)
+        let expected = "05 33 0a 00 16 ff 00 00 00 00 00 ce 00 00 00 00 00 00 00 00 70 17 00 00"
+        XCTAssertEqual(hex(b.toData()), expected)
+        XCTAssertEqual(b.toData().count, 24)
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// Both delays round-trip independently, at their own offsets, across the
+    /// full uint16 span.  A byte swap between them would flip which edge waits.
+    func testIndicatorDelaysRoundTrip() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_LED_PWM), noun: UInt8(CS_NOUN_SPDIF_LOCK),
+            action: UInt8(CS_ACT_IND_EQUALS), gpio0: 10, gpio1: CS_GPIO_UNUSED,
+            value: 1, onDelay: 1, offDelay: UInt16.max)
+        let d = b.toData()
+        XCTAssertEqual(Array(d[18...19]), [0x01, 0x00])
+        XCTAssertEqual(Array(d[20...21]), [0xFF, 0xFF])
+        XCTAssertEqual(Array(d[22...23]), [0x00, 0x00])   // reserved2 tail stays zero
+        XCTAssertEqual(CsBinding.fromData(d), b)
+    }
+
+    /// A pre-v8 binding (all-zero tail) decodes as "no delay", which is exactly
+    /// v7 behavior, and a delay-free v8 binding is byte-identical to the v7 one.
+    func testPreV8BindingDecodesAsNoDelay() {
+        let v7Bytes = Data([0x05, 0x03, 0x08, 0x00, 0x14, 0xFF, 0, 0, 0, 0,
+                            0x01, 0x00, 0, 0, 0, 0, 0, 0,
+                            0, 0, 0, 0, 0, 0])
+        guard let b = CsBinding.fromData(v7Bytes) else { return XCTFail("parse failed") }
+        XCTAssertEqual(b.onDelay, 0)
+        XCTAssertEqual(b.offDelay, 0)
+        XCTAssertEqual(b.toData(), v7Bytes)
+    }
+
+    /// Seconds -> 0.1 s units, saturating rather than wrapping at the top of the
+    /// uint16 field: an over-long delay must not silently become a short one.
+    func testDelayEncoding() {
+        XCTAssertEqual(csEncodeDelay(0), 0)
+        XCTAssertEqual(csEncodeDelay(0.1), 1)
+        XCTAssertEqual(csEncodeDelay(1.5), 15)
+        XCTAssertEqual(csEncodeDelay(600), 6000)
+        XCTAssertEqual(csEncodeDelay(-5), 0)                    // clamped, not wrapped
+        XCTAssertEqual(csEncodeDelay(CS_DELAY_MAX_SECONDS), UInt16.max)
+        XCTAssertEqual(csEncodeDelay(99999), UInt16.max)
+        XCTAssertEqual(csDecodeDelay(6000), 600, accuracy: 0.001)
+        XCTAssertEqual(csDecodeDelay(csEncodeDelay(12.3)), 12.3, accuracy: 0.001)
     }
 
     /// An IR command driving an upmixer mode: INC + WRAP cycles the enum.

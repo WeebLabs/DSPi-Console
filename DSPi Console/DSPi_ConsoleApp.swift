@@ -2679,6 +2679,56 @@ struct ControlSurfacesSettingsTab: View {
         default:
             EmptyView()
         }
+        // Condition timing rides alongside whichever operand row the indicator
+        // action drew above (caps v8; a brightness meter has no edge to time).
+        if vm.csIndicatorDelaysSupported, csDelaysAllowed(type: Int(b.type), action: action) {
+            csDelayRows(slot)
+        }
+    }
+
+    /// Whether the firmware accepts on/off delays on this (type, action) pair:
+    /// an LED following a boolean condition, and nothing else (spec §6.5).  A
+    /// delay left on any other combination is rejected outright, so the editor
+    /// clears the fields whenever an edit moves the binding out of this set.
+    private func csDelaysAllowed(type: Int, action: Int) -> Bool {
+        isIndicatorType(type) && (action == CS_ACT_IND_EQUALS || action == CS_ACT_IND_ABOVE)
+    }
+
+    /// Indicator condition timing (caps v8, spec §6.5): the raw condition must
+    /// hold continuously for the delay before the LED follows it, like a PLC
+    /// TON/TOF timer, so a brief blip neither lights nor extinguishes it.  The
+    /// filter runs on the logical condition, ahead of the invert flag, so the
+    /// two keep their meaning on active-low wiring.
+    @ViewBuilder
+    private func csDelayRows(_ slot: Int) -> some View {
+        csDelayRow(slot, title: "Turn-On Delay", keyPath: \.onDelay,
+                   detail: "Hold off until the condition has been true this long. Any interruption restarts the wait.",
+                   icon: "hourglass.bottomhalf.filled")
+        csDelayRow(slot, title: "Turn-Off Delay", keyPath: \.offDelay,
+                   detail: "Stay lit until the condition has been false this long - long enough to hold an amplifier trigger on through quiet passages.",
+                   icon: "hourglass.tophalf.filled")
+        // Applying releases and re-claims the pin, which restarts the filter
+        // from "off" (spec §8.2g).  Harmless on a panel LED, but this is the
+        // feature people wire to an amplifier's trigger input, where it reads
+        // as a power cycle - worth saying next to the delay that implies it.
+        if drafts[slot].onDelay != 0 || drafts[slot].offDelay != 0 {
+            Text("Applying, reverting, or rebooting briefly releases the pin and restarts the timing from off. Driving an amplifier trigger, that is a power cycle.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func csDelayRow(_ slot: Int, title: String,
+                            keyPath: WritableKeyPath<CsBinding, UInt16>,
+                            detail: String, icon: String) -> some View {
+        settingRow(title: title, detail: detail, icon: icon) {
+            ValueField(label: "s", value: csDecodeDelay(drafts[slot][keyPath: keyPath]),
+                       width: 64, scrollStep: 0.1, minValue: 0, maxDecimals: 1) { v in
+                var nb = drafts[slot]
+                nb[keyPath: keyPath] = csEncodeDelay(v)   // clamps to 0 .. 6553.5 s
+                drafts[slot] = nb
+            }
+        }
     }
 
     /// Unit for a noun (dB / Hz / Q / percent / none), independent of any slot.
@@ -2802,8 +2852,17 @@ struct ControlSurfacesSettingsTab: View {
     private func csValueRow(_ slot: Int, title: String, detail: String) -> some View {
         let unit = nounUnit(slot)
         let (lo, hi) = nounRange(slot)
+        // A threshold parked on the range floor compares true even in silence,
+        // so the LED never goes out (spec §8.2g).  The floor is a legal value,
+        // so say what it does rather than refuse it: on a meter noun the floor
+        // doubles as "no signal", which makes this an easy trap to walk into.
+        let atFloor = Int(drafts[slot].action) == CS_ACT_IND_ABOVE
+            && drafts[slot].value <= (nounDesc(Int(drafts[slot].noun))?.minQ8 ?? Int16.min)
+        let range = "(\(fmtUnit(lo, unit)) to \(fmtUnit(hi, unit)))."
         settingRow(title: title,
-                   detail: "\(detail) (\(fmtUnit(lo, unit)) to \(fmtUnit(hi, unit))).",
+                   detail: atFloor
+                       ? "\(detail) \(range) At the \(fmtUnit(lo, unit)) floor this is always true, so the LED stays lit."
+                       : "\(detail) \(range)",
                    icon: "target") {
             ValueField(label: csUnitSymbol(unit),
                        value: csDecodeValue(drafts[slot].value, unit: unit),
@@ -3661,7 +3720,8 @@ struct ControlSurfacesSettingsTab: View {
                      strip: ["Filter"]),
         NounCategory(name: "Tools", nouns: [CS_NOUN_SIGGEN, CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
         NounCategory(name: "Status",
-                     nouns: [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
+                     nouns: [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_INPUT_LEVEL_MAX,
+                             CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
                              CS_NOUN_USB_STREAMING, CS_NOUN_ADAT_ACTIVE, CS_NOUN_LG_PRESENT,
                              CS_NOUN_LG_MUTED]),
     ]
@@ -3752,6 +3812,12 @@ struct ControlSurfacesSettingsTab: View {
         let kind = nd?.kind ?? CS_KIND_BOOL
         let unit = nd?.unit ?? CS_UNIT_DB
         b.value = 0; b.step = 0; b.rangeMin = 0; b.rangeMax = 0
+        // The delays survive an edit that keeps the binding an LED following a
+        // boolean condition (only the comparand changed); anywhere else they
+        // must go back to zero or the device rejects the whole binding.
+        if !csDelaysAllowed(type: Int(b.type), action: action) {
+            b.onDelay = 0; b.offDelay = 0
+        }
         switch action {
         case CS_ACT_STEP, CS_ACT_INC, CS_ACT_DEC:
             // Continuous: step 0 = the firmware unit default (1 dB / 1 % / 1/12
@@ -3986,6 +4052,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
         case CS_NOUN_LOUDNESS_INTENSITY: return "Loudness Intensity"
+        case CS_NOUN_INPUT_LEVEL_MAX:    return "Input Signal Level"
         default:                         return "Parameter \(noun)"
         }
     }
@@ -4009,8 +4076,27 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// One-line plain-language summary of the whole binding.
+    /// One-line plain-language summary of the whole binding, plus the condition
+    /// timing when it carries any: a delayed LED behaves nothing like an
+    /// immediate one, and the collapsed card shows only this line.
     private func verbPhrase(_ b: CsBinding) -> String {
+        let phrase = actionPhrase(b)
+        guard b.onDelay != 0 || b.offDelay != 0 else { return phrase }
+        var parts: [String] = []
+        if b.onDelay != 0 { parts.append("\(fmtDelay(b.onDelay)) on") }
+        if b.offDelay != 0 { parts.append("\(fmtDelay(b.offDelay)) off") }
+        return phrase + " Delayed \(parts.joined(separator: ", "))."
+    }
+
+    /// A delay in the most readable unit: seconds under a minute, else minutes.
+    private func fmtDelay(_ raw: UInt16) -> String {
+        let s = csDecodeDelay(raw)
+        if s < 60 { return String(format: s < 10 ? "%.1f s" : "%.0f s", s) }
+        let mins = s / 60
+        return String(format: mins == mins.rounded() ? "%.0f min" : "%.1f min", mins)
+    }
+
+    private func actionPhrase(_ b: CsBinding) -> String {
         if Int(b.type) == CS_TYPE_IR { return "Receives commands from an IR remote." }
         let noun = nounName(Int(b.noun), forType: Int(b.type)) + targetSuffix(b)
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
