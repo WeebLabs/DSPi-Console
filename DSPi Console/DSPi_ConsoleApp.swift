@@ -68,6 +68,7 @@ class AppSettings: ObservableObject {
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case general, graphing, advanced
+    case overview
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
     case channelGroups, macros
 
@@ -75,6 +76,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
+        case .overview:         return "Overview"
         case .general:          return "About"
         case .graphing:         return "Graphing"
         case .advanced:         return "Advanced"
@@ -91,6 +93,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
 
     var icon: String {
         switch self {
+        case .overview:         return "cpu.fill"
         case .general:          return "gear"
         case .graphing:         return "waveform.path.ecg"
         case .advanced:         return "gearshape.2"
@@ -110,6 +113,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     /// sidebar reads as one harmonious theme.
     var tint: Color {
         switch self {
+        case .overview:         return Color(red: 0.24, green: 0.45, blue: 0.58)  // deep steel
         case .general:          return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
         case .advanced:         return Color(red: 0.38, green: 0.47, blue: 0.60)  // steel blue-gray
         case .graphing:         return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
@@ -146,7 +150,9 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     static let groups: [(title: String, items: [SettingsCategory])] = [
         ("Application", [.general, .advanced]),
         ("Display",     [.graphing]),
-        ("System",      [.spdifInput, .outputAssignment, .i2sConfig, .globalParams]),
+        // Overview leads the group: it is the read-only summary of what every
+        // page below it has claimed.
+        ("System",      [.overview, .spdifInput, .outputAssignment, .i2sConfig, .globalParams]),
         // Everything the user drives the device *with*: the panel they wire, the
         // bus an external MCU talks over, and the two shared resources both of
         // those reference.  Groups and macros are referenced by many controls
@@ -390,6 +396,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var detailContent: some View {
         switch selection {
+        case .overview:         PinOverviewTab()
         case .general:          GeneralSettingsTab()
         case .graphing:         GraphingSettingsTab()
         case .advanced:         AdvancedSettingsTab()
@@ -401,6 +408,202 @@ struct SettingsView: View {
         case .controlSurfaces:  ControlSurfacesSettingsTab(section: .controls)
         case .channelGroups:    ControlSurfacesSettingsTab(section: .groups)
         case .macros:           ControlSurfacesSettingsTab(section: .macros)
+        }
+    }
+}
+
+// MARK: - Pin Overview Tab
+
+/// A read-only map of every GPIO the device is currently holding.
+///
+/// The pin pickers scattered across the other pages each answer "is this one
+/// free?" one pin at a time; nothing answered "what does the whole header look
+/// like right now".  Rows come from `vm.activePinAssignments`, which asks the
+/// same authority (`pinAssignment`) those pickers ask, so this page cannot
+/// claim a pin is free that a picker will refuse, or vice versa.
+///
+/// Only *held* pins are listed.  A feature that is configured but switched off
+/// reserves nothing on the device and so appears nowhere here - a disabled
+/// optional S/PDIF input, ADAT while stopped, a control interface that is down,
+/// a control-surface binding the device rejected at boot.
+struct PinOverviewTab: View {
+    @ObservedObject private var vm = AppState.shared.viewModel
+
+    /// Every claimed pin, in pin order.
+    private var assignments: [PinAssignment] {
+        vm.activePinAssignments(from: HardwareSettingsTab.validPins)
+    }
+
+    /// Valid GPIOs with nothing on them.
+    private var freePins: [UInt8] {
+        let taken = Set(assignments.map(\.pin))
+        return HardwareSettingsTab.validPins.filter { !taken.contains($0) }
+    }
+
+    /// Claimed pins bucketed by role, empty roles dropped, each list in pin order.
+    private var grouped: [(role: PinRole, rows: [PinAssignment])] {
+        let byRole = Dictionary(grouping: assignments, by: \.role)
+        return byRole.keys.sorted().map { ($0, byRole[$0]!.sorted { $0.pin < $1.pin }) }
+    }
+
+    var body: some View {
+        Form {
+            if !vm.isDeviceConnected {
+                disconnectedSection
+            } else if assignments.isEmpty {
+                Section {
+                    Text("No GPIOs are currently claimed.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                }
+            } else {
+                summarySection
+                ForEach(grouped, id: \.role) { group in
+                    Section(roleTitle(group.role)) {
+                        ForEach(group.rows, id: \.pin) { row in
+                            assignmentRow(row)
+                        }
+                    }
+                }
+                freeSection
+            }
+
+            Section {
+                Text("Pins listed here are held by something switched on, so they cannot be picked for anything else. A function that is configured but disabled holds nothing and does not appear.\n\nAssignments are made on the pages that own them: Outputs, I2S Configuration, Inputs, Global Parameters, and the Control pages.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: Rows
+
+    /// One pin: a monospaced GPIO chip, the owning feature, and its role glyph.
+    /// The chip and the glyph are fixed-width so the names line up down the
+    /// column no matter how wide the numbers or labels run.
+    private func assignmentRow(_ row: PinAssignment) -> some View {
+        HStack(spacing: 10) {
+            Text("GP\(row.pin)")
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 40)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(roleTint(row.role).gradient)
+                )
+            Image(systemName: roleIcon(row.role))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            Text(row.label)
+                .font(.callout)
+            Spacer()
+        }
+        .padding(.vertical, 1)
+    }
+
+    private var summarySection: some View {
+        Section {
+            HStack(spacing: 14) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 26))
+                    .foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(assignments.count) of \(HardwareSettingsTab.validPins.count) GPIOs in use")
+                        .font(.headline)
+                    Text(freePins.isEmpty
+                         ? "No pins remain for new functions."
+                         : "\(freePins.count) free for new functions.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    /// The remaining pins, so assigning something new does not mean reading the
+    /// list above and subtracting.
+    @ViewBuilder
+    private var freeSection: some View {
+        if !freePins.isEmpty {
+            Section("Available") {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6),
+                          alignment: .leading, spacing: 6) {
+                    ForEach(freePins, id: \.self) { pin in
+                        Text("GP\(pin)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 3)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(Color.secondary.opacity(0.12))
+                            )
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var disconnectedSection: some View {
+        Section {
+            VStack(spacing: 10) {
+                Image(systemName: "cable.connector.slash")
+                    .font(.system(size: 28))
+                    .foregroundColor(.secondary)
+                VStack(spacing: 3) {
+                    Text("No Device Connected")
+                        .font(.headline)
+                    Text("Pin assignments live on the device. Connect a DSPi to see which GPIOs are in use.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+        }
+    }
+
+    // MARK: Role presentation
+
+    private func roleTitle(_ role: PinRole) -> String {
+        switch role {
+        case .output:  return "Outputs"
+        case .clock:   return "Clocks"
+        case .input:   return "Inputs"
+        case .control: return "Control"
+        case .utility: return "Other"
+        }
+    }
+
+    private func roleIcon(_ role: PinRole) -> String {
+        switch role {
+        case .output:  return "cable.connector"
+        case .clock:   return "metronome"
+        case .input:   return "arrow.down.to.line"
+        case .control: return "dial.medium"
+        case .utility: return "wrench.adjustable"
+        }
+    }
+
+    /// Same cool palette the sidebar badges use, one shade per role.
+    private func roleTint(_ role: PinRole) -> Color {
+        switch role {
+        case .output:  return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
+        case .clock:   return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
+        case .input:   return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
+        case .control: return Color(red: 0.27, green: 0.52, blue: 0.70)  // steel cyan
+        case .utility: return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
         }
     }
 }

@@ -7,6 +7,22 @@ import Combine
 // pin pickers shares one source of truth.  Without this, each tab that
 // owns a pin assignment maintains its own conflict list and a pin set
 // in one tab would silently appear "available" in another.
+/// What a claimed GPIO is doing, for grouping on the Overview page.  Kept
+/// beside the claim itself so display code never has to infer a category by
+/// matching on the owner's name.
+enum PinRole: Int, Comparable {
+    case output, clock, input, control, utility
+    static func < (a: PinRole, b: PinRole) -> Bool { a.rawValue < b.rawValue }
+}
+
+/// One GPIO and the feature holding it.  `label` is the same owner name pin
+/// pickers have always shown in conflict messages.
+struct PinAssignment: Equatable {
+    let pin: UInt8
+    let label: String
+    let role: PinRole
+}
+
 enum PinConsumer: Equatable {
     case output(Int)    // slot or PDM index — indexes vm.outputPins[]
     case i2sBck         // also covers LRCLK (BCK + 1)
@@ -1959,12 +1975,25 @@ class DSPViewModel: ObservableObject {
     ///
     /// Single source of truth: HardwareSettingsTab AND GlobalSettingsTab
     /// both call this so a pin assigned in one tab can't quietly appear
-    /// as "available" in the other.
+    /// as "available" in the other.  It is a thin read of `pinAssignment`,
+    /// which carries the same answer plus the role the Overview page groups by.
     func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
+        pinAssignment(pin, excluding: consumer)?.label
+    }
+
+    /// The claim on `pin`, or nil if free: the same decision `pinInUseBy`
+    /// reports, carrying the owner's display name and its role so callers can
+    /// group by function without re-deriving anything from the label text.
+    ///
+    /// Reservations follow the firmware's rules, so a feature that is merely
+    /// configured does not hold a pin: an optional S/PDIF input, ADAT in or
+    /// out, a control interface, and a control-surface binding all reserve
+    /// only while actually enabled or live.
+    func pinAssignment(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> PinAssignment? {
         // SPDIF / I2S output slot pins.
         for slot in 0..<numOutputSlots {
             if consumer != .output(slot) && outputPins[slot] == pin {
-                return "Output \(slot + 1)"
+                return PinAssignment(pin: pin, label: "Output \(slot + 1)", role: .output)
             }
         }
         // PDM (Subwoofer) — its outputPins index is numOutputSlots.
@@ -1972,31 +2001,31 @@ class DSPViewModel: ObservableObject {
         if pdmIdx < outputPins.count,
            consumer != .output(pdmIdx),
            outputPins[pdmIdx] == pin {
-            return "Subwoofer"
+            return PinAssignment(pin: pin, label: "Subwoofer", role: .output)
         }
         if consumer != .i2sBck {
-            if pin == i2sBckPin { return "I2S BCK" }
-            if pin == i2sBckPin &+ 1 { return "I2S LRCLK" }
+            if pin == i2sBckPin { return PinAssignment(pin: pin, label: "I2S BCK", role: .clock) }
+            if pin == i2sBckPin &+ 1 { return PinAssignment(pin: pin, label: "I2S LRCLK", role: .clock) }
         }
         // Slave-mode clock pair: reserved only in SPLIT clock-pin mode.  In
         // UNIFIED the pair is dormant and constrains nothing (mirrors the
         // firmware i2s_clock_pin_claimed helper - clock_pins_spec.md §1).
         if consumer != .i2sBckSlave && i2sClockPinMode == I2S_CLOCK_PIN_MODE_SPLIT {
-            if pin == i2sBckPinSlave { return "I2S Slave BCK" }
-            if pin == i2sBckPinSlave &+ 1 { return "I2S Slave LRCLK" }
+            if pin == i2sBckPinSlave { return PinAssignment(pin: pin, label: "I2S Slave BCK", role: .clock) }
+            if pin == i2sBckPinSlave &+ 1 { return PinAssignment(pin: pin, label: "I2S Slave LRCLK", role: .clock) }
         }
-        if consumer != .mck && pin == mckPin { return "I2S MCK" }
+        if consumer != .mck && pin == mckPin { return PinAssignment(pin: pin, label: "I2S MCK", role: .clock) }
         // S/PDIF RX pins.  Input 1 is always reserved; the optional inputs 2/3/4
         // are reserved only while enabled (a disabled input's pin is invisible
         // to conflict checks, mirroring the firmware's per-input reservation).
         if inputSourceSupported {
             if consumer != .spdifRx(0) && pin == spdifRxPin {
-                return multiSpdifSupported && anyOptionalSpdifEnabled ? "S/PDIF 1 RX" : "S/PDIF RX"
+                return PinAssignment(pin: pin, label: multiSpdifSupported && anyOptionalSpdifEnabled ? "S/PDIF 1 RX" : "S/PDIF RX", role: .input)
             }
             if multiSpdifSupported {
                 for idx in 1..<spdifInputCount where spdifInputEnabled(index: idx) {
                     if consumer != .spdifRx(idx) && pin == spdifPin(index: idx) {
-                        return "S/PDIF \(idx + 1) RX"
+                        return PinAssignment(pin: pin, label: "S/PDIF \(idx + 1) RX", role: .input)
                     }
                 }
             }
@@ -2014,14 +2043,14 @@ class DSPViewModel: ObservableObject {
             if case .some(.i2sRx) = consumer { assigningI2SRx = true } else { assigningI2SRx = false }
             let pairsReserved = assigningI2SRx ? i2sMaxPairs : i2sActivePairs
             for pair in 0..<min(pairsReserved, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
-                return i2sMaxPairs > 1 ? "I2S RX \(pair + 1)" : "I2S RX"
+                return PinAssignment(pin: pin, label: i2sMaxPairs > 1 ? "I2S RX \(pair + 1)" : "I2S RX", role: .input)
             }
         }
         if consumer != .dacMute,
            dacHwMuteConfig.enabled,
            dacHwMuteConfig.pin != DAC_HW_MUTE_PIN_NONE,
            pin == dacHwMuteConfig.pin {
-            return "DAC Mute"
+            return PinAssignment(pin: pin, label: "DAC Mute", role: .utility)
         }
         // ADAT owns its GPIO only while enabled (mirrors the firmware: a
         // disabled ADAT stream holds no pin, so its GPIO is free for other uses).
@@ -2030,7 +2059,7 @@ class DSPViewModel: ObservableObject {
         // pin as taken - the sharing exception is one-directional (input onto
         // output), so every other consumer still does.
         if consumer != .adatOut, consumer != .adatIn, adatSupported, adatEnabled, pin == adatPin {
-            return "ADAT Output"
+            return PinAssignment(pin: pin, label: "ADAT Output", role: .output)
         }
         // ADAT input owns its GPIO only while enabled (same rule as the output).
         // Reserved against every other consumer, including the ADAT output - the
@@ -2038,18 +2067,18 @@ class DSPViewModel: ObservableObject {
         // sees the input pin as taken.
         if consumer != .adatIn, adatInputSupported, adatInputEnabled,
            adatInputPin != ADAT_INPUT_PIN_UNSET, pin == adatInputPin {
-            return "ADAT Input"
+            return PinAssignment(pin: pin, label: "ADAT Input", role: .input)
         }
         // External control interfaces reserve their pins only while LIVE (a
         // disabled interface, or one kept down by a boot pin-collision, holds
         // no GPIOs) - mirrors the firmware's is_pin_in_use rule (spec §5.3).
         if consumer != .uartCtrl, ctrlIfaceStatus.uartLive,
            pin == uartCtrlConfig.txPin || pin == uartCtrlConfig.rxPin {
-            return "UART Control"
+            return PinAssignment(pin: pin, label: "UART Control", role: .control)
         }
         if consumer != .i2cCtrl, ctrlIfaceStatus.i2cLive,
            pin == i2cCtrlConfig.sdaPin || pin == i2cCtrlConfig.sclPin {
-            return "I2C Control"
+            return PinAssignment(pin: pin, label: "I2C Control", role: .control)
         }
         // Control Surfaces reserve their GPIO(s) only while the binding is LIVE
         // (its active_mask bit is set) - a cleared binding, or one kept down by
@@ -2059,10 +2088,17 @@ class DSPViewModel: ObservableObject {
         where consumer != .controlSurface(slot) && csStatus.isSlotActive(slot) {
             let bind = csBindings[slot]
             if bind.gpio0 == pin || (bind.gpio1 != CS_GPIO_UNUSED && bind.gpio1 == pin) {
-                return "Control Surface \(slot + 1)"
+                return PinAssignment(pin: pin, label: "Control Surface \(slot + 1)", role: .control)
             }
         }
         return nil
+    }
+
+    /// Every GPIO currently claimed, in pin order.  Walks the same valid-GPIO
+    /// list the pin pickers offer and asks the one authority about each, so the
+    /// Overview cannot disagree with what a picker will let you choose.
+    func activePinAssignments(from pins: [UInt8]) -> [PinAssignment] {
+        pins.compactMap { pinAssignment($0) }
     }
 
     let usb: USBDevice
