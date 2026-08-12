@@ -462,18 +462,14 @@ struct PinOverviewTab: View {
                 summarySection
                 ForEach(grouped, id: \.role) { group in
                     Section(roleTitle(group.role)) {
-                        ForEach(group.rows, id: \.pin) { row in
-                            assignmentRow(row)
+                        LazyVGrid(columns: Self.assignmentColumns, alignment: .leading, spacing: 5) {
+                            ForEach(group.rows, id: \.pin) { row in
+                                assignmentCell(row)
+                            }
                         }
+                        .padding(.vertical, 1)
                     }
                 }
-                freeSection
-            }
-
-            Section {
-                Text("Pins listed here are held by something switched on, so they cannot be picked for anything else. A function that is configured but disabled holds nothing and does not appear.\n\nAssignments are made on the pages that own them: Outputs, I2S Configuration, Inputs, Global Parameters, and the Control pages.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -481,75 +477,92 @@ struct PinOverviewTab: View {
 
     // MARK: Rows
 
-    /// One pin: a monospaced GPIO chip, the owning feature, and its role glyph.
-    /// The chip and the glyph are fixed-width so the names line up down the
-    /// column no matter how wide the numbers or labels run.
-    private func assignmentRow(_ row: PinAssignment) -> some View {
-        HStack(spacing: 10) {
+    /// Two columns of assignments per role.  The detail pane is fixed-width, so
+    /// the count is fixed too rather than adaptive: an adaptive grid re-decides
+    /// its columns from the width it is offered and settles a frame late.
+    private static let assignmentColumns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 2)
+
+    /// One pin: a role-tinted monospaced GPIO chip and the owning feature.  The
+    /// chip is fixed-width so names line up down both columns.  No role glyph
+    /// here - the section header names the role and the chip is already
+    /// coloured by it, so a third indicator would just cost width.
+    private func assignmentCell(_ row: PinAssignment) -> some View {
+        HStack(spacing: 7) {
             Text("GP\(row.pin)")
-                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
                 .foregroundStyle(.white)
-                .frame(width: 40)
-                .padding(.vertical, 3)
+                .frame(width: 34)
+                .padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .fill(roleTint(row.role).gradient)
                 )
-            Image(systemName: roleIcon(row.role))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .frame(width: 16)
             Text(row.label)
-                .font(.callout)
-            Spacer()
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(row.label)
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 1)
     }
 
+    /// The whole header at a glance: every valid GPIO in pin order, tinted by
+    /// what holds it and muted where free.
+    ///
+    /// A bare list of free pin numbers answers "how many are left" but not
+    /// "where", and where is what matters: the clock pairs claim `pin` and
+    /// `pin + 1` together, so two free GPIOs are only useful to them if they
+    /// are adjacent.  Laying the map out in pin order shows that directly.
     private var summarySection: some View {
         Section {
-            HStack(spacing: 14) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 26))
-                    .foregroundColor(.accentColor)
-                VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 15))
+                        .foregroundColor(.accentColor)
                     Text("\(assignments.count) of \(HardwareSettingsTab.validPins.count) GPIOs in use")
-                        .font(.headline)
-                    Text(freePins.isEmpty
-                         ? "No pins remain for new functions."
-                         : "\(freePins.count) free for new functions.")
+                        .font(.callout.weight(.medium))
+                    Spacer()
+                    Text(freePins.isEmpty ? "none free" : "\(freePins.count) free")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                Spacer()
+                LazyVGrid(columns: Self.mapColumns, alignment: .leading, spacing: 4) {
+                    ForEach(HardwareSettingsTab.validPins, id: \.self) { pin in
+                        mapChip(pin)
+                    }
+                }
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
         }
     }
 
-    /// The remaining pins, so assigning something new does not mean reading the
-    /// list above and subtracting.
-    @ViewBuilder
-    private var freeSection: some View {
-        if !freePins.isEmpty {
-            Section("Available") {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6),
-                          alignment: .leading, spacing: 6) {
-                    ForEach(freePins, id: \.self) { pin in
-                        Text("GP\(pin)")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 3)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(Color.secondary.opacity(0.12))
-                            )
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-        }
+    /// Fixed column count for the map, like the assignment grid: the detail
+    /// pane is a known width, and an adaptive grid settles a frame late.
+    private static let mapColumns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 9)
+
+    /// One GPIO in the map.  Claimed pins carry their role's tint and name the
+    /// owner on hover; free pins are a muted outline of the same shape, so the
+    /// eye reads occupancy as colour rather than having to parse numbers.
+    private func mapChip(_ pin: UInt8) -> some View {
+        let claim = claimsByPin[pin]
+        return Text("\(pin)")
+            .font(.system(.caption2, design: .monospaced).weight(claim == nil ? .regular : .semibold))
+            .foregroundStyle(claim == nil ? Color.secondary : Color.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(claim.map { roleTint($0.role).gradient }
+                          ?? Color.secondary.opacity(0.12).gradient)
+            )
+            .help(claim?.label ?? "GP\(pin) - available")
+    }
+
+    /// Claims keyed by pin, so the map is one pass over the assignments rather
+    /// than a fresh ownership query per chip.
+    private var claimsByPin: [UInt8: PinAssignment] {
+        Dictionary(uniqueKeysWithValues: assignments.map { ($0.pin, $0) })
     }
 
     @ViewBuilder
@@ -583,16 +596,6 @@ struct PinOverviewTab: View {
         case .input:   return "Inputs"
         case .control: return "Control"
         case .utility: return "Other"
-        }
-    }
-
-    private func roleIcon(_ role: PinRole) -> String {
-        switch role {
-        case .output:  return "cable.connector"
-        case .clock:   return "metronome"
-        case .input:   return "arrow.down.to.line"
-        case .control: return "dial.medium"
-        case .utility: return "wrench.adjustable"
         }
     }
 
