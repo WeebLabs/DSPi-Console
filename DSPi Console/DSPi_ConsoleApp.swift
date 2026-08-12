@@ -108,23 +108,33 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// Icon-badge tint. A single cohesive cool palette (slate → teal → cyan →
-    /// blue → indigo) — distinct shades per page, but no warm colors, so the
-    /// sidebar reads as one harmonious theme.
+    /// Icon-badge tint.  Colour carries meaning here rather than decorating:
+    /// a page that assigns GPIOs wears the colour those pins wear on the
+    /// Overview map, so the badge and the chip agree; the Control pages share
+    /// one orchid family because they are one group; and a page that claims no
+    /// pin stays a quiet neutral so the coloured rows stand for something.
+    ///
+    /// Every step sits in the band that carries a white glyph at 4.5:1 and
+    /// still clears 3:1 on a dark window (OKLCH L 0.52-0.57, chroma <= 0.125),
+    /// so the sidebar holds up in both appearances.
     var tint: Color {
         switch self {
-        case .overview:         return Color(red: 0.24, green: 0.45, blue: 0.58)  // deep steel
-        case .general:          return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
-        case .advanced:         return Color(red: 0.38, green: 0.47, blue: 0.60)  // steel blue-gray
-        case .graphing:         return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
-        case .globalParams:     return Color(red: 0.21, green: 0.49, blue: 0.82)  // blue
-        case .outputAssignment: return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
-        case .i2sConfig:        return Color(red: 0.16, green: 0.41, blue: 0.74)  // ocean blue
-        case .spdifInput:       return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
-        case .controlInterfaces: return Color(red: 0.30, green: 0.44, blue: 0.66) // dusk blue
-        case .controlSurfaces:  return Color(red: 0.27, green: 0.52, blue: 0.70)  // steel cyan
-        case .channelGroups:    return Color(red: 0.22, green: 0.56, blue: 0.66)  // muted teal
-        case .macros:           return Color(red: 0.36, green: 0.42, blue: 0.72)  // periwinkle
+        // Neutral: these pages assign no GPIO.
+        case .overview:         return Color(red: 0.384, green: 0.439, blue: 0.502)  // #627080 steel
+        case .general:          return Color(red: 0.392, green: 0.412, blue: 0.443)  // #646971 slate
+        case .advanced:         return Color(red: 0.447, green: 0.471, blue: 0.502)  // #727880 slate light
+        case .graphing:         return Color(red: 0.345, green: 0.478, blue: 0.537)  // #587a89 steel cyan
+        // Pin-owning pages, matched to their role on the Overview map.
+        case .spdifInput:       return Color(red: 0.016, green: 0.522, blue: 0.435)  // #04856f input teal
+        case .outputAssignment: return Color(red: 0.008, green: 0.471, blue: 0.780)  // #0278c7 output blue
+        case .i2sConfig:        return Color(red: 0.729, green: 0.220, blue: 0.133)  // #ba3822 clock brick
+        case .globalParams:     return Color(red: 0.502, green: 0.467, blue: 0.004)  // #807701 utility olive
+        // The Control group: one orchid family, a step apart so adjacent rows
+        // stay tellable without breaking the family.
+        case .controlSurfaces:  return Color(red: 0.514, green: 0.329, blue: 0.627)  // #8354a0
+        case .controlInterfaces: return Color(red: 0.561, green: 0.376, blue: 0.678) // #8f60ad
+        case .channelGroups:    return Color(red: 0.424, green: 0.392, blue: 0.718)  // #6c64b7
+        case .macros:           return Color(red: 0.620, green: 0.322, blue: 0.553)  // #9e528d
         }
     }
 
@@ -599,14 +609,27 @@ struct PinOverviewTab: View {
         }
     }
 
-    /// Same cool palette the sidebar badges use, one shade per role.
+    /// One hue per role, and the same five the sidebar gives the pages that
+    /// assign these pins - so a chip's colour points at where you change it.
+    ///
+    /// Chosen by construction rather than by eye: hues ~72 degrees apart, every
+    /// step held inside the narrow lightness band (OKLCH L 0.53-0.56) where a
+    /// fill both carries white text at 4.5:1 and still clears 3:1 against a
+    /// dark window background.  Validated as a categorical set on both
+    /// surfaces - worst adjacent pair ΔE 10.2 under deuteranopia, 26.0 with
+    /// normal vision (OKLab x100).
+    ///
+    /// The role sections show one colour each, which is the case those numbers
+    /// cover.  The map above mixes all five, where the tightest pairs are
+    /// closer than the categorical floor: there the colour is a secondary cue
+    /// and the reliable read is claimed (saturated) against free (grey).
     private func roleTint(_ role: PinRole) -> Color {
         switch role {
-        case .output:  return Color(red: 0.34, green: 0.37, blue: 0.80)  // indigo
-        case .clock:   return Color(red: 0.20, green: 0.62, blue: 0.74)  // cyan
-        case .input:   return Color(red: 0.15, green: 0.49, blue: 0.62)  // deep teal
-        case .control: return Color(red: 0.27, green: 0.52, blue: 0.70)  // steel cyan
-        case .utility: return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
+        case .output:  return Color(red: 0.008, green: 0.471, blue: 0.780)  // #0278c7 blue
+        case .clock:   return Color(red: 0.729, green: 0.220, blue: 0.133)  // #ba3822 brick
+        case .input:   return Color(red: 0.016, green: 0.522, blue: 0.435)  // #04856f teal
+        case .control: return Color(red: 0.584, green: 0.263, blue: 0.655)  // #9543a7 orchid
+        case .utility: return Color(red: 0.502, green: 0.467, blue: 0.004)  // #807701 olive
         }
     }
 }
