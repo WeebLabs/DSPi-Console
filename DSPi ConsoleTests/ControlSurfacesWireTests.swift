@@ -923,6 +923,163 @@ final class ControlSurfacesWireTests: XCTestCase {
         }
     }
 
+    // MARK: - Caps v10: I2C display, IR groups, four new nouns
+
+    /// v10 appends four nouns and one component type, renumbering nothing.
+    func testV10Numbering() {
+        XCTAssertEqual(CS_NOUN_MACRO, 52)            // last v9 noun, unmoved
+        XCTAssertEqual(CS_NOUN_CPU_LOAD, 53)
+        XCTAssertEqual(CS_NOUN_DISPLAY_PAGE, 54)
+        XCTAssertEqual(CS_NOUN_DISPLAY_EDIT, 55)
+        XCTAssertEqual(CS_NOUN_PAGE_VALUE, 56)
+        XCTAssertEqual(CS_TYPE_DISPLAY, 8)
+    }
+
+    /// The caps header grew 40 -> 44 at v10 because the type table gained a row.
+    /// The tail carrying the IR, group and macro counts therefore moves, and a
+    /// parser that looked at a fixed offset would report the whole of v9 absent.
+    /// This is the check that a v10 header still yields those counts.
+    func testCapsHeaderV10TailMovesWithTypeTable() {
+        var d = Data([10, 16, 9, 57])   // caps 10, 16 bindings, 9 types, 57 nouns
+        for _ in 0..<9 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 8, 8, 8])
+        XCTAssertEqual(d.count, 44)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.capsVersion, 10)
+        XCTAssertEqual(caps.typeCount, 9)
+        XCTAssertEqual(caps.nounCount, 57)
+        XCTAssertEqual(caps.maxIrCommands, 16)
+        XCTAssertEqual(caps.maxGroups, 8)
+        XCTAssertEqual(caps.maxMacros, 8)
+        XCTAssertEqual(caps.maxMacroSteps, 8)
+        XCTAssertEqual(caps.types.count, 9)
+    }
+
+    /// A v9 header (8 types, 40 bytes) must still parse with its tail intact,
+    /// so the same build talks to both firmwares.
+    func testCapsHeaderV9StillParsesBesideV10() {
+        var d = Data([9, 16, 8, 53])
+        for _ in 0..<8 { d.append(contentsOf: [0xBC, 0x02, 1, CS_PINCLASS_ANY]) }
+        d.append(contentsOf: [16, 8, 8, 8])
+        XCTAssertEqual(d.count, 40)
+        guard let caps = CsCapsHeader.fromData(d) else { return XCTFail("caps parse failed") }
+        XCTAssertEqual(caps.maxGroups, 8)
+        XCTAssertEqual(caps.maxMacroSteps, 8)
+    }
+
+    /// The display binding is a container: pins, model in `index`, address in
+    /// `value`, everything else zero (strict, like the IR receiver).
+    func testDisplayBindingBytes() {
+        let b = CsBinding(
+            type: UInt8(CS_TYPE_DISPLAY),                 // 0x08
+            gpio0: 2, gpio1: 3,                           // SDA even, SCL odd
+            index: UInt8(CS_DISP_MODEL_SSD1306_128X64),   // 0x06
+            value: 0)                                     // model default address
+        XCTAssertEqual(hex(b.toData()),
+                       "08 00 00 00 02 03 00 00 06 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// 12 bytes, timings in 0.1 s units like the indicator delays.
+    func testDisplayCfgRoundTrip() {
+        let cfg = CsDisplayCfg(mode: CS_DMODE_CYCLE_SELECTED, homePage: 2,
+                               dwell: 50, overlayHold: 20, brightness: 128,
+                               flags: CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED,
+                               editTimeout: 100)
+        let d = cfg.toData()
+        XCTAssertEqual(d.count, 12)
+        XCTAssertEqual(hex(d), "01 02 32 00 14 00 80 03 64 00 00 00")
+        XCTAssertEqual(CsDisplayCfg.fromData(d), cfg)
+    }
+
+    /// The GET response puts a 4-byte limits header before the config, so the
+    /// parser has to skip it - reading from offset 0 would take max_pages as
+    /// the mode.
+    func testDisplayCfgParsesPastTheLimitsHeader() {
+        let cfg = CsDisplayCfg(mode: CS_DMODE_FIXED, homePage: 1, dwell: 30,
+                               overlayHold: 20, brightness: 0, flags: 0, editTimeout: 100)
+        var d = Data([16, 9, 0, 0])          // max_pages, model_count, reserved
+        d.append(cfg.toData())
+        XCTAssertEqual(d.count, Int(CS_DISPLAY_CFG_GET_LEN))
+        XCTAssertEqual(CsDisplayCfg.fromData(d, offset: 4), cfg)
+        XCTAssertEqual(d[d.startIndex], 16)  // the limit the page loop uses
+    }
+
+    /// 4 bytes; an all-zero record is an empty slot.
+    func testDisplayPageRoundTrip() {
+        let page = CsDisplayPage(noun: UInt8(CS_NOUN_OUTPUT_GAIN), target: 2, index: 0,
+                                 flags: CS_DPAGE_ACTIVE | CS_DPAGE_LARGE)
+        XCTAssertEqual(hex(page.toData()), "11 02 00 05")
+        XCTAssertEqual(CsDisplayPage.fromData(page.toData()), page)
+        XCTAssertTrue(page.isActive)
+        XCTAssertTrue(page.isLarge)
+        XCTAssertFalse(page.isGrouped)
+        XCTAssertEqual(CsDisplayPage().toData(), Data(count: 4))
+        XCTAssertFalse(CsDisplayPage().isActive)
+    }
+
+    func testDisplayStatusDecode() {
+        var d = Data(count: 8)
+        d[0] = CS_DISP_STATE_LIVE
+        d[1] = 3
+        d[2] = CS_DISP_FLAG_OVERLAY | CS_DISP_FLAG_EDIT
+        d[3] = UInt8(CS_DISP_MODEL_LCD1602)
+        d[4] = 0x2C; d[5] = 0x01      // 300 aborts, little-endian
+        guard let st = CsDisplayStatus.fromData(d) else { return XCTFail("status parse failed") }
+        XCTAssertTrue(st.isLive)
+        XCTAssertEqual(st.currentPage, 3)
+        XCTAssertTrue(st.overlayShowing)
+        XCTAssertTrue(st.editArmed)
+        XCTAssertEqual(st.nakCount, 300)
+    }
+
+    /// The display's deferred tags must stay clear of the binding, group, macro
+    /// and IR namespaces, or one poll of `lastSlot` would misattribute a result.
+    ///
+    /// Within the display's own namespace the config and page 0 deliberately
+    /// share `0x50` (the firmware tags the config bare and pages `0x50 | page`).
+    /// That is only safe because the host never has two display SETs in flight
+    /// - `DSPViewModel` serializes them - so the tag is never ambiguous in
+    /// practice. This pins both halves of that contract.
+    func testDisplayOutcomeTagsAreDisjoint() {
+        var display: [UInt8] = [CS_LAST_SLOT_DISPLAY_FLAG]
+        for i in 0..<CS_MAX_DISPLAY_PAGES { display.append(CS_LAST_SLOT_DISPLAY_FLAG | UInt8(i)) }
+        var others: [UInt8] = [CS_LAST_SLOT_SAVE]
+        for i in 0..<CS_MAX_BINDINGS { others.append(UInt8(i)) }
+        for i in 0..<CS_MAX_GROUPS { others.append(CS_LAST_SLOT_GROUP_FLAG | UInt8(i)) }
+        for i in 0..<CS_MAX_MACROS { others.append(CS_LAST_SLOT_MACRO_FLAG | UInt8(i)) }
+        for i in 0..<CS_MAX_IR_COMMANDS { others.append(CS_LAST_SLOT_IR_FLAG | UInt8(i)) }
+        XCTAssertTrue(Set(display).isDisjoint(with: Set(others)))
+        // 17 tags, 16 distinct: the config and page 0 are the same byte.
+        XCTAssertEqual(display.count, 17)
+        XCTAssertEqual(Set(display).count, 16)
+        XCTAssertEqual(CS_LAST_SLOT_DISPLAY_FLAG, CS_LAST_SLOT_DISPLAY_FLAG | UInt8(0))
+    }
+
+    /// An IR command may address a group at v10.  The record is unchanged - the
+    /// flag bit is the same one bindings use and `target` is reinterpreted.
+    func testGroupedIrCommandBytes() {
+        let c = IrCommand(noun: UInt8(CS_NOUN_OUTPUT_GAIN), action: UInt8(CS_ACT_INC),
+                          flags: CS_FLAG_GROUP | CS_FLAG_REPEAT, target: 1,
+                          proto: CS_IR_PROTO_NEC, step: 256, code: 0xE718FF00)
+        XCTAssertEqual(c.toData().count, 16)
+        XCTAssertEqual(hex(c.toData()), "11 02 30 01 00 01 00 00 00 01 00 00 00 ff 18 e7")
+        XCTAssertEqual(IrCommand.fromData(c.toData()), c)
+    }
+
+    /// A display page's model default: the HD44780 backpacks answer on 0x27,
+    /// everything else on 0x3C.
+    func testDisplayDefaultAddresses() {
+        XCTAssertEqual(csDisplayDefaultAddress(CS_DISP_MODEL_LCD1602), 0x27)
+        XCTAssertEqual(csDisplayDefaultAddress(CS_DISP_MODEL_LCD2004), 0x27)
+        XCTAssertEqual(csDisplayDefaultAddress(CS_DISP_MODEL_CHAR_OLED_16X2), 0x3C)
+        XCTAssertEqual(csDisplayDefaultAddress(CS_DISP_MODEL_SSD1306_128X64), 0x3C)
+        // Only the graphic panels render a large font.
+        XCTAssertFalse(csDisplayIsGraphic(CS_DISP_MODEL_CHAR_OLED_20X4))
+        XCTAssertTrue(csDisplayIsGraphic(CS_DISP_MODEL_SSD1306_128X64))
+        XCTAssertTrue(csDisplayIsGraphic(CS_DISP_MODEL_SH1106_128X64))
+    }
+
     /// An IR command driving an upmixer mode: INC + WRAP cycles the enum.
     func testUpmixModeIrCommand() {
         let c = IrCommand(

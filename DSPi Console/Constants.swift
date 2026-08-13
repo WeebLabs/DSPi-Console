@@ -609,6 +609,15 @@ let REQ_SET_CS_MACRO_STEP: UInt8  = 0x24   // OUT 12 bytes: CsMacroStep, wValue 
 let REQ_CS_MACRO_FIRE: UInt8      = 0x25   // IN 1 status byte: wValue = macro fires it, 0xFFFF cancels
 let REQ_GET_CS_EXT_STATUS: UInt8  = 0x26   // IN 24 bytes: CsExtStatusPacket
 
+// I2C display commands (caps v10; display spec §2.4).  Same deferred-preview
+// conventions as the rest of the feature, reported with `lastSlot` 0x50 for
+// the config and 0x50 | page for a page.
+let REQ_SET_CS_DISPLAY_CFG: UInt8    = 0x27   // OUT 12 bytes: CsDisplayCfg
+let REQ_GET_CS_DISPLAY_CFG: UInt8    = 0x28   // IN 16 bytes: {maxPages, modelCount, rsv[2]} + CsDisplayCfg
+let REQ_SET_CS_DISPLAY_PAGE: UInt8   = 0x29   // OUT 4 bytes: CsDisplayPage, wValue = page (0-15)
+let REQ_GET_CS_DISPLAY_PAGE: UInt8   = 0x2A   // IN 4 bytes: CsDisplayPage, wValue = page
+let REQ_GET_CS_DISPLAY_STATUS: UInt8 = 0x2B   // IN 8 bytes: CsDisplayStatus
+
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
 let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16 (IR sub-slot >= 16)
@@ -629,6 +638,10 @@ let CS_STATUS_NO_IR: UInt8           = 0x1E   // learn was armed with no live CS
 let CS_STATUS_INVALID_GROUP: UInt8   = 0x1F   // group reference empty, out of range, or the wrong kind for the noun
 let CS_STATUS_INVALID_MACRO: UInt8   = 0x20   // bad macro index or step_count
 let CS_STATUS_INVALID_STEP: UInt8    = 0x21   // macro step record invalid
+let CS_STATUS_DISPLAY_IN_USE: UInt8  = 0x22   // another slot already holds the display (one per device)
+let CS_STATUS_PIN_NOT_I2C: UInt8     = 0x23   // SDA/SCL are not a valid same-instance pair
+let CS_STATUS_I2C_IN_USE: UInt8      = 0x24   // that I2C instance belongs to the control interface
+let CS_STATUS_INVALID_PAGE: UInt8    = 0x25   // display config or page record invalid
 
 // Limits / sentinels (spec §2).
 let CS_MAX_BINDINGS: Int       = 16
@@ -652,6 +665,8 @@ let CS_LAST_SLOT_IR_FLAG: UInt8 = 0x80
 /// 0xFF save/revert sentinel, so one poll distinguishes all five kinds.
 let CS_LAST_SLOT_GROUP_FLAG: UInt8 = 0x40
 let CS_LAST_SLOT_MACRO_FLAG: UInt8 = 0x60
+/// `lastSlot` for the display: 0x50 bare for the config, 0x50 | page for a page.
+let CS_LAST_SLOT_DISPLAY_FLAG: UInt8 = 0x50
 
 // Target group / macro limits (caps v9).  The device reports its own in the
 // caps header (`maxGroups` / `maxMacros` / `maxMacroSteps`); these are the wire
@@ -669,6 +684,80 @@ let CS_MACRO_LEN: UInt16        = 132
 let CS_MACRO_HEADER_LEN: UInt16 = 36
 let CS_MACRO_STEP_LEN: UInt16   = 12
 let CS_EXT_STATUS_LEN: UInt16   = 24
+let CS_DISPLAY_CFG_LEN: UInt16      = 12   // the SET payload
+let CS_DISPLAY_CFG_GET_LEN: UInt16  = 16   // 4-byte limits header + the config
+let CS_DISPLAY_PAGE_LEN: UInt16     = 4
+let CS_DISPLAY_STATUS_LEN: UInt16   = 8
+
+// I2C display (caps v10; display spec §1).
+let CS_MAX_DISPLAY_PAGES: Int = 16
+
+// Display models - CsBinding.index on a CS_TYPE_DISPLAY slot.  Wire and flash
+// persistent, so these are never renumbered.  Geometry and bus speed are fixed
+// per model by the firmware driver.
+let CS_DISP_MODEL_NONE: Int           = 0
+let CS_DISP_MODEL_LCD1602: Int        = 1
+let CS_DISP_MODEL_LCD2004: Int        = 2
+let CS_DISP_MODEL_CHAR_OLED_16X2: Int = 3
+let CS_DISP_MODEL_CHAR_OLED_20X2: Int = 4
+let CS_DISP_MODEL_CHAR_OLED_20X4: Int = 5
+let CS_DISP_MODEL_SSD1306_128X64: Int = 6
+let CS_DISP_MODEL_SSD1306_128X32: Int = 7
+let CS_DISP_MODEL_SH1106_128X64: Int  = 8
+let CS_DISP_MODEL_COUNT: Int          = 9
+
+/// Display home-content mode (`CsDisplayCfg.mode`).
+let CS_DMODE_FIXED: UInt8          = 0   // show cfg.homePage
+let CS_DMODE_CYCLE_SELECTED: UInt8 = 1   // rotate the active pages at cfg.dwell
+let CS_DMODE_CYCLE_ALL: UInt8      = 2   // rotate every displayable noun
+
+/// `CsDisplayCfg.flags`.
+let CS_DCFG_OVERLAY_ANY: UInt8 = 0x01   // the pop-up also covers unconfigured changes
+let CS_DCFG_EDIT_GATED: UInt8  = 0x02   // PAGE_VALUE adjusts only while edit is armed
+
+/// `CsDisplayPage.flags`.
+let CS_DPAGE_ACTIVE: UInt8 = 0x01   // slot in use (an all-zero record is empty)
+let CS_DPAGE_GROUP: UInt8  = 0x02   // `target` is a group index
+let CS_DPAGE_LARGE: UInt8  = 0x04   // pixel-doubled value on graphic OLEDs
+
+/// `CsDisplayStatus.initState`.
+let CS_DISP_STATE_DOWN: UInt8   = 0
+let CS_DISP_STATE_INIT: UInt8   = 1
+let CS_DISP_STATE_LIVE: UInt8   = 2
+let CS_DISP_STATE_ERROR: UInt8  = 3
+/// `CsDisplayStatus.flags`.
+let CS_DISP_FLAG_OVERLAY: UInt8 = 0x01
+let CS_DISP_FLAG_EDIT: UInt8    = 0x02
+/// `CsDisplayStatus.currentPage` when nothing (or a synthesized overlay) shows.
+let CS_DISPLAY_PAGE_NONE: UInt8 = 0xFF
+
+/// The dwell floor the firmware enforces in either cycle mode (0.1 s units).
+let CS_DISPLAY_MIN_DWELL: UInt16 = 10
+
+/// Display model names, indexed by `CS_DISP_MODEL_*`.
+func csDisplayModelName(_ model: Int) -> String {
+    switch model {
+    case CS_DISP_MODEL_LCD1602:        return "LCD 16x2 (HD44780)"
+    case CS_DISP_MODEL_LCD2004:        return "LCD 20x4 (HD44780)"
+    case CS_DISP_MODEL_CHAR_OLED_16X2: return "Character OLED 16x2"
+    case CS_DISP_MODEL_CHAR_OLED_20X2: return "Character OLED 20x2"
+    case CS_DISP_MODEL_CHAR_OLED_20X4: return "Character OLED 20x4"
+    case CS_DISP_MODEL_SSD1306_128X64: return "OLED 128x64 (SSD1306)"
+    case CS_DISP_MODEL_SSD1306_128X32: return "OLED 128x32 (SSD1306)"
+    case CS_DISP_MODEL_SH1106_128X64:  return "OLED 128x64 (SH1106)"
+    default:                           return "Model \(model)"
+    }
+}
+
+/// The address a model uses when `CsBinding.value` is 0.
+func csDisplayDefaultAddress(_ model: Int) -> UInt8 {
+    (model == CS_DISP_MODEL_LCD1602 || model == CS_DISP_MODEL_LCD2004) ? 0x27 : 0x3C
+}
+
+/// True for the graphic OLEDs, the only models with a large font to render.
+func csDisplayIsGraphic(_ model: Int) -> Bool {
+    model >= CS_DISP_MODEL_SSD1306_128X64
+}
 
 /// A macro step's `pre_delay` is in 10 ms units, unlike the binding's 0.1 s
 /// indicator delays - the sequencer needs finer grain for timed sequences.
@@ -698,6 +787,7 @@ let CS_TYPE_ENCODER: Int  = 4
 let CS_TYPE_LED: Int      = 5
 let CS_TYPE_LED_PWM: Int  = 6   // hardware-PWM-dimmed LED (IND_LEVEL meter)
 let CS_TYPE_IR: Int       = 7   // IR remote receiver (container: one pin + learned command sub-slots)
+let CS_TYPE_DISPLAY: Int  = 8   // I2C character/OLED display (container: SDA + SCL, model, address)
 
 // CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns,
 // v4 = 49, v7 = 51); the app reads the live count and per-noun descriptors from
@@ -766,6 +856,12 @@ let CS_NOUN_INPUT_LEVEL_MAX: Int    = 51
 // the running macro's index, or 255 when idle - which matches no comparand, so
 // an idle sequencer leaves every macro LED dark.
 let CS_NOUN_MACRO: Int              = 52
+// Caps v10 additions (display spec §4).  The three display nouns are no-ops
+// without a live display component, so they are valid to configure in advance.
+let CS_NOUN_CPU_LOAD: Int           = 53   // continuous percent 0..100, read-only
+let CS_NOUN_DISPLAY_PAGE: Int       = 54   // enum: which page is shown (steps skip empty slots)
+let CS_NOUN_DISPLAY_EDIT: Int       = 55   // bool: editing of the shown page is armed
+let CS_NOUN_PAGE_VALUE: Int         = 56   // virtual: adjusts whatever the display is showing
 /// `CS_NOUN_MACRO` live value while no macro is running (also
 /// `CsExtStatusPacket.macroRunning` when idle).
 let CS_MACRO_NONE: UInt8            = 0xFF

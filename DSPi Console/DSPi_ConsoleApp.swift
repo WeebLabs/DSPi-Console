@@ -537,9 +537,10 @@ struct PinOverviewTab: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                let claims = claimsByPin(assignments)
                 LazyVGrid(columns: Self.mapColumns, alignment: .leading, spacing: 4) {
                     ForEach(HardwareSettingsTab.validPins, id: \.self) { pin in
-                        mapChip(pin)
+                        mapChip(pin, claim: claims[pin])
                     }
                 }
             }
@@ -554,9 +555,8 @@ struct PinOverviewTab: View {
     /// One GPIO in the map.  Claimed pins carry their role's tint and name the
     /// owner on hover; free pins are a muted outline of the same shape, so the
     /// eye reads occupancy as colour rather than having to parse numbers.
-    private func mapChip(_ pin: UInt8) -> some View {
-        let claim = claimsByPin[pin]
-        return Text("\(pin)")
+    private func mapChip(_ pin: UInt8, claim: PinAssignment?) -> some View {
+        Text("\(pin)")
             .font(.system(.caption2, design: .monospaced).weight(claim == nil ? .regular : .semibold))
             .foregroundStyle(claim == nil ? Color.secondary : Color.white)
             .frame(maxWidth: .infinity)
@@ -569,10 +569,12 @@ struct PinOverviewTab: View {
             .help(claim?.label ?? "GP\(pin) - available")
     }
 
-    /// Claims keyed by pin, so the map is one pass over the assignments rather
-    /// than a fresh ownership query per chip.
-    private var claimsByPin: [UInt8: PinAssignment] {
-        Dictionary(uniqueKeysWithValues: assignments.map { ($0.pin, $0) })
+    /// Claims keyed by pin.  Built once per render by the caller and handed to
+    /// each chip: as a computed property read inside `mapChip` it rebuilt the
+    /// whole table, and re-queried every pin's owner, once for each of the 25
+    /// chips.
+    private func claimsByPin(_ rows: [PinAssignment]) -> [UInt8: PinAssignment] {
+        Dictionary(uniqueKeysWithValues: rows.map { ($0.pin, $0) })
     }
 
     @ViewBuilder
@@ -3116,7 +3118,8 @@ struct ControlSurfacesSettingsTab: View {
     private func macroStepNouns() -> [Int] {
         let mask = CS_MACRO_STEP_ACTIONS.reduce(UInt16(0)) { $0 | CS_ACT_BIT($1) }
         return (0..<vm.csNounDescs.count).filter { n in
-            n != CS_NOUN_MACRO && (vm.csNounDescs[n].actions & mask) != 0
+            n != CS_NOUN_MACRO && n != CS_NOUN_PAGE_VALUE
+                && (vm.csNounDescs[n].actions & mask) != 0
         }
     }
 
@@ -3600,6 +3603,13 @@ struct ControlSurfacesSettingsTab: View {
                                detail: invertDetail(CS_TYPE_IR),
                                icon: "bolt")
                     irCommandsSection(slot)
+                } else if Int(b.type) == CS_TYPE_DISPLAY {
+                    // Also a container: the panel's wiring and identity here,
+                    // then what it shows (config + pages) below.
+                    displayRejectionRow()
+                    displayWiringRows(slot)
+                    displayConfigRows()
+                    displayPagesSection()
                 } else {
                     nounRow(slot)
                     targetRows(slot)
@@ -4052,7 +4062,9 @@ struct ControlSurfacesSettingsTab: View {
         let b = drafts[slot]
         let noun = Int(b.noun)
         let action = Int(b.action)
-        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        // PAGE_VALUE takes its unit, step law and range from whatever page is
+        // on screen, so there is nothing to set here.
+        let kind = noun == CS_NOUN_PAGE_VALUE ? UInt8(255) : (nounDesc(noun)?.kind ?? CS_KIND_BOOL)
 
         switch action {
         case CS_ACT_ADJUST:
@@ -4543,15 +4555,24 @@ struct ControlSurfacesSettingsTab: View {
             DispatchQueue.main.async {
                 applyingSlot = nil
                 coordinator.endCsOperation()
-                drafts[slot] = vm.csBindings[slot]
-                nameEdits[slot] = nil   // staged name is now live (or unchanged)
-                for item in irToApply {
-                    irDrafts[item.sub] = vm.csIrCommands[item.sub]
-                    subMessages[item.sub] = nil
+                let msg = statusMessage(status)
+                if status == PIN_CONFIG_SUCCESS {
+                    drafts[slot] = vm.csBindings[slot]
+                    nameEdits[slot] = nil   // staged name is now live (or unchanged)
+                    for item in irToApply {
+                        irDrafts[item.sub] = vm.csIrCommands[item.sub]
+                        subMessages[item.sub] = nil
+                    }
+                } else {
+                    // Keep the rejected draft.  Re-seeding from the device
+                    // would restore an empty slot for a control that was never
+                    // applied, so the card would vanish - taking this very
+                    // error message with it, and reading as "adding it flashed
+                    // and did nothing".  Left in place, the user can see what
+                    // was wrong, fix the pins or model, and apply again.
                 }
                 // Success is shown by the status pill (Active); keep a message
                 // only when the apply failed.
-                let msg = statusMessage(status)
                 slotMessages[slot] = msg.isError ? msg : nil
             }
         }
@@ -4586,7 +4607,9 @@ struct ControlSurfacesSettingsTab: View {
         var c = command
         let nd = nounDesc(Int(c.noun))
         let action = Int(c.action)
-        let kind = nd?.kind ?? CS_KIND_BOOL
+        // PAGE_VALUE reads as a 1-value enum but resolves its item at event
+        // time; the firmware requires its value and step to stay zero.
+        let kind = Int(c.noun) == CS_NOUN_PAGE_VALUE ? UInt8(255) : (nd?.kind ?? CS_KIND_BOOL)
         c.value = 0; c.step = 0; c.flags = 0
         switch action {
         case CS_ACT_INC, CS_ACT_DEC:
@@ -4829,23 +4852,54 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func irTargetRows(_ sub: Int) -> some View {
         if let nd = nounDesc(Int(irDrafts[sub].noun)), nd.isTargeted {
-            settingRow(title: "Channel", detail: "Which channel this affects.", icon: "square.stack.3d.up") {
-                Picker("", selection: Binding(
-                    get: { Int(irDrafts[sub].target) },
-                    set: { newTarget in
-                        var c = irDrafts[sub]; c.target = UInt8(newTarget)
+            // Caps v10 lets a remote key address a group, which is what closes
+            // the v9 gap where grouped volume from a remote needed a macro per
+            // press.  Same merged picker a binding gets.
+            let grouped = irDrafts[sub].flags & CS_FLAG_GROUP != 0
+            let usable = vm.csIrGroupsSupported ? compatibleGroups(forNoun: Int(irDrafts[sub].noun)) : []
+            settingRow(title: usable.isEmpty && !grouped ? "Channel" : "Channel or Group",
+                       detail: "Which channel, or named set of channels, this affects.",
+                       icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
+                Picker("", selection: Binding<CsTargetChoice>(
+                    get: {
+                        let c = irDrafts[sub]
+                        return c.flags & CS_FLAG_GROUP != 0 ? .group(Int(c.target)) : .channel(Int(c.target))
+                    },
+                    set: { choice in
+                        var c = irDrafts[sub]
+                        switch choice {
+                        case .channel(let t): c.flags &= ~CS_FLAG_GROUP; c.target = UInt8(t)
+                        case .group(let g):   c.flags |= CS_FLAG_GROUP;  c.target = UInt8(g)
+                        }
                         if nounDesc(Int(c.noun))?.hasBand == true {
-                            let opts = bandOptions(noun: Int(c.noun), dspChannel: newTarget)
+                            let opts = bandOptions(noun: Int(c.noun), target: Int(c.target),
+                                                   grouped: c.flags & CS_FLAG_GROUP != 0)
                             if !opts.contains(Int(c.index)) { c.index = UInt8(opts.first ?? 0) }
                         }
                         irDrafts[sub] = c
                     })) {
-                    ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in Text(targetName(nd, t)).tag(t) }
+                    Section("Channels") {
+                        ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                            Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
+                        }
+                    }
+                    if !usable.isEmpty {
+                        Section("Groups") {
+                            ForEach(usable, id: \.self) { g in
+                                Text(groupMenuLabel(g)).tag(CsTargetChoice.group(g))
+                            }
+                        }
+                    }
+                    if grouped, !usable.contains(Int(irDrafts[sub].target)) {
+                        Text(groupMenuLabel(Int(irDrafts[sub].target)))
+                            .tag(CsTargetChoice.group(Int(irDrafts[sub].target)))
+                    }
                 }
                 .labelsHidden().fixedSize()
             }
             if nd.hasBand {
-                let bands = bandOptions(noun: Int(irDrafts[sub].noun), dspChannel: Int(irDrafts[sub].target))
+                let bands = bandOptions(noun: Int(irDrafts[sub].noun),
+                                        target: Int(irDrafts[sub].target), grouped: grouped)
                 settingRow(title: "Band", detail: "Which filter band this affects.", icon: "waveform.path.ecg") {
                     Picker("", selection: Binding(
                         get: { Int(irDrafts[sub].index) },
@@ -4863,7 +4917,8 @@ struct ControlSurfacesSettingsTab: View {
         let c = irDrafts[sub]
         let noun = Int(c.noun)
         let action = Int(c.action)
-        let kind = nounDesc(noun)?.kind ?? CS_KIND_BOOL
+        // PAGE_VALUE takes everything from the page on screen (see operandRows).
+        let kind = noun == CS_NOUN_PAGE_VALUE ? UInt8(255) : (nounDesc(noun)?.kind ?? CS_KIND_BOOL)
         switch action {
         case CS_ACT_INC, CS_ACT_DEC:
             if kind == CS_KIND_CONTINUOUS { irStepRow(sub) }
@@ -5146,7 +5201,17 @@ struct ControlSurfacesSettingsTab: View {
 
     /// Types offerable when adding a control: hide IR once a receiver exists.
     private var addableTypes: [Int] {
-        realTypes.filter { $0 != CS_TYPE_IR || irReceiverSlot == nil }
+        realTypes.filter {
+            if $0 == CS_TYPE_IR { return irReceiverSlot == nil }
+            if $0 == CS_TYPE_DISPLAY { return displaySlot == nil }
+            return true
+        }
+    }
+
+    /// The slot holding the display component, counting staged drafts so two
+    /// cannot be added before either is applied.
+    private var displaySlot: Int? {
+        (0..<slotCount).first { Int(drafts[$0].type) == CS_TYPE_DISPLAY }
     }
 
     /// Nouns a given component type can drive (non-empty action intersection).
@@ -5208,8 +5273,11 @@ struct ControlSurfacesSettingsTab: View {
                      strip: ["Filter"]),
         NounCategory(name: "Tools", nouns: [CS_NOUN_MACRO, CS_NOUN_SIGGEN,
                                             CS_NOUN_DAC_MUTE_TEST, CS_NOUN_CLIP]),
+        NounCategory(name: "Display",
+                     nouns: [CS_NOUN_DISPLAY_PAGE, CS_NOUN_PAGE_VALUE, CS_NOUN_DISPLAY_EDIT],
+                     strip: ["Display"]),
         NounCategory(name: "Status",
-                     nouns: [CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_INPUT_LEVEL_MAX,
+                     nouns: [CS_NOUN_CPU_LOAD, CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_INPUT_LEVEL_MAX,
                              CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
                              CS_NOUN_USB_STREAMING, CS_NOUN_ADAT_ACTIVE, CS_NOUN_LG_PRESENT,
                              CS_NOUN_LG_MUTED]),
@@ -5274,6 +5342,20 @@ struct ControlSurfacesSettingsTab: View {
             ir.gpio1 = CS_GPIO_UNUSED
             return ir
         }
+        // The display is a container too: SDA, SCL, a model in `index` and an
+        // address in `value`, every other field 0.  SDA must be an even GPIO
+        // and SCL the odd one above it (the pin mux pairs them), so the pins
+        // are seeded as a legal pair rather than the next two free numbers.
+        if type == CS_TYPE_DISPLAY {
+            var disp = CsBinding()
+            disp.type = UInt8(CS_TYPE_DISPLAY)
+            let pair = freeI2CPair(slot: slot)
+            disp.gpio0 = pair.sda
+            disp.gpio1 = pair.scl
+            disp.index = UInt8(CS_DISP_MODEL_SSD1306_128X64)
+            disp.value = 0   // 0 means the model's conventional address
+            return disp
+        }
         var b = CsBinding()
         b.type = UInt8(type)
         let noun = validNouns(forType: type).first ?? CS_NOUN_MASTER_VOLUME
@@ -5328,6 +5410,12 @@ struct ControlSurfacesSettingsTab: View {
         default:
             break   // IND_LEVEL / ADJUST use the full range (0,0)
         }
+        // PAGE_VALUE resolves its item at event time, so it has no static
+        // operands to carry; the firmware rejects the binding if any is set.
+        // It reads as a 1-value enum, which would otherwise pick up a step of 1.
+        if Int(b.noun) == CS_NOUN_PAGE_VALUE {
+            b.value = 0; b.step = 0; b.rangeMin = 0; b.rangeMax = 0
+        }
         return sanitizeGroupFlags(b)
     }
 
@@ -5361,6 +5449,464 @@ struct ControlSurfacesSettingsTab: View {
             b.flags &= ~CS_FLAG_GROUP_ALL
         }
         return b
+    }
+
+    // MARK: Display wiring, config and pages (caps v10)
+
+    /// The panel's identity and wiring.  SCL is not offered separately: the pin
+    /// mux fixes it as SDA + 1, so showing it as a second picker would only let
+    /// the user build a pair the device rejects.
+    @ViewBuilder
+    private func displayWiringRows(_ slot: Int) -> some View {
+        let b = drafts[slot]
+        settingRow(title: "Model", detail: "Which panel is wired up.", icon: "display") {
+            Picker("", selection: Binding(
+                get: { Int(drafts[slot].index) },
+                set: { newModel in
+                    var nb = drafts[slot]
+                    nb.index = UInt8(newModel)
+                    // The address is stored as 0 = "the model's usual address",
+                    // so a model change carries that convention with it rather
+                    // than stranding the previous model's default.
+                    if nb.value != 0, UInt8(truncatingIfNeeded: nb.value) == csDisplayDefaultAddress(Int(drafts[slot].index)) {
+                        nb.value = 0
+                    }
+                    drafts[slot] = nb
+                })) {
+                ForEach(Array(1..<max(2, min(Int(vm.csDisplayModelCount), CS_DISP_MODEL_COUNT))), id: \.self) { m in
+                    Text(csDisplayModelName(m)).tag(m)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+
+        settingRow(title: "SDA Pin",
+                   detail: "Data line. SCL is the next GPIO up (\(Int(b.gpio0) + 1)); the pin mux pairs them.",
+                   icon: "cable.connector") {
+            Picker("", selection: Binding(
+                get: { drafts[slot].gpio0 },
+                set: { sda in
+                    var nb = drafts[slot]
+                    nb.gpio0 = sda
+                    nb.gpio1 = sda &+ 1
+                    drafts[slot] = nb
+                })) {
+                ForEach(i2cSdaCandidates(slot: slot), id: \.self) { pin in
+                    Text("GPIO \(pin) / \(pin + 1)").tag(pin)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+
+        settingRow(title: "Address",
+                   detail: "7-bit I2C address. Default is the model's usual one (0x\(String(csDisplayDefaultAddress(Int(b.index)), radix: 16, uppercase: true))).",
+                   icon: "number") {
+            Picker("", selection: Binding(
+                get: { Int(drafts[slot].value) },
+                set: { var nb = drafts[slot]; nb.value = Int16($0); drafts[slot] = nb })) {
+                Text("Default").tag(0)
+                ForEach([0x27, 0x3C, 0x3D, 0x3E, 0x3F], id: \.self) { addr in
+                    Text("0x" + String(addr, radix: 16, uppercase: true)).tag(addr)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+
+        displayStatusRow()
+    }
+
+    /// The last live edit the device refused.  The config and page rows apply
+    /// as they are edited, so there is no Apply button to carry the reason.
+    @ViewBuilder
+    private func displayRejectionRow() -> some View {
+        let status = vm.csDisplayLastStatus
+        if status != PIN_CONFIG_SUCCESS {
+            let msg = statusMessage(status)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange).font(.caption)
+                Text(msg.message).font(.caption2).foregroundColor(.orange)
+            }
+        }
+    }
+
+    /// Live panel state.  A miswired or absent module announces itself through
+    /// the I2C abort counter: the driver keeps retrying, so the count climbs
+    /// rather than the feature failing silently.
+    @ViewBuilder
+    private func displayStatusRow() -> some View {
+        let st = vm.csDisplayStatus
+        let (text, colour): (String, Color) = {
+            switch st.initState {
+            case CS_DISP_STATE_LIVE:  return ("Running", .green)
+            case CS_DISP_STATE_INIT:  return ("Starting up", .secondary)
+            case CS_DISP_STATE_ERROR: return ("Not responding", .orange)
+            default:                  return ("Not started", .secondary)
+            }
+        }()
+        HStack(spacing: 8) {
+            settingLabel(title: "Panel",
+                         detail: st.nakCount > 0
+                             ? "\(st.nakCount) I2C error\(st.nakCount == 1 ? "" : "s") so far. Check wiring, pull-up resistors, and the address."
+                             : "Reported by the device.",
+                         icon: "waveform.path.ecg")
+            Spacer()
+            Text(text).font(.caption).foregroundColor(colour)
+        }
+    }
+
+    /// How the panel chooses what to show when nothing has just changed.
+    @ViewBuilder
+    private func displayConfigRows() -> some View {
+        let cfg = vm.csDisplayCfg
+        Divider().padding(.vertical, 2)
+
+        settingRow(title: "Shows", detail: "What the panel rests on between changes.", icon: "rectangle.on.rectangle") {
+            Picker("", selection: displayCfgBinding(\.mode)) {
+                Text("One page").tag(CS_DMODE_FIXED)
+                Text("Cycle chosen pages").tag(CS_DMODE_CYCLE_SELECTED)
+                Text("Cycle everything").tag(CS_DMODE_CYCLE_ALL)
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+
+        if cfg.mode == CS_DMODE_FIXED {
+            settingRow(title: "Page", detail: "Which page rests on screen.", icon: "doc.text") {
+                Picker("", selection: displayCfgBinding(\.homePage)) {
+                    ForEach(Array(0..<UInt8(vm.csDisplayPageCount)), id: \.self) { i in
+                        Text(displayPageMenuLabel(Int(i))).tag(i)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+        } else {
+            displaySecondsRow(title: "Cycle Every",
+                              detail: "How long each page stays up.",
+                              icon: "clock.arrow.circlepath",
+                              keyPath: \.dwell, minimum: CS_DISPLAY_MIN_DWELL)
+        }
+
+        displaySecondsRow(title: "Pop-Up Hold",
+                          detail: "How long a change stays on screen before the panel goes back. Zero turns pop-ups off.",
+                          icon: "bell.badge",
+                          keyPath: \.overlayHold, minimum: 0)
+
+        if cfg.overlayHold > 0 {
+            displayFlagToggle(CS_DCFG_OVERLAY_ANY,
+                              title: "Pop Up Anything",
+                              detail: "Show any parameter that changes, not only the ones with a page.",
+                              icon: "sparkles")
+        }
+
+        displaySecondsRow(title: "Editing Times Out",
+                          detail: "Disarm editing after this long untouched. Zero leaves it armed until switched off.",
+                          icon: "hourglass",
+                          keyPath: \.editTimeout, minimum: 0)
+
+        displayFlagToggle(CS_DCFG_EDIT_GATED,
+                          title: "Arm Before Editing",
+                          detail: "An encoder browses pages until editing is armed, then adjusts. Off lets it adjust straight away.",
+                          icon: "lock")
+
+        settingRow(title: "Brightness",
+                   detail: "OLED contrast, applied when the panel next starts. Zero is the driver default.",
+                   icon: "sun.max") {
+            ValueField(label: "", value: Float(vm.csDisplayCfg.brightness), width: 44,
+                       scrollStep: 8, minValue: 0, maxDecimals: 0, labelWidth: 0) { v in
+                var cfg = vm.csDisplayCfg
+                cfg.brightness = UInt8(min(255, max(0, v.rounded())))
+                vm.csDisplayCfg = cfg
+                applyDisplayCfg(cfg)
+            }
+        }
+    }
+
+    /// A 0.1 s-unit config field, entered in whole seconds.
+    @ViewBuilder
+    private func displaySecondsRow(title: String, detail: String, icon: String,
+                                   keyPath: WritableKeyPath<CsDisplayCfg, UInt16>,
+                                   minimum: UInt16) -> some View {
+        settingRow(title: title, detail: detail, icon: icon) {
+            ValueField(label: "s", value: Float(vm.csDisplayCfg[keyPath: keyPath]) / 10,
+                       width: 44, scrollStep: 1, minValue: 0, maxDecimals: 1) { v in
+                var cfg = vm.csDisplayCfg
+                let tenths = UInt16(min(6553, max(0, (v * 10).rounded())))
+                // The firmware refuses a dwell under its floor, so snap rather
+                // than let Apply fail on a value the field allowed.
+                cfg[keyPath: keyPath] = (tenths == 0 && minimum == 0) ? 0 : max(minimum, tenths)
+                vm.csDisplayCfg = cfg
+                applyDisplayCfg(cfg)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func displayFlagToggle(_ mask: UInt8, title: String, detail: String, icon: String) -> some View {
+        Toggle(isOn: Binding(
+            get: { vm.csDisplayCfg.flags & mask != 0 },
+            set: { on in
+                var cfg = vm.csDisplayCfg
+                if on { cfg.flags |= mask } else { cfg.flags &= ~mask }
+                vm.csDisplayCfg = cfg
+                applyDisplayCfg(cfg)
+            })) {
+            settingLabel(title: title, detail: detail, icon: icon)
+        }
+        .toggleStyle(.switch)
+    }
+
+    private func displayCfgBinding<V: Equatable>(_ keyPath: WritableKeyPath<CsDisplayCfg, V>) -> Binding<V> {
+        Binding(
+            get: { vm.csDisplayCfg[keyPath: keyPath] },
+            set: { newValue in
+                var cfg = vm.csDisplayCfg
+                cfg[keyPath: keyPath] = newValue
+                // A cycle mode has a dwell floor; entering one from FIXED with
+                // an unset dwell would otherwise be rejected on apply.
+                if cfg.mode != CS_DMODE_FIXED { cfg.dwell = max(CS_DISPLAY_MIN_DWELL, cfg.dwell) }
+                vm.csDisplayCfg = cfg
+                applyDisplayCfg(cfg)
+            })
+    }
+
+    /// The display config applies immediately rather than staging behind Apply:
+    /// it is one small record with no dependent edits, and the panel shows the
+    /// result the moment it lands.  Save/Revert still governs whether it sticks.
+    ///
+    /// A ValueField commits on each scroll detent, so this can fire many times
+    /// a second.  The view model coalesces the writes onto its serial queue:
+    /// dispatching each to a global queue instead parked a thread per edit on
+    /// that same serial queue, and ran a full deferred round trip for values
+    /// the user had already scrolled past.
+    private func applyDisplayCfg(_ cfg: CsDisplayCfg) {
+        vm.queueDisplayCfg(cfg)
+    }
+
+    // MARK: Display pages
+
+    private var visibleDisplayPages: [Int] {
+        (0..<vm.csDisplayPageCount).filter { vm.csDisplayPages[$0].isActive }
+    }
+
+    private var firstFreeDisplayPage: Int? {
+        (0..<vm.csDisplayPageCount).first { !vm.csDisplayPages[$0].isActive }
+    }
+
+    /// Nouns a page can show: anything the platform has, minus the three
+    /// display nouns themselves, which the firmware rejects as page nouns
+    /// (a page showing which page is shown says nothing).
+    ///
+    /// MACRO stays: the spec only skips it in the cycle-everything rotation,
+    /// not as an explicit page, and its live read is the running macro - worth
+    /// a page on a panel that fires them.
+    private func displayPageNouns() -> [Int] {
+        (0..<vm.csNounDescs.count).filter { n in
+            vm.csNounDescs[n].actions != 0
+                && n != CS_NOUN_DISPLAY_PAGE && n != CS_NOUN_DISPLAY_EDIT
+                && n != CS_NOUN_PAGE_VALUE
+        }
+    }
+
+    private func displayPageMenuLabel(_ index: Int) -> String {
+        guard vm.csDisplayPages.indices.contains(index) else { return "Page \(index + 1)" }
+        let page = vm.csDisplayPages[index]
+        guard page.isActive else { return "Page \(index + 1) (empty)" }
+        return "\(index + 1). \(displayPageSummary(page))"
+    }
+
+    /// "Out 3 Gain" - the label the panel itself renders.
+    private func displayPageSummary(_ page: CsDisplayPage) -> String {
+        let noun = nounName(Int(page.noun), forType: CS_TYPE_NONE)
+        guard let nd = nounDesc(Int(page.noun)), nd.isTargeted else { return noun }
+        let where_ = page.isGrouped
+            ? vm.csGroupName(Int(page.target))
+            : targetName(nd, Int(page.target))
+        return "\(where_) \(noun)"
+    }
+
+    @ViewBuilder
+    private func displayPagesSection() -> some View {
+        Divider().padding(.vertical, 2)
+        settingLabel(title: "Pages",
+                     detail: "What the panel can show. Bind a control to \"Display Page\" to step through them.",
+                     icon: "doc.on.doc")
+
+        ForEach(visibleDisplayPages, id: \.self) { i in
+            displayPageRow(i)
+        }
+
+        HStack {
+            Button {
+                guard let i = firstFreeDisplayPage else { return }
+                var page = CsDisplayPage()
+                page.noun = UInt8(displayPageNouns().first ?? CS_NOUN_USER_VOLUME)
+                page.flags = CS_DPAGE_ACTIVE
+                applyDisplayPage(i, page)
+            } label: {
+                Label("Add Page", systemImage: "plus")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .fixedSize()
+            .disabled(firstFreeDisplayPage == nil || !vm.isDeviceConnected)
+            Spacer()
+            if firstFreeDisplayPage == nil {
+                Text("All \(vm.csDisplayPageCount) page slots are in use.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    /// One page: what it shows, for which channel or group, and whether the
+    /// value is rendered large.  Applies on change like the config does.
+    @ViewBuilder
+    private func displayPageRow(_ i: Int) -> some View {
+        let page = vm.csDisplayPages[i]
+        let nd = nounDesc(Int(page.noun))
+        let shown = vm.csDisplayStatus.currentPage == UInt8(i)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Text("\(i + 1)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                    .frame(width: 16, alignment: .trailing)
+                Picker("", selection: Binding(
+                    get: { Int(vm.csDisplayPages[i].noun) },
+                    set: { newNoun in
+                        var p = vm.csDisplayPages[i]
+                        p.noun = UInt8(newNoun)
+                        p.target = 0; p.index = 0
+                        p.flags &= ~CS_DPAGE_GROUP
+                        applyDisplayPage(i, p)
+                    })) {
+                    ForEach(displayPageNouns(), id: \.self) { n in
+                        Text(nounName(n, forType: CS_TYPE_NONE)).tag(n)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+
+                if shown {
+                    Image(systemName: "eye.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.green)
+                        .help("Currently on screen")
+                }
+                Spacer()
+                Button(role: .destructive) {
+                    applyDisplayPage(i, CsDisplayPage())
+                } label: {
+                    Image(systemName: "minus.circle").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+            }
+
+            if let nd = nd, nd.isTargeted {
+                HStack(spacing: 8) {
+                    Spacer().frame(width: 16)
+                    Picker("", selection: Binding<CsTargetChoice>(
+                        get: {
+                            let p = vm.csDisplayPages[i]
+                            return p.isGrouped ? .group(Int(p.target)) : .channel(Int(p.target))
+                        },
+                        set: { choice in
+                            var p = vm.csDisplayPages[i]
+                            switch choice {
+                            case .channel(let c): p.flags &= ~CS_DPAGE_GROUP; p.target = UInt8(c)
+                            case .group(let g):   p.flags |= CS_DPAGE_GROUP;  p.target = UInt8(g)
+                            }
+                            applyDisplayPage(i, p)
+                        })) {
+                        Section("Channels") {
+                            ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                                Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
+                            }
+                        }
+                        let usable = compatibleGroups(forNoun: Int(page.noun))
+                        if !usable.isEmpty {
+                            Section("Groups") {
+                                ForEach(usable, id: \.self) { g in
+                                    Text(groupMenuLabel(g)).tag(CsTargetChoice.group(g))
+                                }
+                            }
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Spacer()
+                }
+            }
+
+            // Large text is a graphic-OLED feature; character modules ignore it.
+            if let slot = vm.csDisplaySlot, csDisplayIsGraphic(Int(vm.csBindings[slot].index)) {
+                HStack(spacing: 8) {
+                    Spacer().frame(width: 16)
+                    Toggle(isOn: Binding(
+                        get: { vm.csDisplayPages[i].isLarge },
+                        set: { on in
+                            var p = vm.csDisplayPages[i]
+                            if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
+                            applyDisplayPage(i, p)
+                        })) {
+                        Text("Large value").font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    Spacer()
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func applyDisplayPage(_ index: Int, _ page: CsDisplayPage) {
+        vm.csDisplayPages[index] = page
+        vm.queueDisplayPage(index, page)
+    }
+
+    // MARK: I2C display wiring helpers
+
+    /// Legal SDA pins: the RP2040/RP2350 mux pairs GPIOs so that bit 0 picks
+    /// SDA (even) or SCL (odd) and bit 1 picks the bus instance, so SDA is
+    /// always an even GPIO whose odd neighbour is its SCL.
+    private func i2cSdaCandidates(slot: Int) -> [UInt8] {
+        let valid = Set(HardwareSettingsTab.validPins)
+        // The display masters one I2C instance; the external I2C control
+        // interface occupies the other while it is live.  The firmware rejects
+        // an overlap outright, so drop those pins here rather than letting the
+        // user build a pair that can only fail on apply.
+        let blockedInstance: UInt8? = vm.ctrlIfaceStatus.i2cLive
+            ? (vm.i2cCtrlConfig.sdaPin >> 1) & 1 : nil
+        return HardwareSettingsTab.validPins.filter { sda in
+            if let blocked = blockedInstance, (sda >> 1) & 1 == blocked { return false }
+            guard sda % 2 == 0, valid.contains(sda + 1) else { return false }
+            // Keep whatever this display already uses selectable, but only when
+            // it really is a display: makeBinding asks before it assigns the
+            // draft, when gpio0 still reads 0, which would otherwise hand back
+            // GPIO 0/1 however occupied they are.
+            if Int(drafts[slot].type) == CS_TYPE_DISPLAY && sda == drafts[slot].gpio0 { return true }
+            return vm.pinInUseBy(sda, excluding: .controlSurface(slot)) == nil
+                && vm.pinInUseBy(sda + 1, excluding: .controlSurface(slot)) == nil
+        }
+    }
+
+    /// The first free legal SDA/SCL pair, falling back to the lowest legal pair.
+    private func freeI2CPair(slot: Int) -> (sda: UInt8, scl: UInt8) {
+        if let sda = i2cSdaCandidates(slot: slot).first { return (sda, sda + 1) }
+        let sda = HardwareSettingsTab.validPins.first { $0 % 2 == 0 } ?? 0
+        return (sda, sda + 1)
+    }
+
+    /// The address the panel actually answers on: the model default when the
+    /// binding stores 0.
+    private func displayAddress(_ b: CsBinding) -> UInt8 {
+        b.value == 0 ? csDisplayDefaultAddress(Int(b.index)) : UInt8(truncatingIfNeeded: b.value)
     }
 
     private func freePins(slot: Int, adcOnly: Bool) -> [UInt8] {
@@ -5458,6 +6004,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED:     return "Indicator LED"
         case CS_TYPE_LED_PWM: return "Dimmable LED"
         case CS_TYPE_IR:      return "IR Remote"
+        case CS_TYPE_DISPLAY: return "Display"
         default:              return "Type \(type)"
         }
     }
@@ -5471,6 +6018,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED:     return "lightbulb.fill"
         case CS_TYPE_LED_PWM: return "sun.max.fill"
         case CS_TYPE_IR:      return "av.remote"
+        case CS_TYPE_DISPLAY: return "display"
         default:              return "dial.medium"
         }
     }
@@ -5486,6 +6034,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED:     return Color(red: 0.93, green: 0.63, blue: 0.18)  // amber
         case CS_TYPE_LED_PWM: return Color(red: 0.90, green: 0.45, blue: 0.20)  // warm orange
         case CS_TYPE_IR:      return Color(red: 0.55, green: 0.35, blue: 0.72)  // violet
+        case CS_TYPE_DISPLAY: return Color(red: 0.016, green: 0.522, blue: 0.435) // teal
         default:              return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
         }
     }
@@ -5575,6 +6124,10 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_LOUDNESS_INTENSITY: return "Loudness Intensity"
         case CS_NOUN_INPUT_LEVEL_MAX:    return "Input Signal Level"
         case CS_NOUN_MACRO:              return isIndicatorType(type) ? "Running Macro" : "Macro"
+        case CS_NOUN_CPU_LOAD:           return "CPU Load"
+        case CS_NOUN_DISPLAY_PAGE:       return "Display Page"
+        case CS_NOUN_DISPLAY_EDIT:       return "Display Editing"
+        case CS_NOUN_PAGE_VALUE:         return "Shown Value"
         default:                         return "Parameter \(noun)"
         }
     }
@@ -5622,6 +6175,9 @@ struct ControlSurfacesSettingsTab: View {
 
     private func actionPhrase(_ b: CsBinding) -> String {
         if Int(b.type) == CS_TYPE_IR { return "Receives commands from an IR remote." }
+        if Int(b.type) == CS_TYPE_DISPLAY {
+            return "\(csDisplayModelName(Int(b.index))) on I2C, address 0x\(String(displayAddress(b), radix: 16, uppercase: true))."
+        }
         let noun = nounName(Int(b.noun), forType: Int(b.type)) + targetSuffix(b)
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
         let press = pressWord(b)
@@ -5842,6 +6398,10 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_INVALID_GROUP:   return ("That group is empty, missing, or holds the wrong kind of channel", true)
         case CS_STATUS_INVALID_MACRO:   return ("Invalid macro or step count", true)
         case CS_STATUS_INVALID_STEP:    return ("A macro step isn't valid", true)
+        case CS_STATUS_DISPLAY_IN_USE:  return ("Another slot already holds the display (one per device)", true)
+        case CS_STATUS_PIN_NOT_I2C:     return ("SDA and SCL must be an even/odd GPIO pair on the same I2C bus", true)
+        case CS_STATUS_I2C_IN_USE:      return ("That I2C bus belongs to the I2C control interface", true)
+        case CS_STATUS_INVALID_PAGE:    return ("That display page isn't valid", true)
         default:                        return ("Failed to apply the binding", true)
         }
     }

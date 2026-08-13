@@ -2205,7 +2205,13 @@ extension DSPViewModel {
     /// bindings, and the status packet, so the picker UI is built entirely from
     /// device-served tables (spec §4/§8.1).
     func fetchControlSurfaces() {
-        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 40),
+        // Ask for more than the largest known header: the type table grows as
+        // component types are added (40 bytes at caps v3-v9, 44 at v10 with
+        // CS_TYPE_DISPLAY), and a request pinned to one version silently
+        // truncates the tail that carries the IR, group and macro counts - so
+        // those features would read as absent on newer firmware.  The parser
+        // locates that tail from `type_count`, never a fixed offset.
+        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 64),
               let caps = CsCapsHeader.fromData(h) else {
             DispatchQueue.main.async { self.controlSurfacesSupported = false }
             return
@@ -2246,6 +2252,13 @@ extension DSPViewModel {
         for g in 0..<min(Int(caps.maxGroups), CS_MAX_GROUPS) { fetchCsGroup(g) }
         for m in 0..<min(Int(caps.maxMacros), CS_MAX_MACROS) { fetchCsMacro(m) }
         if caps.maxGroups > 0 || caps.maxMacros > 0 { fetchCsExtStatus() }
+        // I2C display (caps v10).  The config GET carries the page limit, so it
+        // has to land before the page loop.
+        if caps.typeCount > UInt8(CS_TYPE_DISPLAY) {
+            let pages = fetchCsDisplayCfg()
+            for i in 0..<min(Int(pages), CS_MAX_DISPLAY_PAGES) { fetchCsDisplayPage(i) }
+            fetchCsDisplayStatus()
+        }
         // Runs after every fetch above (all dispatch to main in FIFO order): if
         // the device is clean, snapshot the loaded config as the saved baseline
         // so csDirty can tell net-zero edits from real ones.
@@ -2405,6 +2418,10 @@ extension DSPViewModel {
         for g in 0..<CS_MAX_GROUPS { fetchCsGroup(g) }
         for m in 0..<CS_MAX_MACROS { fetchCsMacro(m) }
         fetchCsExtStatus()
+        // The display config and pages are covered by the same revert.
+        let pages = fetchCsDisplayCfg()
+        for i in 0..<min(Int(pages), CS_MAX_DISPLAY_PAGES) { fetchCsDisplayPage(i) }
+        fetchCsDisplayStatus()
         fetchCsStatus()
         // Live now mirrors flash again; rebase the clean baseline after the
         // re-fetches above land (FIFO on main).
@@ -2512,6 +2529,122 @@ extension DSPViewModel {
         let r = usb.getControlRequest(request: REQ_CS_MACRO_FIRE, value: index, index: 2, length: 1)
         fetchCsExtStatus()
         return r?.first ?? CS_STATUS_INVALID_MACRO
+    }
+
+    // MARK: - Control Surfaces: I2C display (caps v10)
+
+    /// Read the display config, returning the device's page-slot count so the
+    /// caller can size its page loop.  The 16-byte response is a 4-byte limits
+    /// header followed by the 12-byte config.
+    @discardableResult
+    func fetchCsDisplayCfg() -> UInt8 {
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_CFG, value: 0, index: 2,
+                                            length: CS_DISPLAY_CFG_GET_LEN),
+              d.count >= Int(CS_DISPLAY_CFG_GET_LEN),
+              let cfg = CsDisplayCfg.fromData(d, offset: 4) else { return 0 }
+        let b = d.startIndex
+        let maxPages = d[b], modelCount = d[b + 1]
+        DispatchQueue.main.async {
+            self.csDisplayMaxPages = maxPages
+            self.csDisplayModelCount = modelCount
+            self.csDisplayCfg = cfg
+        }
+        return maxPages
+    }
+
+    /// Read one 4-byte page record into `csDisplayPages[index]`.
+    func fetchCsDisplayPage(_ index: Int) {
+        guard index >= 0, index < CS_MAX_DISPLAY_PAGES,
+              let d = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_PAGE, value: UInt16(index),
+                                            index: 2, length: CS_DISPLAY_PAGE_LEN),
+              let page = CsDisplayPage.fromData(d) else { return }
+        DispatchQueue.main.async {
+            if index < self.csDisplayPages.count { self.csDisplayPages[index] = page }
+        }
+    }
+
+    /// Read the live display state: whether the panel came up, what it shows,
+    /// and the running I2C abort count.
+    @discardableResult
+    func fetchCsDisplayStatus() -> CsDisplayStatus? {
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_STATUS, value: 0, index: 2,
+                                            length: CS_DISPLAY_STATUS_LEN),
+              let st = CsDisplayStatus.fromData(d) else { return nil }
+        DispatchQueue.main.async { self.csDisplayStatus = st }
+        return st
+    }
+
+    /// Apply the display config (live-only preview; reported with `lastSlot`
+    /// 0x50).  USB-only; must be called off the main thread (blocks on poll).
+    ///
+    /// Serialized with the page SETs below: the firmware tags the config bare
+    /// and pages `0x50 | page`, so the config and page 0 arrive under the same
+    /// byte.  One display SET at a time keeps that from being ambiguous, and
+    /// these are auto-applied from the UI as the user edits, which is exactly
+    /// the case that would otherwise overlap.
+    @discardableResult
+    func setCsDisplayCfg(_ cfg: CsDisplayCfg) -> UInt8 {
+        displaySetQueue.sync { performDisplayCfgSet(cfg) }
+    }
+
+    /// The write itself.  Assumes the caller already holds `displaySetQueue`;
+    /// `setCsDisplayCfg` takes it, and `queueDisplayCfg` runs on it.
+    private func performDisplayCfgSet(_ cfg: CsDisplayCfg) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_CS_DISPLAY_CFG, value: 0, index: 2, data: cfg.toData())
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_DISPLAY_FLAG)
+        fetchCsDisplayCfg()
+        fetchCsStatus()
+        fetchCsDisplayStatus()
+        // These apply live as the user edits, so nothing waits on a return
+        // value; publish the outcome or a rejection would be invisible - the
+        // row would just snap back when the re-fetch landed.
+        DispatchQueue.main.async { self.csDisplayLastStatus = result }
+        return result
+    }
+
+    /// Queue a config write, replacing any that has not gone out yet.  These
+    /// come from live UI edits (a scroll wheel commits per detent), so sending
+    /// every intermediate value would be a queue of stale round trips.
+    func queueDisplayCfg(_ cfg: CsDisplayCfg) {
+        displayPendingLock.lock(); pendingDisplayCfg = cfg; displayPendingLock.unlock()
+        displaySetQueue.async { [weak self] in
+            guard let self else { return }
+            self.displayPendingLock.lock()
+            let next = self.pendingDisplayCfg
+            self.pendingDisplayCfg = nil
+            self.displayPendingLock.unlock()
+            guard let next else { return }   // a later edit already carried it
+            _ = self.performDisplayCfgSet(next)
+        }
+    }
+
+    /// Same for one page slot; edits to different pages do not displace each other.
+    func queueDisplayPage(_ index: Int, _ page: CsDisplayPage) {
+        displayPendingLock.lock(); pendingDisplayPages[index] = page; displayPendingLock.unlock()
+        displaySetQueue.async { [weak self] in
+            guard let self else { return }
+            self.displayPendingLock.lock()
+            let next = self.pendingDisplayPages.removeValue(forKey: index)
+            self.displayPendingLock.unlock()
+            guard let next else { return }
+            _ = self.performDisplayPageSet(index, page: next)
+        }
+    }
+
+    /// Apply one page (all-zero clears it), reported with `lastSlot` 0x50 | page.
+    @discardableResult
+    func setCsDisplayPage(_ index: Int, page: CsDisplayPage) -> UInt8 {
+        displaySetQueue.sync { performDisplayPageSet(index, page: page) }
+    }
+
+    private func performDisplayPageSet(_ index: Int, page: CsDisplayPage) -> UInt8 {
+        usb.sendControlRequest(request: REQ_SET_CS_DISPLAY_PAGE, value: UInt16(index), index: 2,
+                               data: page.toData())
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_DISPLAY_FLAG | UInt8(index))
+        fetchCsDisplayPage(index)
+        fetchCsStatus()
+        DispatchQueue.main.async { self.csDisplayLastStatus = result }
+        return result
     }
 
     /// Arm the IR learn listener (REQ_CS_IR_LEARN wValue=1; spec §3.6.1).  The

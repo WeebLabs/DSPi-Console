@@ -926,6 +926,99 @@ struct CsExtStatusPacket: Equatable {
     }
 }
 
+// MARK: - Control Surfaces: I2C display (caps v10)
+//
+// Wire-format structs mirroring firmware `control_surfaces.h`
+// (control_surfaces_display_spec.md §2).  The display is a container binding
+// like the IR receiver - SDA, SCL, a model and an address - and everything it
+// shows is configured separately: a config record and a table of pages, each
+// page being a {noun, target} drawn from the same noun table the bindings use.
+
+/// Display configuration (12 bytes; display spec §2.2).  Timing fields are in
+/// 0.1 s units, like the indicator delays.
+struct CsDisplayCfg: Equatable {
+    var mode: UInt8 = 0            // Byte 0: CS_DMODE_*
+    var homePage: UInt8 = 0        // Byte 1: page shown in FIXED mode
+    var dwell: UInt16 = 30         // Bytes 2-3: rotation period, 0.1 s units
+    var overlayHold: UInt16 = 20   // Bytes 4-5: pop-up hold, 0.1 s; 0 = no pop-up
+    var brightness: UInt8 = 0      // Byte 6: 0 = the driver default
+    var flags: UInt8 = 0           // Byte 7: CS_DCFG_*
+    var editTimeout: UInt16 = 100  // Bytes 8-9: edit auto-disarm, 0.1 s; 0 = manual
+    // Bytes 10-11: reserved (0)
+
+    func toData() -> Data {
+        var d = Data(count: 12)
+        d[0] = mode; d[1] = homePage
+        func put(_ v: UInt16, _ off: Int) {
+            d[off] = UInt8(v & 0xFF); d[off + 1] = UInt8((v >> 8) & 0xFF)
+        }
+        put(dwell, 2)
+        put(overlayHold, 4)
+        d[6] = brightness; d[7] = flags
+        put(editTimeout, 8)
+        return d
+    }
+
+    /// Parses the config from `data` at `offset` - the GET response carries a
+    /// 4-byte limits header before it, while flash and the SET payload do not.
+    static func fromData(_ data: Data, offset: Int = 0) -> CsDisplayCfg? {
+        let b = data.startIndex + offset
+        guard data.endIndex - b >= 12 else { return nil }
+        func u16(_ o: Int) -> UInt16 { UInt16(data[b + o]) | (UInt16(data[b + o + 1]) << 8) }
+        return CsDisplayCfg(mode: data[b], homePage: data[b + 1],
+                            dwell: u16(2), overlayHold: u16(4),
+                            brightness: data[b + 6], flags: data[b + 7],
+                            editTimeout: u16(8))
+    }
+}
+
+/// One display page (4 bytes; display spec §2.3): what to show and for which
+/// channel or group.  An all-zero record is an empty slot.
+struct CsDisplayPage: Equatable {
+    var noun: UInt8 = 0     // Byte 0: CsNoun to show
+    var target: UInt8 = 0   // Byte 1: channel, or group index when GROUP is set
+    var index: UInt8 = 0    // Byte 2: filter band for CS_TARGET_DSP_BAND nouns
+    var flags: UInt8 = 0    // Byte 3: CS_DPAGE_*
+
+    /// True when the slot is in use.  ACTIVE is the firmware's own marker; an
+    /// inactive record must be all-zero.
+    var isActive: Bool { flags & CS_DPAGE_ACTIVE != 0 }
+    var isGrouped: Bool { flags & CS_DPAGE_GROUP != 0 }
+    var isLarge: Bool { flags & CS_DPAGE_LARGE != 0 }
+
+    func toData() -> Data { Data([noun, target, index, flags]) }
+
+    static func fromData(_ data: Data) -> CsDisplayPage? {
+        guard data.count >= 4 else { return nil }
+        let b = data.startIndex
+        return CsDisplayPage(noun: data[b], target: data[b + 1],
+                             index: data[b + 2], flags: data[b + 3])
+    }
+}
+
+/// Live display state (8 bytes; display spec §2.4).  `nakCount` is a
+/// saturating count of I2C aborts, which is how a miswired or absent module
+/// announces itself: the driver keeps retrying and the count climbs.
+struct CsDisplayStatus: Equatable {
+    var initState: UInt8 = 0
+    var currentPage: UInt8 = CS_DISPLAY_PAGE_NONE
+    var flags: UInt8 = 0
+    var model: UInt8 = 0
+    var nakCount: UInt16 = 0
+
+    var isLive: Bool { initState == CS_DISP_STATE_LIVE }
+    var overlayShowing: Bool { flags & CS_DISP_FLAG_OVERLAY != 0 }
+    var editArmed: Bool { flags & CS_DISP_FLAG_EDIT != 0 }
+
+    static func fromData(_ data: Data) -> CsDisplayStatus? {
+        guard data.count >= 8 else { return nil }
+        let b = data.startIndex
+        return CsDisplayStatus(initState: data[b], currentPage: data[b + 1],
+                               flags: data[b + 2], model: data[b + 3],
+                               nakCount: UInt16(data[b + 4]) | (UInt16(data[b + 5]) << 8))
+    }
+}
+
 // MARK: - Test Signal Generator Wire Structs
 //
 // Wire-format structs mirroring firmware `siggen.h`
@@ -1501,6 +1594,39 @@ class DSPViewModel: ObservableObject {
     var csMacroCount: Int { min(Int(csCaps.maxMacros), CS_MAX_MACROS) }
     var csMacroStepCount: Int { min(Int(csCaps.maxMacroSteps), CS_MAX_MACRO_STEPS) }
 
+    // I2C display (caps v10).  One display per device; its component lives in
+    // the ordinary binding table, while what it shows is this config plus a
+    // page table, both device-global and under the same Save / Revert.
+    @Published var csDisplayCfg: CsDisplayCfg = CsDisplayCfg()
+    @Published var csDisplayPages: [CsDisplayPage] = Array(repeating: CsDisplayPage(), count: CS_MAX_DISPLAY_PAGES)
+    @Published var csDisplayStatus: CsDisplayStatus = CsDisplayStatus()
+    /// Page slots and model count the device serves from REQ_GET_CS_DISPLAY_CFG.
+    @Published var csDisplayMaxPages: UInt8 = 0
+    @Published var csDisplayModelCount: UInt8 = 0
+    /// Outcome of the last display config or page write.  They apply live with
+    /// no Apply button to report against, so without this a rejected edit would
+    /// simply revert on the next read with nothing said.
+    @Published var csDisplayLastStatus: UInt8 = PIN_CONFIG_SUCCESS
+    /// True when the firmware offers the display component.  Read from the caps
+    /// type table rather than the version, the same self-describing rule the
+    /// rest of the page follows.
+    var csDisplaySupported: Bool { csCaps.typeCount > UInt8(CS_TYPE_DISPLAY) }
+    /// True when IR commands may carry CS_FLAG_GROUP (caps v10).  Bundled with
+    /// the display component, so the type table answers for it as well - a
+    /// pre-v10 device rejects a grouped IR record at validation.
+    var csIrGroupsSupported: Bool { csDisplaySupported && csGroupsSupported }
+    /// Page slots to show, clamped to what the app allocates.
+    var csDisplayPageCount: Int {
+        let n = Int(csDisplayMaxPages)
+        return n > 0 ? min(n, CS_MAX_DISPLAY_PAGES) : CS_MAX_DISPLAY_PAGES
+    }
+    /// The slot holding the display component, if one is configured.
+    var csDisplaySlot: Int? {
+        (0..<min(csBindings.count, CS_MAX_BINDINGS)).first {
+            Int(csBindings[$0].type) == CS_TYPE_DISPLAY
+        }
+    }
+
     /// Display name for a group slot, falling back to its index when unnamed.
     func csGroupName(_ index: Int) -> String {
         guard csGroups.indices.contains(index) else { return "Group \(index + 1)" }
@@ -1527,6 +1653,8 @@ class DSPViewModel: ObservableObject {
     private var csCleanNames: [String]? = nil
     private var csCleanGroups: [CsGroup]? = nil
     private var csCleanMacros: [CsMacro]? = nil
+    private var csCleanDisplayCfg: CsDisplayCfg? = nil
+    private var csCleanDisplayPages: [CsDisplayPage]? = nil
 
     /// True when the live Control Surfaces config has unsaved preview changes.
     /// Requires the firmware's sticky dirty flag AND a real difference from the
@@ -1537,13 +1665,16 @@ class DSPViewModel: ObservableObject {
         guard csStatus.dirty else { return false }
         guard let cleanBindings = csCleanBindings, let cleanIr = csCleanIrCommands,
               let cleanNames = csCleanNames, let cleanGroups = csCleanGroups,
-              let cleanMacros = csCleanMacros else {
+              let cleanMacros = csCleanMacros,
+              let cleanDisplayCfg = csCleanDisplayCfg,
+              let cleanDisplayPages = csCleanDisplayPages else {
             return true   // no known-clean baseline: defer to the firmware flag
         }
         // Groups and macros share the one dirty flag and the one Save, so an
         // edit to either has to keep the banner up on its own.
         return csBindings != cleanBindings || csIrCommands != cleanIr || csNames != cleanNames
             || csGroups != cleanGroups || csMacros != cleanMacros
+            || csDisplayCfg != cleanDisplayCfg || csDisplayPages != cleanDisplayPages
     }
 
     /// Record the current live config as the clean (== flash) baseline.  Call
@@ -1555,6 +1686,8 @@ class DSPViewModel: ObservableObject {
         csCleanNames = csNames
         csCleanGroups = csGroups
         csCleanMacros = csMacros
+        csCleanDisplayCfg = csDisplayCfg
+        csCleanDisplayPages = csDisplayPages
     }
 
     // Test signal generator (siggen) - onboard measurement/diagnostic signals
@@ -2100,6 +2233,16 @@ class DSPViewModel: ObservableObject {
     func activePinAssignments(from pins: [UInt8]) -> [PinAssignment] {
         pins.compactMap { pinAssignment($0) }
     }
+
+    /// Serializes display config and page SETs against each other - they share
+    /// a deferred-outcome tag for the config and page 0, so two in flight at
+    /// once could latch onto each other's result.
+    let displaySetQueue = DispatchQueue(label: "com.weeblabs.dspi.csDisplaySet")
+    /// Latest un-sent display edits, so a burst of live edits collapses to the
+    /// value the user actually settled on.
+    let displayPendingLock = NSLock()
+    var pendingDisplayCfg: CsDisplayCfg?
+    var pendingDisplayPages: [Int: CsDisplayPage] = [:]
 
     let usb: USBDevice
     private var cancellables = Set<AnyCancellable>()
