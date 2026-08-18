@@ -4112,6 +4112,33 @@ struct ControlSurfacesSettingsTab: View {
         if vm.csIndicatorDelaysSupported, csDelaysAllowed(type: Int(b.type), action: action) {
             csDelayRows(slot)
         }
+        // The ceiling scales whatever duty the action worked out, so it belongs
+        // to the LED rather than to any one action (caps v12).
+        if vm.csLedBrightnessSupported, Int(b.type) == CS_TYPE_LED_PWM {
+            csBrightnessCeilingRow(slot)
+        }
+    }
+
+    /// Per-LED brightness ceiling (caps v12, spec §6.6).  The duty is scaled,
+    /// not clipped, so a meter keeps its whole sweep and only its top end moves
+    /// - which is how a panel of mismatched LEDs is evened out, and how the lot
+    /// is dimmed for a dark room.  The wire field's 0 means "unset", identical
+    /// in effect to 100, so the box shows 100 for it and only ever writes a
+    /// real percentage back.
+    @ViewBuilder
+    private func csBrightnessCeilingRow(_ slot: Int) -> some View {
+        settingRow(title: "Brightness Limit",
+                   detail: "Cap on how bright this LED gets, as a share of full. Everything below the cap scales with it.",
+                   icon: "sun.min") {
+            ValueField(label: "%",
+                       value: Float(drafts[slot].baseBright == 0 ? CS_LED_BRIGHT_MAX
+                                                                : drafts[slot].baseBright),
+                       width: 48, scrollStep: 5, minValue: 1, maxDecimals: 0) { v in
+                var nb = drafts[slot]
+                nb.baseBright = UInt8(min(Float(CS_LED_BRIGHT_MAX), max(1, v.rounded())))
+                drafts[slot] = nb
+            }
+        }
     }
 
     /// Whether the firmware accepts on/off delays on this (type, action) pair:
@@ -5598,8 +5625,8 @@ struct ControlSurfacesSettingsTab: View {
 
         if cfg.overlayHold > 0 {
             displayFlagToggle(CS_DCFG_OVERLAY_ANY,
-                              title: "Pop Up Anything",
-                              detail: "Show any parameter that changes, not only the ones with a page.",
+                              title: "Pop Up Any Control",
+                              detail: "Show what a knob, button, or remote key just changed even when it has no page. Changes made here in the app only pop up for items that do have one.",
                               icon: "sparkles")
         }
 
@@ -5623,6 +5650,35 @@ struct ControlSurfacesSettingsTab: View {
                 vm.csDisplayCfg = cfg
                 applyDisplayCfg(cfg)
             }
+        }
+
+        // Per-line alignment (caps v11).  Both lines are placed across the
+        // panel's full width, whichever view is up: pages, the pop-up, the
+        // cycle-everything rotation and the idle line all follow these.
+        if vm.csDisplayAlignSupported {
+            displayAlignRow(title: "Name Sits",
+                            detail: "Where the top line, the name of what is shown, sits across the panel.",
+                            icon: "textformat", keyPath: \.labelAlign)
+            displayAlignRow(title: "Value Sits",
+                            detail: "Where the value sits. Centred keeps it still when editing arms, since the arrows either side of it take a column whatever the setting.",
+                            icon: "number", keyPath: \.valueAlign)
+        }
+    }
+
+    /// One line's horizontal alignment.  The two 2-bit fields live in the
+    /// config's flags byte, so `CsDisplayCfg` exposes them as properties and
+    /// the ordinary config binding drives them.
+    @ViewBuilder
+    private func displayAlignRow(title: String, detail: String, icon: String,
+                                 keyPath: WritableKeyPath<CsDisplayCfg, UInt8>) -> some View {
+        settingRow(title: title, detail: detail, icon: icon) {
+            Picker("", selection: displayCfgBinding(keyPath)) {
+                Text("Left").tag(CS_DALIGN_LEFT)
+                Text("Centre").tag(CS_DALIGN_CENTRE)
+                Text("Right").tag(CS_DALIGN_RIGHT)
+            }
+            .labelsHidden()
+            .fixedSize()
         }
     }
 
@@ -5783,6 +5839,10 @@ struct ControlSurfacesSettingsTab: View {
                         p.noun = UInt8(newNoun)
                         p.target = 0; p.index = 0
                         p.flags &= ~CS_DPAGE_GROUP
+                        // A bar needs a range to plot inside; switching to a
+                        // switch or a mode leaves it with none, and the device
+                        // rejects the whole page rather than ignoring the flag.
+                        if !displayPageBarAllowed(newNoun) { p.flags &= ~CS_DPAGE_BAR }
                         applyDisplayPage(i, p)
                     })) {
                     ForEach(displayPageNouns(), id: \.self) { n in
@@ -5845,24 +5905,61 @@ struct ControlSurfacesSettingsTab: View {
             }
 
             // Large text is a graphic-OLED feature; character modules ignore it.
-            if let slot = vm.csDisplaySlot, csDisplayIsGraphic(Int(vm.csBindings[slot].index)) {
-                HStack(spacing: 8) {
+            let isGraphic = vm.csDisplaySlot.map { csDisplayIsGraphic(Int(vm.csBindings[$0].index)) } ?? false
+            if isGraphic || displayPageBarAllowed(Int(page.noun)) {
+                HStack(spacing: 12) {
                     Spacer().frame(width: 16)
-                    Toggle(isOn: Binding(
-                        get: { vm.csDisplayPages[i].isLarge },
-                        set: { on in
-                            var p = vm.csDisplayPages[i]
-                            if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
-                            applyDisplayPage(i, p)
-                        })) {
-                        Text("Large value").font(.caption)
+                    if isGraphic {
+                        Toggle(isOn: Binding(
+                            get: { vm.csDisplayPages[i].isLarge },
+                            set: { on in
+                                var p = vm.csDisplayPages[i]
+                                if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
+                                applyDisplayPage(i, p)
+                            })) {
+                            Text("Large value").font(.caption)
+                        }
+                        .toggleStyle(.checkbox)
                     }
-                    .toggleStyle(.checkbox)
+                    if displayPageBarAllowed(Int(page.noun)) {
+                        Toggle(isOn: Binding(
+                            get: { vm.csDisplayPages[i].hasBar },
+                            set: { on in
+                                var p = vm.csDisplayPages[i]
+                                if on { p.flags |= CS_DPAGE_BAR } else { p.flags &= ~CS_DPAGE_BAR }
+                                applyDisplayPage(i, p)
+                            })) {
+                            Text("Level bar").font(.caption)
+                        }
+                        .toggleStyle(.checkbox)
+                        .help(displayBarHelp(isGraphic: isGraphic))
+                    }
                     Spacer()
                 }
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// Whether a page may carry a level bar (caps v13, display spec §5.2).  The
+    /// bar plots the value inside the noun's own range, so it needs one: the
+    /// firmware refuses the flag on every switch and mode, and on any continuous
+    /// noun whose range is empty.
+    private func displayPageBarAllowed(_ noun: Int) -> Bool {
+        guard vm.csDisplayBarSupported, let nd = nounDesc(noun),
+              nd.kind == CS_KIND_CONTINUOUS else { return false }
+        return csDecodeValue(nd.maxQ8, unit: nd.unit) > csDecodeValue(nd.minQ8, unit: nd.unit)
+    }
+
+    /// Where the bar ends up, which is worth saying: on a two-row character
+    /// panel it costs the value its own row, and the name shortens to make room.
+    private func displayBarHelp(isGraphic: Bool) -> String {
+        if isGraphic { return "Fills the value's own row behind the text, with no row given up." }
+        guard let slot = vm.csDisplaySlot else { return "Draws a bar for the value." }
+        let model = Int(vm.csBindings[slot].index)
+        return model == CS_DISP_MODEL_LCD2004 || model == CS_DISP_MODEL_CHAR_OLED_20X4
+            ? "Draws the bar on the bottom row."
+            : "Draws the bar on the bottom row, moving the value up beside its name."
     }
 
     private func applyDisplayPage(_ index: Int, _ page: CsDisplayPage) {
@@ -6155,12 +6252,19 @@ struct ControlSurfacesSettingsTab: View {
     /// timing when it carries any: a delayed LED behaves nothing like an
     /// immediate one, and the collapsed card shows only this line.
     private func verbPhrase(_ b: CsBinding) -> String {
-        let phrase = actionPhrase(b)
-        guard b.onDelay != 0 || b.offDelay != 0 else { return phrase }
-        var parts: [String] = []
-        if b.onDelay != 0 { parts.append("\(fmtDelay(b.onDelay)) on") }
-        if b.offDelay != 0 { parts.append("\(fmtDelay(b.offDelay)) off") }
-        return phrase + " Delayed \(parts.joined(separator: ", "))."
+        var phrase = actionPhrase(b)
+        if b.onDelay != 0 || b.offDelay != 0 {
+            var parts: [String] = []
+            if b.onDelay != 0 { parts.append("\(fmtDelay(b.onDelay)) on") }
+            if b.offDelay != 0 { parts.append("\(fmtDelay(b.offDelay)) off") }
+            phrase += " Delayed \(parts.joined(separator: ", "))."
+        }
+        // A capped LED looks broken next to an uncapped one, so the collapsed
+        // card says so rather than leaving it to be found in the editor.
+        if b.baseBright != 0 && b.baseBright < CS_LED_BRIGHT_MAX {
+            phrase += " Up to \(b.baseBright)% bright."
+        }
+        return phrase
     }
 
     /// A delay in the same words its fields use: whole minutes and seconds, so

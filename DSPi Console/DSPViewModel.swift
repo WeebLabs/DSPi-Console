@@ -447,7 +447,12 @@ struct CsBinding: Equatable {
     var event: UInt8 = 0            // Byte 6: CsEvent (buttons: press/long/double); 0 for other types
     var target: UInt8 = 0          // Byte 7: channel address for targeted nouns; 0 otherwise
     var index: UInt8 = 0           // Byte 8: filter band for CS_TARGET_DSP_BAND nouns; 0 otherwise
-    // Byte 9: reserved (0)
+    // Byte 9: per-LED brightness ceiling (caps v12, spec §6.6), carved from the
+    // former reserved byte.  Percent 1-100 scaling the final PWM duty, so a
+    // meter keeps its whole sweep and only its top end moves; 0 = unset = full.
+    // CS_TYPE_LED_PWM only - any other type must write 0 or the device rejects
+    // the binding, as a pre-v12 device does for any non-zero value at all.
+    var baseBright: UInt8 = 0
     var value: Int16 = 0           // Bytes 10-11: SET/MOMENTARY target, IND_EQUALS/IND_ABOVE comparand
     var step: Int16 = 0            // Bytes 12-13: STEP/INC/DEC size; 0 = the unit default
     var rangeMin: Int16 = 0       // Bytes 14-15: pot / IND_LEVEL span low; both 0 = the noun's full range
@@ -464,7 +469,7 @@ struct CsBinding: Equatable {
     /// True when the slot holds a component (not CS_TYPE_NONE).
     var isConfigured: Bool { type != UInt8(CS_TYPE_NONE) }
 
-    /// Serialize to the 24-byte wire layout.  Bytes 9 and 22-23 are reserved (0).
+    /// Serialize to the 24-byte wire layout.  Bytes 22-23 are reserved (0).
     func toData() -> Data {
         var d = Data(count: 24)
         d[0] = type
@@ -476,7 +481,7 @@ struct CsBinding: Equatable {
         d[6] = event
         d[7] = target
         d[8] = index
-        // 9 reserved (0)
+        d[9] = baseBright
         func put(_ v: Int16, _ off: Int) {
             let u = UInt16(bitPattern: v)
             d[off] = UInt8(u & 0xFF)
@@ -510,6 +515,7 @@ struct CsBinding: Equatable {
             type: data[b + 0], noun: data[b + 1], action: data[b + 2], flags: data[b + 3],
             gpio0: data[b + 4], gpio1: data[b + 5],
             event: data[b + 6], target: data[b + 7], index: data[b + 8],
+            baseBright: data[b + 9],
             value: i16(10), step: i16(12), rangeMin: i16(14), rangeMax: i16(16),
             onDelay: u16(18), offDelay: u16(20))
     }
@@ -946,6 +952,27 @@ struct CsDisplayCfg: Equatable {
     var editTimeout: UInt16 = 100  // Bytes 8-9: edit auto-disarm, 0.1 s; 0 = manual
     // Bytes 10-11: reserved (0)
 
+    /// Horizontal alignment of the label line (caps v11; display spec §5.1),
+    /// one of the two 2-bit CS_DALIGN_* fields inside `flags`.
+    var labelAlign: UInt8 {
+        get { (flags & CS_DCFG_LABEL_ALIGN) >> CS_DCFG_LABEL_ALIGN_SHIFT }
+        set {
+            flags = (flags & ~CS_DCFG_LABEL_ALIGN)
+                | ((newValue << CS_DCFG_LABEL_ALIGN_SHIFT) & CS_DCFG_LABEL_ALIGN)
+        }
+    }
+
+    /// Horizontal alignment of the value line.  Centre keeps the value on the
+    /// same columns armed and unarmed, since the edit markers claim the outer
+    /// column of each side either way.
+    var valueAlign: UInt8 {
+        get { (flags & CS_DCFG_VALUE_ALIGN) >> CS_DCFG_VALUE_ALIGN_SHIFT }
+        set {
+            flags = (flags & ~CS_DCFG_VALUE_ALIGN)
+                | ((newValue << CS_DCFG_VALUE_ALIGN_SHIFT) & CS_DCFG_VALUE_ALIGN)
+        }
+    }
+
     func toData() -> Data {
         var d = Data(count: 12)
         d[0] = mode; d[1] = homePage
@@ -985,6 +1012,7 @@ struct CsDisplayPage: Equatable {
     var isActive: Bool { flags & CS_DPAGE_ACTIVE != 0 }
     var isGrouped: Bool { flags & CS_DPAGE_GROUP != 0 }
     var isLarge: Bool { flags & CS_DPAGE_LARGE != 0 }
+    var hasBar: Bool { flags & CS_DPAGE_BAR != 0 }
 
     func toData() -> Data { Data([noun, target, index, flags]) }
 
@@ -1578,6 +1606,10 @@ class DSPViewModel: ObservableObject {
     /// a v7 device rejects a binding carrying a non-zero delay outright (its
     /// reserved2 all-zero check), which is why the fields stay hidden below v8.
     var csIndicatorDelaysSupported: Bool { csCaps.capsVersion >= 8 }
+    /// True when the firmware honours `CsBinding.base_bright` (caps v12).  It
+    /// sits in a byte a pre-v12 device checks is zero, so the same reasoning as
+    /// the delays applies: the field stays hidden, and zero, below v12.
+    var csLedBrightnessSupported: Bool { csCaps.capsVersion >= 12 }
 
     // Target groups and macros (caps v9).  Device-global like the bindings, in
     // the same directory and under the same Apply / Save / Revert preview.
@@ -1615,6 +1647,12 @@ class DSPViewModel: ObservableObject {
     /// the display component, so the type table answers for it as well - a
     /// pre-v10 device rejects a grouped IR record at validation.
     var csIrGroupsSupported: Bool { csDisplaySupported && csGroupsSupported }
+    /// True when the display honours the per-line alignment fields (caps v11).
+    /// Nothing about the record changes, so the version is the only signal: a
+    /// v10 device rejects a config carrying either field set.
+    var csDisplayAlignSupported: Bool { csDisplaySupported && csCaps.capsVersion >= 11 }
+    /// True when a page may carry CS_DPAGE_BAR (caps v13), same reasoning.
+    var csDisplayBarSupported: Bool { csDisplaySupported && csCaps.capsVersion >= 13 }
     /// Page slots to show, clamped to what the app allocates.
     var csDisplayPageCount: Int {
         let n = Int(csDisplayMaxPages)

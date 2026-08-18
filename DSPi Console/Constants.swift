@@ -714,11 +714,27 @@ let CS_DMODE_CYCLE_ALL: UInt8      = 2   // rotate every displayable noun
 /// `CsDisplayCfg.flags`.
 let CS_DCFG_OVERLAY_ANY: UInt8 = 0x01   // the pop-up also covers unconfigured changes
 let CS_DCFG_EDIT_GATED: UInt8  = 0x02   // PAGE_VALUE adjusts only while edit is armed
+/// Per-line horizontal alignment (caps v11; display spec 5.1): two 2-bit
+/// CS_DALIGN_* fields packed into the same flags byte.  A pre-v11 device
+/// rejects the config outright if either is non-zero, so both stay 0 there.
+let CS_DCFG_LABEL_ALIGN: UInt8 = 0x0C
+let CS_DCFG_VALUE_ALIGN: UInt8 = 0x30
+let CS_DCFG_LABEL_ALIGN_SHIFT: UInt8 = 2
+let CS_DCFG_VALUE_ALIGN_SHIFT: UInt8 = 4
+
+/// A line's horizontal alignment.  Encoding 3 is reserved and rejected.
+let CS_DALIGN_LEFT: UInt8   = 0
+let CS_DALIGN_CENTRE: UInt8 = 1
+let CS_DALIGN_RIGHT: UInt8  = 2
 
 /// `CsDisplayPage.flags`.
 let CS_DPAGE_ACTIVE: UInt8 = 0x01   // slot in use (an all-zero record is empty)
 let CS_DPAGE_GROUP: UInt8  = 0x02   // `target` is a group index
 let CS_DPAGE_LARGE: UInt8  = 0x04   // pixel-doubled value on graphic OLEDs
+/// Level bar for the value (caps v13; display spec 5.2).  Continuous nouns
+/// only: the bar plots the value inside the noun's own range, which a bool or
+/// an enum has none of, and the firmware rejects the page if one carries it.
+let CS_DPAGE_BAR: UInt8    = 0x08
 
 /// `CsDisplayStatus.initState`.
 let CS_DISP_STATE_DOWN: UInt8   = 0
@@ -947,6 +963,10 @@ func csEncodeDelay(_ seconds: Float) -> UInt16 {
 
 /// Inverse of `csEncodeDelay`: 0.1 s units -> seconds.
 func csDecodeDelay(_ raw: UInt16) -> Float { Float(raw) / 10 }
+
+/// Highest per-LED brightness ceiling (caps v12, spec §6.6).  The field is a
+/// percentage of full duty; 0 means "unset", which is also full.
+let CS_LED_BRIGHT_MAX: UInt8 = 100
 
 // CsNounDesc.target_kind values (spec §4.4).
 let CS_TARGET_NONE: UInt8      = 0

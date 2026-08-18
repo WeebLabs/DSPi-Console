@@ -1091,4 +1091,100 @@ final class ControlSurfacesWireTests: XCTestCase {
                        "25 02 04 00 00 01 00 00 01 00 00 00 00 ff 18 e7")
         XCTAssertEqual(IrCommand.fromData(c.toData()), c)
     }
+
+    // MARK: - Caps v11: per-line display alignment
+
+    /// Both alignments are packed into the config's flags byte, alongside the
+    /// two booleans already there.  Nothing about the record grows, so the byte
+    /// is the whole contract: label in bits 3:2, value in bits 5:4.
+    func testDisplayAlignFieldsPackIntoTheFlagsByte() {
+        var cfg = CsDisplayCfg(mode: CS_DMODE_FIXED, homePage: 0, dwell: 30,
+                               overlayHold: 20, brightness: 0,
+                               flags: CS_DCFG_EDIT_GATED, editTimeout: 100)
+        cfg.labelAlign = CS_DALIGN_RIGHT     // 2 << 2 = 0x08
+        cfg.valueAlign = CS_DALIGN_CENTRE    // 1 << 4 = 0x10
+        XCTAssertEqual(cfg.flags, 0x1A)
+        XCTAssertEqual(hex(cfg.toData()), "00 00 1e 00 14 00 00 1a 64 00 00 00")
+        XCTAssertEqual(CsDisplayCfg.fromData(cfg.toData()), cfg)
+        XCTAssertEqual(CsDisplayCfg.fromData(cfg.toData())?.labelAlign, CS_DALIGN_RIGHT)
+        XCTAssertEqual(CsDisplayCfg.fromData(cfg.toData())?.valueAlign, CS_DALIGN_CENTRE)
+    }
+
+    /// Each field must write only its own two bits: an editor that let one
+    /// alignment clear the other, or either clear the pop-up and edit-gate
+    /// booleans, would silently undo settings from the row above it.
+    func testDisplayAlignFieldsAreIndependent() {
+        var cfg = CsDisplayCfg()
+        cfg.flags = CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED
+        for label in [CS_DALIGN_LEFT, CS_DALIGN_CENTRE, CS_DALIGN_RIGHT] {
+            for value in [CS_DALIGN_LEFT, CS_DALIGN_CENTRE, CS_DALIGN_RIGHT] {
+                cfg.labelAlign = label
+                cfg.valueAlign = value
+                XCTAssertEqual(cfg.labelAlign, label)
+                XCTAssertEqual(cfg.valueAlign, value)
+                XCTAssertEqual(cfg.flags & (CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED),
+                               CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED)
+                // Encoding 3 is reserved; nothing here may ever produce it.
+                XCTAssertLessThanOrEqual(cfg.labelAlign, CS_DALIGN_RIGHT)
+                XCTAssertLessThanOrEqual(cfg.valueAlign, CS_DALIGN_RIGHT)
+            }
+        }
+        // A default config leaves both fields left-aligned, which is what a
+        // pre-v11 device demands of the bits it still checks are zero.
+        XCTAssertEqual(CsDisplayCfg().flags & (CS_DCFG_LABEL_ALIGN | CS_DCFG_VALUE_ALIGN), 0)
+    }
+
+    // MARK: - Caps v12: per-LED brightness ceiling
+
+    /// `base_bright` takes byte 9, the binding's last spare, so the struct is
+    /// still 24 bytes and every field after it stays put.
+    func testLedBrightnessCeilingByte() {
+        let b = CsBinding(type: UInt8(CS_TYPE_LED_PWM), noun: UInt8(CS_NOUN_LEVEL),
+                          action: UInt8(CS_ACT_IND_LEVEL),
+                          gpio0: 11, gpio1: CS_GPIO_UNUSED, target: 1,
+                          baseBright: 40)
+        XCTAssertEqual(b.toData().count, 24)
+        XCTAssertEqual(hex(b.toData()),
+                       "06 1c 0b 00 0b ff 00 01 00 28 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(b.toData()), b)
+    }
+
+    /// Byte 9 is zero on everything the app builds unless a ceiling is set,
+    /// which is what keeps the same binding acceptable to a pre-v12 device -
+    /// it rejects any non-zero value there outright.
+    func testBindingLeavesBrightnessByteZeroByDefault() {
+        XCTAssertEqual(CsBinding().toData()[9], 0)
+        let led = CsBinding(type: UInt8(CS_TYPE_LED), noun: UInt8(CS_NOUN_USER_MUTE),
+                            action: UInt8(CS_ACT_IND_EQUALS),
+                            gpio0: 12, gpio1: CS_GPIO_UNUSED, value: 1)
+        XCTAssertEqual(led.toData()[9], 0)
+        // Full brightness is expressible either way; both must survive a round
+        // trip so a device reporting 100 does not read back as unset.
+        for raw: UInt8 in [0, 1, 50, CS_LED_BRIGHT_MAX] {
+            var b = CsBinding(type: UInt8(CS_TYPE_LED_PWM), gpio0: 11, gpio1: CS_GPIO_UNUSED)
+            b.baseBright = raw
+            XCTAssertEqual(CsBinding.fromData(b.toData())?.baseBright, raw)
+        }
+    }
+
+    // MARK: - Caps v13: display level bars
+
+    /// The bar is one more bit in the page's flags byte; the record stays 4
+    /// bytes and the flag sits clear of ACTIVE, GROUP and LARGE.
+    func testDisplayPageBarFlag() {
+        let page = CsDisplayPage(noun: UInt8(CS_NOUN_OUTPUT_GAIN), target: 2, index: 0,
+                                 flags: CS_DPAGE_ACTIVE | CS_DPAGE_BAR)
+        XCTAssertEqual(hex(page.toData()), "11 02 00 09")
+        XCTAssertEqual(CsDisplayPage.fromData(page.toData()), page)
+        XCTAssertTrue(page.hasBar)
+        XCTAssertFalse(page.isLarge)
+        XCTAssertEqual(CS_DPAGE_BAR, 0x08)
+        XCTAssertEqual(CS_DPAGE_ACTIVE | CS_DPAGE_GROUP | CS_DPAGE_LARGE | CS_DPAGE_BAR, 0x0F)
+        // A bar and a large value are independent: a graphic panel draws both.
+        var both = page
+        both.flags |= CS_DPAGE_LARGE
+        XCTAssertTrue(both.hasBar)
+        XCTAssertTrue(both.isLarge)
+        XCTAssertFalse(CsDisplayPage().hasBar)
+    }
 }
