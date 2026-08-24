@@ -4794,6 +4794,15 @@ struct ControlSurfacesSettingsTab: View {
     /// One-line summary of a learned remote button's action, for the collapsed
     /// card (mirrors `verbPhrase` for component bindings).
     private func irVerbPhrase(_ c: IrCommand) -> String {
+        if Int(c.noun) == CS_NOUN_PAGE_VALUE {
+            let gated = vm.csDisplayCfg.flags & CS_DCFG_EDIT_GATED != 0
+            switch Int(c.action) {
+            case CS_ACT_INC:    return gated ? "Next page, or value up when armed" : "Shown value up"
+            case CS_ACT_DEC:    return gated ? "Previous page, or value down when armed" : "Shown value down"
+            case CS_ACT_TOGGLE: return "Toggle the shown value (on/off pages only)"
+            default:            return "Browse/Adjust"
+            }
+        }
         let noun = nounName(Int(c.noun), forType: CS_TYPE_IR) + irTargetSuffix(c)
         let isEnum = (nounDesc(Int(c.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
         switch Int(c.action) {
@@ -6286,13 +6295,20 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_CPU_LOAD:           return "CPU Load"
         case CS_NOUN_DISPLAY_PAGE:       return "Display Page"
         case CS_NOUN_DISPLAY_EDIT:       return "Display Editing"
-        case CS_NOUN_PAGE_VALUE:         return "Shown Value"
+        case CS_NOUN_PAGE_VALUE:         return "Browse/Adjust"
         default:                         return "Parameter \(noun)"
         }
     }
 
     private func actionName(_ action: Int, noun: Int) -> String {
         let isEnum = (nounDesc(noun)?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
+        // Browse/Adjust is not stepping a list: unarmed it moves a page, armed
+        // it moves the shown value (and on a bool page the firmware reads up as
+        // on, down as off).  A direction is the only honest label for that.
+        if noun == CS_NOUN_PAGE_VALUE {
+            if action == CS_ACT_INC { return "Up" }
+            if action == CS_ACT_DEC { return "Down" }
+        }
         switch action {
         case CS_ACT_ADJUST:     return "Adjust"
         case CS_ACT_STEP:       return "Step"
@@ -6344,6 +6360,7 @@ struct ControlSurfacesSettingsTab: View {
         if Int(b.type) == CS_TYPE_DISPLAY {
             return "\(csDisplayModelName(Int(b.index))) on I2C, address 0x\(String(displayAddress(b), radix: 16, uppercase: true))."
         }
+        if Int(b.noun) == CS_NOUN_PAGE_VALUE { return pageValuePhrase(b) }
         let noun = nounName(Int(b.noun), forType: Int(b.type)) + targetSuffix(b)
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
         let press = pressWord(b)
@@ -6362,6 +6379,33 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_IND_ABOVE:  return "Lights when \(noun) is above a level."
         case CS_ACT_IND_LEVEL:  return "Brightness follows \(noun)."
         default:                return ""
+        }
+    }
+
+    /// Browse/Adjust does two jobs, and which one a control gets depends on the
+    /// panel's own gate: with "Arm Before Editing" off it only ever adjusts, so
+    /// a summary promising page browsing would be describing another config.
+    private func pageValuePhrase(_ b: CsBinding) -> String {
+        let gated = vm.csDisplayCfg.flags & CS_DCFG_EDIT_GATED != 0
+        let press = pressWord(b)
+        switch Int(b.action) {
+        case CS_ACT_STEP:
+            return gated ? "Turn to move through pages, or to adjust the shown value once editing is armed."
+                         : "Turn to adjust the shown value."
+        case CS_ACT_INC:
+            return gated ? "\(press) for the next page, or to raise the shown value once editing is armed."
+                         : "\(press) to raise the shown value."
+        case CS_ACT_DEC:
+            return gated ? "\(press) for the previous page, or to lower the shown value once editing is armed."
+                         : "\(press) to lower the shown value."
+        // Toggle is the one action here the device cannot validate up front: the
+        // page it lands on is not known until the press, and the firmware
+        // silently no-ops it on anything but an on/off item.
+        case CS_ACT_TOGGLE:
+            return gated ? "\(press) to toggle the shown value, once editing is armed. Only acts on a page showing an on/off setting."
+                         : "\(press) to toggle the shown value. Only acts on a page showing an on/off setting."
+        default:
+            return ""
         }
     }
 
