@@ -499,6 +499,35 @@ class InterruptMonitor: ObservableObject {
     /// dropped FIFO when the cap is reached.
     static let maxEvents = 2000
 
+    /// How often notifications are allowed to reach the UI.
+    ///
+    /// A bound control emits one PARAM_CHANGED per change it makes, and the
+    /// firmware samples pots at 1 kHz, so an unwired ADC pin reading noise
+    /// floods this endpoint continuously.  Each delivery sets a `@Published`
+    /// property, which invalidates every view observing the view model - the
+    /// whole Control Surfaces page included, whether or not it shows the
+    /// parameter that moved.  At a thousand a second the main thread has
+    /// nothing left for the user.
+    ///
+    /// 25 Hz is past what anyone can see, and only the newest value per
+    /// offset is delivered, which is the one that describes the device now.
+    /// A change arriving into a quiet monitor still goes straight out, so a
+    /// single knob turn or preset load is as immediate as it ever was.
+    private static let flushInterval: TimeInterval = 0.04
+
+    /// Newest pending payload per parameter offset, and the order the offsets
+    /// first arrived in, so a flush replays them in the order they happened.
+    private struct PendingParam {
+        var size: UInt16
+        var source: UInt8
+        var payload: Data
+    }
+    private var pendingParams: [UInt16: PendingParam] = [:]
+    private var pendingOrder: [UInt16] = []
+    private var pendingEvents: [InterruptEvent] = []
+    private var flushScheduled = false
+    private var lastFlush: TimeInterval = 0
+
     /// Fires on the main thread for every v2 PARAM_CHANGED event regardless
     /// of pause state.  Consumers (e.g. DSPViewModel) use this to mirror
     /// non-host parameter changes back into the UI without waiting for the
@@ -652,6 +681,7 @@ class InterruptMonitor: ObservableObject {
     }
 
     func stop() {
+        discardPending()
         guard let session = currentSession else { return }
         currentSession = nil
         isActive = false
@@ -671,6 +701,7 @@ class InterruptMonitor: ObservableObject {
     }
 
     func clear() {
+        pendingEvents.removeAll()
         events.removeAll()
     }
 
@@ -758,7 +789,7 @@ class InterruptMonitor: ObservableObject {
 
         // Dispatch v2 PARAM_CHANGED to non-display consumers regardless of
         // pause state (pause is only meant to freeze the visible log).
-        if let handler = onParamChanged,
+        if onParamChanged != nil,
            bytes.count >= 12,
            bytes[0] == NOTIFY_V2_VERSION,
            bytes[1] == NOTIFY_EVT_PARAM_CHANGED {
@@ -767,9 +798,7 @@ class InterruptMonitor: ObservableObject {
             let source = bytes[8]
             let payloadEnd = min(bytes.count, 12 + Int(size))
             let payload = Data(bytes[12..<payloadEnd])
-            DispatchQueue.main.async {
-                handler(offset, size, source, payload)
-            }
+            dispatchParam(offset: offset, size: size, source: source, payload: payload)
         }
 
         // Dispatch the input-format event (host switched USB alt → new active
@@ -846,15 +875,81 @@ class InterruptMonitor: ObservableObject {
         // single event right at a pause/resume edge, which is harmless.
         if isPaused { return }
 
-        let event = InterruptEvent(timestamp: Date(), rawBytes: Data(bytes))
+        // Batched, not dropped: the log is a diagnostic trace and keeps every
+        // event, but publishing it per event republishes the whole array to
+        // the log view at the notification rate.
+        pendingEvents.append(InterruptEvent(timestamp: Date(), rawBytes: Data(bytes)))
+        scheduleFlush()
+    }
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.events.append(event)
-            if self.events.count > Self.maxEvents {
-                self.events.removeFirst(self.events.count - Self.maxEvents)
+    // MARK: - Coalescing
+
+    /// Queue one parameter change for delivery, or deliver it now when the
+    /// monitor has been quiet for a full interval.  Main thread only.
+    private func dispatchParam(offset: UInt16, size: UInt16, source: UInt8, payload: Data) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if !flushScheduled && now - lastFlush >= Self.flushInterval {
+            lastFlush = now
+            onParamChanged?(offset, size, source, payload)
+            return
+        }
+        // Newest wins: an older value for the same offset no longer describes
+        // the device, and replaying it would only make the UI flicker backwards.
+        if pendingParams.updateValue(PendingParam(size: size, source: source, payload: payload),
+                                     forKey: offset) == nil {
+            pendingOrder.append(offset)
+        }
+        scheduleFlush()
+    }
+
+    /// Arm the next flush, at most one at a time.  Main thread only.
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        let due = max(0, Self.flushInterval - (ProcessInfo.processInfo.systemUptime - lastFlush))
+        DispatchQueue.main.asyncAfter(deadline: .now() + due) { [weak self] in
+            self?.flush()
+        }
+    }
+
+    /// Deliver everything queued since the last flush.  Main thread only.
+    private func flush() {
+        flushScheduled = false
+        lastFlush = ProcessInfo.processInfo.systemUptime
+
+        if !pendingEvents.isEmpty {
+            events.append(contentsOf: pendingEvents)
+            pendingEvents.removeAll(keepingCapacity: true)
+            if events.count > Self.maxEvents {
+                events.removeFirst(events.count - Self.maxEvents)
             }
         }
+
+        if !pendingOrder.isEmpty {
+            let order = pendingOrder
+            let params = pendingParams
+            pendingOrder.removeAll(keepingCapacity: true)
+            pendingParams.removeAll(keepingCapacity: true)
+            for offset in order {
+                guard let p = params[offset] else { continue }
+                onParamChanged?(offset, p.size, p.source, p.payload)
+            }
+        }
+
+        // A handler can queue more work as it runs, and events keep arriving
+        // during the flush; both leave the timer armed rather than waiting for
+        // the next notification to restart it.
+        if !pendingOrder.isEmpty || !pendingEvents.isEmpty { scheduleFlush() }
+    }
+
+    /// Drop anything queued but not yet delivered.  A pending change describes
+    /// the device the reader was attached to, which after a switch is not the
+    /// one the UI is now showing.
+    private func discardPending() {
+        pendingParams.removeAll()
+        pendingOrder.removeAll()
+        pendingEvents.removeAll()
+        lastFlush = 0
     }
 
     // MARK: - Interface Helpers
