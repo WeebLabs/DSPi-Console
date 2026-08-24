@@ -4794,6 +4794,14 @@ struct ControlSurfacesSettingsTab: View {
     /// One-line summary of a learned remote button's action, for the collapsed
     /// card (mirrors `verbPhrase` for component bindings).
     private func irVerbPhrase(_ c: IrCommand) -> String {
+        if Int(c.noun) == CS_NOUN_DISPLAY_PAGE {
+            switch Int(c.action) {
+            case CS_ACT_INC: return "Show the next page"
+            case CS_ACT_DEC: return "Show the previous page"
+            case CS_ACT_SET: return "Show a set page"
+            default:         return "Show Page"
+            }
+        }
         if Int(c.noun) == CS_NOUN_PAGE_VALUE {
             let gated = vm.csDisplayCfg.flags & CS_DCFG_EDIT_GATED != 0
             switch Int(c.action) {
@@ -6293,8 +6301,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_INPUT_LEVEL_MAX:    return "Input Signal Level"
         case CS_NOUN_MACRO:              return isIndicatorType(type) ? "Running Macro" : "Macro"
         case CS_NOUN_CPU_LOAD:           return "CPU Load"
-        case CS_NOUN_DISPLAY_PAGE:       return "Display Page"
-        case CS_NOUN_DISPLAY_EDIT:       return "Display Editing"
+        case CS_NOUN_DISPLAY_PAGE:       return "Show Page"
+        case CS_NOUN_DISPLAY_EDIT:       return "Allow Editing"
         case CS_NOUN_PAGE_VALUE:         return "Browse/Adjust"
         default:                         return "Parameter \(noun)"
         }
@@ -6361,6 +6369,7 @@ struct ControlSurfacesSettingsTab: View {
             return "\(csDisplayModelName(Int(b.index))) on I2C, address 0x\(String(displayAddress(b), radix: 16, uppercase: true))."
         }
         if Int(b.noun) == CS_NOUN_PAGE_VALUE { return pageValuePhrase(b) }
+        if Int(b.noun) == CS_NOUN_DISPLAY_PAGE { return displayPagePhrase(b) }
         let noun = nounName(Int(b.noun), forType: Int(b.type)) + targetSuffix(b)
         let isEnum = (nounDesc(Int(b.noun))?.kind ?? CS_KIND_BOOL) == CS_KIND_ENUM
         let press = pressWord(b)
@@ -6378,6 +6387,21 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_IND_EQUALS: return "Lights to indicate \(noun)."
         case CS_ACT_IND_ABOVE:  return "Lights when \(noun) is above a level."
         case CS_ACT_IND_LEVEL:  return "Brightness follows \(noun)."
+        default:                return ""
+        }
+    }
+
+    /// The page noun names the panel, not a list position: the generic enum
+    /// wording ("select the next Show Page") reads as nonsense once the noun
+    /// itself says "show".
+    private func displayPagePhrase(_ b: CsBinding) -> String {
+        let press = pressWord(b)
+        switch Int(b.action) {
+        case CS_ACT_STEP:       return "Turn to move through the pages on screen."
+        case CS_ACT_INC:        return "\(press) to show the next page."
+        case CS_ACT_DEC:        return "\(press) to show the previous page."
+        case CS_ACT_SET:        return "\(press) to show a set page."
+        case CS_ACT_IND_EQUALS: return "Lights while a set page is on screen."
         default:                return ""
         }
     }
