@@ -5708,6 +5708,18 @@ struct ControlSurfacesSettingsTab: View {
                           detail: "An encoder browses pages until editing is armed, then adjusts. Off lets it adjust straight away.",
                           icon: "lock")
 
+        // Gated with nothing able to arm it is a dead end the device cannot
+        // refuse: both halves are valid on their own, and the control just
+        // browses forever.  Only says so once a control actually depends on it.
+        if displayEditingUnreachable {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange).font(.caption)
+                Text("Nothing can arm editing, so a Browse/Adjust control can only browse pages. Bind a button or remote key to Allow Editing.")
+                    .font(.caption2).foregroundColor(.orange)
+            }
+        }
+
         groupHeading("Appearance")
 
         settingRow(title: "Brightness",
@@ -6388,6 +6400,52 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_IND_ABOVE:  return "Lights when \(noun) is above a level."
         case CS_ACT_IND_LEVEL:  return "Brightness follows \(noun)."
         default:                return ""
+        }
+    }
+
+    /// True when editing is gated, some control depends on that gate, and
+    /// nothing on the device can lift it.
+    private var displayEditingUnreachable: Bool {
+        guard vm.csDisplayCfg.flags & CS_DCFG_EDIT_GATED != 0 else { return false }
+        return usesNoun(CS_NOUN_PAGE_VALUE) && !canArmEditing
+    }
+
+    /// Whether any control or remote key drives `noun`.  Drafts count alongside
+    /// the live bindings so a staged edit is not nagged about before Apply.
+    private func usesNoun(_ noun: Int) -> Bool {
+        let slots = (0..<slotCount).contains { slot in
+            (drafts[slot].isConfigured && Int(drafts[slot].noun) == noun)
+                || (vm.csBindings[slot].isConfigured && Int(vm.csBindings[slot].noun) == noun)
+        }
+        if slots { return true }
+        return (0..<CS_MAX_IR_COMMANDS).contains { sub in
+            (irDrafts[sub].isConfigured && Int(irDrafts[sub].noun) == noun)
+                || (vm.csIrCommands[sub].isConfigured && Int(vm.csIrCommands[sub].noun) == noun)
+        }
+    }
+
+    /// Whether anything can actually arm editing: a control, a remote key, or a
+    /// macro step that writes the noun.  An LED bound to it only reports the
+    /// state, so indicator actions do not count.
+    private var canArmEditing: Bool {
+        func writes(_ noun: UInt8, _ action: UInt8) -> Bool {
+            guard Int(noun) == CS_NOUN_DISPLAY_EDIT else { return false }
+            let a = Int(action)
+            return a != CS_ACT_IND_EQUALS && a != CS_ACT_IND_ABOVE && a != CS_ACT_IND_LEVEL
+        }
+        if (0..<slotCount).contains(where: { writes(drafts[$0].noun, drafts[$0].action)
+                                          || writes(vm.csBindings[$0].noun, vm.csBindings[$0].action) }) {
+            return true
+        }
+        if (0..<CS_MAX_IR_COMMANDS).contains(where: { writes(irDrafts[$0].noun, irDrafts[$0].action)
+                                                   || writes(vm.csIrCommands[$0].noun, vm.csIrCommands[$0].action) }) {
+            return true
+        }
+        // A macro step can arm it too, and a button firing that macro is then
+        // the arm control.
+        return (0..<CS_MAX_MACROS).contains { m in
+            macroDrafts[m].activeSteps.contains { writes($0.noun, $0.action) }
+                || vm.csMacros[m].activeSteps.contains { writes($0.noun, $0.action) }
         }
     }
 
