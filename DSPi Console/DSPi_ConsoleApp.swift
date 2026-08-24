@@ -5222,6 +5222,27 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    /// Names a run of rows inside a card.  A grouped Form already rules a
+    /// hairline between its rows, so this needs no divider of its own - an
+    /// explicit one lands as a blank row between two of those hairlines, and a
+    /// rule drawn after the label just doubles the one below it.  Small caps
+    /// alone, delimited by the form's own lines, reads as the band it is.
+    @ViewBuilder
+    private func groupHeading(_ title: String, detail: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.5)
+                .foregroundColor(.secondary)
+            if let detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: Caps-driven model helpers
 
     private func typeDesc(_ type: Int) -> CsTypeDesc? {
@@ -5513,6 +5534,7 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func displayWiringRows(_ slot: Int) -> some View {
         let b = drafts[slot]
+        groupHeading("Wiring")
         settingRow(title: "Model", detail: "Which panel is wired up.", icon: "display") {
             Picker("", selection: Binding(
                 get: { Int(drafts[slot].index) },
@@ -5616,7 +5638,7 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func displayConfigRows() -> some View {
         let cfg = vm.csDisplayCfg
-        Divider().padding(.vertical, 2)
+        groupHeading("Behavior")
 
         settingRow(title: "Idle Behavior", detail: "What the panel rests on between changes.", icon: "rectangle.on.rectangle") {
             Picker("", selection: displayCfgBinding(\.mode)) {
@@ -5657,6 +5679,8 @@ struct ControlSurfacesSettingsTab: View {
                               icon: "sparkles")
         }
 
+        groupHeading("Editing")
+
         displaySecondsRow(title: "Editing Times Out",
                           detail: "Disarm editing after this long untouched. Zero leaves it armed until switched off.",
                           icon: "hourglass",
@@ -5666,6 +5690,8 @@ struct ControlSurfacesSettingsTab: View {
                           title: "Arm Before Editing",
                           detail: "An encoder browses pages until editing is armed, then adjusts. Off lets it adjust straight away.",
                           icon: "lock")
+
+        groupHeading("Appearance")
 
         settingRow(title: "Brightness",
                    detail: "OLED contrast, applied when the panel next starts. Zero is the driver default.",
@@ -5814,10 +5840,7 @@ struct ControlSurfacesSettingsTab: View {
 
     @ViewBuilder
     private func displayPagesSection() -> some View {
-        Divider().padding(.vertical, 2)
-        settingLabel(title: "Dashboard Pages",
-                     detail: "These pages are shown when Idle Behavior is set to Cycle Dashboard. Bind a control to the Display Page noun to step through them.",
-                     icon: "doc.on.doc")
+        groupHeading("Dashboard Pages")
 
         ForEach(visibleDisplayPages, id: \.self) { i in
             displayPageRow(i)
