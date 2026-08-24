@@ -5552,7 +5552,7 @@ struct ControlSurfacesSettingsTab: View {
     private func displayWiringRows(_ slot: Int) -> some View {
         let b = drafts[slot]
         groupHeading("Wiring")
-        settingRow(title: "Model", detail: "Which panel is wired up.", icon: "display") {
+        settingRow(title: "Model", detail: "The type of display connected.", icon: "display") {
             Picker("", selection: Binding(
                 get: { Int(drafts[slot].index) },
                 set: { newModel in
@@ -5574,8 +5574,8 @@ struct ControlSurfacesSettingsTab: View {
             .fixedSize()
         }
 
-        settingRow(title: "SDA Pin",
-                   detail: "Data line. SCL is the next GPIO up (\(Int(b.gpio0) + 1)); the pin mux pairs them.",
+        settingRow(title: "SDA/SCL Pins",
+                   detail: "Clock and data pins are chosen in fixed pairs.",
                    icon: "cable.connector") {
             Picker("", selection: Binding(
                 get: { drafts[slot].gpio0 },
@@ -5641,7 +5641,7 @@ struct ControlSurfacesSettingsTab: View {
             }
         }()
         HStack(spacing: 8) {
-            settingLabel(title: "Panel",
+            settingLabel(title: "Panel State",
                          detail: st.nakCount > 0
                              ? "\(st.nakCount) I2C error\(st.nakCount == 1 ? "" : "s") so far. Check wiring, pull-up resistors, and the address."
                              : "Reported by the device.",
@@ -5685,14 +5685,14 @@ struct ControlSurfacesSettingsTab: View {
         }
 
         displaySecondsRow(title: "Pop-Up Hold",
-                          detail: "How long a change stays on screen before the panel goes back. Zero turns pop-ups off.",
+                          detail: "Duration for which a change remains on-screen. Zero turns pop-ups off.",
                           icon: "bell.badge",
                           keyPath: \.overlayHold, minimum: 0)
 
         if cfg.overlayHold > 0 {
             displayFlagToggle(CS_DCFG_OVERLAY_ANY,
-                              title: "Pop Up Any Control",
-                              detail: "Show what a knob, button, or remote key just changed even when it has no page. Changes made here in the app only pop up for items that do have one.",
+                              title: "All Changes Pop-Up",
+                              detail: "Show changes made by a knob, button or remote key even if the parameter doesn't correspond to a dashboard page.",
                               icon: "sparkles")
         }
 
@@ -5705,7 +5705,7 @@ struct ControlSurfacesSettingsTab: View {
 
         displayFlagToggle(CS_DCFG_EDIT_GATED,
                           title: "Arm Before Editing",
-                          detail: "An encoder browses pages until editing is armed, then adjusts. Off lets it adjust straight away.",
+                          detail: "When enabled, an encoder or button browses pages unless Allow Editing is toggled. When disabled, an encoder or button will always adjust the displayed value.",
                           icon: "lock")
 
         // Gated with nothing able to arm it is a dead end the device cannot
@@ -5738,11 +5738,11 @@ struct ControlSurfacesSettingsTab: View {
         // panel's full width, whichever view is up: pages, the pop-up, the
         // cycle-everything rotation and the idle line all follow these.
         if vm.csDisplayAlignSupported {
-            displayAlignRow(title: "Name Sits",
-                            detail: "Where the top line, the name of what is shown, sits across the panel.",
+            displayAlignRow(title: "Name Alignment",
+                            detail: "Horizontal placement of the current page's name.",
                             icon: "textformat", keyPath: \.labelAlign)
-            displayAlignRow(title: "Value Sits",
-                            detail: "Where the value sits. Centred keeps it still when editing arms, since the arrows either side of it take a column whatever the setting.",
+            displayAlignRow(title: "Value Alignment",
+                            detail: "Horizontal placement of the current page's value.",
                             icon: "number", keyPath: \.valueAlign)
         }
     }
