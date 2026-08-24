@@ -2295,6 +2295,33 @@ struct ControlSurfacesSettingsTab: View {
         // Save/Revert onto the same status channel (spec §3.2). Applies need no
         // such handling: they are bounded and release their own claim.
         .onDisappear { if section == .controls { cancelLearn() } }
+        // Which page the panel has on screen is runtime state with no
+        // notification behind it (a bound control or the cycle timer moves it),
+        // so the live marker in the page list has to be read.  Restarts only
+        // when `displayStatusPollSlot` flips, and that is nil unless an open
+        // display card is actually showing the marker - one 8-byte GET a second
+        // while the user looks at it, and nothing at all otherwise.
+        .task(id: displayStatusPollSlot) {
+            guard displayStatusPollSlot != nil else { return }
+            while !Task.isCancelled {
+                await withCheckedContinuation { cont in
+                    DispatchQueue.global(qos: .utility).async {
+                        vm.fetchCsDisplayStatus()
+                        cont.resume()
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    /// The display slot whose live page marker is on screen, or nil when
+    /// nobody is looking - the gate on the poll above.
+    private var displayStatusPollSlot: Int? {
+        guard section == .controls, vm.isDeviceConnected, vm.csDisplaySupported,
+              let slot = vm.csDisplaySlot, expandedSlots.contains(slot),
+              drafts.indices.contains(slot), drafts[slot].isConfigured else { return nil }
+        return slot
     }
 
     /// The Control Surfaces page: the wired components themselves.
@@ -5591,11 +5618,11 @@ struct ControlSurfacesSettingsTab: View {
         let cfg = vm.csDisplayCfg
         Divider().padding(.vertical, 2)
 
-        settingRow(title: "Shows", detail: "What the panel rests on between changes.", icon: "rectangle.on.rectangle") {
+        settingRow(title: "Idle Behavior", detail: "What the panel rests on between changes.", icon: "rectangle.on.rectangle") {
             Picker("", selection: displayCfgBinding(\.mode)) {
                 Text("One page").tag(CS_DMODE_FIXED)
-                Text("Cycle chosen pages").tag(CS_DMODE_CYCLE_SELECTED)
-                Text("Cycle everything").tag(CS_DMODE_CYCLE_ALL)
+                Text("Cycle Dashboard").tag(CS_DMODE_CYCLE_SELECTED)
+                Text("Cycle All").tag(CS_DMODE_CYCLE_ALL)
             }
             .labelsHidden()
             .fixedSize()
@@ -5788,8 +5815,8 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func displayPagesSection() -> some View {
         Divider().padding(.vertical, 2)
-        settingLabel(title: "Pages",
-                     detail: "What the panel can show. Bind a control to \"Display Page\" to step through them.",
+        settingLabel(title: "Dashboard Pages",
+                     detail: "These pages are shown when Idle Behavior is set to Cycle Dashboard. Bind a control to the Display Page noun to step through them.",
                      icon: "doc.on.doc")
 
         ForEach(visibleDisplayPages, id: \.self) { i in
@@ -5826,12 +5853,23 @@ struct ControlSurfacesSettingsTab: View {
         let page = vm.csDisplayPages[i]
         let nd = nounDesc(Int(page.noun))
         let shown = vm.csDisplayStatus.currentPage == UInt8(i)
+        // Large text is a graphic-OLED feature; character modules ignore it.
+        let isGraphic = vm.csDisplaySlot.map { csDisplayIsGraphic(Int(vm.csBindings[$0].index)) } ?? false
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 Text("\(i + 1)")
                     .font(.caption.monospacedDigit())
                     .foregroundColor(.secondary)
                     .frame(width: 16, alignment: .trailing)
+                // The live-page marker holds its place when the panel is showing
+                // some other page, so the pickers beside it stay in a column
+                // instead of shuffling sideways as the panel cycles.
+                Image(systemName: "eye.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.accentColor)
+                    .opacity(shown ? 1 : 0)
+                    .frame(width: 12)
+                    .help(shown ? "Currently on screen" : "")
                 Picker("", selection: Binding(
                     get: { Int(vm.csDisplayPages[i].noun) },
                     set: { newNoun in
@@ -5852,13 +5890,44 @@ struct ControlSurfacesSettingsTab: View {
                 .labelsHidden()
                 .fixedSize()
 
-                if shown {
-                    Image(systemName: "eye.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.green)
-                        .help("Currently on screen")
-                }
                 Spacer()
+                // The value options ride in this row rather than one of their
+                // own: on a page with no target they were a whole row holding a
+                // single checkbox.  Fixed widths keep the boxes in a column down
+                // the list however wide the noun beside them reads.
+                if isGraphic {
+                    Toggle(isOn: Binding(
+                        get: { vm.csDisplayPages[i].isLarge },
+                        set: { on in
+                            var p = vm.csDisplayPages[i]
+                            if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
+                            applyDisplayPage(i, p)
+                        })) {
+                        Text("Large value").font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    .frame(width: 92, alignment: .leading)
+                }
+                if vm.csDisplayBarSupported {
+                    // Greyed rather than hidden on a noun that cannot carry a
+                    // bar: the box keeps its column, and the tooltip says why it
+                    // is out rather than leaving a silent gap.
+                    let barAllowed = displayPageBarAllowed(Int(page.noun))
+                    Toggle(isOn: Binding(
+                        get: { vm.csDisplayPages[i].hasBar },
+                        set: { on in
+                            var p = vm.csDisplayPages[i]
+                            if on { p.flags |= CS_DPAGE_BAR } else { p.flags &= ~CS_DPAGE_BAR }
+                            applyDisplayPage(i, p)
+                        })) {
+                        Text("Level bar").font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(!barAllowed)
+                    .frame(width: 82, alignment: .leading)
+                    .help(barAllowed ? displayBarHelp(isGraphic: isGraphic)
+                                     : "Only a value with a range can be drawn as a bar.")
+                }
                 Button(role: .destructive) {
                     applyDisplayPage(i, CsDisplayPage())
                 } label: {
@@ -5870,7 +5939,10 @@ struct ControlSurfacesSettingsTab: View {
 
             if let nd = nd, nd.isTargeted {
                 HStack(spacing: 8) {
-                    Spacer().frame(width: 16)
+                    // Indents past the number and the marker column so this
+                    // picker sits under the noun picker rather than under the
+                    // eye (16 + 8 spacing + 12).
+                    Spacer().frame(width: 36)
                     Picker("", selection: Binding<CsTargetChoice>(
                         get: {
                             let p = vm.csDisplayPages[i]
@@ -5904,39 +5976,6 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
 
-            // Large text is a graphic-OLED feature; character modules ignore it.
-            let isGraphic = vm.csDisplaySlot.map { csDisplayIsGraphic(Int(vm.csBindings[$0].index)) } ?? false
-            if isGraphic || displayPageBarAllowed(Int(page.noun)) {
-                HStack(spacing: 12) {
-                    Spacer().frame(width: 16)
-                    if isGraphic {
-                        Toggle(isOn: Binding(
-                            get: { vm.csDisplayPages[i].isLarge },
-                            set: { on in
-                                var p = vm.csDisplayPages[i]
-                                if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
-                                applyDisplayPage(i, p)
-                            })) {
-                            Text("Large value").font(.caption)
-                        }
-                        .toggleStyle(.checkbox)
-                    }
-                    if displayPageBarAllowed(Int(page.noun)) {
-                        Toggle(isOn: Binding(
-                            get: { vm.csDisplayPages[i].hasBar },
-                            set: { on in
-                                var p = vm.csDisplayPages[i]
-                                if on { p.flags |= CS_DPAGE_BAR } else { p.flags &= ~CS_DPAGE_BAR }
-                                applyDisplayPage(i, p)
-                            })) {
-                            Text("Level bar").font(.caption)
-                        }
-                        .toggleStyle(.checkbox)
-                        .help(displayBarHelp(isGraphic: isGraphic))
-                    }
-                    Spacer()
-                }
-            }
         }
         .padding(.vertical, 2)
     }
