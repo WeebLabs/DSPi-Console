@@ -270,12 +270,12 @@ struct GettingStartedView: View {
 
     private var boardStageTitle: String {
         switch installer.state {
-        case .verified: return "Your board is ready"
+        case .verified: return "Your Pico is ready"
         case .failed: return "Something needs attention"
         case .writing, .waitingForDevice: return "Installing firmware"
         default:
             if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
-                return "Update your board's firmware"
+                return "Update your Pico's firmware"
             }
             return "Prepare your Pico"
         }
@@ -284,7 +284,7 @@ struct GettingStartedView: View {
     private var boardStageBlurb: String {
         switch installer.state {
         case .writing, .waitingForDevice:
-            return "Console ships the firmware it expects, so nothing needs a download. Keep the board plugged in until it checks back in."
+            return "Console ships the firmware it expects, so nothing needs a download. Keep the Pico plugged in until it checks back in."
         case .verified:
             return "The board came back and confirmed it is running exactly what was written."
         case .failed:
@@ -306,8 +306,8 @@ struct GettingStartedView: View {
                     icon: "magnifyingglass",
                     tint: .accentColor,
                     spinning: true,
-                    title: "Looking for the board",
-                    message: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug the board, hold BOOTSEL, and plug it back in.")
+                    title: "Looking for your Pico",
+                    message: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug it, hold BOOTSEL, and plug it back in.")
             } else if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
                 VStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -335,8 +335,8 @@ struct GettingStartedView: View {
                     icon: "cable.connector",
                     tint: .accentColor,
                     spinning: true,
-                    title: "Watching for your board",
-                    message: "Plug the DSPi in and this step completes by itself. For a new Pico, hold the BOOTSEL button while plugging it in and the firmware installer appears here.")
+                    title: "Waiting for your Pico",
+                    message: "Connect it as described below and it will appear here. A device already running DSPi firmware needs nothing further, and this step will move on by itself.")
             }
 
         case .waitingForVolume(let chip):
