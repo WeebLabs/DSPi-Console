@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import DSPi_Console
 
 /// Pure-logic tests for firmware versioning and the installer's decisions.
@@ -297,6 +298,155 @@ final class FirmwareInstallerTests: XCTestCase {
 
         installer.install(BootloaderBoard(chip: .rp2350, volumeURL: volume))
         XCTAssertEqual(installer.state, .failed(.bundledImageStale(bundled: "1.1.6", expected: "1.1.7")))
+    }
+
+    // MARK: - Life after an install
+
+    /// The outcome of a flash has to stay on screen long enough to be read:
+    /// the board rebooting out of BOOTSEL right after a success is the normal
+    /// ending, not a change that may erase the green tick.
+    func testVerifiedStateSurvivesTheBoardDisappearing() throws {
+        let (volume, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let locator = FakeBootloaderLocator(boards: [BootloaderBoard(chip: .rp2350, volumeURL: volume)])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: FirmwareVersion(1, 1, 7)),
+                                          imageProvider: { _ in image })
+        installer.beginWatching()
+        installer.installWhenReady()
+        waitForSettledState(installer)
+        XCTAssertEqual(installer.state, .verified(FirmwareVersion(1, 1, 7)))
+
+        locator.boards = []
+        locator.emit()
+        XCTAssertEqual(installer.state, .verified(FirmwareVersion(1, 1, 7)))
+    }
+
+    /// The reported hang: a finished install froze detection for the life of
+    /// the installer, so the window sat on its terminal state ignoring every
+    /// plug and unplug. `reset()` is the door back to detection.
+    func testResetAfterAVerifiedInstallReturnsToDetection() throws {
+        let (volume, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let locator = FakeBootloaderLocator(boards: [BootloaderBoard(chip: .rp2350, volumeURL: volume)])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: FirmwareVersion(1, 1, 7)),
+                                          imageProvider: { _ in image })
+        installer.beginWatching()
+        installer.installWhenReady()
+        waitForSettledState(installer)
+
+        locator.boards = []
+        installer.reset()
+        XCTAssertEqual(installer.state, .waitingForBoard)
+    }
+
+    /// Arming must not outlive the write it authorised: a second board seen
+    /// after a reset was decided about exactly zero times, so it may become
+    /// ready but never start writing on its own.
+    func testASecondBoardAfterResetNeedsAFreshCommit() throws {
+        let (volume, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let locator = FakeBootloaderLocator(boards: [BootloaderBoard(chip: .rp2350, volumeURL: volume)])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: FirmwareVersion(1, 1, 7)),
+                                          imageProvider: { _ in image })
+        installer.beginWatching()
+        installer.installWhenReady()
+        waitForSettledState(installer)
+        installer.reset()
+
+        let second = BootloaderBoard(chip: .rp2040, volumeURL: URL(fileURLWithPath: "/Volumes/RPI-RP2"))
+        locator.boards = [second]
+        locator.emit()
+        XCTAssertEqual(installer.state, .ready(second))
+        XCTAssertFalse(installer.isArmed)
+    }
+
+    /// A failure raised before any byte moved - here a missing image - used to
+    /// last one poll tick: the board was still attached, so detection put
+    /// `.ready` straight back over it, leaving a disabled button and no error.
+    func testPreWriteFailureHoldsOverContinuedDetection() {
+        let board = BootloaderBoard(chip: .rp2350, volumeURL: URL(fileURLWithPath: "/Volumes/RP2350"))
+        let locator = FakeBootloaderLocator(boards: [board])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: nil),
+                                          imageProvider: { chip in
+                                              throw FirmwareInstallError.imageMissing(chip.displayName)
+                                          })
+        installer.beginWatching()
+        installer.installWhenReady()
+        XCTAssertEqual(installer.state, .failed(.imageMissing(BootloaderBoard.Chip.rp2350.displayName)))
+
+        locator.emit()
+        XCTAssertEqual(installer.state, .failed(.imageMissing(BootloaderBoard.Chip.rp2350.displayName)))
+
+        installer.reset()
+        XCTAssertEqual(installer.state, .ready(board))
+        XCTAssertFalse(installer.isArmed)
+    }
+
+    /// Try Again after a genuine write failure has to actually start over;
+    /// before `reset()` it restarted the watch against a permanently frozen
+    /// state machine, which looked alive and did nothing.
+    func testResetAfterAWriteFailureRecovers() throws {
+        let (_, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let ghostVolume = URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")
+        let locator = FakeBootloaderLocator(boards: [])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: nil),
+                                          imageProvider: { _ in image })
+        installer.beginWatching()
+        installer.install(BootloaderBoard(chip: .rp2350, volumeURL: ghostVolume))
+        waitForSettledState(installer)
+        guard case .failed(.writeFailed) = installer.state else {
+            return XCTFail("expected a write failure, got \(installer.state)")
+        }
+
+        let good = BootloaderBoard(chip: .rp2350, volumeURL: URL(fileURLWithPath: "/Volumes/RP2350"))
+        locator.boards = [good]
+        installer.reset()
+        XCTAssertEqual(installer.state, .ready(good))
+    }
+
+    /// Mid-install there is no outcome to dismiss, and unfreezing detection
+    /// would let the rebooting board's disappearance overwrite the write in
+    /// progress - the exact bug the freeze exists to prevent.
+    func testResetIsRefusedMidInstall() {
+        let locator = FakeBootloaderLocator(boards: [])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: nil),
+                                          imageProvider: { _ in throw FirmwareInstallError.noBoardFound })
+        installer.beginWatching()
+
+        installer.setStateForTesting(.writing(0.5), installing: true)
+        installer.reset()
+        XCTAssertEqual(installer.state, .writing(0.5))
+
+        installer.setStateForTesting(.waitingForDevice, installing: true)
+        installer.reset()
+        XCTAssertEqual(installer.state, .waitingForDevice)
+        locator.emit()
+        XCTAssertEqual(installer.state, .waitingForDevice)
+    }
+
+    /// Seven jumps of a progress bar over a whole flash read as a stall, not
+    /// as progress; the chunk size has to keep the bar visibly moving.
+    func testProgressMovesInFineSteps() throws {
+        let (volume, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let installer = makeInstaller(boards: [],
+                                      verifier: StubVerifier(version: FirmwareVersion(1, 1, 7)),
+                                      image: image)
+        var fractions = Set<Double>()
+        let watcher = installer.$state.sink { state in
+            if case .writing(let f) = state { fractions.insert(f) }
+        }
+        defer { watcher.cancel() }
+
+        installer.install(BootloaderBoard(chip: .rp2350, volumeURL: volume))
+        waitForSettledState(installer)
+
+        XCTAssertEqual(installer.state, .verified(FirmwareVersion(1, 1, 7)))
+        // The 256 KB test image should produce a distinct fraction for each
+        // chunk; a return to 64 KB chunks drops this to four.
+        XCTAssertGreaterThanOrEqual(fractions.count, 12)
     }
 
     // MARK: - The real bundle

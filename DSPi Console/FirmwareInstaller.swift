@@ -99,6 +99,9 @@ struct ViewModelFirmwareVerifier: FirmwareVerifying {
     let vm: DSPViewModel
 
     func awaitDeviceVersion(timeout: TimeInterval) -> FirmwareVersion? {
+        // The main.sync below deadlocks instantly if this ever runs on the
+        // main queue; make that mistake loud rather than a hang.
+        dispatchPrecondition(condition: .notOnQueue(.main))
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let version: FirmwareVersion? = DispatchQueue.main.sync {
@@ -149,8 +152,16 @@ final class FirmwareInstaller: ObservableObject {
     /// so an early genuine failure still surfaces.
     static let rebootThreshold = 0.95
 
-    /// How long to wait for the board to come back after a write.
-    static let verifyTimeout: TimeInterval = 15
+    /// How long to wait for the board to come back after a write.  Covers the
+    /// reboot, USB re-enumeration, and the app's own reconnect and platform
+    /// fetch; generous on purpose, because timing out after a flash that
+    /// actually worked tells the user their device is broken when it is not.
+    static let verifyTimeout: TimeInterval = 30
+
+    /// Write chunk size.  Small enough that a typical image produces a few
+    /// dozen progress updates; 64 KB moved the bar in seven jumps, which read
+    /// as a stall rather than progress.
+    static let writeChunkSize = 16 * 1024
 
     /// How long a board may sit on the USB bus with no drive before we call it
     /// a failure.  The mount always lags enumeration; treating that gap as an
@@ -175,10 +186,13 @@ final class FirmwareInstaller: ObservableObject {
     private let now: () -> Date
     private let queue = DispatchQueue(label: "com.foxdac.firmware-install")
 
-    /// Set once a write begins.  From then on the board disappearing is the
-    /// expected reboot, so detection stops touching the state.  Before that,
-    /// detection stays live: a failure it reported is only ever a description
-    /// of what is plugged in right now, and must give way when that changes.
+    /// Set once `install` begins and cleared only by `reset()`.  While it is
+    /// set, detection stops touching the state: mid-write because the board
+    /// disappearing is the expected reboot, and afterwards because the outcome
+    /// - `.verified` or a `.failed` - must stay on screen rather than being
+    /// overwritten by the next poll tick.  Before an install, detection stays
+    /// live: a failure it reported is only ever a description of what is
+    /// plugged in right now, and must give way when that changes.
     private var installing = false
 
     /// When the current board was first seen without a drive.
@@ -218,12 +232,33 @@ final class FirmwareInstaller: ObservableObject {
         locator.stop()
     }
 
+    /// Returns a finished installer to detection so another update can run.
+    ///
+    /// The outcome of an install - `.verified` or `.failed` - is deliberately
+    /// frozen so the user gets to read it; this is the one door back out, and
+    /// it is only opened by an explicit user action (Try Again, Update Another
+    /// Board) or a fresh window.  It clears the commitment along with the
+    /// freeze: a second board is a second decision, never covered by the
+    /// first click.  Refused mid-install, where there is no outcome yet to
+    /// dismiss and detection must stay off.
+    func reset() {
+        switch state {
+        case .writing, .waitingForDevice: return
+        default: break
+        }
+        installing = false
+        armed = false
+        volumeWaitStarted = nil
+        applyBoards(locator.currentBoards())
+    }
+
     /// Maps what is attached onto a state.
     ///
-    /// Stops entirely once a write has begun: from that point the board
-    /// vanishing is the expected reboot, not a change worth reacting to.
-    /// Until then it always runs, including over a failure it reported
-    /// itself, so a board whose drive shows up late recovers on its own.
+    /// Stops entirely once an install has begun: mid-write the board
+    /// vanishing is the expected reboot, and afterwards the outcome must hold
+    /// until `reset()`.  Until then it always runs, including over a failure
+    /// it reported itself, so a board whose drive shows up late recovers on
+    /// its own.
     private func applyBoards(_ boards: [BootloaderBoard]) {
         guard !installing else { return }
 
@@ -275,6 +310,19 @@ final class FirmwareInstaller: ObservableObject {
     /// Writes the bundled image for `board` and verifies the result.
     /// Call only from a state of `.ready`, after the user has confirmed.
     func install(_ board: BootloaderBoard) {
+        guard !installing else { return }
+
+        // The commitment is consumed here, success or not.  Left standing, a
+        // pre-write failure would retrigger the install on every poll tick,
+        // and a later board would be flashed on a decision made about an
+        // earlier one.
+        armed = false
+
+        // Frozen from the first possible failure, not from the first byte:
+        // detection would otherwise overwrite an error like a missing image
+        // with `.ready` on the next tick, since the board is still attached.
+        installing = true
+
         guard let volumeURL = board.volumeURL else {
             publish(.failed(.volumeNotMounted(board.chip.volumeName)))
             return
@@ -291,7 +339,6 @@ final class FirmwareInstaller: ObservableObject {
             return
         }
 
-        installing = true
         publish(.writing(0))
 
         queue.async { [weak self] in
@@ -350,7 +397,15 @@ final class FirmwareInstaller: ObservableObject {
 
         var written = 0
         while true {
-            let chunk = (try? source.read(upToCount: 64 * 1024)) ?? Data()
+            let chunk: Data
+            do {
+                chunk = try source.read(upToCount: Self.writeChunkSize) ?? Data()
+            } catch {
+                // A failed read must not be mistaken for end-of-file: falling
+                // out of the loop here would flash a truncated image and then
+                // report only that the device never came back.
+                throw FirmwareInstallError.writeFailed("could not read the bundled image")
+            }
             if chunk.isEmpty { break }
 
             do {

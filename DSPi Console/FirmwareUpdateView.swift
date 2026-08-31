@@ -15,10 +15,16 @@ class FirmwareUpdateWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "Firmware Update"
-            window?.contentView = NSHostingView(rootView: FirmwareUpdateView(vm: vm))
             window?.isReleasedWhenClosed = false
             window?.delegate = self
         }
+        // Fresh content on every open.  The view owns the installer, so a
+        // reused hosting view would resurrect the last run's terminal state
+        // and its already-spent confirmation; each open must start at
+        // detection.
+        window?.contentView = NSHostingView(rootView: FirmwareUpdateView(
+            vm: vm,
+            onClose: { [weak self] in self?.hide() }))
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         isVisible = true
@@ -27,11 +33,28 @@ class FirmwareUpdateWindowController: NSObject, ObservableObject {
     func hide() {
         window?.orderOut(nil)
         isVisible = false
+        tearDownContent()
+    }
+
+    /// Releases the hosting view, and with it the installer and its locator.
+    /// `orderOut` alone left the locator's one-second poll and workspace
+    /// observers running for the life of the app, because a hidden-not-closed
+    /// window never fires the view's `onDisappear`.  Deferred a turn of the
+    /// run loop so the view is never torn down from inside its own button
+    /// action, and skipped if the window was reopened in the meantime.
+    private func tearDownContent() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isVisible else { return }
+            self.window?.contentView = NSView()
+        }
     }
 }
 
 extension FirmwareUpdateWindowController: NSWindowDelegate {
-    func windowWillClose(_ notification: Notification) { isVisible = false }
+    func windowWillClose(_ notification: Notification) {
+        isVisible = false
+        tearDownContent()
+    }
 }
 
 // MARK: - Update View
@@ -47,14 +70,20 @@ struct FirmwareUpdateView: View {
     @ObservedObject var vm: DSPViewModel
     @StateObject private var installer: FirmwareInstaller
 
+    /// Closes this view's own window.  A closure from the controller rather
+    /// than `NSApp.keyWindow?.close()`, which closed whichever window
+    /// happened to be key - not necessarily this one.
+    let onClose: () -> Void
+
     /// Set when the user commits to the update.  The installer never flashes
     /// on its own, so a board reaching `.ready` only starts a write once this
     /// is true.
     @State private var confirmed = false
     @State private var rebootRequested = false
 
-    init(vm: DSPViewModel) {
+    init(vm: DSPViewModel, onClose: @escaping () -> Void = {}) {
         self.vm = vm
+        self.onClose = onClose
         _installer = StateObject(wrappedValue: FirmwareInstaller(
             locator: SystemBootloaderLocator(),
             verifier: ViewModelFirmwareVerifier(vm: vm)))
@@ -80,11 +109,15 @@ struct FirmwareUpdateView: View {
 
             HStack {
                 if case .verified = installer.state {
+                    // A second board is a second decision: this returns to
+                    // detection with nothing armed, it does not re-run the
+                    // update.
+                    Button("Update Another Board") { resetRun() }
                     Spacer()
-                    Button("Done") { NSApp.keyWindow?.close() }
+                    Button("Done") { onClose() }
                         .keyboardShortcut(.defaultAction)
                 } else {
-                    Button("Cancel") { NSApp.keyWindow?.close() }
+                    Button("Cancel") { onClose() }
                     // A UF2 write does not target the preset sectors, but a
                     // wire-format change between versions can leave them
                     // unreadable, and the device is about to become
@@ -185,13 +218,8 @@ struct FirmwareUpdateView: View {
     private var primaryButton: some View {
         switch installer.state {
         case .failed:
-            Button("Try Again") {
-                confirmed = false
-                rebootRequested = false
-                installer.stopWatching()
-                installer.beginWatching()
-            }
-            .keyboardShortcut(.defaultAction)
+            Button("Try Again") { resetRun() }
+                .keyboardShortcut(.defaultAction)
 
         case .writing, .waitingForDevice:
             EmptyView()
@@ -216,6 +244,16 @@ struct FirmwareUpdateView: View {
         // The device drops off the bus answering this, so there is no reply to
         // wait for.
         _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+    }
+
+    /// Starts the whole flow over: the view's flags and the installer's
+    /// freeze and commitment together, because clearing only one side leaves
+    /// the other believing a run is still in progress.  Backs both
+    /// Try Again and Update Another Board.
+    private func resetRun() {
+        confirmed = false
+        rebootRequested = false
+        installer.reset()
     }
 }
 
