@@ -76,6 +76,15 @@ final class SystemBootloaderLocator: BootloaderLocating {
     private var pollTimer: Timer?
     private var observers: [NSObjectProtocol] = []
 
+    /// Scanning happens here, never on the main thread.  Both halves of a scan
+    /// touch system state that can stall, and this runs once a second for as
+    /// long as a flashing UI is open.
+    private let scanQueue = DispatchQueue(label: "com.foxdac.bootloader-scan")
+
+    /// Last completed scan.  Main thread only; `currentBoards()` hands this
+    /// back rather than scanning inline, so no caller can block on a scan.
+    private var lastScan: [BootloaderBoard] = []
+
     func start() {
         let centre = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
@@ -106,8 +115,26 @@ final class SystemBootloaderLocator: BootloaderLocating {
 
     deinit { stop() }
 
-    func currentBoards() -> [BootloaderBoard] {
-        let volumes = mountedVolumesByName()
+    /// The most recent scan, not a fresh one.  Deliberate: see `scanQueue`.
+    func currentBoards() -> [BootloaderBoard] { lastScan }
+
+    /// Reports on every tick rather than only on change: a board sitting on
+    /// the bus with no drive yet looks identical scan to scan, and the
+    /// installer needs those ticks to decide the drive is not coming.  The
+    /// installer drops states that did not change, so this costs no UI churn.
+    private func rescan() {
+        scanQueue.async { [weak self] in
+            guard let self else { return }
+            let boards = self.scan()
+            DispatchQueue.main.async {
+                self.lastScan = boards
+                self.onChange?(boards)
+            }
+        }
+    }
+
+    private func scan() -> [BootloaderBoard] {
+        let volumes = mountPointsByName()
         return BootloaderBoard.Chip.allCases.flatMap { chip -> [BootloaderBoard] in
             let count = usbCount(of: chip)
             guard count > 0 else { return [] }
@@ -119,14 +146,6 @@ final class SystemBootloaderLocator: BootloaderLocating {
                 BootloaderBoard(chip: chip, volumeURL: index == 0 ? volumes[chip.volumeName] : nil)
             }
         }
-    }
-
-    /// Reports on every tick rather than only on change: a board sitting on
-    /// the bus with no drive yet looks identical scan to scan, and the
-    /// installer needs those ticks to decide the drive is not coming.  The
-    /// installer drops states that did not change, so this costs no UI churn.
-    private func rescan() {
-        onChange?(currentBoards())
     }
 
     /// How many boards of this chip are on the USB bus in BOOTSEL.
@@ -148,14 +167,37 @@ final class SystemBootloaderLocator: BootloaderLocating {
         return count
     }
 
-    private func mountedVolumesByName() -> [String: URL] {
-        let urls = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeNameKey],
-                                                         options: [.skipHiddenVolumes]) ?? []
+    /// Mount points keyed by the volume name, read straight from the kernel's
+    /// mount table.
+    ///
+    /// `FileManager.mountedVolumeURLs` was the obvious call and is the wrong
+    /// one: fetching `.volumeNameKey` stats every mounted volume, and a flash
+    /// routinely leaves a wedged one behind - the board yanks its own drive
+    /// away as it reboots, and the stale `msdos`/fskit mount that survives
+    /// blocks any stat of it indefinitely, with no timeout.  On the main
+    /// thread that froze the whole app, and the process could not even be
+    /// killed because it sat in an uninterruptible wait.
+    ///
+    /// `getmntinfo` with `MNT_NOWAIT` reads the table the kernel already holds
+    /// and touches no filesystem, so a dead mount is listed rather than fatal.
+    /// The mount point's last path component is the volume name macOS assigned
+    /// (`/Volumes/RP2350`), including its de-duplicating suffix for a second
+    /// identical board.
+    private func mountPointsByName() -> [String: URL] {
+        var table: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&table, MNT_NOWAIT)
+        guard count > 0, let table else { return [:] }
+
         var byName: [String: URL] = [:]
-        for url in urls {
-            guard let name = try? url.resourceValues(forKeys: [.volumeNameKey]).volumeName else { continue }
+        for index in 0..<Int(count) {
+            var entry = table[index]
+            let path = withUnsafePointer(to: &entry.f_mntonname) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+            }
+            let url = URL(fileURLWithPath: path)
             // First writer wins, so an identically named second mount cannot
             // displace the one we already paired.
+            let name = url.lastPathComponent
             if byName[name] == nil { byName[name] = url }
         }
         return byName
