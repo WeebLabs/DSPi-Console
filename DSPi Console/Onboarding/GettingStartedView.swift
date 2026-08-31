@@ -259,12 +259,11 @@ struct GettingStartedView: View {
     /// is the user's, and the card says exactly what that move is.
     private var boardStage: some View {
         stepBody(title: boardStageTitle, blurb: boardStageBlurb) {
+            // No separate BOOTSEL footnote: the card that needs those
+            // instructions carries them itself, and repeating them beneath it
+            // made the same sentence appear twice on one screen.
             boardStatusCard
                 .frame(minHeight: 190)
-
-            if showBootselHint {
-                BootselHint()
-            }
         }
     }
 
@@ -336,7 +335,7 @@ struct GettingStartedView: View {
                     tint: .accentColor,
                     spinning: true,
                     title: "Waiting for your Pico",
-                    message: "Connect it as described below and it will appear here. A device already running DSPi firmware needs nothing further, and this step will move on by itself.")
+                    message: "Hold the BOOTSEL button while connecting your Pico-compatible device to your computer. Once detected, it will appear here.")
             }
 
         case .waitingForVolume(let chip):
@@ -397,18 +396,6 @@ struct GettingStartedView: View {
                     .controlSize(.large)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
-        }
-    }
-
-    /// Shown whenever the user may need to put a board into BOOTSEL by hand.
-    private var showBootselHint: Bool {
-        switch installer.state {
-        case .idle, .waitingForBoard:
-            return !vm.isDeviceConnected || confirmed
-        case .failed(.noBoardFound):
-            return true
-        default:
-            return false
         }
     }
 
