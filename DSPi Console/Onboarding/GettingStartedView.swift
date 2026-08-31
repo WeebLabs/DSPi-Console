@@ -277,7 +277,7 @@ struct GettingStartedView: View {
             if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
                 return "Update your board's firmware"
             }
-            return "Get your board running"
+            return "Prepare your Pico"
         }
     }
 
@@ -293,7 +293,7 @@ struct GettingStartedView: View {
             if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
                 return "The connected DSPi runs firmware \(deviceVersionText), and this Console expects \(bundledVersion). Updating takes about a minute, or continue and update later from the Tools menu."
             }
-            return "A board that already has DSPi firmware just needs plugging in - this step finishes on its own when it appears. A brand-new Pico needs firmware first, and that happens right here: Console ships the firmware it expects, so nothing needs a download."
+            return "In this step, we are going to install the DSPi firmware on your Pico compatible device. Simply follow the directions below."
         }
     }
 
