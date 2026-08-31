@@ -120,11 +120,17 @@ extension DSPViewModel {
 
     @discardableResult
     func fetchPlatform() -> String? {
-        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) else { return nil }
+        // Ask for 6: firmware 1.1.7+ appends full-width minor and patch at
+        // bytes 4-5, because the legacy byte 2 packs them into a nibble each
+        // and so caps both at 15.  Older firmware answers short with the
+        // original 4 bytes and we fall back to the nibbles; never mix the two
+        // decodes.  See the firmware's firmware_versioning_spec.md.
+        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 6),
+              data.count >= 4 else { return nil }
         let platform = data[0]
         let major = Int(data[1])
-        let minor = Int(data[2] >> 4)
-        let patch = Int(data[2] & 0x0F)
+        let minor = data.count >= 6 ? Int(data[4]) : Int(data[2] >> 4)
+        let patch = data.count >= 6 ? Int(data[5]) : Int(data[2] & 0x0F)
         let name: String
         switch platform {
         case 1:  name = "RP2350"
