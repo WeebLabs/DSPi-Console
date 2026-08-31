@@ -363,7 +363,9 @@ struct FirmwareUpdateView: View {
             ProgressView(value: fraction)
 
             VStack(alignment: .leading, spacing: 4) {
-                summaryRow(label: "Board", value: writingBoardName)
+                if let board = lastSeenChip?.displayName {
+                    summaryRow(label: "Board", value: board)
+                }
                 summaryRow(label: "Firmware", value: bundledVersion)
             }
             .padding(.top, 2)
@@ -386,13 +388,6 @@ struct FirmwareUpdateView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color.gray.opacity(0.2), lineWidth: 1)
         )
-    }
-
-    /// Name of the chip being written.  A write is only ever started from
-    /// `.ready`, so the chip remembered on the way there is always the one
-    /// under the pen; the fallback can only show if that assumption breaks.
-    private var writingBoardName: String {
-        lastSeenChip?.displayName ?? "Raspberry Pi Pico"
     }
 
     /// A failure, dressed to match its severity.  Detection-side stumbles - no
