@@ -10025,7 +10025,17 @@ struct DSPi_ConsoleApp: App {
             }
 
             // Add to native File menu
+            // Disabled while first-time setup is running.  Every one of these
+            // opens a window that is useless before a device is configured, and
+            // several show their own "no device" state, which is exactly what
+            // the wizard exists to spare a new user.  Help, Settings, About and
+            // Quit stay live, so nobody is trapped.
             CommandGroup(after: .newItem) {
+                // Disabled during first-time setup: each opens a window
+                // that is useless before a device is configured.  Group,
+                // not the CommandGroup itself, because a command group is
+                // not a View and carries no .disabled.
+                Group {
                 Divider()
 
                 Button("Import Filters...") {
@@ -10059,10 +10069,17 @@ struct DSPi_ConsoleApp: App {
                 Button("Save Output Configuration") {
                     FileMenuActions.saveOutputConfig()
                 }
+                }
+                .disabled(onboarding.shouldTakeOverMainWindow())
             }
 
             // AutoEQ Menu
             CommandMenu("AutoEQ") {
+                // Disabled during first-time setup: each opens a window
+                // that is useless before a device is configured.  Group,
+                // not the CommandGroup itself, because a command group is
+                // not a View and carries no .disabled.
+                Group {
                 Button("Browse Profiles...") {
                     autoEQBrowserController.show()
                 }
@@ -10093,10 +10110,17 @@ struct DSPi_ConsoleApp: App {
                 Button("Update Database...") {
                     AutoEQMenuActions.updateDatabase()
                 }
+                }
+                .disabled(onboarding.shouldTakeOverMainWindow())
             }
 
             // Tools Menu
             CommandMenu("Tools") {
+                // Disabled during first-time setup: each opens a window
+                // that is useless before a device is configured.  Group,
+                // not the CommandGroup itself, because a command group is
+                // not a View and carries no .disabled.
+                Group {
                 Button("Commit Parameters...") {
                     ToolsMenuActions.commitParameters()
                 }
@@ -10169,6 +10193,8 @@ struct DSPi_ConsoleApp: App {
                     interruptMonitorWindowController.show()
                 }
                 .keyboardShortcut("I", modifiers: [.command, .shift])
+                }
+                .disabled(onboarding.shouldTakeOverMainWindow())
             }
 
             // Users look in Help.  Replacing the group drops the stock
