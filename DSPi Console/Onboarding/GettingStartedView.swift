@@ -293,7 +293,7 @@ struct GettingStartedView: View {
             if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
                 return "The connected DSPi runs firmware \(deviceVersionText), and this Console expects \(bundledVersion). Updating takes about a minute, or continue and update later from the Tools menu."
             }
-            return "In this step, we are going to install the DSPi firmware on your Pico compatible device. Simply follow the directions below."
+            return "In this step, we are going to install the DSPi firmware on your Pico-compatible device. Simply follow the directions below."
         }
     }
 
@@ -356,17 +356,17 @@ struct GettingStartedView: View {
                     title: "Preparing to write",
                     message: "Opening the \(board.chip.displayName)'s \(board.chip.volumeName) drive.")
             } else {
-                VStack(spacing: 12) {
-                    InstallStateCard(
-                        icon: "externaldrive.badge.checkmark",
-                        tint: .green,
-                        title: "\(board.chip.displayName) ready",
-                        message: "The board is in bootloader mode, ready to receive firmware \(bundledVersion).")
-                    Button("Install Firmware \(bundledVersion)") { beginInstall() }
-                        .controlSize(.large)
-                        .keyboardShortcut(.defaultAction)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                }
+                InstallStateCard(
+                    icon: "externaldrive.badge.checkmark",
+                    tint: .green,
+                    title: "\(board.chip.displayName) ready",
+                    message: "The device is now in bootloader mode and ready to receive firmware.",
+                    accessory: AnyView(
+                        Button("Install DSPi Firmware") { beginInstall() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                            .keyboardShortcut(.defaultAction)
+                    ))
             }
 
         case .writing(let fraction):

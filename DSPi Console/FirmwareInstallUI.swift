@@ -62,6 +62,11 @@ struct InstallStateCard: View {
     let title: String
     let message: String
 
+    /// Optional control belonging to this state, drawn inside the card.  A
+    /// button that acts on what the card describes reads as part of it; the
+    /// same button floating underneath reads as belonging to the page.
+    var accessory: AnyView? = nil
+
     var body: some View {
         VStack(spacing: 10) {
             if spinning {
@@ -82,6 +87,9 @@ struct InstallStateCard: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 340)
+            if let accessory {
+                accessory.padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(14)
@@ -209,7 +217,7 @@ struct BootselHint: View {
             Image(systemName: "button.programmable")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
-            Text("BOOTSEL is the small button on the Pico board. Hold it down while plugging in the USB cable and the board starts in bootloader mode, ready to receive firmware.")
+            Text("Hold the BOOTSEL button on your Pico-compatible device while plugging it into your computer.")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
