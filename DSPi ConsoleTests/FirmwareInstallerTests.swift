@@ -94,13 +94,74 @@ final class FirmwareInstallerTests: XCTestCase {
         XCTAssertEqual(installer.state, .ready(board))
     }
 
-    /// Seen on the bus with no volume: the likely shape of a denied
-    /// removable-volume prompt, and something the user can act on. It must not
-    /// collapse into "no board found".
-    func testBoardWithoutVolumeReportsTheDrive() {
+    /// The drive always mounts a moment after the board enumerates, so a
+    /// missing volume starts as waiting, not as an error.  Calling it a
+    /// failure immediately rejected any board plugged in while the window was
+    /// already open, a beat before its drive appeared.
+    func testBoardWithoutVolumeWaitsRatherThanFailing() {
         let installer = makeInstaller(boards: [BootloaderBoard(chip: .rp2040, volumeURL: nil)])
         installer.beginWatching()
+        XCTAssertEqual(installer.state, .waitingForVolume(.rp2040))
+    }
+
+    /// A drive that never turns up is the likely shape of a denied
+    /// removable-volume prompt, and the user can act on that, so it does
+    /// eventually become an error naming the drive.
+    func testBoardWithoutVolumeFailsOnceTheWaitElapses() {
+        let clock = TestClock()
+        let locator = FakeBootloaderLocator(boards: [BootloaderBoard(chip: .rp2040, volumeURL: nil)])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: nil),
+                                          imageProvider: { _ in throw FirmwareInstallError.noBoardFound },
+                                          now: { clock.now })
+        installer.beginWatching()
+        XCTAssertEqual(installer.state, .waitingForVolume(.rp2040))
+
+        clock.advance(FirmwareInstaller.volumeWaitTimeout)
+        locator.emit()
         XCTAssertEqual(installer.state, .failed(.volumeNotMounted("RPI-RP2")))
+    }
+
+    /// The bug this pair guards: a detection failure must not latch.  A drive
+    /// that shows up late has to recover on its own, or the window stays stuck
+    /// on an error while the drive sits mounted in Finder.
+    func testLateArrivingDriveRecoversFromTheFailure() {
+        let clock = TestClock()
+        let locator = FakeBootloaderLocator(boards: [BootloaderBoard(chip: .rp2350, volumeURL: nil)])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: nil),
+                                          imageProvider: { _ in throw FirmwareInstallError.noBoardFound },
+                                          now: { clock.now })
+        installer.beginWatching()
+        clock.advance(FirmwareInstaller.volumeWaitTimeout)
+        locator.emit()
+        XCTAssertEqual(installer.state, .failed(.volumeNotMounted("RP2350")))
+
+        let mounted = BootloaderBoard(chip: .rp2350, volumeURL: URL(fileURLWithPath: "/Volumes/RP2350"))
+        locator.boards = [mounted]
+        locator.emit()
+        XCTAssertEqual(installer.state, .ready(mounted))
+    }
+
+    /// Unplugging a board must clear the wait, so plugging a second one in
+    /// starts its own grace period rather than inheriting an expired one.
+    func testRemovingTheBoardResetsTheVolumeWait() {
+        let clock = TestClock()
+        let locator = FakeBootloaderLocator(boards: [BootloaderBoard(chip: .rp2040, volumeURL: nil)])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: nil),
+                                          imageProvider: { _ in throw FirmwareInstallError.noBoardFound },
+                                          now: { clock.now })
+        installer.beginWatching()
+        clock.advance(FirmwareInstaller.volumeWaitTimeout - 1)
+
+        locator.boards = []
+        locator.emit()
+        XCTAssertEqual(installer.state, .waitingForBoard)
+
+        locator.boards = [BootloaderBoard(chip: .rp2040, volumeURL: nil)]
+        locator.emit()
+        XCTAssertEqual(installer.state, .waitingForVolume(.rp2040))
     }
 
     /// Two boards must be refused outright rather than resolved by guessing;
@@ -114,8 +175,9 @@ final class FirmwareInstallerTests: XCTestCase {
         XCTAssertEqual(installer.state, .failed(.multipleBoards(2)))
     }
 
-    /// A board vanishing mid-write is the reboot, so detection must not
-    /// overwrite the write's own state.
+    /// Once a write has begun the board vanishing IS the expected reboot, so
+    /// detection has to stop touching the state.  Before a write, detection
+    /// stays live - that asymmetry is the whole fix.
     func testDetectionDoesNotDisturbAWriteInProgress() {
         let locator = FakeBootloaderLocator(boards: [
             BootloaderBoard(chip: .rp2350, volumeURL: URL(fileURLWithPath: "/Volumes/RP2350"))
@@ -124,7 +186,7 @@ final class FirmwareInstallerTests: XCTestCase {
                                           verifier: StubVerifier(version: nil),
                                           imageProvider: { _ in throw FirmwareInstallError.noBoardFound })
         installer.beginWatching()
-        installer.setStateForTesting(.writing(0.5))
+        installer.setStateForTesting(.writing(0.5), installing: true)
         locator.boards = []
         locator.emit()
         XCTAssertEqual(installer.state, .writing(0.5))
@@ -252,4 +314,11 @@ final class FirmwareInstallerTests: XCTestCase {
 private struct StubVerifier: FirmwareVerifying {
     let version: FirmwareVersion?
     func awaitDeviceVersion(timeout: TimeInterval) -> FirmwareVersion? { version }
+}
+
+/// A clock the test moves by hand, so the volume-wait timeout is exercised
+/// without any test actually waiting for it.
+private final class TestClock {
+    private(set) var now = Date(timeIntervalSince1970: 1_000_000)
+    func advance(_ interval: TimeInterval) { now = now.addingTimeInterval(interval) }
 }

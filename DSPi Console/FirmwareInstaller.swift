@@ -118,6 +118,9 @@ enum FirmwareInstallState: Equatable {
     case idle
     /// Nothing in BOOTSEL yet.
     case waitingForBoard
+    /// Board on the bus but its drive has not mounted.  Ordinary for a second
+    /// or two after it appears, so this is a waiting state, not a failure.
+    case waitingForVolume(BootloaderBoard.Chip)
     /// Exactly one board, volume mounted, ready to be written when the user says so.
     case ready(BootloaderBoard)
     /// Writing, with the fraction of the image sent so far.
@@ -149,6 +152,12 @@ final class FirmwareInstaller: ObservableObject {
     /// How long to wait for the board to come back after a write.
     static let verifyTimeout: TimeInterval = 15
 
+    /// How long a board may sit on the USB bus with no drive before we call it
+    /// a failure.  The mount always lags enumeration; treating that gap as an
+    /// error meant a board plugged in while the window was open was rejected
+    /// a moment before its drive appeared.
+    static let volumeWaitTimeout: TimeInterval = 8
+
     /// Whether a write error means the board rebooted, which is the ordinary
     /// ending, rather than that the write failed.
     ///
@@ -163,15 +172,27 @@ final class FirmwareInstaller: ObservableObject {
     private let locator: BootloaderLocating
     private let verifier: FirmwareVerifying
     private let imageProvider: (BootloaderBoard.Chip) throws -> FirmwareImage
+    private let now: () -> Date
     private let queue = DispatchQueue(label: "com.foxdac.firmware-install")
+
+    /// Set once a write begins.  From then on the board disappearing is the
+    /// expected reboot, so detection stops touching the state.  Before that,
+    /// detection stays live: a failure it reported is only ever a description
+    /// of what is plugged in right now, and must give way when that changes.
+    private var installing = false
+
+    /// When the current board was first seen without a drive.
+    private var volumeWaitStarted: Date?
 
     init(locator: BootloaderLocating,
          verifier: FirmwareVerifying,
          imageProvider: @escaping (BootloaderBoard.Chip) throws -> FirmwareImage
-            = { try FirmwareImage.bundled(for: $0) }) {
+            = { try FirmwareImage.bundled(for: $0) },
+         now: @escaping () -> Date = Date.init) {
         self.locator = locator
         self.verifier = verifier
         self.imageProvider = imageProvider
+        self.now = now
     }
 
     // MARK: Detection
@@ -191,28 +212,36 @@ final class FirmwareInstaller: ObservableObject {
         locator.stop()
     }
 
-    /// Maps what is attached onto a state.  Only advances the detection
-    /// states; a write in progress is never interrupted by a board appearing
-    /// or vanishing, because the vanishing IS the expected reboot.
+    /// Maps what is attached onto a state.
+    ///
+    /// Stops entirely once a write has begun: from that point the board
+    /// vanishing is the expected reboot, not a change worth reacting to.
+    /// Until then it always runs, including over a failure it reported
+    /// itself, so a board whose drive shows up late recovers on its own.
     private func applyBoards(_ boards: [BootloaderBoard]) {
-        switch state {
-        case .writing, .waitingForDevice, .verified, .failed:
-            return
-        case .idle, .waitingForBoard, .ready:
-            break
-        }
+        guard !installing else { return }
 
         let next: FirmwareInstallState
         switch boards.count {
         case 0:
+            volumeWaitStarted = nil
             next = .waitingForBoard
         case 1:
             if boards[0].volumeURL != nil {
+                volumeWaitStarted = nil
                 next = .ready(boards[0])
             } else {
-                next = .failed(.volumeNotMounted(boards[0].chip.volumeName))
+                // The drive mounts a moment after the board enumerates, so
+                // hold in a waiting state and only call it a failure once it
+                // is clear the drive is not coming.
+                let started = volumeWaitStarted ?? now()
+                volumeWaitStarted = started
+                next = now().timeIntervalSince(started) >= Self.volumeWaitTimeout
+                    ? .failed(.volumeNotMounted(boards[0].chip.volumeName))
+                    : .waitingForVolume(boards[0].chip)
             }
         default:
+            volumeWaitStarted = nil
             next = .failed(.multipleBoards(boards.count))
         }
         publish(next)
@@ -239,6 +268,7 @@ final class FirmwareInstaller: ObservableObject {
             return
         }
 
+        installing = true
         publish(.writing(0))
 
         queue.async { [weak self] in
@@ -322,13 +352,18 @@ final class FirmwareInstaller: ObservableObject {
     }
 
     #if DEBUG
-    /// Test hook: drives the state machine directly, so transitions that only
-    /// happen with a write in flight can be exercised without one.
-    func setStateForTesting(_ next: FirmwareInstallState) { state = next }
+    /// Test hook: drives the state machine directly, and can mark a write as
+    /// begun, so transitions that only happen mid-install are reachable
+    /// without actually writing anything.
+    func setStateForTesting(_ next: FirmwareInstallState, installing: Bool = false) {
+        state = next
+        self.installing = installing
+    }
     #endif
 
     private func publish(_ next: FirmwareInstallState) {
         if Thread.isMainThread {
+            guard state != next else { return }
             state = next
         } else {
             DispatchQueue.main.async { self.state = next }

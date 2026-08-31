@@ -73,7 +73,6 @@ protocol BootloaderLocating: AnyObject {
 final class SystemBootloaderLocator: BootloaderLocating {
     var onChange: (([BootloaderBoard]) -> Void)?
 
-    private var lastReported: [BootloaderBoard] = []
     private var pollTimer: Timer?
     private var observers: [NSObjectProtocol] = []
 
@@ -122,11 +121,12 @@ final class SystemBootloaderLocator: BootloaderLocating {
         }
     }
 
+    /// Reports on every tick rather than only on change: a board sitting on
+    /// the bus with no drive yet looks identical scan to scan, and the
+    /// installer needs those ticks to decide the drive is not coming.  The
+    /// installer drops states that did not change, so this costs no UI churn.
     private func rescan() {
-        let boards = currentBoards()
-        guard boards != lastReported else { return }
-        lastReported = boards
-        onChange?(boards)
+        onChange?(currentBoards())
     }
 
     /// How many boards of this chip are on the USB bus in BOOTSEL.

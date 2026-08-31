@@ -149,6 +149,9 @@ struct FirmwareUpdateView: View {
                     .foregroundColor(.secondary)
             }
 
+        case .waitingForVolume(let chip):
+            waiting("A \(chip.displayName) is in bootloader mode. Waiting for its \(chip.volumeName) drive to appear.")
+
         case .ready(let board):
             if confirmed {
                 waiting("Preparing to write to the \(board.chip.displayName).")
