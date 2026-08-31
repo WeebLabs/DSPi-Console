@@ -7190,15 +7190,9 @@ struct HardwareSettingsTab: View {
             return
         }
 
-        var status = vm.setOutputPin(output: outputIndex, pin: pin)
-
-        // PDM requires disable/enable cycle if active
-        let isPDM = visiblePinOutputs.first(where: { $0.id == outputIndex })?.name == "PDM"
-        if status == PIN_CONFIG_OUTPUT_ACTIVE && isPDM {
-            vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: false)
-            status = vm.setOutputPin(output: outputIndex, pin: pin)
-            vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: true)
-        }
+        // assignOutputPin handles the PDM disable/enable cycle when the
+        // firmware refuses because the output is active.
+        let status = vm.assignOutputPin(output: outputIndex, pin: pin)
 
         let outputName = visiblePinOutputs.first(where: { $0.id == outputIndex })?.name ?? "Output \(outputIndex)"
         switch status {
@@ -7238,13 +7232,7 @@ struct HardwareSettingsTab: View {
         }
 
         for output in visiblePinOutputs {
-            var status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
-            // PDM may need disable/enable cycle
-            if status == PIN_CONFIG_OUTPUT_ACTIVE && output.name == "PDM" {
-                vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: false)
-                status = vm.setOutputPin(output: output.id, pin: output.defaultPin)
-                vm.setOutputEnable(output: vm.pdmOutputIndex, enabled: true)
-            }
+            let status = vm.assignOutputPin(output: output.id, pin: output.defaultPin)
             if status != PIN_CONFIG_SUCCESS {
                 statusMessage = "Failed to reset \(output.name)"
                 statusIsError = true

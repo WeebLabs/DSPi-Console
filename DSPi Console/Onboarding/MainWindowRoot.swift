@@ -10,7 +10,7 @@ struct MainWindowRoot: View {
     @EnvironmentObject private var onboarding: OnboardingCoordinator
 
     var body: some View {
-        if onboarding.shouldTakeOverMainWindow(deviceConnected: vm.isDeviceConnected) {
+        if onboarding.shouldTakeOverMainWindow() {
             GettingStartedView(vm: vm)
         } else {
             ContentView(vm: vm)

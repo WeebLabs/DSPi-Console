@@ -2136,6 +2136,9 @@ class DSPViewModel: ObservableObject {
     var numChannels: Int { chOut1 + numOutputChannels }   // 7 (RP2040) / 17 (RP2350)
     var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
     var pdmOutputIndex: Int { numOutputChannels - 1 }     // matrix output index (4 / 8)
+    /// Index of the PDM output in `outputPins` (the physical-output index used
+    /// by REQ_SET_OUTPUT_PIN), distinct from its matrix index above.
+    var pdmPinIndex: Int { platformName == "RP2040" ? 2 : 4 }
     // EQ-worker outputs that share Core 1 with the PDM sub (matrix output indices).
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
     var numOutputSlots: Int { platformName == "RP2040" ? 2 : 4 }

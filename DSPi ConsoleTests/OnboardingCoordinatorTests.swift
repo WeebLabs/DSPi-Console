@@ -239,21 +239,17 @@ final class OnboardingCoordinatorTests: XCTestCase {
 
     // MARK: - When the wizard takes over the window
 
-    /// The case the takeover exists for: nothing plugged in and nothing known
-    /// about the user, where the ordinary interface is a wall of disabled
-    /// controls that teaches nothing.
-    func testWizardTakesOverForANewUserWithNoDevice() {
+    /// A genuinely new user gets the wizard.  Deliberately independent of
+    /// whether a device is connected: the wizard adapts its steps to what is
+    /// attached, and keying the takeover on the device meant a board plugged
+    /// in mid-wizard yanked the wizard away - the very event several of its
+    /// steps sit waiting for.  (This reverses the original rule, which stood
+    /// aside for a connected device; that rule predates the wizard being able
+    /// to do anything useful with one.)
+    func testWizardTakesOverForANewUser() {
         let coordinator = makeCoordinator()
         coordinator.evaluate(vm: DSPViewModel())
-        XCTAssertTrue(coordinator.shouldTakeOverMainWindow(deviceConnected: false))
-    }
-
-    /// With a working device there is nothing to block the user from, so the
-    /// wizard must not seize a usable interface.
-    func testWizardStandsAsideWhenADeviceIsConnected() {
-        let coordinator = makeCoordinator()
-        coordinator.evaluate(vm: DSPViewModel())
-        XCTAssertFalse(coordinator.shouldTakeOverMainWindow(deviceConnected: true))
+        XCTAssertTrue(coordinator.shouldTakeOverMainWindow())
     }
 
     /// A returning user whose device is simply unplugged gets the empty state.
@@ -262,7 +258,7 @@ final class OnboardingCoordinatorTests: XCTestCase {
         defaults.set(Array(OnboardingCatalogue.all.map(\.id)), forKey: OnboardingCoordinator.Key.completed)
         let coordinator = makeCoordinator()
         coordinator.evaluate(vm: DSPViewModel())
-        XCTAssertFalse(coordinator.shouldTakeOverMainWindow(deviceConnected: false))
+        XCTAssertFalse(coordinator.shouldTakeOverMainWindow())
     }
 
     /// Asked for from the Help menu, it opens regardless of cohort or
@@ -272,7 +268,7 @@ final class OnboardingCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator()
         coordinator.evaluate(vm: DSPViewModel())
         coordinator.requestSetup()
-        XCTAssertTrue(coordinator.shouldTakeOverMainWindow(deviceConnected: true))
+        XCTAssertTrue(coordinator.shouldTakeOverMainWindow())
     }
 
     /// Finishing hands the window back and does not come round again, whether
@@ -281,11 +277,11 @@ final class OnboardingCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator()
         coordinator.evaluate(vm: DSPViewModel())
         coordinator.finishSetup()
-        XCTAssertFalse(coordinator.shouldTakeOverMainWindow(deviceConnected: false))
+        XCTAssertFalse(coordinator.shouldTakeOverMainWindow())
 
         let next = makeCoordinator()
         next.evaluate(vm: DSPViewModel())
-        XCTAssertFalse(next.shouldTakeOverMainWindow(deviceConnected: false))
+        XCTAssertFalse(next.shouldTakeOverMainWindow())
     }
 
     /// Skipping setup must not also skip the tour: they are separate offers.

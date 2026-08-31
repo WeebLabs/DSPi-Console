@@ -137,16 +137,17 @@ final class OnboardingCoordinator: ObservableObject {
 
     /// Whether the wizard should replace the console inside the main window.
     ///
-    /// Only for a genuinely new user with nothing plugged in.  That is the one
-    /// case where the ordinary interface is a wall of disabled controls and
-    /// showing it teaches nothing.  A returning user with an unplugged device
-    /// gets the empty state instead, and a new user who already has a working
-    /// device gets the real interface, because there is nothing to block them
-    /// from.
-    func shouldTakeOverMainWindow(deviceConnected: Bool) -> Bool {
+    /// For any genuinely new user, connected or not.  The wizard adapts its
+    /// steps to what is attached, so a user with a working device gets the
+    /// short version (outputs, audio) and a user with nothing gets shown how
+    /// to connect a board.  Deliberately not keyed on the device: a device
+    /// appearing mid-wizard must not yank the wizard away, it is the very
+    /// thing several steps are waiting for.  A returning user whose device is
+    /// unplugged gets the empty state instead, never this.
+    func shouldTakeOverMainWindow() -> Bool {
         if setupRequested { return true }
         if debug.forceWizard { return true }
-        guard cohort == .newUser, !deviceConnected else { return false }
+        guard cohort == .newUser else { return false }
         return !pending(.setup).isEmpty
     }
 

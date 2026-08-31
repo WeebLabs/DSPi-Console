@@ -113,7 +113,9 @@ struct FirmwareUpdateView: View {
             VStack(spacing: 14) {
                 versionSummary
 
-                StepStrip(current: currentStep, dimmed: isFailed)
+                StepDotStrip(labels: UpdateStep.allCases.map(\.label),
+                             current: currentStep.rawValue,
+                             dimmed: isFailed)
 
                 statusCard
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -171,10 +173,10 @@ struct FirmwareUpdateView: View {
     /// fixed label column keeps the values aligned however long the labels get.
     private var versionSummary: some View {
         VStack(alignment: .leading, spacing: 6) {
-            summaryRow(label: "This Console", value: bundledVersion)
-            summaryRow(label: "Connected device",
-                       value: deviceVersion ?? "None",
-                       secondary: deviceVersion == nil)
+            LabeledValueRow(label: "This Console", value: bundledVersion)
+            LabeledValueRow(label: "Connected device",
+                            value: deviceVersion ?? "None",
+                            secondary: deviceVersion == nil)
             if vm.firmwareMatch == .deviceNewer {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
@@ -190,26 +192,7 @@ struct FirmwareUpdateView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-        )
-    }
-
-    private func summaryRow(label: String, value: String, secondary: Bool = false) -> some View {
-        HStack(spacing: 8) {
-            Text(label.uppercased())
-                .font(.system(size: 9, weight: .bold))
-                .foregroundColor(.secondary)
-                .frame(width: 120, alignment: .leading)
-            Text(value)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundColor(secondary ? .secondary : .primary)
-        }
+        .setupCard()
     }
 
     // MARK: Step strip
@@ -236,176 +219,74 @@ struct FirmwareUpdateView: View {
         switch installer.state {
         case .idle, .waitingForBoard:
             if confirmed {
-                stateCard(
+                InstallStateCard(
                     icon: "magnifyingglass",
                     tint: .accentColor,
                     spinning: true,
                     title: "Looking for the board",
-                    body: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug the board, hold BOOTSEL, and plug it back in.")
+                    message: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug the board, hold BOOTSEL, and plug it back in.")
             } else if vm.isDeviceConnected {
-                stateCard(
+                InstallStateCard(
                     icon: "checkmark.circle",
                     tint: .accentColor,
                     title: "Ready when you are",
-                    body: "Click Update Firmware to begin. The device will restart into bootloader mode, and audio will stop until the update finishes. Nothing is written without this click.")
+                    message: "Click Update Firmware to begin. The device will restart into bootloader mode, and audio will stop until the update finishes. Nothing is written without this click.")
             } else {
-                stateCard(
+                InstallStateCard(
                     icon: "cable.connector",
                     tint: .secondary,
                     title: "Connect a board",
-                    body: "No device is connected. Hold the BOOTSEL button while plugging a board in, and it will appear here.")
+                    message: "No device is connected. Hold the BOOTSEL button while plugging a board in, and it will appear here.")
             }
 
         case .waitingForVolume(let chip):
-            stateCard(
+            InstallStateCard(
                 icon: "externaldrive",
                 tint: .accentColor,
                 spinning: true,
                 title: "\(chip.displayName) found",
-                body: "The board is in bootloader mode. Waiting for its \(chip.volumeName) drive to mount - this usually takes a second or two.")
+                message: "The board is in bootloader mode. Waiting for its \(chip.volumeName) drive to mount - this usually takes a second or two.")
 
         case .ready(let board):
             if confirmed {
-                stateCard(
+                InstallStateCard(
                     icon: "externaldrive.badge.checkmark",
                     tint: .accentColor,
                     spinning: true,
                     title: "Preparing to write",
-                    body: "Opening the \(board.chip.displayName)'s \(board.chip.volumeName) drive.")
+                    message: "Opening the \(board.chip.displayName)'s \(board.chip.volumeName) drive.")
             } else {
-                stateCard(
+                InstallStateCard(
                     icon: "externaldrive.badge.checkmark",
                     tint: .green,
                     title: "\(board.chip.displayName) ready",
-                    body: "The board is in bootloader mode and ready to receive firmware \(bundledVersion). Click \(primaryTitle) to begin.")
+                    message: "The board is in bootloader mode and ready to receive firmware \(bundledVersion). Click \(primaryTitle) to begin.")
             }
 
         case .writing(let fraction):
-            writingCard(fraction: fraction)
+            InstallWritingCard(fraction: fraction,
+                               boardName: lastSeenChip?.displayName,
+                               version: bundledVersion)
 
         case .waitingForDevice:
-            stateCard(
+            InstallStateCard(
                 icon: "arrow.triangle.2.circlepath",
                 tint: .accentColor,
                 spinning: true,
                 title: "Firmware written",
-                body: "The board is restarting with its new firmware. This can take up to half a minute; leave it plugged in.")
+                message: "The board is restarting with its new firmware. This can take up to half a minute; leave it plugged in.")
 
         case .verified(let version):
-            stateCard(
+            InstallStateCard(
                 icon: "checkmark.seal.fill",
                 tint: .green,
                 iconSize: 36,
                 title: "Update complete",
-                body: "The device is back and confirmed running firmware \(version).")
+                message: "The device is back and confirmed running firmware \(version).")
 
         case .failed(let error):
-            failureCard(error)
+            installFailureCard(error)
         }
-    }
-
-    /// One centred state: an icon or spinner, a short title, and one or two
-    /// sentences of explanation.  A spinner always means the app or the
-    /// hardware is doing the work; a still icon means the next move is the
-    /// user's, and the body says exactly what that move is.
-    private func stateCard(icon: String,
-                           tint: Color,
-                           spinning: Bool = false,
-                           iconSize: CGFloat = 28,
-                           title: String,
-                           body: String) -> some View {
-        VStack(spacing: 10) {
-            if spinning {
-                ProgressView()
-                    .controlSize(.regular)
-                    .frame(height: iconSize)
-            } else {
-                Image(systemName: icon)
-                    .font(.system(size: iconSize))
-                    .foregroundColor(tint)
-                    .frame(height: iconSize)
-            }
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-            Text(body)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 340)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-        )
-    }
-
-    /// The write in progress: who is being written, what is being written, how
-    /// far along it is, and a line saying the alarming-looking ending - the
-    /// drive vanishing - is the normal one.
-    private func writingCard(fraction: Double) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Writing firmware")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Text("\(Int((fraction * 100).rounded()))%")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-
-            ProgressView(value: fraction)
-
-            VStack(alignment: .leading, spacing: 4) {
-                if let board = lastSeenChip?.displayName {
-                    summaryRow(label: "Board", value: board)
-                }
-                summaryRow(label: "Firmware", value: bundledVersion)
-            }
-            .padding(.top, 2)
-
-            Spacer(minLength: 0)
-
-            Label("Near the end the board restarts itself and its drive disappears. That is normal - do not unplug it.",
-                  systemImage: "info.circle")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-        )
-    }
-
-    /// A failure, dressed to match its severity.  Detection-side stumbles - no
-    /// board yet, a drive that has not mounted - are ordinary and read that
-    /// way; a failure after bytes have moved gets the warning triangle.
-    private func failureCard(_ error: FirmwareInstallError) -> some View {
-        let mundane: Bool
-        switch error {
-        case .noBoardFound, .volumeNotMounted, .multipleBoards:
-            mundane = true
-        default:
-            mundane = false
-        }
-        return stateCard(
-            icon: mundane ? "questionmark.circle" : "exclamationmark.triangle.fill",
-            tint: .orange,
-            title: mundane ? "Not quite ready" : "The update did not complete",
-            body: error.message)
     }
 
     // MARK: BOOTSEL hint
@@ -424,18 +305,7 @@ struct FirmwareUpdateView: View {
         }
     }
 
-    private var bootselHint: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "button.programmable")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-            Text("BOOTSEL is the small button on the Pico board. Hold it down while plugging in the USB cable and the board starts in bootloader mode, ready to receive firmware.")
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+    private var bootselHint: some View { BootselHint() }
 
     // MARK: Buttons
 
@@ -528,63 +398,6 @@ private enum UpdateStep: Int, CaseIterable {
         case .verify: return "Verify"
         case .done: return "Done"
         }
-    }
-}
-
-private struct StepStrip: View {
-    let current: UpdateStep
-    /// A failure keeps the strip on screen but takes the emphasis off it; the
-    /// status card is telling the real story.
-    let dimmed: Bool
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(UpdateStep.allCases, id: \.rawValue) { step in
-                if step != .prepare {
-                    Rectangle()
-                        .fill(connectorColor(into: step))
-                        .frame(height: 2)
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 4)
-                }
-                stepDot(step)
-            }
-        }
-        .padding(.horizontal, 8)
-        .opacity(dimmed ? 0.4 : 1)
-        .animation(.easeInOut(duration: 0.2), value: current)
-    }
-
-    private func stepDot(_ step: UpdateStep) -> some View {
-        VStack(spacing: 3) {
-            ZStack {
-                Circle()
-                    .fill(fillColor(step))
-                    .frame(width: 14, height: 14)
-                if step.rawValue < current.rawValue || (step == .done && current == .done) {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 7, weight: .bold))
-                        .foregroundColor(.white)
-                }
-            }
-            Text(step.label)
-                .font(.system(size: 9, weight: step == current ? .bold : .regular))
-                .foregroundColor(step == current ? .primary : .secondary)
-        }
-        // Fixed width so the labels sit centred under their dots and the
-        // connectors between dots stay equal, whatever the labels say.
-        .frame(width: 52)
-    }
-
-    private func fillColor(_ step: UpdateStep) -> Color {
-        if step.rawValue < current.rawValue { return .accentColor }
-        if step == current { return current == .done ? .green : .accentColor }
-        return Color.secondary.opacity(0.25)
-    }
-
-    private func connectorColor(into step: UpdateStep) -> Color {
-        step.rawValue <= current.rawValue ? Color.accentColor.opacity(0.6)
-                                          : Color.secondary.opacity(0.2)
     }
 }
 

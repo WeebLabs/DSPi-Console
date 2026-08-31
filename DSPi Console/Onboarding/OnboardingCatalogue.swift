@@ -59,17 +59,22 @@ enum OnboardingCatalogue {
 
     /// The wizard.  Stops at the first moment the user can hear their computer
     /// through the DSPi; everything past that is discoverable.
+    ///
+    /// These records exist for persistence: finishing or skipping the wizard
+    /// marks them all seen.  Which of them a user actually meets is decided
+    /// live by `GettingStartedView`, because it depends on what is plugged in
+    /// at that moment, which `applies` - evaluated once at launch - cannot see.
     static let setup: [OnboardingStep] = [
         OnboardingStep(id: "setup.welcome", introducedIn: FirmwareVersion(1, 1, 7),
                        phase: .setup, title: "Welcome",
                        applies: { _ in true }),
-        OnboardingStep(id: "setup.install-firmware", introducedIn: FirmwareVersion(1, 1, 7),
-                       phase: .setup, title: "Set up your board",
+        OnboardingStep(id: "setup.board", introducedIn: FirmwareVersion(1, 1, 7),
+                       phase: .setup, title: "Get your board running",
                        applies: { _ in true }),
-        OnboardingStep(id: "setup.describe-hardware", introducedIn: FirmwareVersion(1, 1, 7),
-                       phase: .setup, title: "Describe your hardware",
+        OnboardingStep(id: "setup.outputs", introducedIn: FirmwareVersion(1, 1, 7),
+                       phase: .setup, title: "Choose your outputs",
                        applies: { _ in true }),
-        OnboardingStep(id: "setup.route-audio", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "setup.audio", introducedIn: FirmwareVersion(1, 1, 7),
                        phase: .setup, title: "Send audio to the DSPi",
                        applies: { _ in true }),
         OnboardingStep(id: "setup.finished", introducedIn: FirmwareVersion(1, 1, 7),

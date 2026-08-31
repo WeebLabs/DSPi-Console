@@ -1508,6 +1508,21 @@ extension DSPViewModel {
         return 0xFF
     }
 
+    /// Sets an output's GPIO pin, transparently cycling the PDM output off and
+    /// back on when the firmware refuses because it is active.  The one shared
+    /// path for pin assignment, used by Settings and the Getting Started
+    /// wizard, so the retry rule cannot drift between the two.
+    @discardableResult
+    func assignOutputPin(output: Int, pin: UInt8) -> UInt8 {
+        var status = setOutputPin(output: output, pin: pin)
+        if status == PIN_CONFIG_OUTPUT_ACTIVE && output == pdmPinIndex {
+            setOutputEnable(output: pdmOutputIndex, enabled: false)
+            status = setOutputPin(output: output, pin: pin)
+            setOutputEnable(output: pdmOutputIndex, enabled: true)
+        }
+        return status
+    }
+
     // MARK: - I2S Configuration
 
     /// Switch an output slot between S/PDIF (0) and I2S (1). Returns firmware status code.
