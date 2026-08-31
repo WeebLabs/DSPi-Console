@@ -78,8 +78,6 @@ struct GettingStartedView: View {
     /// Set when the user commits to a firmware install.  The installer never
     /// flashes on its own; this records the one explicit decision.
     @State private var confirmed = false
-    /// The reboot-into-BOOTSEL request is sent at most once per commitment.
-    @State private var rebootRequested = false
     /// Chip of the board most recently seen by detection, remembered so the
     /// writing card can still name it once the board leaves `.ready`.
     @State private var lastSeenChip: BootloaderBoard.Chip?
@@ -103,21 +101,15 @@ struct GettingStartedView: View {
         }
     }
 
-    /// The board stage earns its place when there is no working device, when
-    /// the connected one runs older firmware than this Console ships, or when
-    /// an install is in flight.  A downgrade (device newer) is deliberately
-    /// not pushed here; that is a power user's decision, made in the Firmware
-    /// Update window.
-    private var boardStageNeeded: Bool {
-        if installerEngaged { return true }
-        if !vm.isDeviceConnected { return true }
-        return vm.firmwareMatch == .deviceOlder
-    }
-
     /// The steps this user actually faces, right now.
+    ///
+    /// Setup assumes a blank Pico.  It deliberately does not inspect a
+    /// connected device to decide whether firmware is needed: a first-time
+    /// user who has a working DSPi already can skip setup, and guessing wrong
+    /// in the other direction leaves someone stranded on a step that never
+    /// arrives.  Walking everyone through the install is the robust choice.
     private var visibleStages: [Stage] {
-        var stages: [Stage] = [.welcome]
-        if boardStageNeeded { stages.append(.board) }
+        var stages: [Stage] = [.welcome, .board]
         if vm.isDeviceConnected {
             stages.append(.outputs)
             stages.append(.audio)
@@ -182,10 +174,9 @@ struct GettingStartedView: View {
             current = .board
             return
         }
-        if current == .board, vm.isDeviceConnected, !installerEngaged,
-           vm.firmwareMatch != .deviceOlder {
-            current = .outputs
-        }
+        // No auto-advance off the board stage on mere connection: setup
+        // assumes a blank Pico, so reaching the outputs stage is the user's
+        // move once the firmware is on.
     }
 
     // MARK: Header
@@ -241,11 +232,7 @@ struct GettingStartedView: View {
     private var welcomeStage: some View {
         stepBody(title: "Welcome to DSPi Console",
                  blurb: "DSPi turns a Raspberry Pi Pico into a very flexible audio DSP. Equalisation, crossovers, upmixers, crossfeed, loudness compensation and more can be applied to sound through a plethora of inputs and outputs.\n\nThis setup takes just a minute and will guide you through hearing your computer's audio through DSPi. Everything else can be set up when you need it.") {
-            if vm.isDeviceConnected {
-                statusRow(.ok, "A DSPi is already connected and running firmware \(deviceVersionText), so this will be short.")
-            } else {
-                infoRow("bolt.horizontal.circle", "Get your Pico connected and running, installing firmware if needed.")
-            }
+            infoRow("bolt.horizontal.circle", "Get your Pico connected and running, installing firmware if needed.")
             infoRow("cable.connector", "Choose the kinds of outputs you'd like to use for now and how they are wired.")
             infoRow("speaker.wave.2", "Send your computer's audio to the DSPi and hear it working.")
         }
@@ -273,9 +260,6 @@ struct GettingStartedView: View {
         case .failed: return "Something needs attention"
         case .writing, .waitingForDevice: return "Installing firmware"
         default:
-            if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
-                return "Update your Pico's firmware"
-            }
             return "Prepare your Pico"
         }
     }
@@ -289,9 +273,6 @@ struct GettingStartedView: View {
         case .failed:
             return "This is almost always fixable. Follow the card below, then try again - nothing has been lost."
         default:
-            if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
-                return "The connected DSPi runs firmware \(deviceVersionText), and this Console expects \(bundledVersion). Updating takes about a minute, or continue and update later from the Tools menu."
-            }
             return "In this step, we are going to install the DSPi firmware on your Pico-compatible device. Simply follow the directions below."
         }
     }
@@ -307,28 +288,6 @@ struct GettingStartedView: View {
                     spinning: true,
                     title: "Looking for your Pico",
                     message: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug it, hold BOOTSEL, and plug it back in.")
-            } else if vm.isDeviceConnected, vm.firmwareMatch == .deviceOlder {
-                VStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        LabeledValueRow(label: "This Console", value: bundledVersion)
-                        LabeledValueRow(label: "Connected device", value: deviceVersionText)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Button("Update Firmware") { beginUpdateOfConnectedDevice() }
-                        .controlSize(.large)
-                        .keyboardShortcut(.defaultAction)
-                        .frame(maxWidth: .infinity, alignment: .center)
-
-                    Text("The device restarts into bootloader mode and audio stops until the update finishes. Nothing is written without this click.")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity)
-                .setupCard()
             } else {
                 InstallStateCard(
                     icon: "cable.connector",
@@ -411,22 +370,11 @@ struct GettingStartedView: View {
     /// installer, then asks the device to restart into bootloader mode.  The
     /// order the user and the hardware arrive in stops mattering; the write
     /// begins when the BOOTSEL drive appears.
-    private func beginUpdateOfConnectedDevice() {
-        confirmed = true
-        installer.installWhenReady()
-        guard !rebootRequested else { return }
-        rebootRequested = true
-        // The device drops off the bus answering this, so there is no reply
-        // to wait for.
-        _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
-    }
-
     /// Starts the install flow over after a failure: the view's flags and the
     /// installer's freeze and commitment together, because clearing only one
     /// side leaves the other believing a run is still in progress.
     private func resetInstallRun() {
         confirmed = false
-        rebootRequested = false
         installer.reset()
     }
 
@@ -690,7 +638,11 @@ struct GettingStartedView: View {
     private var showsContinue: Bool {
         switch current {
         case .board:
-            return vm.isDeviceConnected && !installInFlight
+            // Only once the firmware is on and confirmed.  Setup does not ask
+            // whether a connected device already runs DSPi, so a connection
+            // alone is not this step being finished.
+            if case .verified = installer.state { return true }
+            return false
         default:
             return true
         }
@@ -702,8 +654,6 @@ struct GettingStartedView: View {
     private var continueIsDefault: Bool {
         guard current == .board, !confirmed else { return true }
         if case .ready = installer.state { return false }
-        if case .idle = installer.state, vm.firmwareMatch == .deviceOlder { return false }
-        if case .waitingForBoard = installer.state, vm.firmwareMatch == .deviceOlder { return false }
         return true
     }
 
@@ -765,11 +715,6 @@ struct GettingStartedView: View {
     // MARK: State
 
     private var bundledVersion: String { FirmwareVersion.expected?.description ?? "unknown" }
-
-    private var deviceVersionText: String {
-        guard let v = vm.firmwareVersion else { return "unknown" }
-        return FirmwareVersion(v.major, v.minor, v.patch).description
-    }
 
     /// Any input channel showing level.  The threshold is above the noise a
     /// silent input reports, low enough that quiet music still counts.
