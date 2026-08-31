@@ -61,6 +61,7 @@ struct ContentView: View {
     @EnvironmentObject var graphWindowController: GraphWindowController
     @EnvironmentObject var levellerController: VolumeLevellerWindowController
     @EnvironmentObject var psybassController: PsychoacousticBassWindowController
+    @EnvironmentObject var firmwareUpdateController: FirmwareUpdateWindowController
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
 
@@ -851,6 +852,15 @@ struct ContentView: View {
             .onTapGesture {
                 if renamingChannel != nil { commitRename() }
                 NSApp.keyWindow?.makeFirstResponder(nil)
+            }
+        }
+        // Across the whole window rather than inside a pane: a device on the
+        // wrong firmware is a broken state, not a per-page detail.  The banner
+        // draws nothing when the versions agree, so this costs no space in the
+        // ordinary case.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            FirmwareMismatchBanner(vm: vm) {
+                firmwareUpdateController.show(vm: vm)
             }
         }
         .navigationTitle("DSPi Console")

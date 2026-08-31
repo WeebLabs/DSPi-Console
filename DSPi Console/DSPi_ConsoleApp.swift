@@ -9491,29 +9491,6 @@ struct ToolsMenuActions {
         }
     }
 
-    static func enterFirmwareUpdateMode() {
-        let skipConfirmation = NSEvent.modifierFlags.contains(.option)
-
-        if !skipConfirmation {
-            let alert = NSAlert()
-            alert.messageText = "Firmware Update"
-            alert.informativeText = "This will reboot the device into bootloader mode.\n\nAudio output will stop immediately. The device will appear as a USB drive to which you can drag a .uf2 firmware file."
-            alert.alertStyle = .critical
-            alert.addButton(withTitle: "Reboot into Bootloader")
-            alert.addButton(withTitle: "Cancel")
-
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-
-        let usb = AppState.shared.usb
-        guard usb.isConnected else {
-            showError("Not connected to device")
-            return
-        }
-        // Device disconnects after this command — ignore nil response
-        _ = usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
-    }
-
     private static func showSuccess(_ message: String) {
         let alert = NSAlert()
         alert.messageText = "Success"
@@ -9884,6 +9861,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var graphWindowController = GraphWindowController()
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
     @StateObject private var testSignalsWindowController = TestSignalsWindowController()
+    @StateObject private var firmwareUpdateWindowController = FirmwareUpdateWindowController()
     // Observe only narrow, rarely-changing state here. Observing the full
     // view model (which republishes ~16x/second for the meters) rebuilt the
     // whole `.commands` tree on every tick, making open submenus flicker.
@@ -9903,6 +9881,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(statsWindowController)
                 .environmentObject(graphWindowController)
                 .environmentObject(interruptMonitorWindowController)
+                .environmentObject(firmwareUpdateWindowController)
                 .preferredColorScheme(.dark)
                 .onAppear {
                     NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -10035,7 +10014,7 @@ struct DSPi_ConsoleApp: App {
                     Divider()
 
                     Button("Firmware Update...") {
-                        ToolsMenuActions.enterFirmwareUpdateMode()
+                        firmwareUpdateWindowController.show(vm: AppState.shared.viewModel)
                     }
                 }
 
