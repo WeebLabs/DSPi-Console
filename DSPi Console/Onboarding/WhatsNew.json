@@ -1,0 +1,12 @@
+[
+  {
+    "version": "1.1.7",
+    "headline": "Firmware that installs itself",
+    "items": [
+      "Firmware Update now installs. Put a board into bootloader mode, or let the app restart the connected device into it, and Console writes the matching firmware and confirms the device came back running it.",
+      "Console ships the firmware it expects. The RP2040 and RP2350 images are bundled, so the app and the device can no longer drift apart.",
+      "A banner appears if a connected device is running a different firmware version, with a one-click update. It stays out of the way when the versions agree.",
+      "Version numbers are now plain point releases. Beta suffixes are gone, because a device can only report three numbers and two builds sharing a version cannot be told apart."
+    ]
+  }
+]

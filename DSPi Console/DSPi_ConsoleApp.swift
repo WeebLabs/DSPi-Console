@@ -1603,8 +1603,105 @@ struct AdvancedSettingsTab: View {
             } header: {
                 Label("Diagnostics", systemImage: "ladybug")
             }
+
+            // Behind the debug toggle: every cohort below takes weeks of real
+            // use to reach naturally, so without a way to jump to one the
+            // branches only ever get exercised by users.
+            if settings.showDebugInfo {
+                OnboardingDeveloperSection()
+            }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Onboarding Developer Section
+
+/// Puts the app into any onboarding cohort on demand.
+///
+/// The same overrides are readable as launch arguments, because the two get
+/// used at different moments: this panel while working on a step, the
+/// arguments from an Xcode scheme or a script.  Each override rewrites the
+/// persisted state and then applies on the next launch, which is the only
+/// honest way to test something that only happens at launch.
+private struct OnboardingDeveloperSection: View {
+    @EnvironmentObject private var onboarding: OnboardingCoordinator
+    @State private var note: String?
+
+    /// Fixed width so the buttons line up down the column regardless of label
+    /// length, per the repo's alignment rule.
+    private let buttonWidth: CGFloat = 150
+
+    var body: some View {
+        Section {
+            row("Start as a new user",
+                "Forgets everything. The next launch runs setup from the top.",
+                "Reset Onboarding") {
+                onboarding.resetAll()
+                UserDefaults.standard.removeObject(forKey: WhatsNew.lastShownKey)
+                note = "Reset. Relaunch to see a first run."
+            }
+
+            row("Offer the tour again",
+                "Leaves setup and the first-open cards alone, and lifts a previous \"never again\".",
+                "Replay Tour") {
+                onboarding.replayBasics()
+                note = "The basics tour is pending again."
+            }
+
+            row("Show the first-open cards again",
+                "Clears only the just-in-time hints, without re-running the wizard.",
+                "Replay Hints") {
+                onboarding.replayJustInTime()
+                note = "First-open cards are pending again."
+            }
+
+            row("Simulate an upgrade",
+                "Marks everything up to 1.1.7 as seen, so only later steps are offered.",
+                "As Updater") {
+                UserDefaults.standard.set("updater:1.1.7", forKey: OnboardingDebug.Key.cohort)
+                note = "Relaunch to arrive as an updater from 1.1.7."
+            }
+
+            row("Simulate an existing user",
+                "Prior use with no onboarding state: the upgrade-day case, where the tour is offered rather than run.",
+                "As Existing") {
+                UserDefaults.standard.set("existing", forKey: OnboardingDebug.Key.cohort)
+                note = "Relaunch to arrive as an existing user."
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Current cohort: \(String(describing: onboarding.cohort))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("\(onboarding.pending.count) step\(onboarding.pending.count == 1 ? "" : "s") pending")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if let note {
+                    Text(note).font(.caption).foregroundColor(.accentColor)
+                }
+            }
+            .padding(.vertical, 4)
+        } header: {
+            Label("Onboarding (Developer)", systemImage: "graduationcap")
+        }
+    }
+
+    private func row(_ title: String,
+                     _ detail: String,
+                     _ button: String,
+                     action: @escaping () -> Void) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.body)
+                Text(detail).font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button(button, action: action)
+                .frame(width: buttonWidth)
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -9862,6 +9959,19 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
     @StateObject private var testSignalsWindowController = TestSignalsWindowController()
     @StateObject private var firmwareUpdateWindowController = FirmwareUpdateWindowController()
+    @StateObject private var whatsNewWindowController = WhatsNewWindowController()
+    @StateObject private var onboarding = OnboardingCoordinator()
+
+    /// Release notes are not onboarding: they are shown after an update, never
+    /// on a first run.  Someone seeing the app for the first time has nothing
+    /// to catch up on, so a new install is simply marked as read.
+    private func showReleaseNotesIfUnread() {
+        if UserDefaults.standard.string(forKey: WhatsNew.lastShownKey) == nil {
+            WhatsNew.markCurrentAsRead()
+        } else if !WhatsNew.unread().isEmpty {
+            whatsNewWindowController.show()
+        }
+    }
     // Observe only narrow, rarely-changing state here. Observing the full
     // view model (which republishes ~16x/second for the meters) rebuilt the
     // whole `.commands` tree on every tick, making open submenus flicker.
@@ -9882,10 +9992,14 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(graphWindowController)
                 .environmentObject(interruptMonitorWindowController)
                 .environmentObject(firmwareUpdateWindowController)
+                .environmentObject(whatsNewWindowController)
+                .environmentObject(onboarding)
                 .preferredColorScheme(.dark)
                 .onAppear {
                     NSApp.appearance = NSAppearance(named: .darkAqua)
                     NSWindow.allowsAutomaticWindowTabbing = false
+                    onboarding.evaluate(vm: AppState.shared.viewModel)
+                    showReleaseNotesIfUnread()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -10068,6 +10182,29 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("I", modifiers: [.command, .shift])
             }
+
+            // Users look in Help.  Replacing the group drops the stock
+            // "DSPi Console Help" item, which pointed at a help book we do
+            // not ship and opened an error sheet.
+            CommandGroup(replacing: .help) {
+                Button("What's New in DSPi Console") {
+                    whatsNewWindowController.show()
+                }
+
+                Divider()
+
+                Button("DSPi Console on GitHub") {
+                    if let url = URL(string: "https://github.com/WeebLabs/DSPi-Console") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+
+                Button("DSPi Firmware on GitHub") {
+                    if let url = URL(string: "https://github.com/WeebLabs/DSPi") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
         }
 
         // A plain `Window` scene rather than a `Settings` scene, so the window
@@ -10077,6 +10214,10 @@ struct DSPi_ConsoleApp: App {
         // `SettingsCommand` in `.commands` below.
         Window("Settings", id: "settings") {
             SettingsView()
+                // The Advanced page's developer section reads this.  A scene
+                // is its own environment root, so without this the panel
+                // traps the moment it appears.
+                .environmentObject(onboarding)
         }
         // `.contentMinSize` uses the content's size as the *minimum* while
         // letting the user grow the window (unlike `.contentSize`, which pins
