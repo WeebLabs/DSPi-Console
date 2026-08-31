@@ -270,7 +270,7 @@ struct GettingStartedView: View {
 
     private var boardStageTitle: String {
         switch installer.state {
-        case .verified: return "Your Pico is ready"
+        case .verified: return "Your device has been prepared"
         case .failed: return "Something needs attention"
         case .writing, .waitingForDevice: return "Installing firmware"
         default:
