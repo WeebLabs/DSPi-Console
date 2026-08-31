@@ -198,6 +198,55 @@ final class OnboardingCoordinatorTests: XCTestCase {
         XCTAssertTrue(leftover.isEmpty)
     }
 
+    /// The bug this guards: every machine that develops or tests onboarding
+    /// has years of the app's own settings on it, so clearing onboarding state
+    /// alone let the prior-use heuristic re-seed the user as an existing one
+    /// on the very next launch. A first run was unreachable on exactly the
+    /// machines that needed to see one.
+    func testResetReachesAFirstRunOnAMachineThatHasUsedTheApp() {
+        defaults.set(282.25, forKey: "graphHeight")   // years of prior use
+        defaults.set(true, forKey: "showDebugInfo")
+
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        XCTAssertEqual(coordinator.cohort, .existingUser)
+
+        coordinator.resetAll()
+
+        let next = makeCoordinator()
+        next.evaluate(vm: DSPViewModel())
+        XCTAssertEqual(next.cohort, .newUser)
+        XCTAssertTrue(next.shouldTakeOverMainWindow())
+    }
+
+    /// Simulating a fresh install lasts one launch. Left set, the app could
+    /// never become an ordinary returning user again.
+    func testSimulatedFreshInstallAppliesOnlyOnce() {
+        defaults.set(282.25, forKey: "graphHeight")
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.resetAll()
+
+        let first = makeCoordinator()
+        first.evaluate(vm: DSPViewModel())
+        XCTAssertEqual(first.cohort, .newUser)
+        first.finishSetup()
+
+        let second = makeCoordinator()
+        second.evaluate(vm: DSPViewModel())
+        XCTAssertFalse(second.shouldTakeOverMainWindow())
+    }
+
+    /// The launch-argument override has the same hole and the same fix.
+    func testFreshOverrideWorksOnAMachineThatHasUsedTheApp() {
+        defaults.set(282.25, forKey: "graphHeight")
+        defaults.set("fresh", forKey: OnboardingDebug.Key.cohort)
+
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        XCTAssertEqual(coordinator.cohort, .newUser)
+    }
+
     func testResetForgetsEverything() {
         let coordinator = makeCoordinator()
         coordinator.evaluate(vm: DSPViewModel())

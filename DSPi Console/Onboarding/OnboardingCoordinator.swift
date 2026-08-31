@@ -33,6 +33,11 @@ final class OnboardingCoordinator: ObservableObject {
         static let declined = "onboarding.tourDeclined"
         static let firstLaunch = "onboarding.firstLaunchDate"
 
+        /// Written by a developer reset to demand the genuinely-new-user
+        /// path on the next launch.  Deliberately outside `all`, so clearing
+        /// state and then asking for a fresh run do not cancel each other.
+        static let simulateFresh = "onboarding.simulateFreshInstall"
+
         static let all = [completed, lastSeenVersion, declined, firstLaunch]
     }
 
@@ -87,12 +92,23 @@ final class OnboardingCoordinator: ObservableObject {
     func evaluate(vm: DSPViewModel) {
         debug.applyCohortOverride(to: defaults, catalogue: OnboardingCatalogue.all)
 
+        // Consumed on sight: a simulated fresh install is one launch, not a
+        // mode the app gets stuck in.
+        let simulatingFresh = defaults.bool(forKey: Key.simulateFresh)
+        if simulatingFresh { defaults.removeObject(forKey: Key.simulateFresh) }
+
         if isFirstOnboardingLaunch {
             defaults.set(Date(), forKey: Key.firstLaunch)
             // Someone already using the app should not be dragged through a
             // beginner's wizard on upgrade day.  Mark everything shipped so
             // far as seen, then offer the tour once rather than running it.
-            if hasPriorAppUse {
+            //
+            // Skipped when a fresh install was asked for, because every
+            // machine that develops or tests this has years of settings on
+            // it: without the exemption the seeding fires the moment the
+            // state is cleared, and a first run becomes unreachable on
+            // exactly the machines that need to see one.
+            if hasPriorAppUse && !simulatingFresh {
                 completedIDs = Set(OnboardingCatalogue.all.map(\.id))
                 defaults.set(FirmwareVersion.expected?.description, forKey: Key.lastSeenVersion)
                 cohort = .existingUser
@@ -191,8 +207,13 @@ final class OnboardingCoordinator: ObservableObject {
 
     /// Forgets everything, as though the app had never been run.  Backs the
     /// developer panel and the launch-argument override.
+    ///
+    /// Also demands the new-user path next launch.  Clearing the state alone
+    /// is not enough: the prior-use heuristic would see the app's other
+    /// settings and seed the user as an existing one straight away.
     func resetAll() {
         Key.all.forEach { defaults.removeObject(forKey: $0) }
+        defaults.set(true, forKey: Key.simulateFresh)
         cohort = .upToDate
         pending = []
     }

@@ -37,7 +37,10 @@ struct OnboardingDebug {
 
         switch cohortOverride {
         case "fresh":
-            break  // no keys at all is exactly a new install
+            // Not just "no keys": a machine that has run the app carries
+            // settings the prior-use heuristic reads as an existing user, so
+            // the new-user path has to be demanded outright.
+            defaults.set(true, forKey: OnboardingCoordinator.Key.simulateFresh)
 
         case "existing":
             // Prior use without any onboarding state: the upgrade-day case.
