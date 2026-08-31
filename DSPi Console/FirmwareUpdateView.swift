@@ -85,6 +85,16 @@ struct FirmwareUpdateView: View {
                         .keyboardShortcut(.defaultAction)
                 } else {
                     Button("Cancel") { NSApp.keyWindow?.close() }
+                    // A UF2 write does not target the preset sectors, but a
+                    // wire-format change between versions can leave them
+                    // unreadable, and the device is about to become
+                    // unreachable either way.  Offered rather than forced:
+                    // a blank board has nothing worth saving.
+                    if vm.isDeviceConnected, !confirmed {
+                        Button("Export Configuration...") {
+                            FileMenuActions.exportConfiguration()
+                        }
+                    }
                     Spacer()
                     primaryButton
                 }
