@@ -826,6 +826,12 @@ struct ContentView: View {
                         OutputChannelDetail(vm: vm, outputIndex: idx,
                                             availableTypes: availableFilterTypes(vm: vm))
 
+                    case .overview where !vm.isDeviceConnected:
+                        // A wall of disabled controls explains nothing.  The
+                        // empty state names the problem and offers the two
+                        // things that fix it.
+                        NoDeviceView(vm: vm)
+
                     case .overview:
                         // `.never`, not `.hidden`: on macOS `.hidden` still
                         // brings the scroller back when a mouse is connected,

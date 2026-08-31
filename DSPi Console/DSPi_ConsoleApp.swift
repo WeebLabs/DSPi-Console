@@ -9981,7 +9981,7 @@ struct DSPi_ConsoleApp: App {
 
     var body: some Scene {
         Window("DSPi Console", id: "main") {
-            ContentView(vm: AppState.shared.viewModel)
+            MainWindowRoot(vm: AppState.shared.viewModel)
                 .environmentObject(matrixMixerWindowController)
                 .environmentObject(loudnessWindowController)
                 .environmentObject(crossfeedWindowController)
@@ -10187,6 +10187,17 @@ struct DSPi_ConsoleApp: App {
             // "DSPi Console Help" item, which pointed at a help book we do
             // not ship and opened an error sheet.
             CommandGroup(replacing: .help) {
+                Button("Getting Started...") {
+                    onboarding.requestSetup()
+                }
+
+                Button("Replay the Basics Tour") {
+                    onboarding.replayBasics()
+                    onboarding.evaluate(vm: AppState.shared.viewModel)
+                }
+
+                Divider()
+
                 Button("What's New in DSPi Console") {
                     whatsNewWindowController.show()
                 }

@@ -129,6 +129,38 @@ final class OnboardingCoordinator: ObservableObject {
         pending.first { $0.phase == .justInTime(key) }
     }
 
+    // MARK: The wizard
+
+    /// Set when the user asks for the wizard from the Help menu, so it opens
+    /// even for someone who has already finished setup.
+    @Published var setupRequested = false
+
+    /// Whether the wizard should replace the console inside the main window.
+    ///
+    /// Only for a genuinely new user with nothing plugged in.  That is the one
+    /// case where the ordinary interface is a wall of disabled controls and
+    /// showing it teaches nothing.  A returning user with an unplugged device
+    /// gets the empty state instead, and a new user who already has a working
+    /// device gets the real interface, because there is nothing to block them
+    /// from.
+    func shouldTakeOverMainWindow(deviceConnected: Bool) -> Bool {
+        if setupRequested { return true }
+        if debug.forceWizard { return true }
+        guard cohort == .newUser, !deviceConnected else { return false }
+        return !pending(.setup).isEmpty
+    }
+
+    /// Opens the wizard on demand.
+    func requestSetup() { setupRequested = true }
+
+    /// Leaves the wizard, whether it was completed or skipped.  Both record
+    /// the setup steps as seen: a skip that reappears next launch is not a
+    /// skip, and a user who reached the end does not want it again either.
+    func finishSetup() {
+        setupRequested = false
+        skip(.setup)
+    }
+
     // MARK: Recording
 
     func markSeen(_ step: OnboardingStep) { markSeen([step.id]) }

@@ -237,6 +237,65 @@ final class OnboardingCoordinatorTests: XCTestCase {
         XCTAssertNotEqual(next.cohort, .declined)
     }
 
+    // MARK: - When the wizard takes over the window
+
+    /// The case the takeover exists for: nothing plugged in and nothing known
+    /// about the user, where the ordinary interface is a wall of disabled
+    /// controls that teaches nothing.
+    func testWizardTakesOverForANewUserWithNoDevice() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        XCTAssertTrue(coordinator.shouldTakeOverMainWindow(deviceConnected: false))
+    }
+
+    /// With a working device there is nothing to block the user from, so the
+    /// wizard must not seize a usable interface.
+    func testWizardStandsAsideWhenADeviceIsConnected() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        XCTAssertFalse(coordinator.shouldTakeOverMainWindow(deviceConnected: true))
+    }
+
+    /// A returning user whose device is simply unplugged gets the empty state.
+    /// Seizing their window would be a regression dressed as help.
+    func testWizardNeverTakesOverForAReturningUser() {
+        defaults.set(Array(OnboardingCatalogue.all.map(\.id)), forKey: OnboardingCoordinator.Key.completed)
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        XCTAssertFalse(coordinator.shouldTakeOverMainWindow(deviceConnected: false))
+    }
+
+    /// Asked for from the Help menu, it opens regardless of cohort or
+    /// hardware, because the user asked.
+    func testRequestingSetupOpensItForAnyone() {
+        defaults.set(Array(OnboardingCatalogue.all.map(\.id)), forKey: OnboardingCoordinator.Key.completed)
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.requestSetup()
+        XCTAssertTrue(coordinator.shouldTakeOverMainWindow(deviceConnected: true))
+    }
+
+    /// Finishing hands the window back and does not come round again, whether
+    /// the user completed the wizard or skipped it.
+    func testFinishingSetupReleasesTheWindowPermanently() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        XCTAssertFalse(coordinator.shouldTakeOverMainWindow(deviceConnected: false))
+
+        let next = makeCoordinator()
+        next.evaluate(vm: DSPViewModel())
+        XCTAssertFalse(next.shouldTakeOverMainWindow(deviceConnected: false))
+    }
+
+    /// Skipping setup must not also skip the tour: they are separate offers.
+    func testFinishingSetupLeavesTheTourPending() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        XCTAssertFalse(coordinator.pending(.basics).isEmpty)
+    }
+
     // MARK: - Catalogue hygiene
 
     /// Two steps sharing an id would mark each other as seen. Cheap to check,
