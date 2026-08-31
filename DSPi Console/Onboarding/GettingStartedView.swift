@@ -286,7 +286,7 @@ struct GettingStartedView: View {
         case .writing, .waitingForDevice:
             return "Console ships the firmware it expects, so nothing needs a download. Keep the Pico plugged in until it checks back in."
         case .verified:
-            return "The board came back and confirmed it is running exactly what was written."
+            return "The device has successfully restarted and DSPi Firmware is correctly installed."
         case .failed:
             return "This is almost always fixable. Follow the card below, then try again - nothing has been lost."
         default:
@@ -388,7 +388,7 @@ struct GettingStartedView: View {
                 tint: .green,
                 iconSize: 36,
                 title: "Firmware \(version) installed",
-                message: "The device is back and confirmed running what was written. Continue to set up your outputs.")
+                message: "Continue to set up your outputs.")
 
         case .failed(let error):
             VStack(spacing: 12) {
