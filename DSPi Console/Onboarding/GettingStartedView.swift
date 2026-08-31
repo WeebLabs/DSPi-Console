@@ -244,9 +244,9 @@ struct GettingStartedView: View {
             if vm.isDeviceConnected {
                 statusRow(.ok, "A DSPi is already connected and running firmware \(deviceVersionText), so this will be short.")
             } else {
-                infoRow("bolt.horizontal.circle", "Get your board connected and running, installing firmware if it needs it.")
+                infoRow("bolt.horizontal.circle", "Get your Pico connected and running, installing firmware if needed.")
             }
-            infoRow("cable.connector", "Choose which outputs your build uses and where they are wired.")
+            infoRow("cable.connector", "Choose the kinds of outputs you'd like to use for now and how they are wired.")
             infoRow("speaker.wave.2", "Send your computer's audio to the DSPi and hear it working.")
         }
     }
