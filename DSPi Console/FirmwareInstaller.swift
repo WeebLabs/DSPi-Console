@@ -184,6 +184,12 @@ final class FirmwareInstaller: ObservableObject {
     /// When the current board was first seen without a drive.
     private var volumeWaitStarted: Date?
 
+    /// The user has committed to an update, so the next ready board is written
+    /// without asking again.  Kept here rather than in the view because the
+    /// board may be ready before the user commits, or commit before the board
+    /// is ready, and only one of those two orders is a state *change*.
+    private var armed = false
+
     init(locator: BootloaderLocating,
          verifier: FirmwareVerifying,
          imageProvider: @escaping (BootloaderBoard.Chip) throws -> FirmwareImage
@@ -245,9 +251,26 @@ final class FirmwareInstaller: ObservableObject {
             next = .failed(.multipleBoards(boards.count))
         }
         publish(next)
+
+        // Committed before the board arrived: write it now that it is here.
+        if armed, case .ready(let board) = next { install(board) }
     }
 
     // MARK: Install
+
+    /// Records the user's decision to update, and writes as soon as there is a
+    /// board to write to - immediately if one is already ready.
+    ///
+    /// This is the only way callers should start an install.  Waiting for
+    /// `.ready` to *arrive* misses the common case where the board was plugged
+    /// in first and the state is already `.ready` when the user clicks.
+    func installWhenReady() {
+        armed = true
+        if case .ready(let board) = state { install(board) }
+    }
+
+    /// Whether an update has been committed to but not yet started.
+    var isArmed: Bool { armed }
 
     /// Writes the bundled image for `board` and verifies the result.
     /// Call only from a state of `.ready`, after the user has confirmed.

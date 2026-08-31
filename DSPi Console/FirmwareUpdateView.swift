@@ -104,13 +104,6 @@ struct FirmwareUpdateView: View {
         .frame(width: 420, height: 300)
         .onAppear { installer.beginWatching() }
         .onDisappear { installer.stopWatching() }
-        .onChange(of: installer.state) { state in
-            // The user has already confirmed; a board arriving is the go
-            // signal.  Without the flag this would flash anything plugged in.
-            if case .ready(let board) = state, confirmed {
-                installer.install(board)
-            }
-        }
     }
 
     // MARK: Pieces
@@ -212,10 +205,12 @@ struct FirmwareUpdateView: View {
         }
     }
 
-    /// Commits to the update.  A connected device has to be sent into BOOTSEL
-    /// first; a board already sitting there is picked up by the watcher.
+    /// Commits to the update.  The installer writes as soon as a board is
+    /// ready, whether that is now or after the reboot below, so the order the
+    /// user and the hardware arrive in stops mattering.
     private func start() {
         confirmed = true
+        installer.installWhenReady()
         guard vm.isDeviceConnected, !rebootRequested else { return }
         rebootRequested = true
         // The device drops off the bus answering this, so there is no reply to

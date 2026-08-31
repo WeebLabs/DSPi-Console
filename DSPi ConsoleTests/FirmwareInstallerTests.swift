@@ -192,6 +192,53 @@ final class FirmwareInstallerTests: XCTestCase {
         XCTAssertEqual(installer.state, .writing(0.5))
     }
 
+    // MARK: - Committing to an update
+
+    /// The hang this guards: with the board plugged in first, clicking Update
+    /// changes no state, so anything that waits for `.ready` to *arrive* never
+    /// fires and the window sits there forever.
+    func testCommittingWithABoardAlreadyReadyStartsTheWrite() throws {
+        let (volume, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let board = BootloaderBoard(chip: .rp2350, volumeURL: volume)
+        let installer = makeInstaller(boards: [board],
+                                      verifier: StubVerifier(version: FirmwareVersion(1, 1, 7)),
+                                      image: image)
+        installer.beginWatching()
+        XCTAssertEqual(installer.state, .ready(board))
+
+        installer.installWhenReady()
+        waitForSettledState(installer)
+        XCTAssertEqual(installer.state, .verified(FirmwareVersion(1, 1, 7)))
+    }
+
+    /// The other order: commit first, board arrives later.
+    func testCommittingBeforeTheBoardArrivesStartsTheWriteWhenItDoes() throws {
+        let (volume, image) = try makeVolumeAndImage(version: FirmwareVersion(1, 1, 7))
+        let locator = FakeBootloaderLocator(boards: [])
+        let installer = FirmwareInstaller(locator: locator,
+                                          verifier: StubVerifier(version: FirmwareVersion(1, 1, 7)),
+                                          imageProvider: { _ in image })
+        installer.beginWatching()
+
+        installer.installWhenReady()
+        XCTAssertEqual(installer.state, .waitingForBoard)
+
+        locator.boards = [BootloaderBoard(chip: .rp2350, volumeURL: volume)]
+        locator.emit()
+        waitForSettledState(installer)
+        XCTAssertEqual(installer.state, .verified(FirmwareVersion(1, 1, 7)))
+    }
+
+    /// Arming is a decision about this update, not standing permission: a
+    /// board that turns up with nothing committed is never written to.
+    func testAnUncommittedBoardIsNeverWritten() {
+        let board = BootloaderBoard(chip: .rp2350, volumeURL: URL(fileURLWithPath: "/Volumes/RP2350"))
+        let installer = makeInstaller(boards: [board])
+        installer.beginWatching()
+        XCTAssertEqual(installer.state, .ready(board))
+        XCTAssertFalse(installer.isArmed)
+    }
+
     // MARK: - A flash only counts when the device comes back
 
     func testSuccessRequiresTheDeviceToReturnRunningWhatWeWrote() throws {
