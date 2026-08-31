@@ -240,7 +240,7 @@ struct GettingStartedView: View {
 
     private var welcomeStage: some View {
         stepBody(title: "Welcome to DSPi Console",
-                 blurb: "DSPi turns a Raspberry Pi Pico into a USB audio processor: equalisation, crossovers, delay and level control applied to sound on its way out of your computer.\n\nThis takes a few minutes and gets you as far as hearing your computer through the DSPi. Everything else can wait until you want it.") {
+                 blurb: "DSPi turns a Raspberry Pi Pico into a very flexible audio DSP. Equalisation, crossovers, upmixers, crossfeed, loudness compensation and more can be applied to sound through a plethora of inputs and outputs.\n\nThis setup takes just a minute and will guide you through hearing your computer's audio through DSPi. Everything else can be set up when you need it.") {
             if vm.isDeviceConnected {
                 statusRow(.ok, "A DSPi is already connected and running firmware \(deviceVersionText), so this will be short.")
             } else {
