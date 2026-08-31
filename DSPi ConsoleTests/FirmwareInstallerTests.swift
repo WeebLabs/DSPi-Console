@@ -190,6 +190,21 @@ final class FirmwareInstallerTests: XCTestCase {
         XCTAssertEqual(installer.state, .failed(.bundledImageStale(bundled: "1.1.6", expected: "1.1.7")))
     }
 
+    // MARK: - The real bundle
+
+    /// Proves the shipping app actually carries an image for each chip and
+    /// that both match the app's own version. This is the release checklist
+    /// enforced as a test: bump MARKETING_VERSION without refreshing the UF2s
+    /// and this fails rather than shipping a downgrade.
+    func testBundleCarriesMatchingImagesForBothChips() throws {
+        for chip in BootloaderBoard.Chip.allCases {
+            let image = try FirmwareImage.bundled(for: chip)
+            XCTAssertEqual(image.version, FirmwareVersion.expected,
+                           "bundled \(chip.assetToken) image is not the app's version")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: image.url.path))
+        }
+    }
+
     // MARK: - Helpers
 
     private func makeInstaller(boards: [BootloaderBoard],
