@@ -3333,6 +3333,11 @@ extension DSPViewModel {
     @discardableResult
     func loadPreset(slot: Int) -> UInt8 {
         print("[PRESET] loadPreset(\(slot)) starting")
+        // We refetch everything below, so drop the PRESET_LOADED /
+        // BULK_INVALIDATED pair the device is about to send rather than pay for
+        // a second bulk read of the state we are already fetching.  Armed
+        // before the request so the notification can never beat it.
+        suppressDeviceResync()
         guard let status = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1)?.first else {
             // nil = USB request failed; empty Data = device returned no status
             // byte (e.g. it reset/disconnected mid-transfer).  Treat both as a
@@ -3387,19 +3392,6 @@ extension DSPViewModel {
                 return true
             }
             Thread.sleep(forTimeInterval: 0.02)
-        }
-        return false
-    }
-
-    private func refreshAfterPresetLoad(timeout: TimeInterval = 1.5) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if fetchAllParams(markDisconnectedOnFailure: false) {
-                _ = fetchPresetDirectory()
-                fetchPresetActive()
-                return true
-            }
-            Thread.sleep(forTimeInterval: 0.03)
         }
         return false
     }
@@ -3542,15 +3534,15 @@ extension DSPViewModel {
     /// Apply a v2 PARAM_CHANGED notification (already filtered to non-HOST
     /// sources) to local UI state.  Runs on the main thread.
     ///
-    /// This is an opt-in list, not a general mirror: EQ and crossover bands,
-    /// channel names, dac_hw_mute, user volume, LG, and the input / I2S / ADAT
-    /// config.  An unlisted offset is dropped silently, so the DSP feature
-    /// blocks (loudness, crossfeed, leveller, psybass, upmixer, preamp, output
-    /// gain / mute / delay) do NOT track a non-HOST write live - their windows
-    /// only catch up on the next fetch.  That matters most for Control Surfaces,
-    /// where a bound pot or IR button writes those very parameters (spec §7.3,
-    /// PARAM_SRC_GPIO); worth extending when one of those windows needs to
-    /// follow a knob.  Note InterruptMonitor.decode names every offset, but
+    /// The listed offsets are decoded in place: EQ and crossover bands, channel
+    /// names, dac_hw_mute, user volume, LG, and the input / I2S / ADAT config.
+    /// Anything else - the DSP feature blocks (loudness, crossfeed, leveller,
+    /// psybass, upmixer, preamp, output gain / mute / delay) - falls through to
+    /// a coalesced full re-read instead, which costs one bulk transfer but
+    /// needs no per-block decoder here and cannot drift out of step with the
+    /// wire format.  That path is what lets a bound pot or IR button move those
+    /// parameters and have the matching window follow (spec §7.3,
+    /// PARAM_SRC_GPIO).  Note InterruptMonitor.decode names every offset, but
     /// that is the diagnostics log only - naming an offset there mirrors
     /// nothing.
     func applyNotifiedParamChange(offset: UInt16, size: UInt16, payload: Data) {
@@ -3848,6 +3840,12 @@ extension DSPViewModel {
             self.adatStatus.pin = pin
             return
         }
+
+        // Not an offset we decode here.  Re-read the whole block instead, on a
+        // longer delay than the preset path uses: a pot bound to one of these
+        // parameters emits at the notification rate, and a quarter second of
+        // coalescing turns a knob sweep into a handful of fetches.
+        scheduleDeviceResync(delay: 0.25)
     }
 
     // MARK: - Flash Storage Commands
@@ -3884,6 +3882,9 @@ extension DSPViewModel {
 
     func factoryReset() -> UInt8 {
         guard isDeviceConnected else { return FLASH_ERR_WRITE }
+        // fetchAll() below covers the rewrite; drop the device's own
+        // BULK_INVALIDATED(source=FACTORY) so it doesn't duplicate that work.
+        suppressDeviceResync()
         if let data = usb.getControlRequest(request: REQ_FACTORY_RESET, value: 0, index: 0, length: 1) {
             let result = data[0]
             if result == FLASH_OK {

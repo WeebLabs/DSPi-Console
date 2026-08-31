@@ -539,6 +539,20 @@ class InterruptMonitor: ObservableObject {
     /// (2/4/6/8) so the UI can relayout immediately.
     var onInputFormatChanged: ((_ channels: Int) -> Void)?
 
+    /// Fires on the main thread when the device loads a preset
+    /// (NOTIFY_EVT_PRESET_LOADED).  Carries the slot that is now active.  The
+    /// firmware always follows this with a BULK_INVALIDATED, so a consumer
+    /// that only needs "everything changed" can listen to that one alone.
+    var onPresetLoaded: ((_ slot: UInt8) -> Void)?
+
+    /// Fires on the main thread when the device declares its whole parameter
+    /// block stale (NOTIFY_EVT_BULK_INVALIDATED).  Carries the ParamSource
+    /// that caused it - PRESET on a preset load, FACTORY on a factory reset,
+    /// BULK on another host's bulk write.  The per-parameter PARAM_CHANGED
+    /// events are suppressed inside a bulk bracket, so this event is the only
+    /// notice of those changes.
+    var onBulkInvalidated: ((_ source: UInt8) -> Void)?
+
     /// Fires on the main thread for every siggen state push
     /// (NOTIFY_EVT_SIGGEN_STATE: start, stop, completion, reconfigure).
     /// Carries the SiggenState, SIGGEN_STOP_* reason, active/last signal
@@ -799,6 +813,33 @@ class InterruptMonitor: ObservableObject {
             let payloadEnd = min(bytes.count, 12 + Int(size))
             let payload = Data(bytes[12..<payloadEnd])
             dispatchParam(offset: offset, size: size, source: source, payload: payload)
+        }
+
+        // Dispatch the preset-loaded event so the UI can follow a preset that
+        // something other than us selected (an IR button, a macro, a second
+        // host, a control-surface encoder).
+        if let handler = onPresetLoaded,
+           bytes.count >= 8,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_PRESET_LOADED {
+            let slot = bytes[4]
+            DispatchQueue.main.async {
+                handler(slot)
+            }
+        }
+
+        // Dispatch the bulk-invalidated event.  Inside a bulk bracket the
+        // firmware suppresses the individual PARAM_CHANGED events and emits
+        // this instead, so without it a preset load or factory reset reaches
+        // the UI as nothing at all.
+        if let handler = onBulkInvalidated,
+           bytes.count >= 8,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_BULK_INVALIDATED {
+            let source = bytes[4]
+            DispatchQueue.main.async {
+                handler(source)
+            }
         }
 
         // Dispatch the input-format event (host switched USB alt → new active

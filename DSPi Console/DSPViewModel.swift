@@ -2287,6 +2287,100 @@ class DSPViewModel: ObservableObject {
     private var pollTimer: DispatchSourceTimer?
     private let pollQueue = DispatchQueue(label: "com.foxdac.poll", qos: .userInteractive)
 
+    // MARK: - Device Resync
+
+    /// True while a coalesced full-state resync is queued or running, so a
+    /// burst of notifications costs one bulk read rather than one each.
+    /// Main thread only.
+    private var resyncInFlight = false
+
+    /// Set when the queued resync should also rebase the unsaved-changes
+    /// baseline - i.e. the device loaded a preset, so its state IS the saved
+    /// state and `hasUnsavedChanges` must read false afterwards.
+    /// Main thread only.
+    private var resyncRebasesSnapshot = false
+
+    /// Uptime before which resync requests are dropped.  Set by the paths that
+    /// already refetch everything themselves (our own preset load, factory
+    /// reset); the firmware answers those with the same PRESET_LOADED and
+    /// BULK_INVALIDATED it sends for an external change, and re-reading 5.9 kB
+    /// for state we just read is duplicate work.  Written from whichever queue
+    /// runs the load and read on the main thread, hence the lock.
+    private var resyncSuppressedUntil: TimeInterval = 0
+    private let resyncLock = NSLock()
+
+    /// Suppress notification-driven resyncs for `interval` seconds.  Call this
+    /// BEFORE issuing a request whose own completion path refetches state.
+    func suppressDeviceResync(for interval: TimeInterval = 3.0) {
+        resyncLock.lock()
+        resyncSuppressedUntil = max(resyncSuppressedUntil,
+                                    ProcessInfo.processInfo.systemUptime + interval)
+        resyncLock.unlock()
+    }
+
+    private var resyncIsSuppressed: Bool {
+        resyncLock.lock()
+        defer { resyncLock.unlock() }
+        return ProcessInfo.processInfo.systemUptime < resyncSuppressedUntil
+    }
+
+    /// Set when a further change arrived while a resync was already running,
+    /// so the block we read may already be stale by the time it lands.
+    /// Main thread only.
+    private var resyncQueuedAgain = false
+
+    /// Re-read the whole parameter block from the device after a change we
+    /// cannot mirror from the notification alone.  Coalesced: `delay` gives a
+    /// burst (a preset load's PRESET_LOADED + BULK_INVALIDATED pair, or a bound
+    /// pot spinning at the notification rate) time to settle into one fetch,
+    /// and anything arriving mid-fetch schedules exactly one more afterwards.
+    /// Main thread only.
+    func scheduleDeviceResync(rebaseSnapshot: Bool = false, delay: TimeInterval = 0.15) {
+        // Checked before the flag is recorded: a suppressed request must leave
+        // no rebase pending, or the next unrelated resync would rebaseline the
+        // unsaved-changes snapshot and quietly hide the user's live edits.
+        guard isDeviceConnected, !resyncIsSuppressed else { return }
+        if rebaseSnapshot { resyncRebasesSnapshot = true }
+        guard !resyncInFlight else { resyncQueuedAgain = true; return }
+        resyncInFlight = true
+
+        // A device switch mid-flight must not apply the old unit's parameters
+        // to the new one's UI.
+        let generation = usb.generation
+        pollQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            var fetched = false
+            if self.usb.generation == generation, self.isDeviceConnected,
+               self.fetchAllParams(markDisconnectedOnFailure: false) {
+                _ = self.fetchPresetDirectory()
+                self.fetchPresetActive()
+                fetched = true
+            }
+
+            // Queued after fetchAllParams so its main.async writes have landed
+            // by the time captureSnapshot() runs - FIFO on the main queue
+            // guarantees it, same as the preset-load path.
+            DispatchQueue.main.async {
+                self.resyncInFlight = false
+                guard self.usb.generation == generation else {
+                    self.resyncQueuedAgain = false
+                    self.resyncRebasesSnapshot = false
+                    return
+                }
+                // Rebase only once the reads have caught up: a snapshot taken
+                // from a block we already know is stale is not the saved state.
+                if fetched && self.resyncRebasesSnapshot && !self.resyncQueuedAgain {
+                    self.resyncRebasesSnapshot = false
+                    self.updateSavedSnapshot()
+                }
+                if self.resyncQueuedAgain {
+                    self.resyncQueuedAgain = false
+                    self.scheduleDeviceResync(delay: delay)
+                }
+            }
+        }
+    }
+
     /// Reports the host-selected USB output channel count from CoreAudio, which
     /// survives the device idling to USB alt 0.  Drives `hostConfiguredInputChannels`.
     private let hostAudioFormatMonitor = HostAudioFormatMonitor()
@@ -2409,6 +2503,26 @@ class DSPViewModel: ObservableObject {
             self.adatInputStatus.clockMode = clockMode
             self.adatInputClockMode = clockMode
             self.pollQueue.async { self.fetchAdatInputStatus() }
+        }
+
+        // The device loaded a preset without us asking - an IR button or macro
+        // bound to PRESET_RELOAD, a control-surface encoder, a preset load over
+        // UART/I2C, or a second host.  Follow the active slot immediately; the
+        // BULK_INVALIDATED that always follows does the actual refetch, and the
+        // rebase flag makes it re-baseline the unsaved-changes snapshot so the
+        // freshly loaded preset doesn't read as dirty.
+        AppState.shared.interruptMonitor.onPresetLoaded = { [weak self] slot in
+            guard let self = self else { return }
+            if self.activePresetSlot != Int(slot) { self.activePresetSlot = Int(slot) }
+            self.scheduleDeviceResync(rebaseSnapshot: true)
+        }
+
+        // The device declared the whole parameter block stale (preset load,
+        // factory reset, another host's bulk write).  The per-parameter events
+        // are suppressed inside that bracket, so a full re-read is the only way
+        // to learn what changed.
+        AppState.shared.interruptMonitor.onBulkInvalidated = { [weak self] _ in
+            self?.scheduleDeviceResync()
         }
 
         // 1. Subscribe to USB connection changes AND Trigger Fetch
