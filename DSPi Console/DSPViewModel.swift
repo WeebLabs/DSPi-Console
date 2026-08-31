@@ -1918,10 +1918,24 @@ class DSPViewModel: ObservableObject {
         return UInt8(truncatingIfNeeded: stored)
     }
 
-    // Firmware version tuple parsed from REQ_GET_PLATFORM (data[1] = major,
-    // data[2] high nibble = minor, data[2] low nibble = patch).  nil before
-    // the first successful fetchPlatform().
+    // Firmware version tuple parsed from REQ_GET_PLATFORM: bytes 4-5 when the
+    // device answers with 6 bytes, else the legacy nibble pair in byte 2.
+    // nil before the first successful fetchPlatform().
     @Published var firmwareVersion: (major: Int, minor: Int, patch: Int)? = nil
+
+    /// How the connected device's firmware compares with the version this
+    /// Console build expects.  nil while disconnected, before the first
+    /// `fetchPlatform()`, or if the app's own bundle version is unparseable -
+    /// in every one of those cases we know too little to tell the user
+    /// anything, so callers must stay silent rather than guess.
+    var firmwareMatch: FirmwareMatch? {
+        guard isDeviceConnected,
+              let v = firmwareVersion,
+              let expected = FirmwareVersion.expected else { return nil }
+        let device = FirmwareVersion(v.major, v.minor, v.patch)
+        if device == expected { return .match }
+        return device < expected ? .deviceOlder : .deviceNewer
+    }
 
     /// Bulk wire-format version (WIRE_FORMAT_VERSION), captured from byte 0 of
     /// the last REQ_GET_BULK_PARAMS reply.  This - not the firmware release
