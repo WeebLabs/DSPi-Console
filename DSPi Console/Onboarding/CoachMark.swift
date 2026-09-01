@@ -32,25 +32,31 @@ extension View {
 
 /// Runs the basics tour over the live interface.
 ///
-/// Attached at the window root, where it can see every anchor and cover the
-/// whole window.  The spotlight is a real hole: the highlighted control stays
-/// clickable, so the step that asks the user to add a filter is one they can
-/// actually carry out without leaving the tour.  Everything else is covered,
-/// which keeps a half-finished tour from turning into aimless clicking.
+/// Attached at the root of every window the tour visits, where it can see that
+/// window's anchors and cover all of it.  The spotlight is a real hole: the
+/// highlighted control stays clickable, so the step that asks the user to add
+/// a filter, or to connect an input to an output, is one they can actually
+/// carry out without leaving the tour.  Everything else is covered, which
+/// keeps a half-finished tour from turning into aimless clicking.
+///
+/// `host` says which window this copy is in.  Only the window the current step
+/// belongs to lights anything up; the main window stays dimmed and inert while
+/// the tour is off in a tool window, so the next click goes where the tour is
+/// rather than into a console nobody is looking at.  A tool window shows the
+/// spotlight alone - `CoachMarkPanelController` puts the card beside it.
 struct BasicsTourOverlay: ViewModifier {
     @ObservedObject var onboarding: OnboardingCoordinator
+    let host: OnboardingHost
 
     func body(content: Content) -> some View {
         content.overlayPreferenceValue(OnboardingAnchors.self) { anchors in
             GeometryReader { proxy in
-                if onboarding.basicsTourRunning {
-                    let steps = onboarding.basicsTourSteps
-                    if let step = steps.indices.contains(onboarding.basicsTourIndex)
-                        ? steps[onboarding.basicsTourIndex] : nil {
+                if let step = onboarding.basicsTourStep {
+                    if step.host == host {
                         CoachMarkStage(
                             step: step,
                             index: onboarding.basicsTourIndex,
-                            total: steps.count,
+                            total: onboarding.basicsTourSteps.count,
                             // A step whose target is not on screen (a collapsed
                             // sidebar, a control the device hides) still gets
                             // said - it simply loses its spotlight rather than
@@ -59,23 +65,106 @@ struct BasicsTourOverlay: ViewModifier {
                                 .flatMap { anchors[$0] }
                                 .map { proxy[$0] },
                             container: proxy.size,
+                            // A tool window is sized to its own content and has
+                            // no room to spare, so its card is a panel beside
+                            // the window rather than an overlay on top of the
+                            // thing being described.
+                            showsCard: host == .mainWindow,
                             onBack: onboarding.basicsTourBack,
                             onNext: onboarding.basicsTourNext,
                             onSkip: onboarding.endBasicsTour)
+                    } else if host == .mainWindow {
+                        // The tour has stepped into a tool window.  The console
+                        // keeps its dimming, without a spotlight or a card, so
+                        // it is plainly out of play until the tour comes back.
+                        Color.black.opacity(0.55)
+                            .contentShape(Rectangle())
+                            .onTapGesture { }
+                            .gesture(DragGesture(minimumDistance: 0))
                     }
                 }
             }
-            // The overlay sits over the console for the whole life of the
+            // The overlay sits over its window for the whole life of that
             // window.  Idle it must be completely inert, or a mistake here
             // costs the user every click in the app.
-            .allowsHitTesting(onboarding.basicsTourRunning)
+            .allowsHitTesting(isActive)
         }
+    }
+
+    /// Live only while this window has something to show: the current step, or
+    /// the console's dimming while the tour is elsewhere.
+    private var isActive: Bool {
+        guard let step = onboarding.basicsTourStep else { return false }
+        return step.host == host || host == .mainWindow
     }
 }
 
 extension View {
-    func basicsTour(_ onboarding: OnboardingCoordinator) -> some View {
-        modifier(BasicsTourOverlay(onboarding: onboarding))
+    func basicsTour(_ onboarding: OnboardingCoordinator,
+                    host: OnboardingHost = .mainWindow) -> some View {
+        modifier(BasicsTourOverlay(onboarding: onboarding, host: host))
+    }
+}
+
+// MARK: - The card
+
+/// What a step says, and the ways out of the tour.
+///
+/// Split out from the spotlight because the two do not always live in the same
+/// place: a step hosted in a tool window keeps its spotlight inside that window
+/// and puts this card in a panel beside it, since a window sized to its own
+/// content has no spare room to put a card in.
+struct CoachMarkCard: View {
+    let step: OnboardingStep
+    let index: Int
+    let total: Int
+    var width: CGFloat = 340
+    let onBack: () -> Void
+    let onNext: () -> Void
+    let onSkip: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Step \(index + 1) of \(total)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+
+            Text(step.title)
+                .font(.system(size: 15, weight: .semibold))
+
+            Text(step.message)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                // Esc leaves the tour, which is what the plan promises and
+                // what people try first.
+                Button("Skip Tour", action: onSkip)
+                    .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                if index > 0 {
+                    Button("Back", action: onBack)
+                }
+                // Next owns the return key, except on a step that asks the
+                // user to type into the control it is pointing at: there,
+                // committing a frequency would advance the tour instead.
+                Button(index == total - 1 ? "Done" : "Next", action: onNext)
+                    .keyboardShortcut(step.invitesTyping ? nil : .defaultAction)
+            }
+            .padding(.top, 2)
+        }
+        .padding(16)
+        .frame(width: width, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Material.regular)
+                .shadow(color: .black.opacity(0.3), radius: 12, y: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.gray.opacity(0.25), lineWidth: 1))
     }
 }
 
@@ -88,6 +177,9 @@ private struct CoachMarkStage: View {
     let total: Int
     let target: CGRect?
     let container: CGSize
+    /// False where the card is shown in a panel beside the window instead, so
+    /// this window contributes the dimming and the spotlight only.
+    let showsCard: Bool
     let onBack: () -> Void
     let onNext: () -> Void
     let onSkip: () -> Void
@@ -165,54 +257,26 @@ private struct CoachMarkStage: View {
 
     // MARK: Card
 
-    private static let cardWidth: CGFloat = 340
+    private static let preferredCardWidth: CGFloat = 340
     private static let gap: CGFloat = 14
     private static let margin: CGFloat = 16
 
+    /// Narrowed for a small window.  The tour visits the Matrix Mixer, whose
+    /// window is sized to its grid and can be barely wider than the card
+    /// itself; a fixed width there would hang off both edges at once.
+    private var cardWidth: CGFloat {
+        min(Self.preferredCardWidth, max(200, container.width - 2 * Self.margin))
+    }
+
+    @ViewBuilder
     private var card: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Step \(index + 1) of \(total)")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
-
-            Text(step.title)
-                .font(.system(size: 15, weight: .semibold))
-
-            Text(step.message)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack {
-                // Esc leaves the tour, which is what the plan promises and
-                // what people try first.
-                Button("Skip Tour", action: onSkip)
-                    .keyboardShortcut(.cancelAction)
-
-                Spacer()
-
-                if index > 0 {
-                    Button("Back", action: onBack)
-                }
-                // Next owns the return key, except on a step that asks the
-                // user to type into the control it is pointing at: there,
-                // committing a frequency would advance the tour instead.
-                Button(index == total - 1 ? "Done" : "Next", action: onNext)
-                    .keyboardShortcut(step.invitesTyping ? nil : .defaultAction)
-            }
-            .padding(.top, 2)
+        if showsCard {
+            CoachMarkCard(step: step, index: index, total: total,
+                          width: cardWidth,
+                          onBack: onBack, onNext: onNext, onSkip: onSkip)
+                .background(sizeReader)
+                .offset(x: cardOrigin.x, y: cardOrigin.y)
         }
-        .padding(16)
-        .frame(width: Self.cardWidth, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Material.regular)
-                .shadow(color: .black.opacity(0.3), radius: 12, y: 4))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.gray.opacity(0.25), lineWidth: 1))
-        .background(sizeReader)
-        .offset(x: cardOrigin.x, y: cardOrigin.y)
     }
 
     private var sizeReader: some View {
@@ -240,13 +304,13 @@ private struct CoachMarkStage: View {
         let height = cardSize.height > 0 ? cardSize.height : 150
 
         guard let hole else {
-            return clamped(CGPoint(x: (container.width - Self.cardWidth) / 2,
+            return clamped(CGPoint(x: (container.width - cardWidth) / 2,
                                    y: (container.height - height) / 2), height: height)
         }
 
         // Lined up with the spotlight where the window allows it, so the eye
         // travels from the card to the thing it describes.
-        let alignedX = hole.midX - Self.cardWidth / 2
+        let alignedX = hole.midX - cardWidth / 2
         let alignedY = hole.midY - height / 2
 
         let candidates: [(origin: CGPoint, room: CGFloat, fits: Bool)] = [
@@ -260,11 +324,11 @@ private struct CoachMarkStage: View {
 
             (CGPoint(x: hole.maxX + Self.gap, y: alignedY),
              container.width - hole.maxX,
-             hole.maxX + Self.gap + Self.cardWidth + Self.margin <= container.width),
+             hole.maxX + Self.gap + cardWidth + Self.margin <= container.width),
 
-            (CGPoint(x: hole.minX - Self.gap - Self.cardWidth, y: alignedY),
+            (CGPoint(x: hole.minX - Self.gap - cardWidth, y: alignedY),
              hole.minX,
-             hole.minX - Self.gap - Self.cardWidth >= Self.margin),
+             hole.minX - Self.gap - cardWidth >= Self.margin),
         ]
 
         let chosen = candidates.first(where: \.fits)
@@ -275,7 +339,7 @@ private struct CoachMarkStage: View {
     /// Keeps the card inside the window whatever was chosen.  A card the user
     /// cannot read is worse than no tour.
     private func clamped(_ point: CGPoint, height: CGFloat) -> CGPoint {
-        CGPoint(x: clamp(point.x, Self.margin, container.width - Self.cardWidth - Self.margin),
+        CGPoint(x: clamp(point.x, Self.margin, container.width - cardWidth - Self.margin),
                 y: clamp(point.y, Self.margin, container.height - height - Self.margin))
     }
 

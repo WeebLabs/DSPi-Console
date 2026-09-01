@@ -247,19 +247,31 @@ struct MatrixMixerView: View {
 
     private var unifiedSection: some View {
         VStack(spacing: 0) {
-            columnHeaders
+            // Grouped so the tour can spotlight the routing half and the
+            // per-output half separately.  Both wrappers are plain zero-spacing
+            // stacks inside a zero-spacing stack, so the layout is unchanged.
+            VStack(spacing: 0) {
+                columnHeaders
 
-            sectionDivider
+                sectionDivider
 
-            // ── ROUTING ──
-            routingHeader
-            inputRowsSection
+                // ── ROUTING ──
+                routingHeader
+                inputRowsSection
+            }
+            // The whole grid, headers included: the tour asks the user to click
+            // a crosspoint, and the spotlight is the only part of the window
+            // still taking clicks while it does.
+            .onboardingAnchor("matrix.grid")
 
             sectionDivider
 
             // ── OUTPUT CONTROLS ──
-            sectionLabel("OUTPUT")
-            outputControlsSection
+            VStack(spacing: 0) {
+                sectionLabel("OUTPUT")
+                outputControlsSection
+            }
+            .onboardingAnchor("matrix.outputs")
 
             Spacer().frame(height: 4)
         }

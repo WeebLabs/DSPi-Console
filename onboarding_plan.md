@@ -15,7 +15,7 @@ persistence model:
 | Layer | What it is | When it runs | Blocking? |
 |---|---|---|---|
 | **Getting Started** | Linear setup wizard: flash a board and verify it | First launch on a machine with no prior state, or on demand from Help | Takes over the main window for a first-time user; skippable in one click |
-| **Basics tour** | ~7 coach marks over the real UI | Once, after setup succeeds | Non-blocking overlay, Esc dismisses |
+| **Basics tour** | ~10 coach marks over the real UI, including a visit to the Matrix Mixer | Once, after setup succeeds | Non-blocking overlay, Esc dismisses |
 | **Just-in-time hints** | One card the first time a specialist window opens | Whenever the user first opens that feature | Small, inline, dismisses itself |
 
 The third layer is the important one and the part most apps skip. DSPi Console
@@ -25,7 +25,8 @@ Transform, AutoEQ, siggen, room correction). Touring those up front teaches
 nothing, because the user has no context to hang them on, and it makes the tour
 long enough that everyone skips it. The Matrix Mixer turned out to be the one
 exception, for the reason given in section 5: it is not a feature you might
-want later, it is the routing every other feature depends on. Explaining each one at the moment it is
+want later, it is the routing every other feature depends on, and the tour
+opens its window and teaches it there rather than describing it from outside. Explaining each one at the moment it is
 first opened is both more effective and solves the version problem for free: a
 new feature ships with its own first-open hint, and new users and updaters both
 see it exactly once, when it becomes relevant.
@@ -140,17 +141,53 @@ the overlay at the window root resolves the anchors and draws the spotlight.
    name or meter opens that channel's page, while the coloured tag at the end
    shows or hides its curve on the graph. Anchored to the channel list, above
    the bottom inset.
-2. **The Matrix Mixer.** **Added during implementation, and the reason the
-   tour is eight steps rather than seven.** Routing is not optional knowledge:
-   the firmware's default connects left and right to the first output pair and
-   nothing else, so a user with a subwoofer, a second pair of speakers or a
-   crossover cannot make the device do its job without finding this window.
-   Explaining it only on first open was a bet that people would go looking,
-   which is exactly the bet not to make on the one screen that stands between
-   them and working audio. Anchored to the Matrix Mixer button in the sidebar's
-   icon strip; the first-open card inside the window was retuned to cover what
-   the tour does not, namely per-connection level and polarity and the
-   per-output controls.
+2. **The Matrix Mixer, in three steps, two of them inside the window.**
+   **Added during implementation, and the reason the tour is ten steps rather
+   than seven.** Routing is not optional knowledge: the firmware's default
+   connects left and right to the first output pair and nothing else, so a user
+   with a subwoofer, a second pair of speakers or a crossover cannot make the
+   device do its job without finding this window. Explaining it only on first
+   open was a bet that people would go looking, which is exactly the bet not to
+   make on the one screen that stands between them and working audio.
+
+   The first attempt pointed at the button in the sidebar's icon strip and
+   described the grid in a paragraph. That was still a failure: it named a row,
+   a column and a crosspoint to a user who had never seen any of them, and left
+   them to go and find the window afterwards. So the tour now **opens the
+   Matrix Mixer itself** and continues inside it - the grid, with an invitation
+   to click a crosspoint through the spotlight, and then the per-output ENABLE,
+   GAIN, DELAY and MUTE rows - before closing it again and returning to the
+   console.
+
+   Mechanically: a step names the `OnboardingHost` it belongs to, every window
+   the tour visits carries its own copy of the overlay, and only the host of
+   the current step lights anything up. The console stays dimmed and inert
+   meanwhile, and the Matrix Mixer floats while it holds a step, because a
+   click on a dimmed window still raises it in AppKit and would bury the grid
+   being described.
+
+   **The card for a step in a tool window goes in a panel beside it, not in
+   it.** The mixer's window is sized to exactly its grid, so a card drawn
+   inside lands on top of the thing being described, and the first attempt at
+   fixing that - reserving space inside the window - grew the window by a third
+   of its height for the duration of two steps, which is worse. A borderless
+   child panel travels with the window, costs it nothing, and leaves the
+   spotlight where it is (`CoachMarkPanel.swift`). It never takes key from the
+   window being explained, so a crosspoint can be clicked without clicking past
+   the card first; its content view accepts the first mouse so Next needs no
+   focusing click; and Esc still leaves the tour, through a local key monitor
+   rather than the card's own shortcut, which would only fire while its own
+   window was key.
+
+   Opening and closing the window is driven from `ContentView`, where the
+   window controllers already live, so the coordinator stays free of AppKit and
+   testable. Closing the mixer mid-step is read as "enough of this" and steps
+   the tour past everything hosted there, rather than stranding it with no Next
+   button on screen. A window the tour walks through spends its own first-open
+   card at the start of the run, so the hint never lands on top of the coach
+   mark saying the same thing; a user who skips or defers the tour still meets
+   that card on first open, and it still covers per-connection level and
+   polarity.
 3. **The graph.** What the curve is and which channel it belongs to. Note the
    per-channel visibility toggles are the sidebar's descriptor pills, not a
    legend beside the graph, so the copy does not send anyone looking for one.

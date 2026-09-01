@@ -12,6 +12,32 @@ enum OnboardingPhase: Equatable {
     case justInTime(String)
 }
 
+/// Which window a step is shown in.
+///
+/// The tour started life inside the main window, which was fine until routing:
+/// the Matrix Mixer is the one screen a user cannot skip and it is a window of
+/// its own, so a step that only pointed at the button that opens it was
+/// describing a grid the user had never seen.  A step now names the window it
+/// belongs to, the tour opens and closes that window as it crosses the
+/// boundary, and each window hosts the same overlay.
+enum OnboardingHost: Equatable {
+    case mainWindow
+    case matrixMixer
+
+    /// The first-open card this window's tour steps replace.
+    ///
+    /// A window the tour walks through has already been explained by the time
+    /// it is next opened, so its hint would be a second explanation of what
+    /// the user just did - and, worse, would land on top of the coach mark
+    /// that is explaining it.
+    var justInTimeKey: String? {
+        switch self {
+        case .mainWindow: return nil
+        case .matrixMixer: return "matrix-mixer"
+        }
+    }
+}
+
 /// One thing onboarding can teach.
 ///
 /// A step is data rather than a view so the decision of *what to show* can be
@@ -37,6 +63,10 @@ struct OnboardingStep: Identifiable, Equatable {
     /// The body of the coach mark or hint card.  Empty for setup steps, whose
     /// copy belongs to the wizard screens themselves.
     let message: String
+
+    /// The window this step is shown in.  Its anchor is resolved against that
+    /// window's own layout, so an id may repeat across windows.
+    let host: OnboardingHost
 
     /// For a basics step, the `.onboardingAnchor` id it points at.  A step
     /// whose anchor is absent from the window still shows its card, without a
@@ -64,6 +94,7 @@ struct OnboardingStep: Identifiable, Equatable {
          phase: OnboardingPhase,
          title: String,
          message: String = "",
+         host: OnboardingHost = .mainWindow,
          anchor: String? = nil,
          needsChannelDetail: Bool = false,
          invitesTyping: Bool = false,
@@ -73,6 +104,7 @@ struct OnboardingStep: Identifiable, Equatable {
         self.phase = phase
         self.title = title
         self.message = message
+        self.host = host
         self.anchor = anchor
         self.needsChannelDetail = needsChannelDetail
         self.invitesTyping = invitesTyping
@@ -119,21 +151,42 @@ enum OnboardingCatalogue {
     // MARK: Basics
 
     /// The tour, in the order a new user meets these things rather than the
-    /// order they were built.  Seven marks is the whole budget: everything
-    /// specialist is a just-in-time card instead.
+    /// order they were built.  Everything specialist is a just-in-time card
+    /// instead; the only subsystem that earns a place here is routing, which
+    /// is not optional knowledge and gets its own window visit.
     static let basics: [OnboardingStep] = [
         OnboardingStep(id: "basics.sidebar", introducedIn: FirmwareVersion(1, 1, 7),
                        phase: .basics, title: "Inputs and outputs",
                        message: "Every channel lives here: inputs are what arrives from your computer, outputs are what leaves for your speakers, and each row's meter shows what is reaching it. Click a channel's name or meter to open its page and edit its filters. The small coloured tag at the end of the row is a separate control - it shows or hides that channel's curve on the graph, and leaves whichever page you have open alone.",
                        anchor: "basics.sidebar",
                        applies: { _ in true }),
-        // Routing earns a step of its own because nothing else in the app
-        // matters if the sound is not reaching the right output, and the
-        // default only covers plain stereo on the first output pair.
+        // Routing earns three steps because nothing else in the app matters if
+        // the sound is not reaching the right output, and the default only
+        // covers plain stereo on the first output pair.  The first points at
+        // the button; the two after it are shown inside the Matrix Mixer,
+        // which the tour opens on the user's behalf.  Describing the grid from
+        // the outside taught nobody anything: it named controls the user had
+        // never seen and left them to go and find them afterwards.
         OnboardingStep(id: "basics.routing", introducedIn: FirmwareVersion(1, 1, 7),
                        phase: .basics, title: "The Matrix Mixer",
-                       message: "The Matrix Mixer decides which sound reaches which output. Open it with this button and you will find a grid with a row for every input and a column for every output. Switch on the square where a row meets a column, and that input now plays through that output. To begin with your left and right channels go to the first pair of outputs and nothing else is connected, so everything beyond plain stereo starts here. One input can feed several outputs at once. That is how you send bass to a subwoofer while your main speakers carry the rest, and how you build a crossover by giving each output its own filters.",
+                       message: "The Matrix Mixer decides which sound reaches which output, and it is the one screen standing between you and working audio: to begin with your left and right channels reach the first pair of outputs and nothing else is connected, so everything past plain stereo starts here. This button opens it, and it is worth remembering where it is. Next opens it for you.",
                        anchor: "basics.routing",
+                       applies: { _ in true }),
+        // Anchored to the whole grid rather than one crosspoint, so every
+        // circle in it stays clickable through the spotlight and the
+        // invitation to try one is real.
+        OnboardingStep(id: "basics.matrix-grid", introducedIn: FirmwareVersion(1, 1, 7),
+                       phase: .basics, title: "Connecting an input to an output",
+                       message: "Every input has a row and every output has a column. The circle where a row meets a column is the connection: click one and that input plays through that output. A connected circle grows a level field above it and an INV switch below, which flips its polarity for a driver wired backwards. Try one now. An input can feed several outputs at once, which is how you send bass to a subwoofer while the main speakers carry the rest.",
+                       host: .matrixMixer,
+                       anchor: "matrix.grid",
+                       invitesTyping: true,
+                       applies: { _ in true }),
+        OnboardingStep(id: "basics.matrix-outputs", introducedIn: FirmwareVersion(1, 1, 7),
+                       phase: .basics, title: "What each output does",
+                       message: "These rows act on a whole output rather than on one connection. ENABLE switches an output off and gives its processing time back to the device, GAIN and DELAY set its level and time it against your other speakers, and MUTE silences it while you work. Each output also has its own filters, which is how a crossover is built: send the same input to two outputs and filter each one differently.",
+                       host: .matrixMixer,
+                       anchor: "matrix.outputs",
                        applies: { _ in true }),
         OnboardingStep(id: "basics.graph", introducedIn: FirmwareVersion(1, 1, 7),
                        phase: .basics, title: "The response graph",

@@ -618,6 +618,66 @@ final class OnboardingCoordinatorTests: XCTestCase {
         coordinator.markJustInTimeSeen("not-a-feature")
     }
 
+    // MARK: - Windows the tour visits
+
+    /// Routing is taught inside the Matrix Mixer rather than described from
+    /// the console. Pointing at the button that opens the window and then
+    /// listing controls the user has never seen is the failure this replaced,
+    /// so the hosted steps are the point of the whole arrangement.
+    func testRoutingIsTaughtInsideTheMatrixMixer() {
+        let ids = OnboardingCatalogue.basics.map(\.id)
+        let hosted = OnboardingCatalogue.basics.filter { $0.host == .matrixMixer }
+
+        XCTAssertFalse(hosted.isEmpty, "the tour no longer opens the Matrix Mixer")
+        XCTAssertTrue(hosted.allSatisfy { $0.anchor != nil },
+                      "a step in a tool window with no anchor points at nothing")
+
+        // Directly after the step that points at the button, or the window
+        // opens for a user who has not been told what it is.
+        guard let button = ids.firstIndex(of: "basics.routing") else {
+            return XCTFail("the Matrix Mixer button step is gone")
+        }
+        let hostedIndices = hosted.compactMap { ids.firstIndex(of: $0.id) }.sorted()
+        XCTAssertEqual(hostedIndices, Array((button + 1)...(button + hosted.count)))
+    }
+
+    /// Every window the tour visits must name a first-open card that exists,
+    /// or the suppression below silently stops working.
+    func testHostedWindowsNameARealFirstOpenCard() {
+        for key in OnboardingCatalogue.basics.compactMap({ $0.host.justInTimeKey }) {
+            XCTAssertTrue(OnboardingCatalogue.justInTime.contains { $0.phase == .justInTime(key) },
+                          "no just-in-time step for \(key)")
+        }
+    }
+
+    /// The tour explains the Matrix Mixer while the user is looking at it, so
+    /// the window's own first-open card would land on top of the coach mark
+    /// saying the same thing, and again the next time it is opened.
+    func testStartingTheTourSpendsTheMatrixFirstOpenCard() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "matrix-mixer"))
+
+        coordinator.startBasicsTour(vm: DSPViewModel())
+
+        XCTAssertNil(coordinator.justInTimeStep(for: "matrix-mixer"))
+        // Only the windows the tour actually visits.
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "crossfeed"))
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "stats"))
+    }
+
+    /// Someone who puts the tour off has never been shown the grid, so the
+    /// card that explains it must still be waiting on first open.
+    func testPuttingTheTourOffKeepsTheMatrixFirstOpenCard() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        coordinator.dismissBasicsOffer()
+
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "matrix-mixer"))
+    }
+
     // MARK: - Helpers
 
     private func makeCoordinator() -> OnboardingCoordinator {

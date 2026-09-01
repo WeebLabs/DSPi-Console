@@ -8511,6 +8511,10 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
     /// size (stereo) window can shrink-to-fit when the row count drops - e.g. when
     /// the upmixer is toggled off, removing the derived C/Ls/Rs rows.
     private var rowCountCancellable: AnyCancellable?
+    /// Keeps the tour's card panel beside this window while a step is hosted
+    /// here.  Separate from the row-count subscription because it answers a
+    /// different question and outlives none of the same state.
+    private var tourCancellable: AnyCancellable?
 
     func toggle() {
         if isVisible {
@@ -8524,6 +8528,11 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
         if window == nil {
             let mixerView = MatrixMixerView(vm: AppState.shared.viewModel)
                 .onboardingHint("matrix-mixer")
+                // The basics tour walks through this window rather than
+                // describing it from the console, so it carries its own copy of
+                // the overlay.  It draws nothing unless the step on screen
+                // belongs here.
+                .basicsTour(OnboardingCoordinator.shared, host: .matrixMixer)
             let hostingView = NSHostingView(rootView: mixerView)
             hostingView.setFrameSize(hostingView.fittingSize)
 
@@ -8554,6 +8563,13 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
             rowCountCancellable = Publishers.MergeMany(triggers)
                 .receive(on: RunLoop.main)
                 .sink { [weak self] in self?.refitToContent() }
+
+            let onboarding = OnboardingCoordinator.shared
+            tourCancellable = Publishers.Merge(
+                onboarding.$basicsTourIndex.map { _ in () },
+                onboarding.$basicsTourRunning.map { _ in () })
+                .receive(on: RunLoop.main)
+                .sink { [weak self] in self?.syncCoachMark() }
         }
 
         // Re-evaluate sizing/resizability each time: the 8-channel matrix (8×9)
@@ -8574,6 +8590,18 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         isVisible = true
+        syncCoachMark()
+    }
+
+    /// Shows or hides the tour's card beside this window, according to whether
+    /// the step on screen is one of the ones taught in here.
+    private func syncCoachMark() {
+        guard isVisible, let window,
+              OnboardingCoordinator.shared.basicsTourStep?.host == .matrixMixer else {
+            CoachMarkPanelController.shared.hide()
+            return
+        }
+        CoachMarkPanelController.shared.show(beside: window)
     }
 
     /// Resize the window to fit its current SwiftUI content.  Called when the
@@ -8612,14 +8640,34 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
     }
 
     func hide() {
+        CoachMarkPanelController.shared.hide()
         window?.orderOut(nil)
         isVisible = false
+    }
+
+    /// Floats the window above the console for the duration of a coach mark.
+    ///
+    /// The tour dims the console and swallows clicks there, but a click on a
+    /// dimmed window still raises it in AppKit, which would bury the very
+    /// window the current step is pointing at.
+    func setFloating(_ floating: Bool) {
+        window?.level = floating ? .floating : .normal
     }
 }
 
 extension MatrixMixerWindowController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         isVisible = false
+        CoachMarkPanelController.shared.hide()
+
+        // Closing this window while it hosts a coach mark would strand the
+        // tour: the card beside it goes with it, and the dimmed console has no
+        // Next button of its own.  Read as "enough of this", so the tour steps
+        // past everything hosted here and carries on in the main window.
+        let onboarding = OnboardingCoordinator.shared
+        while onboarding.basicsTourStep?.host == .matrixMixer {
+            onboarding.basicsTourNext()
+        }
     }
 }
 

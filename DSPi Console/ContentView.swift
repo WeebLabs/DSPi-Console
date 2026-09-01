@@ -84,6 +84,11 @@ struct ContentView: View {
     @State private var presetRenameText = ""
     @State private var presetSwitchInFlight = false
     @State private var settingsWindowOpen = false
+
+    /// Whether the tour opened the Matrix Mixer, so it is only closed again if
+    /// the tour is what put it on screen.  A user who already had it open keeps
+    /// it when the tour moves on.
+    @State private var tourOpenedMatrixMixer = false
     @Environment(\.openWindow) private var openWindow
 
     private func commitRename() {
@@ -100,6 +105,31 @@ struct ContentView: View {
             }
         }
         renamingChannel = nil
+    }
+
+    /// Puts the window the current tour step lives in on screen, and takes it
+    /// away again when the tour moves on or ends.
+    ///
+    /// The Matrix Mixer is floated while it hosts a step: the console is dimmed
+    /// and inert underneath, but a click on a dimmed window still raises it in
+    /// AppKit, which would bury the grid the step is pointing at.
+    private func syncTourWindows() {
+        let wantsMatrix = onboarding.basicsTourRunning
+            && onboarding.basicsTourStep?.host == .matrixMixer
+
+        if wantsMatrix {
+            if !matrixMixerController.isVisible {
+                tourOpenedMatrixMixer = true
+                matrixMixerController.show()
+            }
+            matrixMixerController.setFloating(true)
+        } else {
+            matrixMixerController.setFloating(false)
+            if tourOpenedMatrixMixer {
+                tourOpenedMatrixMixer = false
+                matrixMixerController.hide()
+            }
+        }
     }
 
     private func startRename(_ channelIdx: Int) {
@@ -895,11 +925,15 @@ struct ContentView: View {
         // channel for those steps is the difference between a coach mark that
         // points at something and one that points at empty space.
         .onChange(of: onboarding.basicsTourStep?.id) { _ in
+            syncTourWindows()
             guard let step = onboarding.basicsTourStep, step.needsChannelDetail,
                   vm.numMatrixInputs > 0 else { return }
             if case .input = selection { return }
             selection = .input(0)
         }
+        // Also on the running flag, so finishing or skipping from inside the
+        // Matrix Mixer puts the window away.
+        .onChange(of: onboarding.basicsTourRunning) { _ in syncTourWindows() }
         .onChange(of: vm.outputEnabled) { _ in
             // If the selected output was disabled, fall back to overview
             if case .output(let idx) = selection, !vm.outputEnabled[idx] {

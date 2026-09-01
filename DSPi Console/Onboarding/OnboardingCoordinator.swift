@@ -208,7 +208,8 @@ final class OnboardingCoordinator: ObservableObject {
     @Published private(set) var basicsTourRunning = false
 
     /// The step on screen, for anything that has to react to it - the console
-    /// selects a channel for the steps that describe one.
+    /// selects a channel for the steps that describe one, and opens the Matrix
+    /// Mixer for the steps hosted in it.
     var basicsTourStep: OnboardingStep? {
         basicsTourSteps.indices.contains(basicsTourIndex) ? basicsTourSteps[basicsTourIndex] : nil
     }
@@ -253,6 +254,13 @@ final class OnboardingCoordinator: ObservableObject {
         }
         let steps = pending(.basics)
         guard !steps.isEmpty else { return }
+        // A window the tour walks through does not also need its first-open
+        // card: the card would arrive on top of the coach mark explaining the
+        // very same grid, and again on the next open.  Spent at the start
+        // rather than on arrival, for the same reason skipping the tour spends
+        // the steps it never reached: a run of the tour is the whole run.
+        markSeen(Set(steps.compactMap { $0.host.justInTimeKey })
+            .compactMap { justInTimeStep(for: $0)?.id })
         basicsTourSteps = steps
         basicsTourIndex = 0
         basicsTourRunning = true
