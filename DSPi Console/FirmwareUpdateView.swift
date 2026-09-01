@@ -122,6 +122,8 @@ struct FirmwareUpdateView: View {
 
                 if showBootselHint {
                     bootselHint
+                } else if showManualBootloaderHint {
+                    manualBootloaderHint
                 }
             }
             .padding(16)
@@ -306,6 +308,37 @@ struct FirmwareUpdateView: View {
     }
 
     private var bootselHint: some View { BootselHint() }
+
+    /// The old Firmware Update was exactly this and nothing more: restart the
+    /// device into bootloader mode and leave the UF2 to the user.  Kept as a
+    /// quiet footnote for anyone flashing a build of their own, in the slot
+    /// the BOOTSEL hint vacates while a running device is connected.
+    private var showManualBootloaderHint: Bool {
+        guard vm.isDeviceConnected, !confirmed else { return false }
+        switch installer.state {
+        case .idle, .waitingForBoard: return true
+        default: return false
+        }
+    }
+
+    private var manualBootloaderHint: some View {
+        HStack(spacing: 4) {
+            Text("Flashing a UF2 of your own?")
+                .foregroundColor(.secondary)
+            Button("Enter bootloader mode without installing") { enterBootloaderOnly() }
+                .buttonStyle(.link)
+        }
+        .font(.system(size: 10))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Restarts the connected device into bootloader mode without arming an
+    /// install.  The device drops off the bus answering, so there is no reply
+    /// to wait for; its drive then mounts for whatever the user wants to copy,
+    /// and nothing is written unless they ask.
+    private func enterBootloaderOnly() {
+        _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+    }
 
     // MARK: Buttons
 
