@@ -16,6 +16,10 @@ struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
 
     var body: some View {
+        // Nothing without a device: the cards would only repeat the previous
+        // device's channels and filters.  The sidebar hides its rows on the
+        // same reasoning.
+        if vm.isDeviceConnected {
         VStack(spacing: 18) {
             StereoDashboardCard(
                 title: "STEREO INPUT (USB)",
@@ -49,6 +53,7 @@ struct DashboardOverview: View {
         }
         .padding(.horizontal)
         .padding(.top, 4)
+        }
     }
 }
 

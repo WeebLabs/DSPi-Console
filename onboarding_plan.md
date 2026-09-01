@@ -315,10 +315,11 @@ is cheap or painful later.
 
 Each of these independently removes a reason someone would need the tour.
 
-- **Empty state for the main window.** Today, no device means a window full of
-  disabled controls. Replace it with "No DSPi connected", a *Set Up a Board*
-  button, and a hint to check the cable. This is where a returning user with an
-  unplugged device lands, and it is the re-entry point into the wizard.
+- **Empty state for the main window.** Built, then reverted by decision: a
+  returning user with no device keeps the ordinary console and its
+  long-standing red "No Devices" indicator. The takeover-style empty state
+  (and a blurred-console variant tried after it) both proved worse than the
+  familiar window; the wizard remains reachable from the Help menu.
 - **A Help menu.** There is none. Add *Getting Started...*, *Replay Basics
   Tour*, *What's New*, *Documentation*. Users look in Help.
 - **A What's New sheet**, version-keyed, separate from the tour. Release notes

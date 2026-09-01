@@ -301,8 +301,8 @@ final class OnboardingCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.shouldTakeOverMainWindow())
     }
 
-    /// A returning user whose device is simply unplugged gets the empty state.
-    /// Seizing their window would be a regression dressed as help.
+    /// A returning user whose device is simply unplugged keeps the ordinary
+    /// console.  Seizing their window would be a regression dressed as help.
     func testWizardNeverTakesOverForAReturningUser() {
         defaults.set(Array(OnboardingCatalogue.all.map(\.id)), forKey: OnboardingCoordinator.Key.completed)
         let coordinator = makeCoordinator()

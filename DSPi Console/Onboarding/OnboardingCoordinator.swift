@@ -169,8 +169,8 @@ final class OnboardingCoordinator: ObservableObject {
     /// place, and nothing attached gets the bootloader instructions.
     /// Deliberately not keyed on the device: a device appearing mid-wizard
     /// must not yank the wizard away, it is the very thing several steps are
-    /// waiting for.  A returning user whose device is unplugged gets the
-    /// empty state instead, never this.
+    /// waiting for.  A returning user whose device is unplugged keeps the
+    /// ordinary console, never this.
     func shouldTakeOverMainWindow() -> Bool {
         if setupRequested { return true }
         if debug.forceWizard { return true }

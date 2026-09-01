@@ -308,6 +308,10 @@ struct ContentView: View {
         HSplitView {
             // SIDEBAR
             List {
+                // No channels without a device: the rows would only describe
+                // the previous device's layout, and every gesture they offer
+                // acts on hardware that is not there.
+                if vm.isDeviceConnected {
                 Section(header: Text("INPUTS")) {
                     // Show exactly the live active input count (2/4/6/8).  Each
                     // input is a first-class EQ channel (index == channel index).
@@ -403,6 +407,7 @@ struct ContentView: View {
                                 .disabled(vm.channelClipboard == nil)
                             }
                     }
+                }
                 }
             }
             .listStyle(.sidebar)
@@ -843,12 +848,6 @@ struct ContentView: View {
                         OutputChannelDetail(vm: vm, outputIndex: idx,
                                             availableTypes: availableFilterTypes(vm: vm))
 
-                    case .overview where !vm.isDeviceConnected:
-                        // A wall of disabled controls explains nothing.  The
-                        // empty state names the problem and offers the two
-                        // things that fix it.
-                        NoDeviceView(vm: vm)
-
                     case .overview:
                         // `.never`, not `.hidden`: on macOS `.hidden` still
                         // brings the scroller back when a mouse is connected,
@@ -901,6 +900,14 @@ struct ContentView: View {
         .onChange(of: vm.outputEnabled) { _ in
             // If the selected output was disabled, fall back to overview
             if case .output(let idx) = selection, !vm.outputEnabled[idx] {
+                selection = .overview
+                vm.updateSelection(to: nil)
+            }
+        }
+        .onChange(of: vm.isDeviceConnected) { connected in
+            // The sidebar hides its channel rows without a device, so a
+            // selection left on a channel page would have no row to close it.
+            if !connected, selection != .overview {
                 selection = .overview
                 vm.updateSelection(to: nil)
             }
