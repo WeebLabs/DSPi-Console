@@ -62,6 +62,9 @@ struct ContentView: View {
     @EnvironmentObject var levellerController: VolumeLevellerWindowController
     @EnvironmentObject var psybassController: PsychoacousticBassWindowController
     @EnvironmentObject var firmwareUpdateController: FirmwareUpdateWindowController
+    /// Read only so the basics tour can put the right pane on screen for the
+    /// steps that describe it; the console is otherwise unaware of onboarding.
+    @EnvironmentObject var onboarding: OnboardingCoordinator
     @State private var selection: SidebarSelection = .overview
     @State private var renamingChannel: Int? = nil  // channelNames index
 
@@ -403,6 +406,9 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
+            // Before the bottom inset, so the tour's spotlight covers the
+            // scrolling channel rows and not the controls beneath them.
+            .onboardingAnchor("basics.sidebar")
             .mask(
                 VStack(spacing: 0) {
                     Color.black
@@ -421,6 +427,10 @@ struct ContentView: View {
                             tooltip: "Matrix Mixer",
                             action: { matrixMixerController.toggle() }
                         )
+                        // Its own anchor, separate from the strip's: routing is
+                        // a tour step in its own right, and the spotlight has
+                        // to land on this button rather than all eight.
+                        .onboardingAnchor("basics.routing")
 
                         SidebarIconButton(
                             icon: "headphones",
@@ -488,6 +498,7 @@ struct ContentView: View {
                         )
                     }
                     .padding(.vertical, 8)
+                    .onboardingAnchor("basics.tools")
 
                     VStack(spacing: 0) {
                     Divider()
@@ -618,6 +629,7 @@ struct ContentView: View {
                             .opacity(vm.isDeviceConnected ? 1.0 : 0.4)
                             .allowsHitTesting(vm.isDeviceConnected && !presetSwitchInFlight)
                         }
+                        .onboardingAnchor("basics.presets")
                         .contextMenu {
                             // Wrapped in an Equatable view so SwiftUI's diff
                             // skips re-evaluating the menu body when only
@@ -703,10 +715,14 @@ struct ContentView: View {
                         // Master) via the popup-label selector inside each
                         // section; persisted in AppSettings.
                         switch SidebarVolumeMode(rawValue: settings.sidebarVolumeMode) ?? .auto {
+                        // Only one is ever on screen, so both carry the same
+                        // anchor: the tour points at whichever the user has.
                         case .master:
                             MasterModeSection(vm: vm)
+                                .onboardingAnchor("basics.volume")
                         case .auto:
                             UserVolumeSection(vm: vm)
+                                .onboardingAnchor("basics.volume")
                         }
 
                     }
@@ -776,6 +792,7 @@ struct ContentView: View {
                         BodePlotView(vm: vm)
                             .frame(height: CGFloat(settings.graphHeight))
                             .padding(.horizontal)
+                            .onboardingAnchor("basics.graph")
                             .transition(.scale(scale: 0.95, anchor: .top).combined(with: .opacity))
                         // No legend row here: the sidebar descriptor pills are
                         // the per-channel show/hide control in the main window,
@@ -871,6 +888,16 @@ struct ContentView: View {
         }
         .navigationTitle("DSPi Console")
         .frame(maxHeight:900)
+        // The tour describes the filter table and the channel header, neither
+        // of which exists on the overview the console opens on.  Selecting a
+        // channel for those steps is the difference between a coach mark that
+        // points at something and one that points at empty space.
+        .onChange(of: onboarding.basicsTourStep?.id) { _ in
+            guard let step = onboarding.basicsTourStep, step.needsChannelDetail,
+                  vm.numMatrixInputs > 0 else { return }
+            if case .input = selection { return }
+            selection = .input(0)
+        }
         .onChange(of: vm.outputEnabled) { _ in
             // If the selected output was disabled, fall back to overview
             if case .output(let idx) = selection, !vm.outputEnabled[idx] {
@@ -1193,6 +1220,10 @@ struct MasterModeSection: View {
         .environmentObject(CrossfeedWindowController())
         .environmentObject(StatsWindowController())
         .environmentObject(GraphWindowController())
+        .environmentObject(VolumeLevellerWindowController())
+        .environmentObject(PsychoacousticBassWindowController())
+        .environmentObject(FirmwareUpdateWindowController())
+        .environmentObject(OnboardingCoordinator.shared)
         .frame(height: 790)
 }
 
@@ -1203,6 +1234,10 @@ struct MasterModeSection: View {
         .environmentObject(CrossfeedWindowController())
         .environmentObject(StatsWindowController())
         .environmentObject(GraphWindowController())
+        .environmentObject(VolumeLevellerWindowController())
+        .environmentObject(PsychoacousticBassWindowController())
+        .environmentObject(FirmwareUpdateWindowController())
+        .environmentObject(OnboardingCoordinator.shared)
         .frame(width: 1000, height: 780)
 }
 

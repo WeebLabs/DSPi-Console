@@ -1,6 +1,11 @@
 # Onboarding Plan
 
-Status: proposal, not yet implemented. Target: 1.1.7.
+Status: implemented in 1.1.7. Phases 1 to 4 are all in the tree; this
+document is now the record of what was built and why, not a proposal.
+
+Two things changed during implementation and are corrected in place below:
+the wizard's goal was cut back (section 3), and the tour's coach marks had to
+bend around what the interface actually offers (section 5).
 
 ## 1. The core idea
 
@@ -9,7 +14,7 @@ persistence model:
 
 | Layer | What it is | When it runs | Blocking? |
 |---|---|---|---|
-| **Getting Started** | Linear setup wizard: flash a board, define the hardware, hear USB audio | First launch on a machine with no prior state, or on demand from Help | Takes over the main window for a first-time user; skippable in one click |
+| **Getting Started** | Linear setup wizard: flash a board and verify it | First launch on a machine with no prior state, or on demand from Help | Takes over the main window for a first-time user; skippable in one click |
 | **Basics tour** | ~7 coach marks over the real UI | Once, after setup succeeds | Non-blocking overlay, Esc dismisses |
 | **Just-in-time hints** | One card the first time a specialist window opens | Whenever the user first opens that feature | Small, inline, dismisses itself |
 
@@ -18,7 +23,9 @@ has roughly a dozen specialist subsystems (Matrix Mixer, Control Surfaces,
 Control Interfaces, macros, groups, ADAT, I2S, S/PDIF input, Linkwitz
 Transform, AutoEQ, siggen, room correction). Touring those up front teaches
 nothing, because the user has no context to hang them on, and it makes the tour
-long enough that everyone skips it. Explaining each one at the moment it is
+long enough that everyone skips it. The Matrix Mixer turned out to be the one
+exception, for the reason given in section 5: it is not a feature you might
+want later, it is the routing every other feature depends on. Explaining each one at the moment it is
 first opened is both more effective and solves the version problem for free: a
 new feature ships with its own first-open hint, and new users and updaters both
 see it exactly once, when it becomes relevant.
@@ -70,28 +77,33 @@ running it. Everything stays reachable from the Help menu afterwards.
 
 ## 3. Getting Started wizard: what it covers
 
-Goal, decided: get the user to a basic working state where **their computer's
-USB audio comes out of the DSPi**. Not a full configuration, not crossovers,
-not room correction. Sound out of the box, then hand over.
+Goal, **revised**: get the user to a Pico running **verified DSPi firmware**,
+and stop. The original goal was USB audio playing through the DSPi, taking in
+output types, clock mastering, GPIO assignment and macOS sound routing on the
+way. Built out, that was four screens of hardware interrogation in front of
+someone who had owned the device for ninety seconds, and every one of those
+screens asks a question the app can ask better later, in Settings, where it can
+be revisited. Firmware is the one thing that genuinely cannot wait and the one
+thing nothing else in the app can do.
 
-Ordering follows the path to that first audible success:
+Three steps:
 
-1. **Welcome.** Two sentences on what DSPi is. Buttons: *Set up a board* /
-   *I already have one connected* / *Skip setup*.
+1. **Welcome.** What DSPi is, and what this wizard will and will not do.
 2. **Board setup.** Detect a board in BOOTSEL mode, identify the chip, write
    the bundled matching firmware, verify by re-enumeration. Details in
-   section 5. Fully skippable; a board already running DSPi jumps past it.
-3. **Describe the hardware.** How many S/PDIF outputs, which GPIOs, is there a
-   PDM sub. This is the one piece of configuration that genuinely belongs in a
-   wizard, because it is not guessable and the app does nothing useful until it
-   is right.
-4. **Route audio to it.** Select DSPi as the macOS output device. Users will
-   get stuck here. Provide a button that opens Sound settings, then watch the
-   existing input meters and confirm out loud: *"Signal detected - you are
-   connected."* That single beat is what converts a confused user into a
-   confident one, and the metering plumbing already exists.
-5. **Hand off.** "You are set up. Want a two-minute tour?" leading into the
-   basics tour, or straight into the app.
+   section 6. Skippable in one click.
+3. **Hand off.** Confirms the firmware is running and points at where the rest
+   lives: outputs and wiring in Settings > Hardware, the DSPi as the macOS
+   output device, filters in the sidebar, Help for everything else.
+
+Setup assumes a blank Pico rather than inspecting a connected device. Someone
+who already has a working DSPi can skip in one click, and guessing wrong the
+other way strands a user on a step that never arrives.
+
+What the removed steps taught, and where it went instead: output types and
+wiring are a Settings page (reachable, revisable, and already better than a
+wizard screen); the "signal detected" beat became the tour's meter step; the
+macOS output-device instruction is the last card of the wizard's hand-off.
 
 ## 4. Blocking behaviour
 
@@ -120,27 +132,62 @@ Guard rails on when it takes over:
 
 ## 5. Basics tour: what it covers, in order
 
-Coach marks anchored to the real UI, one action required.
+Coach marks anchored to the real UI, one action required. A view opts in with
+`.onboardingAnchor("basics.graph")` and learns nothing else about onboarding;
+the overlay at the window root resolves the anchors and draws the spotlight.
 
-1. **Sidebar.** Inputs and outputs, click a row to edit it, what the meters show.
-2. **The graph.** Which curve is displayed, per-channel visibility toggles.
-3. **Add a filter.** Have the user actually add one peaking filter to an input:
-   type, frequency, Q, gain. A tour with one real action is remembered; a tour
-   that only points at things is not.
-4. **Preamp and volume.** Where master volume lives, why preamp exists
-   (headroom before clipping), what the clip indicator means.
-5. **Saving.** The `*` unsaved marker, Tools > Commit Parameters, Revert to
-   Saved. RAM versus flash is the single highest-support-cost concept in the
-   app. It belongs here, early and explicit, not buried at step twelve.
-6. **Presets.** Ten slots, naming, switching, and that switching discards
-   uncommitted work.
-7. **Where the rest lives.** One card covering the quick-access icon strip at
-   the bottom of the sidebar and the Tools menu. Not eleven cards. "You will
-   find the rest here when you want it."
+1. **Sidebar.** Inputs and outputs, and the two gestures a row carries: the
+   name or meter opens that channel's page, while the coloured tag at the end
+   shows or hides its curve on the graph. Anchored to the channel list, above
+   the bottom inset.
+2. **The Matrix Mixer.** **Added during implementation, and the reason the
+   tour is eight steps rather than seven.** Routing is not optional knowledge:
+   the firmware's default connects left and right to the first output pair and
+   nothing else, so a user with a subwoofer, a second pair of speakers or a
+   crossover cannot make the device do its job without finding this window.
+   Explaining it only on first open was a bet that people would go looking,
+   which is exactly the bet not to make on the one screen that stands between
+   them and working audio. Anchored to the Matrix Mixer button in the sidebar's
+   icon strip; the first-open card inside the window was retuned to cover what
+   the tour does not, namely per-connection level and polarity and the
+   per-output controls.
+3. **The graph.** What the curve is and which channel it belongs to. Note the
+   per-channel visibility toggles are the sidebar's descriptor pills, not a
+   legend beside the graph, so the copy does not send anyone looking for one.
+4. **Add a filter.** The one step that asks for an action, and the reason the
+   spotlight is a real hole rather than a drawn ring: the highlighted control
+   stays clickable, so the filter can be added without leaving the tour.
+   There is no "add" button - a channel has ten slots and a filter appears when
+   a slot is given a type, which is what the card actually says.
+5. **Volume controls.** Anchored to the volume control at the foot of the
+   sidebar. Revised from the plan's "preamp and volume": the two have nothing
+   to do with each other, and the control that actually needs explaining is the
+   picker above the slider, which silently switches between two different
+   volumes. The card explains both - User Volume tracking the computer's own
+   volume keys, Master Volume as a device-level setting the computer never
+   touches. **Preamp is consequently no longer covered by the tour**; if it
+   wants teaching, it wants its own step next to the channel header, not a
+   footnote on an unrelated one.
+6. **Saving.** RAM versus flash, the `*` marker, Tools > Commit Parameters and
+   Revert to Saved. **Deliberately unanchored**: the controls it describes are
+   menu items, which live outside the window and cannot be spotlit, so the card
+   is centred rather than pointing at half the story.
+7. **Presets.** Ten slots, naming, and that switching discards uncommitted
+   work. Anchored to the preset picker, which is also where the `*` from step 6
+   appears - the concept card is followed by the widget it named.
+8. **Where the rest lives.** The quick-access icon strip at the foot of the
+   sidebar and the Tools menu. Not eleven cards. No longer names the Matrix
+   Mixer, which now has a step of its own.
+
+Step 4 describes a pane that only exists once a channel is selected, because
+the console opens on its overview. It declares `needsChannelDetail`, and the
+console selects an input for it, so the mark never points at empty space.
+A step whose anchor is genuinely absent (a collapsed pane, a popped-out graph)
+still shows its card, centred and without a spotlight, rather than stalling.
 
 ### Explicitly out of scope for the base tour
 
-Matrix Mixer, Control Surfaces, Control Interfaces, macros, channel groups,
+Control Surfaces, Control Interfaces, macros, channel groups,
 ADAT in/out, I2S input and clocking, S/PDIF input selection, Linkwitz
 Transform, AutoEQ, room correction, test signals, stats, interrupt monitor.
 
@@ -363,7 +410,7 @@ exactly the kind of thing that regresses silently, so it is worth the coverage:
 Four phases, each independently shippable. The order is chosen so the riskiest
 work lands first and the parts that depend on it come later.
 
-### Phase 1 - Firmware plumbing (useful even if onboarding never ships)
+### Phase 1 - Firmware plumbing (done)
 
 - `fetchPlatform()` requests 6 bytes and prefers the full-width minor/patch at
   bytes 4-5, falling back to the nibbles on a short read. Matches the firmware
@@ -379,7 +426,7 @@ work lands first and the parts that depend on it come later.
 Nothing here is onboarding, and all of it stands on its own. It is also the
 riskiest code in the whole plan, so it should not be gated behind UI work.
 
-### Phase 2 - Onboarding machinery (no visible onboarding yet)
+### Phase 2 - Onboarding machinery (done)
 
 - `OnboardingCatalogue`, `OnboardingCoordinator`, `OnboardingDebug`.
 - The step-selection tests from section 10.
@@ -389,20 +436,21 @@ riskiest code in the whole plan, so it should not be gated behind UI work.
 Pure logic plus two small surfaces. Everything is exercisable through the dev
 flags before a single coach mark exists.
 
-### Phase 3 - The wizard
+### Phase 3 - The wizard (done)
 
 - Main-window takeover and its guard rails (section 4).
-- The five setup steps (section 3).
+- The three setup steps (section 3).
 - The improved empty state for a returning user with no device (section 8).
 
-### Phase 4 - Tour and hints
+### Phase 4 - Tour and hints (done)
 
 - `CoachMark` overlay and the `.onboardingAnchor` modifier.
-- The seven basics steps (section 5).
+- The eight basics steps (section 5).
 - First-open hints for the specialist windows.
 
-Phase 4 is the most deferrable. If it slips a release, phases 1 to 3 still
-leave a new user better off than today.
+Phase 4 shipped alongside the rest. It is where the plan's central bet gets
+tested: fifteen just-in-time cards against seven coach marks, on the theory
+that a feature explains itself best at the moment it is first opened.
 
 ## 12. Decisions
 
@@ -410,7 +458,7 @@ leave a new user better off than today.
 |---|---|---|
 | 1 | Bundle the `.uf2` files or download them? | **Bundle.** Download path can come later for updates. |
 | 2 | What do existing beta users see? | **Opt-in.** Seed as completed, offer the tour once. |
-| 3 | How far does the wizard go? | **To USB audio playing through the DSPi**, including output/GPIO config. |
+| 3 | How far does the wizard go? | **Revised: to verified firmware, and no further.** Originally to USB audio including output/GPIO config; cut back during implementation (section 3). |
 | 4 | Does the wizard block the main window? | **Yes, for a first-time user only**, as a main-window takeover rather than a modal window. |
 
 | 5 | Beta suffixes or point releases? | **Point releases only** for anything published; `CFBundleVersion` for private test builds. |

@@ -51,7 +51,7 @@ class LoudnessWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = LoudnessView(vm: vm)
+            let view = LoudnessView(vm: vm).onboardingHint("loudness")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 600),

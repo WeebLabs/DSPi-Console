@@ -375,6 +375,249 @@ final class OnboardingCoordinatorTests: XCTestCase {
         }
     }
 
+    // MARK: - The basics tour
+
+    /// The tour runs over the steps that were pending when it started, and
+    /// finishing it records every one of them.
+    func testTourRunsPendingStepsAndRecordsThem() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.skip(.setup)
+
+        let expected = coordinator.pending(.basics).map(\.id)
+        XCTAssertFalse(expected.isEmpty)
+
+        coordinator.startBasicsTour(vm: DSPViewModel())
+        XCTAssertTrue(coordinator.basicsTourRunning)
+        XCTAssertEqual(coordinator.basicsTourSteps.map(\.id), expected)
+
+        for _ in expected { coordinator.basicsTourNext() }
+
+        XCTAssertFalse(coordinator.basicsTourRunning)
+        XCTAssertTrue(coordinator.pending(.basics).isEmpty)
+        XCTAssertTrue(Set(expected).isSubset(of: coordinator.completedIDs))
+    }
+
+    /// The step list is frozen when the tour starts. Steps are marked seen as
+    /// the user passes them, and a list recomputed from `pending` would shrink
+    /// underneath the tour, renumbering it and skipping whatever slid into the
+    /// current index.
+    func testTourStepListDoesNotShrinkWhileRunning() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.skip(.setup)
+        coordinator.startBasicsTour(vm: DSPViewModel())
+
+        let total = coordinator.basicsTourSteps.count
+        coordinator.basicsTourNext()
+
+        XCTAssertEqual(coordinator.basicsTourSteps.count, total)
+        XCTAssertEqual(coordinator.basicsTourIndex, 1)
+    }
+
+    /// Skipping is as final as finishing: the steps never reached are recorded
+    /// too, or the same banner returns on the next launch.
+    func testSkippingTheTourRecordsTheStepsNotReached() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.skip(.setup)
+        coordinator.startBasicsTour(vm: DSPViewModel())
+        coordinator.basicsTourNext()        // read one, then walk out
+        coordinator.endBasicsTour()
+
+        XCTAssertTrue(coordinator.pending(.basics).isEmpty)
+        XCTAssertFalse(coordinator.showsBasicsOffer)
+    }
+
+    /// Back does not un-record what has been read; it only moves the cursor.
+    func testTourBackMovesWithoutForgetting() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.skip(.setup)
+        coordinator.startBasicsTour(vm: DSPViewModel())
+
+        let first = coordinator.basicsTourStep?.id
+        coordinator.basicsTourNext()
+        coordinator.basicsTourBack()
+
+        XCTAssertEqual(coordinator.basicsTourIndex, 0)
+        XCTAssertEqual(coordinator.basicsTourStep?.id, first)
+        XCTAssertTrue(coordinator.completedIDs.contains(first!))
+    }
+
+    /// The tour waits its turn: a user who has not dealt with the wizard yet
+    /// is not offered a tour of an interface they have not reached.
+    func testTourIsNotOfferedWhileSetupIsPending() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+
+        XCTAssertFalse(coordinator.pending(.setup).isEmpty)
+        XCTAssertFalse(coordinator.canOfferBasicsTour)
+
+        coordinator.finishSetup()
+        XCTAssertTrue(coordinator.canOfferBasicsTour)
+    }
+
+    /// Upgrade day: everything is seeded as seen so no wizard appears, but the
+    /// promise was that the tour would still be offered once. Taking up that
+    /// offer has to produce a tour, not an empty one.
+    func testExistingUserIsOfferedATourThatActuallyRuns() {
+        defaults.set(250.0, forKey: "graphHeight")   // evidence of prior use
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+
+        XCTAssertEqual(coordinator.cohort, .existingUser)
+        XCTAssertTrue(coordinator.pending(.basics).isEmpty)
+        XCTAssertTrue(coordinator.showsBasicsOffer)
+
+        coordinator.startBasicsTour(vm: DSPViewModel())
+        XCTAssertTrue(coordinator.basicsTourRunning)
+        XCTAssertEqual(coordinator.basicsTourSteps.count, OnboardingCatalogue.basics.count)
+    }
+
+    /// "Later" stops the asking without spending the steps, so the Help menu
+    /// still has a tour to run.
+    func testDismissingTheOfferKeepsTheStepsPending() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        coordinator.dismissBasicsOffer()
+
+        XCTAssertFalse(coordinator.showsBasicsOffer)
+        XCTAssertTrue(coordinator.canOfferBasicsTour)
+        XCTAssertFalse(coordinator.pending(.basics).isEmpty)
+    }
+
+    /// "Never" means never, for the tour and everything after it.
+    func testDecliningStopsTheOfferForGood() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        coordinator.declineEverything()
+
+        XCTAssertFalse(coordinator.canOfferBasicsTour)
+        XCTAssertFalse(coordinator.showsBasicsOffer)
+    }
+
+    /// Running it again from the Help menu gives the whole tour back, even
+    /// after it has been completed once.
+    func testReplayRestoresTheWholeTour() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.skip(.setup)
+        coordinator.skip(.basics)
+        XCTAssertTrue(coordinator.pending(.basics).isEmpty)
+
+        coordinator.startBasicsTour(vm: DSPViewModel())
+        XCTAssertEqual(coordinator.basicsTourSteps.count, OnboardingCatalogue.basics.count)
+    }
+
+    /// The wizard replaces the console, and the tour's overlay lives on the
+    /// console. Leaving a tour running while the wizard opens strands it: no
+    /// spotlight, no Skip button, nothing to press.
+    func testAskingForTheWizardEndsARunningTour() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        coordinator.startBasicsTour(vm: DSPViewModel())
+        XCTAssertTrue(coordinator.basicsTourRunning)
+
+        coordinator.requestSetup()
+
+        XCTAssertFalse(coordinator.basicsTourRunning)
+        XCTAssertTrue(coordinator.shouldTakeOverMainWindow())
+    }
+
+    /// A developer reset must actually reset. A tour left running would write
+    /// its steps back into the set that was just cleared the moment the user
+    /// pressed Next.
+    func testResettingWhileTheTourRunsDoesNotRecordItsSteps() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.finishSetup()
+        coordinator.startBasicsTour(vm: DSPViewModel())
+
+        coordinator.resetAll()
+        coordinator.basicsTourNext()        // a click that was already in flight
+        coordinator.endBasicsTour()
+
+        XCTAssertFalse(coordinator.basicsTourRunning)
+        XCTAssertTrue(coordinator.completedIDs.isEmpty,
+                      "a reset tour wrote its steps back into the cleared state")
+    }
+
+    /// Rewinding the completed ids without recomputing `pending` leaves the two
+    /// disagreeing, and the first step marked seen then finds `pending` empty
+    /// and reclassifies the user as up to date in the middle of their tour.
+    func testReplayedTourKeepsTheCohortIntactWhileItRuns() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.skip(.setup)
+        coordinator.skip(.basics)
+
+        coordinator.startBasicsTour(vm: DSPViewModel())
+        coordinator.basicsTourNext()
+
+        XCTAssertTrue(coordinator.basicsTourRunning)
+        XCTAssertNotEqual(coordinator.cohort, .upToDate)
+        XCTAssertFalse(coordinator.pending(.basics).isEmpty)
+    }
+
+    // MARK: - Step content
+
+    /// A coach mark with no words is a spotlight on nothing, and a hint card
+    /// with no words is a blank box.
+    func testEveryShownStepCarriesItsCopy() {
+        for step in OnboardingCatalogue.basics + OnboardingCatalogue.justInTime {
+            XCTAssertFalse(step.message.isEmpty, "\(step.id) has no message")
+            XCTAssertFalse(step.title.isEmpty, "\(step.id) has no title")
+        }
+    }
+
+    /// Anchors are how a coach mark finds its target. A typo produces a card
+    /// floating in the middle of the window with no explanation, which is the
+    /// kind of thing nobody notices until a user asks what it is pointing at.
+    func testBasicsAnchorsAreDistinct() {
+        let anchors = OnboardingCatalogue.basics.compactMap(\.anchor)
+        XCTAssertEqual(Set(anchors).count, anchors.count, "two steps claim the same anchor")
+    }
+
+    // MARK: - Just-in-time hints
+
+    /// A hint is shown once and then never again, whatever else happens.
+    func testJustInTimeHintIsShownOnceOnly() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "crossfeed"))
+        coordinator.markJustInTimeSeen("crossfeed")
+        XCTAssertNil(coordinator.justInTimeStep(for: "crossfeed"))
+
+        // A second dismissal (a window reopened before the state settled) is
+        // a no-op rather than something that trips over its own absence.
+        coordinator.markJustInTimeSeen("crossfeed")
+        XCTAssertNil(coordinator.justInTimeStep(for: "crossfeed"))
+    }
+
+    /// Marking one feature seen must not silence the others.
+    func testJustInTimeHintsAreIndependent() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+        coordinator.markJustInTimeSeen("crossfeed")
+
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "loudness"))
+        XCTAssertNotNil(coordinator.justInTimeStep(for: "stats"))
+    }
+
+    /// An unknown key is a caller's typo, not a crash.
+    func testUnknownJustInTimeKeyIsHarmless() {
+        let coordinator = makeCoordinator()
+        coordinator.evaluate(vm: DSPViewModel())
+
+        XCTAssertNil(coordinator.justInTimeStep(for: "not-a-feature"))
+        coordinator.markJustInTimeSeen("not-a-feature")
+    }
+
     // MARK: - Helpers
 
     private func makeCoordinator() -> OnboardingCoordinator {

@@ -411,13 +411,21 @@ struct SettingsView: View {
         case .graphing:         GraphingSettingsTab()
         case .advanced:         AdvancedSettingsTab()
         case .globalParams:     GlobalSettingsTab()
+        // Several specialist subsystems are settings pages rather than
+        // windows, so their first-open card rides on the page.
         case .outputAssignment: HardwareSettingsTab(section: .outputs)
+                                    .onboardingHint("adat")
         case .i2sConfig:        HardwareSettingsTab(section: .i2s)
         case .spdifInput:       HardwareSettingsTab(section: .spdif)
+                                    .onboardingHint("i2s-input")
         case .controlInterfaces: ControlInterfacesSettingsTab()
+                                    .onboardingHint("control-interfaces")
         case .controlSurfaces:  ControlSurfacesSettingsTab(section: .controls)
+                                    .onboardingHint("control-surfaces")
         case .channelGroups:    ControlSurfacesSettingsTab(section: .groups)
+                                    .onboardingHint("channel-groups")
         case .macros:           ControlSurfacesSettingsTab(section: .macros)
+                                    .onboardingHint("macros")
         }
     }
 }
@@ -1646,6 +1654,10 @@ private struct OnboardingDeveloperSection: View {
                 "Leaves setup and the first-open cards alone, and lifts a previous \"never again\".",
                 "Replay Tour") {
                 onboarding.replayBasics()
+                // Re-evaluated on the spot: the offer banner reads the pending
+                // list, so without this the panel claims something that only
+                // becomes true after a relaunch.
+                onboarding.evaluate(vm: AppState.shared.viewModel)
                 note = "The basics tour is pending again."
             }
 
@@ -1653,6 +1665,7 @@ private struct OnboardingDeveloperSection: View {
                 "Clears only the just-in-time hints, without re-running the wizard.",
                 "Replay Hints") {
                 onboarding.replayJustInTime()
+                onboarding.evaluate(vm: AppState.shared.viewModel)
                 note = "First-open cards are pending again."
             }
 
@@ -8510,6 +8523,7 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
     func show() {
         if window == nil {
             let mixerView = MatrixMixerView(vm: AppState.shared.viewModel)
+                .onboardingHint("matrix-mixer")
             let hostingView = NSHostingView(rootView: mixerView)
             hostingView.setFrameSize(hostingView.fittingSize)
 
@@ -8635,7 +8649,7 @@ class StatsWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "System Statistics"
-            window?.contentView = NSHostingView(rootView: statsView)
+            window?.contentView = NSHostingView(rootView: statsView.onboardingHint("stats"))
             window?.isReleasedWhenClosed = false
             window?.delegate = self
         }
@@ -9948,7 +9962,9 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var testSignalsWindowController = TestSignalsWindowController()
     @StateObject private var firmwareUpdateWindowController = FirmwareUpdateWindowController()
     @StateObject private var whatsNewWindowController = WhatsNewWindowController()
-    @StateObject private var onboarding = OnboardingCoordinator()
+    // The shared instance, not a fresh one: AppKit-hosted tool windows read
+    // the same coordinator for their first-open hints.
+    @StateObject private var onboarding = OnboardingCoordinator.shared
 
     /// Release notes are not onboarding: they are shown after an update, never
     /// on a first run.  Someone seeing the app for the first time has nothing
@@ -10205,10 +10221,15 @@ struct DSPi_ConsoleApp: App {
                     onboarding.requestSetup()
                 }
 
+                // Asked for outright, so it runs rather than being offered.
                 Button("Replay the Basics Tour") {
                     onboarding.replayBasics()
-                    onboarding.evaluate(vm: AppState.shared.viewModel)
+                    onboarding.startBasicsTour(vm: AppState.shared.viewModel)
                 }
+                // The wizard replaces the console, and the tour's overlay
+                // lives on the console: running both at once strands the tour
+                // off screen with no way to dismiss it.
+                .disabled(onboarding.shouldTakeOverMainWindow())
 
                 Divider()
 

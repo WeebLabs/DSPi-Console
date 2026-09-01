@@ -8,7 +8,7 @@ class TestSignalsWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = TestSignalsView(vm: vm)
+            let view = TestSignalsView(vm: vm).onboardingHint("test-signals")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 428, height: 760),

@@ -8,7 +8,7 @@ class PsychoacousticBassWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = PsychoacousticBassView(vm: vm)
+            let view = PsychoacousticBassView(vm: vm).onboardingHint("psybass")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 640),

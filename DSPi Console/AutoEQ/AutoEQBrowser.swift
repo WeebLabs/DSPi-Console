@@ -221,7 +221,7 @@ class AutoEQBrowserController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "AutoEQ - Browse Profiles"
-            window?.contentView = NSHostingView(rootView: browserView)
+            window?.contentView = NSHostingView(rootView: browserView.onboardingHint("autoeq"))
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.minSize = NSSize(width: 450, height: 350)

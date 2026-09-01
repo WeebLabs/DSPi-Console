@@ -59,6 +59,16 @@ final class OnboardingCoordinator: ObservableObject {
     @Published private(set) var cohort: OnboardingCohort = .upToDate
     @Published private(set) var pending: [OnboardingStep] = []
 
+    /// The instance the app runs on.
+    ///
+    /// Tool windows are AppKit-hosted (`NSHostingView`) and so sit outside the
+    /// scene's environment, but their first-open hints have to read and write
+    /// the same completed set as everything else.  One shared instance is
+    /// simpler than threading the coordinator through a dozen window
+    /// controllers.  Tests still construct their own against a scratch
+    /// `UserDefaults`.
+    static let shared = OnboardingCoordinator()
+
     init(defaults: UserDefaults = .standard, debug: OnboardingDebug = .fromDefaults()) {
         self.defaults = defaults
         self.debug = debug
@@ -153,13 +163,14 @@ final class OnboardingCoordinator: ObservableObject {
 
     /// Whether the wizard should replace the console inside the main window.
     ///
-    /// For any genuinely new user, connected or not.  The wizard adapts its
-    /// steps to what is attached, so a user with a working device gets the
-    /// short version (outputs, audio) and a user with nothing gets shown how
-    /// to connect a board.  Deliberately not keyed on the device: a device
-    /// appearing mid-wizard must not yank the wizard away, it is the very
-    /// thing several steps are waiting for.  A returning user whose device is
-    /// unplugged gets the empty state instead, never this.
+    /// For any genuinely new user, connected or not.  The wizard's board step
+    /// adapts to what is attached: a device already running the expected
+    /// firmware sails through, a mismatched one is offered the update in
+    /// place, and nothing attached gets the bootloader instructions.
+    /// Deliberately not keyed on the device: a device appearing mid-wizard
+    /// must not yank the wizard away, it is the very thing several steps are
+    /// waiting for.  A returning user whose device is unplugged gets the
+    /// empty state instead, never this.
     func shouldTakeOverMainWindow() -> Bool {
         if setupRequested { return true }
         if debug.forceWizard { return true }
@@ -168,7 +179,14 @@ final class OnboardingCoordinator: ObservableObject {
     }
 
     /// Opens the wizard on demand.
-    func requestSetup() { setupRequested = true }
+    ///
+    /// Ends any running tour first.  The wizard replaces the console, and the
+    /// console is where the tour's overlay lives, so leaving it running would
+    /// strand it: no spotlight, no Skip button, and no way out.
+    func requestSetup() {
+        if basicsTourRunning { endBasicsTour() }
+        setupRequested = true
+    }
 
     /// Leaves the wizard, whether it was completed or skipped.  Both record
     /// the setup steps as seen: a skip that reappears next launch is not a
@@ -176,6 +194,109 @@ final class OnboardingCoordinator: ObservableObject {
     func finishSetup() {
         setupRequested = false
         skip(.setup)
+    }
+
+    // MARK: The basics tour
+
+    /// The steps this run of the tour will show, frozen when it starts.
+    ///
+    /// Frozen deliberately: `pending` shrinks as steps are marked seen, and a
+    /// list that shortened underneath the tour would renumber "step 3 of 7"
+    /// mid-flight and skip whatever moved into the current index.
+    @Published private(set) var basicsTourSteps: [OnboardingStep] = []
+    @Published private(set) var basicsTourIndex = 0
+    @Published private(set) var basicsTourRunning = false
+
+    /// The step on screen, for anything that has to react to it - the console
+    /// selects a channel for the steps that describe one.
+    var basicsTourStep: OnboardingStep? {
+        basicsTourSteps.indices.contains(basicsTourIndex) ? basicsTourSteps[basicsTourIndex] : nil
+    }
+
+    /// Whether there is a tour worth offering.  Setup steps still pending mean
+    /// the wizard has not been dealt with yet, and the tour waits its turn.
+    ///
+    /// An existing user is a deliberate exception.  Upgrade day seeds every
+    /// step as seen so nobody mid-project is dragged through a beginner's
+    /// wizard, which leaves them with nothing pending - but the promise was
+    /// that they would still be *offered* the tour once, so the offer stands
+    /// on the cohort rather than on the pending list.
+    var canOfferBasicsTour: Bool {
+        guard cohort != .declined, pending(.setup).isEmpty else { return false }
+        return cohort == .existingUser || !pending(.basics).isEmpty
+    }
+
+    /// Whether the offer should be put in front of the user unprompted.
+    ///
+    /// An existing user is only ever offered it, never dropped into it, which
+    /// is the opt-in promise made to people who were using the app before
+    /// onboarding existed.
+    @Published var basicsOfferDismissed = false
+
+    var showsBasicsOffer: Bool { canOfferBasicsTour && !basicsOfferDismissed }
+
+    /// Starts the tour, restoring the whole thing if nothing is pending.
+    ///
+    /// The empty case is someone who was seeded as having seen it all taking
+    /// up the offer, or anyone running it again from the Help menu; asking for
+    /// the tour is asking for all of it.  Re-evaluating afterwards is what
+    /// keeps `pending` honest: rewinding the completed ids without it would
+    /// leave the two disagreeing, and the first step marked seen would then
+    /// find `pending` empty and quietly reclassify the user as up to date
+    /// mid-tour.  It also puts the steps back through their applicability
+    /// check, so a replay cannot resurrect a step for hardware that is not
+    /// attached.
+    func startBasicsTour(vm: DSPViewModel) {
+        if pending(.basics).isEmpty {
+            completedIDs = completedIDs.subtracting(OnboardingCatalogue.basics.map(\.id))
+            evaluate(vm: vm)
+        }
+        let steps = pending(.basics)
+        guard !steps.isEmpty else { return }
+        basicsTourSteps = steps
+        basicsTourIndex = 0
+        basicsTourRunning = true
+        basicsOfferDismissed = true
+    }
+
+    func basicsTourNext() {
+        guard basicsTourRunning else { return }
+        // Marked one at a time, so a tour interrupted by quitting resumes at
+        // the first step the user has not actually read.
+        if let step = basicsTourStep { markSeen(step) }
+        if basicsTourIndex + 1 < basicsTourSteps.count {
+            basicsTourIndex += 1
+        } else {
+            endBasicsTour()
+        }
+    }
+
+    func basicsTourBack() {
+        guard basicsTourRunning, basicsTourIndex > 0 else { return }
+        basicsTourIndex -= 1
+    }
+
+    /// Ends the tour, however it ended.  Skipping is as final as finishing:
+    /// every step of this run is recorded, including the ones not reached, or
+    /// the skip button is a lie that costs the user the same banner tomorrow.
+    func endBasicsTour() {
+        markSeen(basicsTourSteps.map(\.id))
+        basicsTourRunning = false
+        basicsTourSteps = []
+        basicsTourIndex = 0
+        basicsOfferDismissed = true
+    }
+
+    /// "Not now."  Leaves the steps pending so the Help menu can still run the
+    /// tour, but stops asking for this launch.
+    func dismissBasicsOffer() { basicsOfferDismissed = true }
+
+    // MARK: Just-in-time hints
+
+    /// Records that `key`'s first-open card has been seen.
+    func markJustInTimeSeen(_ key: String) {
+        guard let step = justInTimeStep(for: key) else { return }
+        markSeen(step)
     }
 
     // MARK: Recording
@@ -212,15 +333,29 @@ final class OnboardingCoordinator: ObservableObject {
     /// is not enough: the prior-use heuristic would see the app's other
     /// settings and seed the user as an existing one straight away.
     func resetAll() {
+        // Abandoned outright, not ended: `endBasicsTour` records its steps,
+        // which would write them straight back into the set being cleared.
+        abandonBasicsTour()
         Key.all.forEach { defaults.removeObject(forKey: $0) }
         defaults.set(true, forKey: Key.simulateFresh)
         cohort = .upToDate
         pending = []
     }
 
+    /// Drops a running tour without recording anything.  For the developer
+    /// resets only: every path a user can take through the tour records what
+    /// they were shown.
+    private func abandonBasicsTour() {
+        basicsTourRunning = false
+        basicsTourSteps = []
+        basicsTourIndex = 0
+        basicsOfferDismissed = false
+    }
+
     /// Makes the basics tour offerable again without disturbing setup or the
     /// just-in-time cards.
     func replayBasics() {
+        abandonBasicsTour()
         let ids = OnboardingCatalogue.basics.map(\.id)
         completedIDs = completedIDs.subtracting(ids)
         declined = false

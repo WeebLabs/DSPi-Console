@@ -8,7 +8,7 @@ class VolumeLevellerWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = VolumeLevellerView(vm: vm)
+            let view = VolumeLevellerView(vm: vm).onboardingHint("leveller")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 540),

@@ -8,7 +8,7 @@ class CrossfeedWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = CrossfeedView(vm: vm)
+            let view = CrossfeedView(vm: vm).onboardingHint("crossfeed")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 560),

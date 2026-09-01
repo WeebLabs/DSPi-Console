@@ -1404,6 +1404,9 @@ struct FilterListView: View {
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.gray.opacity(0.2), lineWidth: 1))
         .padding(.horizontal)
         .padding(.bottom)
+        // The whole card, not one row: the rows are lazy, so a row's anchor
+        // would only resolve while it happened to be scrolled into view.
+        .onboardingAnchor("basics.add-filter")
     }
 }
 

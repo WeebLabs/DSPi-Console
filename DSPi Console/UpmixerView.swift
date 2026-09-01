@@ -13,7 +13,7 @@ class UpmixerWindowController: NSObject, ObservableObject {
     func show(vm: DSPViewModel) {
         self.vm = vm
         if window == nil {
-            let view = UpmixerView(vm: vm)
+            let view = UpmixerView(vm: vm).onboardingHint("upmixer")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 400, height: 720),
