@@ -39,19 +39,12 @@ extension DSPViewModel {
         guard gotParams else { return }
         guard usb.generation == generation else { return }
 
+        // Tier 1: only what the main window renders - source, rate, volume
+        // and the preset picker.  The bulk read above already carried the
+        // filters and channel layout.
         fetchInputSource()
-        fetchCore1Mode()
         fetchSampleRate()
         fetchUserVolume()
-        fetchLgSoundSyncEnabled()
-        fetchDacHwMuteConfig()
-        fetchControlInterfaces()
-        fetchControlSurfaces()
-        guard usb.generation == generation else { return }
-
-        fetchSiggen()
-        fetchAdatConfig()
-        fetchAdatInputConfig()
         guard usb.generation == generation else { return }
 
         // Fetch preset state
@@ -68,11 +61,37 @@ extension DSPViewModel {
         fetchPresetActive()
         guard usb.generation == generation else { return }
 
+        // The live UI fades in here, not on raw connection and not after the
+        // whole fetch: everything the main window shows has published by now,
+        // so the content arrives fully formed, and the far larger tier below
+        // (control surfaces alone is ~140 transfers) no longer holds the
+        // fade hostage.
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.3)) { self.isDeviceReady = true }
+        }
+
+        // Tier 2: state for Settings pages and tool windows, which are almost
+        // never open at the moment of connection.  Their published values
+        // simply land a beat after the console appears; the gates they feed
+        // (controlSurfacesSupported, siggenSupported) materialise with them.
+        fetchCore1Mode()
+        fetchLgSoundSyncEnabled()
+        fetchDacHwMuteConfig()
+        fetchControlInterfaces()
+        fetchControlSurfaces()
+        guard usb.generation == generation else { return }
+
+        fetchSiggen()
+        fetchAdatConfig()
+        fetchAdatInputConfig()
+        guard usb.generation == generation else { return }
+
         // All fetches above have enqueued their main-thread state updates, so
         // this runs after the published values reflect the connected device.
         // Re-seeds the Settings global draft (no-op if the user has staged
         // edits) - matters after a device switch, where the draft was reset
-        // from the previous device's values.
+        // from the previous device's values.  Deliberately after tier 2: the
+        // draft snapshots values that tier fetches.
         DispatchQueue.main.async {
             SettingsSaveCoordinator.shared.refreshGlobalDraftIfClean()
         }

@@ -2122,6 +2122,14 @@ class DSPViewModel: ObservableObject {
     static let crossoverBandsPerChannel = 4
     static let firstCrossoverWireBand = 20
     @Published var isDeviceConnected: Bool = false
+
+    /// What the live UI fades in on.  Set only after the connect-path fetch
+    /// has published the device's full state, so rows, cards and curves
+    /// arrive fully formed in one fade instead of reshaping mid-animation as
+    /// each fetch lands; cleared with the same animated transaction that
+    /// clears the rest on disconnect.  Gating logic (menus, commands) should
+    /// keep using `isDeviceConnected`.
+    @Published var isDeviceReady: Bool = false
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
     /// Last USB connection error, mirrored from USBDevice so the status dot can
@@ -2546,13 +2554,24 @@ class DSPViewModel: ObservableObject {
         usb.$isConnected
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
-                self?.isDeviceConnected = connected
+                // One animated transaction for the whole connection change:
+                // everything the console shows or hides - rows, cards,
+                // curves, preset state - fades together.  Views animating
+                // only on `isDeviceConnected` missed the collateral state
+                // cleared below, and anything keyed to it vanished between
+                // frames instead of fading.
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    self?.isDeviceConnected = connected
+                    if !connected {
+                        self?.isDeviceReady = false
+                        self?.savedSnapshot = nil
+                        self?.siggenStatus = SiggenStatus()
+                        self?.presetOccupied = 0
+                        self?.presetNames = Array(repeating: "", count: 10)
+                        self?.activePresetSlot = 0
+                    }
+                }
                 if !connected {
-                    self?.savedSnapshot = nil
-                    self?.siggenStatus = SiggenStatus()
-                    self?.presetOccupied = 0
-                    self?.presetNames = Array(repeating: "", count: 10)
-                    self?.activePresetSlot = 0
                     AppState.shared.interruptMonitor.stop()
                 }
                 if connected {

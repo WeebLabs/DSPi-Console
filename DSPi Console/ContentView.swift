@@ -308,10 +308,6 @@ struct ContentView: View {
         HSplitView {
             // SIDEBAR
             List {
-                // No channels without a device: the rows would only describe
-                // the previous device's layout, and every gesture they offer
-                // acts on hardware that is not there.
-                if vm.isDeviceConnected {
                 Section(header: Text("INPUTS")) {
                     // Show exactly the live active input count (2/4/6/8).  Each
                     // input is a first-class EQ channel (index == channel index).
@@ -408,9 +404,16 @@ struct ContentView: View {
                             }
                     }
                 }
-                }
             }
             .listStyle(.sidebar)
+            // Faded rather than removed without a device: List animates
+            // structural row changes with its own slide, and a pure crossfade
+            // is wanted here.  Invisible rows are also inert, and they only
+            // ever fade in fully formed - `isDeviceReady` waits for the
+            // connect fetches, so the layout is final before it shows.
+            .opacity(vm.isDeviceReady ? 1 : 0)
+            .allowsHitTesting(vm.isDeviceReady)
+            .animation(.easeInOut(duration: 0.3), value: vm.isDeviceReady)
             // Before the bottom inset, so the tour's spotlight covers the
             // scrolling channel rows and not the controls beneath them.
             .onboardingAnchor("basics.sidebar")
@@ -908,8 +911,10 @@ struct ContentView: View {
             // The sidebar hides its channel rows without a device, so a
             // selection left on a channel page would have no row to close it.
             if !connected, selection != .overview {
-                selection = .overview
-                vm.updateSelection(to: nil)
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    selection = .overview
+                    vm.updateSelection(to: nil)
+                }
             }
         }
         .sheet(isPresented: $showPresetRename) {

@@ -16,10 +16,6 @@ struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
 
     var body: some View {
-        // Nothing without a device: the cards would only repeat the previous
-        // device's channels and filters.  The sidebar hides its rows on the
-        // same reasoning.
-        if vm.isDeviceConnected {
         VStack(spacing: 18) {
             StereoDashboardCard(
                 title: "STEREO INPUT (USB)",
@@ -53,7 +49,13 @@ struct DashboardOverview: View {
         }
         .padding(.horizontal)
         .padding(.top, 4)
-        }
+        // Faded rather than removed without a device, so the change is a
+        // pure crossfade with no relayout; invisible cards are also inert.
+        // The stale values underneath never show: `isDeviceReady` only flips
+        // once the connect fetches have replaced them.
+        .opacity(vm.isDeviceReady ? 1 : 0)
+        .allowsHitTesting(vm.isDeviceReady)
+        .animation(.easeInOut(duration: 0.3), value: vm.isDeviceReady)
     }
 }
 

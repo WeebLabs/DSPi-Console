@@ -166,7 +166,7 @@ struct BodePlotView: View {
         // No curves without a device: the cached magnitudes are the previous
         // device's.  The grid and axes stay, so the graph pane keeps its
         // place rather than closing.
-        guard vm.isDeviceConnected else { return [:] }
+        guard vm.isDeviceReady else { return [:] }
         var groups: [[Double]: [ChannelEntry]] = [:]
         let activeEq = vm.activeEqChannel
         let followsSelection = !isPopOut || settings.popoutGraphFollowsSelection
@@ -314,7 +314,7 @@ struct BodePlotView: View {
             // Phase response of the selected channel - dotted, light-gray,
             // mapped to a -180...+180 degree axis (labeled on the right).
             if settings.showPhase,
-               vm.isDeviceConnected,
+               vm.isDeviceReady,
                let activeCh = vm.activeEqChannel,
                let phases = (settings.phaseUnwrapped ? vm.cachedPhasesUnwrapped[activeCh] : vm.cachedPhases[activeCh]),
                (useOverride ? (visibilityOverride[activeCh] ?? false) : (vm.channelVisibility[activeCh] == true)) {
@@ -325,6 +325,10 @@ struct BodePlotView: View {
                     .animation(.spring(response: 0.2, dampingFraction: 0.8), value: phases)
             }
         }
+        // Curves and the phase trace fade with the device rather than
+        // vanishing between frames; the grid underneath never changes, so
+        // only the data animates.
+        .animation(.easeInOut(duration: 0.3), value: vm.isDeviceReady)
         .background(Color(NSColor.windowBackgroundColor).opacity(0.5))
         .cornerRadius(8)
         .clipped()
@@ -591,22 +595,24 @@ struct GraphLegend: View {
         // so a high channel count never forces the graph pane (and window)
         // wider.  FlowLayout reports a minimum width of only its widest pill.
         FlowLayout(spacing: 8, lineSpacing: 6) {
-            // Pills only with a device, matching the sidebar's rows and the
-            // curves they would toggle.
-            if vm.isDeviceConnected {
-                // Active input channels
-                ForEach(Array(0..<vm.numMatrixInputs), id: \.self) { ch in
-                    legendPill(eqCh: ch, name: "IN\(ch + 1)", color: MatrixInput.color(for: ch))
-                }
+            // Active input channels
+            ForEach(Array(0..<vm.numMatrixInputs), id: \.self) { ch in
+                legendPill(eqCh: ch, name: "IN\(ch + 1)", color: MatrixInput.color(for: ch))
+            }
 
-                // Enabled outputs (dynamic)
-                ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
-                    legendPill(eqCh: vm.eqChannel(forOutput: out.index), name: out.descriptor, color: out.color)
-                }
+            // Enabled outputs (dynamic)
+            ForEach(MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).filter { vm.outputEnabled[$0.index] }, id: \.index) { out in
+                legendPill(eqCh: vm.eqChannel(forOutput: out.index), name: out.descriptor, color: out.color)
             }
         }
         .padding(.top, 6)
         .padding(.bottom, 2)
+        // Faded rather than removed without a device: removal would reflow
+        // the layout, and a pure crossfade is wanted.  Invisible pills are
+        // also inert.
+        .opacity(vm.isDeviceReady ? 1 : 0)
+        .allowsHitTesting(vm.isDeviceReady)
+        .animation(.easeInOut(duration: 0.3), value: vm.isDeviceReady)
     }
 }
 
