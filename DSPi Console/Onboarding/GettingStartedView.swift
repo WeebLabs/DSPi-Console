@@ -9,17 +9,12 @@ import SwiftUI
 /// keeps it to one window, and hands the real interface back the moment setup
 /// finishes or is skipped.
 ///
-/// The step list is computed from what is actually true, not fixed.  A board
-/// already connected and running the right firmware never sees a firmware
-/// step; a user with nothing plugged in is shown how to connect a board, and
-/// the wizard moves on by itself when one appears.  Nothing on screen is ever
-/// something the user cannot act on: firmware installs happen right here, and
-/// output configuration is edited right here, so no step hands the user off
-/// to another window.
-///
-/// It stops at the first moment the user can hear their computer through the
-/// DSPi.  Everything past that point is discoverable, and a wizard that keeps
-/// going past its goal is one people learn to dismiss.
+/// The wizard has exactly one objective: a Pico running verified DSPi
+/// firmware.  Outputs, wiring and audio routing all belong to the app proper,
+/// where they can be revisited; a wizard that keeps going past its goal is
+/// one people learn to dismiss.  Nothing on screen is ever something the user
+/// cannot act on: the firmware install happens right here, so no step hands
+/// the user off to another window.
 struct GettingStartedView: View {
     @ObservedObject var vm: DSPViewModel
     @EnvironmentObject private var onboarding: OnboardingCoordinator
@@ -40,34 +35,27 @@ struct GettingStartedView: View {
     /// screenshots and UI tests can reach every screen without replaying the
     /// journey that leads there.
     init(vm: DSPViewModel, installer: FirmwareInstaller? = nil,
-         startAtStageForTesting stage: Int, disableReconcileForTesting: Bool = false) {
+         startAtStageForTesting stage: Int) {
         self.vm = vm
         _installer = StateObject(wrappedValue: installer ?? FirmwareInstaller(
             locator: SystemBootloaderLocator(),
             verifier: ViewModelFirmwareVerifier(vm: vm)))
         _current = State(initialValue: Stage(rawValue: stage) ?? .welcome)
-        self.reconcileDisabledForTesting = disableReconcileForTesting
     }
-
-    /// Screenshot rendering has no real USB, whose connect/disconnect blips
-    /// would otherwise pull a forced stage back to where the state machine
-    /// thinks it belongs.
-    private var reconcileDisabledForTesting = false
     #endif
 
     // MARK: The stages
 
-    /// Everything the wizard can show, in order.  Which of these actually
-    /// appear is `visibleStages`' decision, made live.
+    /// Every step, in order.  The list used to bend around what was plugged
+    /// in; with the goal cut back to verified firmware, the journey is the
+    /// same for everyone.
     private enum Stage: Int, CaseIterable {
-        case welcome, board, outputs, audio, done
+        case welcome, board, done
 
         var label: String {
             switch self {
             case .welcome: return "Welcome"
             case .board:   return "Board"
-            case .outputs: return "Outputs"
-            case .audio:   return "Audio"
             case .done:    return "Done"
             }
         }
@@ -78,45 +66,12 @@ struct GettingStartedView: View {
     /// Set when the user commits to a firmware install.  The installer never
     /// flashes on its own; this records the one explicit decision.
     @State private var confirmed = false
+    /// Whether the connected device has already been told to restart into
+    /// bootloader mode, so a second click cannot reboot it twice.
+    @State private var rebootRequested = false
     /// Chip of the board most recently seen by detection, remembered so the
     /// writing card can still name it once the board leaves `.ready`.
     @State private var lastSeenChip: BootloaderBoard.Chip?
-
-    /// Latches once audio has been seen, so a quiet passage does not undo the
-    /// confirmation a moment after giving it.
-    @State private var sawSignal = false
-
-    /// Inline feedback for output-pin changes.
-    @State private var outputStatus: String?
-    @State private var outputStatusIsError = false
-
-    /// Whether an install has begun or finished, which pins the board stage on
-    /// screen: mid-write the device is off the bus by design, and afterwards
-    /// the outcome must stay readable rather than the stage vanishing under
-    /// the user because the device reappeared.
-    private var installerEngaged: Bool {
-        switch installer.state {
-        case .writing, .waitingForDevice, .verified, .failed: return true
-        default: return confirmed
-        }
-    }
-
-    /// The steps this user actually faces, right now.
-    ///
-    /// Setup assumes a blank Pico.  It deliberately does not inspect a
-    /// connected device to decide whether firmware is needed: a first-time
-    /// user who has a working DSPi already can skip setup, and guessing wrong
-    /// in the other direction leaves someone stranded on a step that never
-    /// arrives.  Walking everyone through the install is the robust choice.
-    private var visibleStages: [Stage] {
-        var stages: [Stage] = [.welcome, .board]
-        if vm.isDeviceConnected {
-            stages.append(.outputs)
-            stages.append(.audio)
-        }
-        stages.append(.done)
-        return stages
-    }
 
     // MARK: Body
 
@@ -141,42 +96,13 @@ struct GettingStartedView: View {
         .frame(minWidth: 620, minHeight: 520)
         .onAppear { installer.beginWatching() }
         .onDisappear { installer.stopWatching() }
-        .onChange(of: vm.isDeviceConnected) { _, _ in reconcile() }
         .onChange(of: installer.state) { _, state in
             switch state {
             case .ready(let board): lastSeenChip = board.chip
             case .waitingForVolume(let chip): lastSeenChip = chip
             default: break
             }
-            reconcile()
         }
-        .onChange(of: current) { _, stage in
-            if stage == .outputs { refreshOutputState() }
-        }
-        .onReceive(vm.meters.objectWillChange) { _ in
-            // Latch, never unlatch: see `sawSignal`.
-            if !sawSignal, inputSignalPresent { sawSignal = true }
-        }
-    }
-
-    /// Keeps `current` pointing at a stage that exists and can be acted on.
-    ///
-    /// Two moves only.  A device appearing while the user watches the board
-    /// stage completes that stage on its own - except when an install has run,
-    /// where the outcome stays until the user continues past it.  A device
-    /// vanishing from a later stage sends the user back to the board stage,
-    /// which is where the problem now lives.
-    private func reconcile() {
-        #if DEBUG
-        if reconcileDisabledForTesting { return }
-        #endif
-        if (current == .outputs || current == .audio), !vm.isDeviceConnected {
-            current = .board
-            return
-        }
-        // No auto-advance off the board stage on mere connection: setup
-        // assumes a blank Pico, so reaching the outputs stage is the user's
-        // move once the firmware is on.
     }
 
     // MARK: Header
@@ -196,8 +122,8 @@ struct GettingStartedView: View {
                 Spacer()
             }
 
-            StepDotStrip(labels: visibleStages.map(\.label),
-                         current: currentStageIndex,
+            StepDotStrip(labels: Stage.allCases.map(\.label),
+                         current: current.rawValue,
                          dotWidth: 60)
                 .frame(maxWidth: 460)
                 .frame(maxWidth: .infinity)
@@ -206,12 +132,8 @@ struct GettingStartedView: View {
         .padding(.vertical, 14)
     }
 
-    private var currentStageIndex: Int {
-        visibleStages.firstIndex(of: current) ?? 0
-    }
-
     private var headerSubtitle: String {
-        "Step \(currentStageIndex + 1) of \(visibleStages.count)"
+        "Step \(current.rawValue + 1) of \(Stage.allCases.count)"
     }
 
     // MARK: Content
@@ -221,8 +143,6 @@ struct GettingStartedView: View {
         switch current {
         case .welcome: welcomeStage
         case .board:   boardStage
-        case .outputs: outputsStage
-        case .audio:   audioStage
         case .done:    doneStage
         }
     }
@@ -231,10 +151,10 @@ struct GettingStartedView: View {
 
     private var welcomeStage: some View {
         stepBody(title: "Welcome to DSPi Console",
-                 blurb: "DSPi turns a Raspberry Pi Pico into a very flexible audio DSP. Equalisation, crossovers, upmixers, crossfeed, loudness compensation and more can be applied to sound through a plethora of inputs and outputs.\n\nThis setup takes just a minute and will guide you through hearing your computer's audio through DSPi. Everything else can be set up when you need it.") {
-            infoRow("bolt.horizontal.circle", "Get your Pico connected and running, installing firmware if needed.")
-            infoRow("cable.connector", "Choose the kinds of outputs you'd like to use for now and how they are wired.")
-            infoRow("speaker.wave.2", "Send your computer's audio to the DSPi and hear it working.")
+                 blurb: "DSPi turns a Raspberry Pi Pico into a remarkably capable audio processor: equalisation, crossovers, upmixing, loudness compensation and more, applied live to whatever you play.\n\nSetup is short and has one job: getting the DSPi firmware onto your Pico. Once it is running, everything else is set up in the app as you need it.") {
+            infoRow("bolt.horizontal.circle", "Connect your Pico and install the DSPi firmware, right here.")
+            infoRow("checkmark.seal", "The board restarts and the app confirms the install worked.")
+            infoRow("slider.horizontal.3", "Outputs, wiring and audio are then yours to shape in the console.")
         }
     }
 
@@ -260,7 +180,12 @@ struct GettingStartedView: View {
         case .failed: return "Something needs attention"
         case .writing, .waitingForDevice: return "Installing firmware"
         default:
-            return "Prepare your Pico"
+            switch connectedDeviceMatch {
+            case .match: return "Your device is ready"
+            case .deviceOlder: return "Update your firmware"
+            case .deviceNewer: return "Your firmware is newer"
+            case nil: return "Prepare your Pico"
+            }
         }
     }
 
@@ -273,8 +198,36 @@ struct GettingStartedView: View {
         case .failed:
             return "This is almost always fixable. Follow the card below, then try again - nothing has been lost."
         default:
-            return "In this step, we are going to install the DSPi firmware on your Pico-compatible device. Simply follow the directions below."
+            switch connectedDeviceMatch {
+            case .match:
+                return "This step installs the DSPi firmware, and your connected device is already running it. There is nothing to do here."
+            case .deviceOlder:
+                return "Your DSPi is already connected, so no buttons need holding: the app can restart it and install the matching firmware in one step."
+            case .deviceNewer:
+                return "This Console ships an older firmware than your device is running. Updating the app is usually the better fix, but you can also downgrade the device to match."
+            case nil:
+                return "In this step, we are going to install the DSPi firmware on your Pico-compatible device. Follow the directions below."
+            }
         }
+    }
+
+    /// The running, already-connected DSPi the board step should talk about
+    /// instead of hunting for a bootloader, if there is one.
+    ///
+    /// Only while detection is still looking and nothing has been committed:
+    /// once a bootloader board is on the bus or an install is underway, the
+    /// installer's own states own the screen.
+    private var connectedDeviceMatch: FirmwareMatch? {
+        guard !confirmed, vm.isDeviceConnected else { return nil }
+        switch installer.state {
+        case .idle, .waitingForBoard: return vm.firmwareMatch
+        default: return nil
+        }
+    }
+
+    private var deviceVersion: String? {
+        guard let v = vm.firmwareVersion else { return nil }
+        return FirmwareVersion(v.major, v.minor, v.patch).description
     }
 
     @ViewBuilder
@@ -288,6 +241,8 @@ struct GettingStartedView: View {
                     spinning: true,
                     title: "Looking for your Pico",
                     message: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug it, hold BOOTSEL, and plug it back in.")
+            } else if let match = connectedDeviceMatch {
+                connectedDeviceCard(match)
             } else {
                 InstallStateCard(
                     icon: "cable.connector",
@@ -346,7 +301,7 @@ struct GettingStartedView: View {
                 tint: .green,
                 iconSize: 36,
                 title: "Firmware \(version) installed",
-                message: "Continue to set up your outputs.")
+                message: "That was the whole job. Continue to finish setup.")
 
         case .failed(let error):
             VStack(spacing: 12) {
@@ -358,6 +313,47 @@ struct GettingStartedView: View {
         }
     }
 
+    /// The card for a DSPi that is already connected and running.  Setup can
+    /// finish without a single bootloader button: a current device sails
+    /// through, and a mismatched one is updated in place the same way the
+    /// Firmware Update window does it.
+    @ViewBuilder
+    private func connectedDeviceCard(_ match: FirmwareMatch) -> some View {
+        switch match {
+        case .match:
+            InstallStateCard(
+                icon: "checkmark.seal.fill",
+                tint: .green,
+                iconSize: 36,
+                title: "Firmware \(bundledVersion) already installed",
+                message: "Your DSPi is running the firmware this Console ships, so there is nothing to install. Continue to finish setup.")
+
+        case .deviceOlder:
+            InstallStateCard(
+                icon: "arrow.up.circle",
+                tint: .accentColor,
+                title: "Firmware update available",
+                message: "Your DSPi is running firmware \(deviceVersion ?? "unknown"); this Console pairs with \(bundledVersion). The device will restart into bootloader mode and come back updated. Audio stops until it finishes.",
+                accessory: AnyView(
+                    Button("Update DSPi Firmware") { beginConnectedDeviceInstall() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .keyboardShortcut(.defaultAction)
+                ))
+
+        case .deviceNewer:
+            InstallStateCard(
+                icon: "arrow.down.circle",
+                tint: .orange,
+                title: "This would be a downgrade",
+                message: "Your DSPi is running firmware \(deviceVersion ?? "unknown"), which is newer than this Console expects (\(bundledVersion)). A newer Console is the better fix, but you can downgrade the device to match this one.",
+                accessory: AnyView(
+                    Button("Downgrade Firmware") { beginConnectedDeviceInstall() }
+                        .controlSize(.large)
+                ))
+        }
+    }
+
     /// Records the user's decision to install onto a board already in BOOTSEL.
     /// Arming is a decision about this one update; the installer writes as
     /// soon as the board is ready, which it already is.
@@ -366,231 +362,37 @@ struct GettingStartedView: View {
         installer.installWhenReady()
     }
 
-    /// Commits to updating the connected, out-of-date device: arms the
-    /// installer, then asks the device to restart into bootloader mode.  The
-    /// order the user and the hardware arrive in stops mattering; the write
-    /// begins when the BOOTSEL drive appears.
+    /// Commits to updating the device that is already connected and running.
+    /// Mirrors the Firmware Update window: arm the installer, then ask the
+    /// device to restart into bootloader mode.  It drops off the bus while
+    /// answering, so there is no reply to wait for.
+    private func beginConnectedDeviceInstall() {
+        confirmed = true
+        installer.installWhenReady()
+        guard !rebootRequested else { return }
+        rebootRequested = true
+        _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+    }
+
     /// Starts the install flow over after a failure: the view's flags and the
     /// installer's freeze and commitment together, because clearing only one
     /// side leaves the other believing a run is still in progress.
     private func resetInstallRun() {
         confirmed = false
+        rebootRequested = false
         installer.reset()
-    }
-
-    // MARK: Outputs
-
-    /// One row per physical output the connected device has.  The DSPi cannot
-    /// tell what is wired to it, so the user says which outputs are in use and
-    /// which GPIO pins carry them - edited right here, applied to the device
-    /// live, and committed when the user continues.
-    private struct OutputRowModel: Identifiable {
-        let id: Int              // index into vm.outputPins
-        let title: String
-        let typeLabel: String
-        let color: Color
-        let matrixChannels: [Int]
-    }
-
-    private var outputRows: [OutputRowModel] {
-        let slots = vm.numOutputSlots
-        let matrixOutputs = MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes)
-        var rows = (0..<slots).map { slot in
-            OutputRowModel(id: slot,
-                           title: "OUT \(slot * 2 + 1)/\(slot * 2 + 2)",
-                           typeLabel: vm.outputSlotTypes[slot] == 1 ? "I2S" : "S/PDIF",
-                           color: matrixOutputs[slot * 2 + 1].color,
-                           matrixChannels: [slot * 2, slot * 2 + 1])
-        }
-        rows.append(OutputRowModel(id: vm.pdmPinIndex,
-                                   title: "Sub",
-                                   typeLabel: "PDM",
-                                   color: MatrixOutput.pdmColor,
-                                   matrixChannels: [vm.pdmOutputIndex]))
-        return rows
-    }
-
-    /// STM32 builds drive fixed peripheral pins; there is nothing to assign.
-    private var pinsAssignable: Bool { vm.platformName != "STM32H723" }
-
-    private var outputsStage: some View {
-        stepBody(title: "Choose your outputs",
-                 blurb: "The DSPi cannot tell what you have wired to it. Switch on the outputs your build uses\(pinsAssignable ? " and check each one's GPIO pin matches your wiring" : ""). Everything applies immediately and can be changed later in Settings.") {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(outputRows) { row in
-                    outputRow(row)
-                }
-
-                if let message = outputStatus {
-                    HStack(spacing: 6) {
-                        Image(systemName: outputStatusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(outputStatusIsError ? .orange : .green)
-                        Text(message)
-                            .font(.system(size: 10))
-                            .foregroundColor(outputStatusIsError ? .orange : .secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.top, 8)
-                    .padding(.horizontal, 2)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .setupCard()
-
-            infoRow("lightbulb", "Not sure? The defaults match the standard DSPi wiring, and outputs you switch off can simply stay unwired.")
-        }
-    }
-
-    /// Fixed-width columns so the switches, names, types and pin pickers line
-    /// up across rows whatever their content.
-    private func outputRow(_ row: OutputRowModel) -> some View {
-        HStack(spacing: 10) {
-            Toggle("", isOn: enabledBinding(row))
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .labelsHidden()
-
-            Circle()
-                .fill(row.color)
-                .frame(width: 8, height: 8)
-
-            Text(row.title)
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: 74, alignment: .leading)
-
-            Text(row.typeLabel)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .frame(width: 52, alignment: .leading)
-
-            Spacer(minLength: 8)
-
-            if pinsAssignable {
-                Picker("", selection: pinBinding(row)) {
-                    ForEach(pinOptions(for: row), id: \.self) { pin in
-                        Text("GPIO \(pin)").tag(pin)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                // Sized for the longest label ("GPIO 28") so every picker is
-                // the same width, right-aligned to the row edge.
-                .frame(width: 92, alignment: .trailing)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func enabledBinding(_ row: OutputRowModel) -> Binding<Bool> {
-        Binding(
-            get: { row.matrixChannels.contains { vm.outputEnabled.indices.contains($0) && vm.outputEnabled[$0] } },
-            set: { on in
-                for channel in row.matrixChannels {
-                    vm.setOutputEnable(output: channel, enabled: on)
-                }
-            })
-    }
-
-    /// The same candidate rule as Settings: any valid pin not owned by another
-    /// consumer, with the current selection always kept so the picker renders.
-    private func pinOptions(for row: OutputRowModel) -> [UInt8] {
-        HardwareSettingsTab.validPins.filter {
-            $0 == vm.outputPins[row.id] || vm.pinInUseBy($0, excluding: .output(row.id)) == nil
-        }
-    }
-
-    private func pinBinding(_ row: OutputRowModel) -> Binding<UInt8> {
-        Binding(
-            get: { vm.outputPins.indices.contains(row.id) ? vm.outputPins[row.id] : 0 },
-            set: { newPin in
-                SettingsSaveCoordinator.shared.beginOutputEdit()
-                let status = vm.assignOutputPin(output: row.id, pin: newPin)
-                switch status {
-                case PIN_CONFIG_SUCCESS:
-                    outputStatus = "\(row.title) moved to GPIO \(newPin)"
-                    outputStatusIsError = false
-                case PIN_CONFIG_PIN_IN_USE:
-                    if let owner = vm.pinInUseBy(newPin, excluding: .output(row.id)) {
-                        outputStatus = "GPIO \(newPin) is already assigned to \(owner)"
-                    } else {
-                        outputStatus = "GPIO \(newPin) is already in use"
-                    }
-                    outputStatusIsError = true
-                    vm.fetchOutputPin(output: row.id)
-                case PIN_CONFIG_INVALID_PIN:
-                    outputStatus = "GPIO \(newPin) is not available on this device"
-                    outputStatusIsError = true
-                    vm.fetchOutputPin(output: row.id)
-                default:
-                    outputStatus = "The device refused the change"
-                    outputStatusIsError = true
-                    vm.fetchOutputPin(output: row.id)
-                }
-            })
-    }
-
-    /// Pulls the device's live output state so the rows show the truth, not
-    /// whatever the app last cached.
-    private func refreshOutputState() {
-        guard vm.isDeviceConnected else { return }
-        for row in outputRows {
-            vm.fetchOutputPin(output: row.id)
-            for channel in row.matrixChannels {
-                vm.fetchOutputEnable(output: channel)
-            }
-        }
-        for slot in 0..<vm.numOutputSlots {
-            vm.fetchOutputSlotType(slot: slot)
-        }
-    }
-
-    /// Commits pin changes made here to the device's flash, so a first-time
-    /// user's configuration survives a power cycle without them having to know
-    /// about the save model yet.  Scoped to the output config only: the
-    /// wizard must never quietly commit unrelated pending edits.
-    private func commitOutputConfigIfDirty() {
-        let coordinator = SettingsSaveCoordinator.shared
-        guard coordinator.outputDirty, vm.isDeviceConnected else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let ok = vm.saveOutputConfig()
-            DispatchQueue.main.async {
-                if ok { coordinator.outputConfigDirty = false }
-            }
-        }
-    }
-
-    // MARK: Audio
-
-    private var audioStage: some View {
-        stepBody(title: "Send audio to the DSPi",
-                 blurb: "macOS needs to be told to play through the DSPi. Open Sound settings, choose the DSPi as the output device, then play something.") {
-            Button("Open Sound Settings...") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .controlSize(.large)
-
-            if sawSignal {
-                statusRow(.ok, "Signal detected. Your computer's audio is reaching the DSPi.")
-            } else {
-                statusRow(.waiting, "Listening for audio. Play something and this will confirm itself.")
-            }
-        }
     }
 
     // MARK: Done
 
+    /// Reached only through a verified install, so it can assert the firmware
+    /// is running and point at what the app offers from here.
     private var doneStage: some View {
         stepBody(title: "You are set up",
-                 blurb: sawSignal
-                    ? "Audio is reaching the DSPi. From here you can shape it however you like."
-                    : "Setup is done. If you have not heard anything yet, check that the DSPi is selected as your output device in Sound settings.") {
+                 blurb: "Your Pico is running the DSPi firmware, and the console is ready whenever it is plugged in. A few places worth knowing about:") {
+            infoRow("cable.connector", "Choose which outputs your build uses, and the pins that carry them, in Settings under Hardware.")
+            infoRow("speaker.wave.2", "Pick the DSPi as the output device in macOS Sound settings to hear your computer through it.")
             infoRow("slider.horizontal.3", "Click an input or output in the sidebar to edit its filters.")
-            infoRow("square.and.arrow.down", "Changes live in memory until you commit them to the device.")
             infoRow("questionmark.circle", "Help holds release notes and links, and this wizard can be run again.")
         }
     }
@@ -605,7 +407,7 @@ struct GettingStartedView: View {
 
             Spacer()
 
-            if let previous = previousStage, !installInFlight {
+            if let previous = Stage(rawValue: current.rawValue - 1), !installInFlight {
                 Button("Back") { current = previous }
             }
 
@@ -618,12 +420,6 @@ struct GettingStartedView: View {
         .padding(.vertical, 16)
     }
 
-    private var previousStage: Stage? {
-        let stages = visibleStages
-        guard let index = stages.firstIndex(of: current), index > 0 else { return nil }
-        return stages[index - 1]
-    }
-
     private var installInFlight: Bool {
         switch installer.state {
         case .writing, .waitingForDevice: return true
@@ -631,26 +427,28 @@ struct GettingStartedView: View {
         }
     }
 
-    /// The board stage has no Continue while it still has work to do: with no
-    /// device it completes on its own, and mid-install there is nothing to
-    /// continue to yet.  A disabled button would say "you cannot do this";
-    /// showing no button says "nothing is asked of you".
+    /// The board stage has no Continue while it still has work to do: mid-
+    /// install there is nothing to continue to yet.  A disabled button would
+    /// say "you cannot do this"; showing no button says "nothing is asked of
+    /// you".
     private var showsContinue: Bool {
         switch current {
         case .board:
-            // Only once the firmware is on and confirmed.  Setup does not ask
-            // whether a connected device already runs DSPi, so a connection
-            // alone is not this step being finished.
+            // Either the firmware went on and was confirmed, or the connected
+            // device is already running exactly what this Console ships and
+            // the step has nothing to install.  A mismatched device gets the
+            // update offer instead of a Continue, so the wizard's goal stays
+            // firmware this Console can actually drive.
             if case .verified = installer.state { return true }
-            return false
+            return connectedDeviceMatch == .match
         default:
             return true
         }
     }
 
-    /// The install and update buttons own the return key while on screen; the
-    /// footer's Continue steps back to an ordinary button so the blue always
-    /// marks the action the step is actually about.
+    /// The install button owns the return key while on screen; the footer's
+    /// Continue steps back to an ordinary button so the blue always marks the
+    /// action the step is actually about.
     private var continueIsDefault: Bool {
         guard current == .board, !confirmed else { return true }
         if case .ready = installer.state { return false }
@@ -658,13 +456,11 @@ struct GettingStartedView: View {
     }
 
     private func advance() {
-        if current == .outputs { commitOutputConfigIfDirty() }
-        let stages = visibleStages
-        guard let index = stages.firstIndex(of: current), index + 1 < stages.count else {
+        guard let next = Stage(rawValue: current.rawValue + 1) else {
             finish()
             return
         }
-        current = stages[index + 1]
+        current = next
     }
 
     // MARK: Pieces
@@ -695,34 +491,9 @@ struct GettingStartedView: View {
         }
     }
 
-    private enum StatusKind { case ok, waiting }
-
-    private func statusRow(_ kind: StatusKind, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            switch kind {
-            case .ok:
-                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
-            case .waiting:
-                ProgressView().controlSize(.small)
-            }
-            Text(text)
-                .font(.system(size: 12))
-                .foregroundColor(kind == .ok ? .primary : .secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     // MARK: State
 
     private var bundledVersion: String { FirmwareVersion.expected?.description ?? "unknown" }
-
-    /// Any input channel showing level.  The threshold is above the noise a
-    /// silent input reports, low enough that quiet music still counts.
-    private var inputSignalPresent: Bool {
-        guard vm.isDeviceConnected else { return false }
-        let peaks = vm.meters.status.peaks
-        return peaks.prefix(max(vm.numMatrixInputs, 2)).contains { $0 > 0.002 }
-    }
 
     private func finish() {
         onboarding.finishSetup()
