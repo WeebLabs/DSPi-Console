@@ -68,14 +68,16 @@ extension View {
 /// `.animation(.linear)` on the level carries them between polls.  A `Canvas`
 /// has no implicit animation to attach to, and the analyser steps harder than
 /// the meters do anyway - the device refreshes one channel every rotation
-/// interval, which is 21 ms with a single channel selected but close to 200 ms
-/// with nine, while the Console polls at 60 ms.  Without interpolation most
-/// polls redraw the identical picture and then it jumps.
+/// interval, which runs from a few milliseconds with one channel at 256 points
+/// to several hundred with nine at 2048.  Without interpolation most polls
+/// redraw the identical picture and then it jumps.
 ///
 /// One pole per band, stepped by real elapsed time so a dropped display frame
 /// catches up instead of lagging.  The fall is slower than the rise, because a
 /// spectrum that blunts its transients is harder to read than one that lingers
-/// a moment on the way down.
+/// a moment on the way down.  The time constant comes from the device's own
+/// refresh interval, so it follows the transform size and the channel count
+/// rather than assuming either.
 final class RtaBarSmoother {
     private var values: [Double] = []
     private var lastTime: Date? = nil
@@ -130,7 +132,7 @@ private let rtaFrameInterval: TimeInterval = 1.0 / 30.0
 /// Roughly one rotation interval to travel most of the way, so a bar is still
 /// moving when the next frame for that channel lands.  Clamped at both ends: a
 /// single channel at 96 kHz would otherwise be back to a step, and nine
-/// channels at 1024 points would turn to syrup.
+/// channels at 2048 points would turn to syrup.
 func rtaFallTau(refreshInterval: TimeInterval, amount: Double) -> TimeInterval {
     guard amount > 0 else { return 0 }
     return min(0.40, max(0.035, refreshInterval * amount))
@@ -158,6 +160,21 @@ func rtaBandHasBin(centreHz: Double, sampleRateHz: Double, fftOrder: Int) -> Boo
     return firstBin * binHz <= hi
 }
 
+/// Whether band `i` holds at least one FFT bin, computed the way the firmware's
+/// table generator does it: exact base-10 centre 1000 * 10^((i - 17) / 10),
+/// edges at 10^(+/-0.05), DC excluded, Nyquist excluded.  Exact rather than a
+/// heuristic, so a band this says is empty really is empty on the device.
+func rtaBandIsPopulated(band i: Int, sampleRateHz: Double, fftOrder: Int) -> Bool {
+    guard i >= 0, sampleRateHz > 0, fftOrder > 0 else { return true }
+    let fc = 1000.0 * pow(10.0, Double(i - 17) / 10.0)
+    let lo = fc * pow(10.0, -0.05), hi = fc * pow(10.0, 0.05)
+    let n = Double(1 << fftOrder)
+    let binHz = sampleRateHz / n
+    let firstBin = max(1.0, (lo / binHz).rounded(.up))
+    let lastBin = min(n / 2 - 1, (hi / binHz).rounded(.down))
+    return firstBin <= lastBin
+}
+
 // MARK: - Third-octave bars
 
 /// One channel's third-octave picture.
@@ -181,24 +198,21 @@ struct RtaBandsView: View {
         return n > 0 ? min(n, RTA_MAX_BANDS) : max(engine.bandCentresHz.count, 31)
     }
 
-    /// The lowest band either stream resolves, as the device reports it.
+    /// The lowest band this size and rate resolve, as the device reports it.
     private var firstResolved: Int { engine.snapshot.status.firstResolvedBand }
 
-    /// Whether band `i` is one this configuration cannot measure, as opposed to
-    /// one that is measured and silent.  They look identical on the wire - both
-    /// read the floor - and drawing them the same way is what makes a working
-    /// analyser look broken at the bottom of the scale.
-    ///
-    /// Only ever applied to a band already sitting at the floor (the caller
-    /// passes its level), so the heuristic in `fastTransformHasBin` cannot
-    /// grey out a band that is actually reading something.
-    private func isUnmeasurable(band i: Int, level: Double, peak: Double) -> Bool {
-        if i < firstResolved { return true }
-        guard level <= scale.floorDB, peak <= scale.floorDB else { return false }
-        // With the bass stream running these bands are its job, so a floor
-        // reading there means silence, not an unmeasurable band.
-        if engine.bassStreamRunning { return false }
-        return !engine.fastTransformHasBin(inBand: i)
+    /// The bands this size and rate actually populate, in order.  Bands with no
+    /// bin (below `first_band`, or the patchy gaps just above it, such as 63 and
+    /// 80 Hz at 48 kHz and 1024 points) are left out entirely rather than drawn
+    /// as empty slots, so the bars always fill the width with real data.
+    private var visibleBands: [Int] {
+        let rate = engine.snapshot.status.sampleRateHz > 0
+            ? Double(engine.snapshot.status.sampleRateHz) : 48000
+        let order = Int(engine.options.fftOrder)
+        let first = firstResolved
+        return (0..<bandCount).filter { i in
+            i >= first && rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order)
+        }
     }
 
     /// One pole per band, carried across redraws.  A reference type in
@@ -230,7 +244,7 @@ struct RtaBandsView: View {
 
     /// Distinguishes one channel's numbers from another's, so a channel change
     /// snaps instead of sliding over from the channel before it.
-    private var seriesIdentity: Int { Int(frame?.channel ?? 0xFF) << 8 | bandCount }
+    private var seriesIdentity: Int { Int(frame?.channel ?? 0xFF) << 8 | visibleBands.count }
 
     var body: some View {
         // Only run a display-linked timeline when there is something to
@@ -273,25 +287,15 @@ struct RtaBandsView: View {
 
             if showLabels { drawGrid(ctx, plot) }
 
-            let slot = plot.width / CGFloat(bandCount)
+            let visible = visibleBands
+            guard !visible.isEmpty else { return }
+            let slot = plot.width / CGFloat(visible.count)
             let gap = min(2.0, max(0.5, slot * 0.18))
             let barWidth = max(1, slot - gap)
 
-            for i in 0..<bandCount {
-                let x = plot.minX + CGFloat(i) * slot + gap / 2
+            for (pos, i) in visible.enumerated() {
+                let x = plot.minX + CGFloat(pos) * slot + gap / 2
                 guard i < avg.count else { continue }
-
-                if isUnmeasurable(band: i, level: avg[i], peak: peak[i]) {
-                    // Not silence: no FFT bin lands in this band at the current
-                    // size, so it can only ever read the floor.  Drawn as a
-                    // shaded slot spanning the plot, which reads as "nothing to
-                    // measure here" rather than as a bar sitting at zero.
-                    let column = CGRect(x: x, y: plot.minY, width: barWidth, height: plot.height)
-                    ctx.fill(Path(column), with: .color(.secondary.opacity(0.07)))
-                    let base = CGRect(x: x, y: plot.maxY - 1, width: barWidth, height: 1)
-                    ctx.fill(Path(base), with: .color(.secondary.opacity(0.28)))
-                    continue
-                }
 
                 let level = scale.norm(avg[i])
                 if level > 0.001 {
@@ -314,7 +318,7 @@ struct RtaBandsView: View {
                 }
             }
 
-            if showLabels { drawFrequencyLabels(ctx, plot, slot: slot, labelY: size.height - labelHeight + 1) }
+            if showLabels { drawFrequencyLabels(ctx, plot, bands: visible, slot: slot, labelY: size.height - labelHeight + 1) }
         }
     }
 
@@ -337,14 +341,15 @@ struct RtaBandsView: View {
     }
 
     private func drawFrequencyLabels(_ ctx: GraphicsContext, _ plot: CGRect,
-                                     slot: CGFloat, labelY: CGFloat) {
+                                     bands: [Int], slot: CGFloat, labelY: CGFloat) {
         let centres = engine.bandCentresHz
         guard !centres.isEmpty else { return }
-        for (i, hz) in centres.enumerated() where i < bandCount {
+        for (pos, i) in bands.enumerated() where i < centres.count {
+            let hz = centres[i]
             // The table carries nominal centres rounded to whole hertz, so 31.5
             // arrives as 31 or 32; match on proportion rather than equality.
             guard rtaLabelledCentres.contains(where: { abs(hz - $0) < $0 * 0.03 }) else { continue }
-            let x = plot.minX + (CGFloat(i) + 0.5) * slot
+            let x = plot.minX + (CGFloat(pos) + 0.5) * slot
             ctx.draw(Text(rtaShortHz(hz)).font(.system(size: 8, design: .monospaced))
                         .foregroundColor(.secondary),
                      at: CGPoint(x: x, y: labelY), anchor: .top)
@@ -356,10 +361,9 @@ struct RtaBandsView: View {
 
 /// The most recent frame's raw magnitude bins on a logarithmic frequency axis.
 ///
-/// Where the high-resolution bass stream is running its bins are used below
-/// their usable passband, because they resolve the bottom two octaves that the
-/// fast transform cannot: at 1024 points and 48 kHz a fast bin is 47 Hz wide,
-/// which is wider than the whole 20 Hz third-octave band.
+/// The frame belongs to whichever channel was transformed last, so the views
+/// that show it ask for a single channel; bin k is centred at
+/// k * sample rate / N, which is 23 Hz apart at 2048 points and 48 kHz.
 struct RtaBinsView: View {
     @ObservedObject var engine: RtaEngine
     let binFrame: RtaBinFrame?
@@ -373,26 +377,13 @@ struct RtaBinsView: View {
         return Double(f.sampleRateHz) / 2
     }
 
-    /// (frequency, dBFS) pairs in ascending frequency, bass stream first.
+    /// (frequency, dBFS) pairs in ascending frequency.  DC belongs to no band
+    /// and is not drawn, so the series starts at bin 1.
     private var points: [(hz: Double, db: Double)] {
-        guard let f = binFrame else { return [] }
-        var out: [(Double, Double)] = []
-        // The decimated stream is only trustworthy inside its own passband;
-        // above 0.4 x its rate the halfband cascade is already rolling off.
-        let lfLimit = f.lfBins.isEmpty ? 0 : Double(f.lfRateHz) * 0.4
-        if !f.lfBins.isEmpty {
-            for k in 1..<f.lfBins.count {
-                let hz = f.lfFrequency(ofBin: k)
-                if hz > lfLimit { break }
-                out.append((hz, engine.levelDB(f.lfBins[k])))
-            }
+        guard let f = binFrame, f.bins.count > 1 else { return [] }
+        return (1..<f.bins.count).map {
+            (hz: f.frequency(ofBin: $0), db: engine.levelDB(f.bins[$0]))
         }
-        for k in 1..<f.bins.count {
-            let hz = f.frequency(ofBin: k)
-            if hz <= lfLimit { continue }
-            out.append((hz, engine.levelDB(f.bins[k])))
-        }
-        return out.map { (hz: $0.0, db: $0.1) }
     }
 
     /// One pole per pixel column; see `RtaBarSmoother`.  The bin frame turns
@@ -515,8 +506,8 @@ struct RtaBinsView: View {
 /// lands in it and it can only read the floor.
 let rtaShadedBandHelp = """
 Shaded bands hold no FFT bin at the current transform size, so they cannot be \
-measured - they are not reading silence. Switch on High-Resolution Bass, or \
-raise the transform size, to fill them in.
+measured - they are not reading silence. Raise the transform size to fill more \
+of them in.
 """
 
 // MARK: - Reading helpers
@@ -541,51 +532,41 @@ extension RtaEngine {
         return "\(channels), each refreshed every \(ms) ms"
     }
 
-    /// Whether the fast transform has any bin inside band `i`.
+    /// Whether the transform has any bin inside band `i`.
     ///
     /// A third-octave band near the bottom is narrower than one FFT bin: at
     /// 48 kHz and 1024 points a bin is 46.9 Hz wide, while the 40 Hz band spans
     /// only 35.6 to 44.9 Hz.  Such a band contains no bin, and the firmware
     /// reports it at the floor rather than faking it from a neighbour.
     ///
-    /// The gaps are not a clean cutoff - at that size and rate the 20, 25,
-    /// 31.5, 40, 63, 80, 125 and 160 Hz bands are all empty while 50 and 100 Hz
-    /// are fine, because bins 1 and 2 happen to land inside them - so
-    /// `RtaStatus.fastFirstBand`, being a single index, cannot describe them.
-    /// The bass stream exists to fill this whole region in, which is why it is
-    /// on by default.
-    ///
     /// Band edges are derived from the nominal centre rather than read from the
     /// device, so this is a display heuristic and callers only apply it to a
     /// band that is already reading the floor.  It can therefore explain an
     /// empty band but never hide a live one.
-    func fastTransformHasBin(inBand i: Int) -> Bool {
+    func transformHasBin(inBand i: Int) -> Bool {
         guard i >= 0, i < bandCentresHz.count else { return true }
         let rate = snapshot.status.sampleRateHz > 0 ? Double(snapshot.status.sampleRateHz) : 48000
         return rtaBandHasBin(centreHz: bandCentresHz[i], sampleRateHz: rate,
                              fftOrder: Int(options.fftOrder))
     }
 
-    /// True while the high-resolution bass stream is running, which is what
-    /// fills in the bands the fast transform cannot resolve.
-    var bassStreamRunning: Bool { snapshot.status.lfFirstBand != 0xFF }
-
-    /// The lowest band this configuration can measure at all, for the note that
-    /// tells the user what switching the bass stream on would buy.
+    /// The centre of the lowest band this configuration can measure at all, for
+    /// the note that tells the user what a larger transform would buy.
     var lowestMeasurableCentreHz: Double? {
-        guard !bandCentresHz.isEmpty else { return nil }
-        for i in bandCentresHz.indices where fastTransformHasBin(inBand: i) {
-            return bandCentresHz[i]
-        }
-        return nil
+        let first = snapshot.status.firstResolvedBand
+        guard first > 0, first < bandCentresHz.count else { return nil }
+        return bandCentresHz[first]
     }
 
     /// How long one channel waits between frames: the time its capture buffer
     /// takes to fill, times the number of channels sharing the rotation.  This
     /// is the interval the displays interpolate across, so their smoothing
-    /// tracks the selection rather than being a fixed guess.
+    /// tracks the size and the selection rather than being a fixed guess.
     var channelRefreshInterval: TimeInterval {
         let s = snapshot.status
+        if s.framesPerSecond > 0 {
+            return Double(max(Int(s.liveCount), 1)) / Double(s.framesPerSecond)
+        }
         let rate = s.sampleRateHz > 0 ? Double(s.sampleRateHz) : 48000
         let points = Double(1 << Int(options.fftOrder))
         return points / rate * Double(max(Int(s.liveCount), 1))
@@ -1056,20 +1037,6 @@ struct SpectrumAnalyserView: View {
             }
             .help("Points in the transform. More points resolve lower frequencies but take longer to fill, so each channel refreshes less often.")
 
-            labelled("Bass detail") {
-                Picker("", selection: Binding(
-                    get: { settings.rtaLfMode },
-                    set: { settings.rtaLfMode = $0; pushOptions() }
-                )) {
-                    if engine.caps.supportsLf(RTA_LF_OFF)  { Text("Off").tag(Int(RTA_LF_OFF)) }
-                    if engine.caps.supportsLf(RTA_LF_512)  { Text("Fast").tag(Int(RTA_LF_512)) }
-                    if engine.caps.supportsLf(RTA_LF_1024) { Text("Full").tag(Int(RTA_LF_1024)) }
-                }
-                .labelsHidden()
-                .frame(width: 90)
-            }
-            .help("A second, decimated transform that resolves the bottom two octaves. Without it the lowest bands read empty, because no FFT bin lands inside them.")
-
             labelled("Averaging") {
                 Picker("", selection: Binding(
                     get: { settings.rtaAvgMs },
@@ -1136,12 +1103,12 @@ struct SpectrumAnalyserView: View {
 
     // MARK: Status
 
-    /// The lowest band the fast transform can measure, when the bass stream is
-    /// off and there is therefore something below it that cannot be measured.
-    private var bassHint: Double? {
-        guard mode == .bands, engine.snapshot.status.isRunning, !engine.bassStreamRunning,
-              let lowest = engine.lowestMeasurableCentreHz,
-              let first = engine.bandCentresHz.first, lowest > first else { return nil }
+    /// The lowest band this size resolves, when there is something below it
+    /// that a larger transform would reach.
+    private var lowBandHint: Double? {
+        guard mode == .bands, engine.snapshot.status.isRunning,
+              settings.rtaFftOrder < Int(engine.caps.fftOrderMax),
+              let lowest = engine.lowestMeasurableCentreHz else { return nil }
         return lowest
     }
 
@@ -1170,11 +1137,11 @@ struct SpectrumAnalyserView: View {
             if engine.configRejected {
                 Label("Device refused this configuration", systemImage: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
-            } else if let lowest = bassHint {
+            } else if let lowest = lowBandHint {
                 // The shaded slots at the bottom of the scale have a remedy,
                 // and it is one control away, so name it rather than leaving
                 // the user to conclude the analyser is broken down there.
-                Text("shaded bands below \(rtaShortHz(lowest)) Hz need High-Resolution Bass")
+                Text("shaded bands below \(rtaShortHz(lowest)) Hz need a larger transform")
                     .foregroundColor(.orange)
             } else if engine.caps.dynamicRangeDB > 0 {
                 Text("\(engine.caps.dynamicRangeDB) dB range")

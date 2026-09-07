@@ -12,19 +12,19 @@ import Combine
 
 /// The staged configuration (REQ_RTA_SET_CONFIG / GET_CONFIG, 12 bytes).
 ///
-/// A change of tap, channel mask, FFT size or bass mode restarts the frame in
-/// flight and clears the averaging; a change of averaging or peak decay alone
-/// takes effect at the next publish.
+/// A change of tap, channel mask or FFT size restarts the frame in flight and
+/// clears the averaging; a change of averaging or peak decay alone takes effect
+/// at the next publish.  Byte 5 and the last two bytes are reserved and go out
+/// as zero.
 struct RtaConfig: Equatable {
     var tap: UInt8 = RTA_TAP_OUTPUT
     var channelMask: UInt16 = 1
     var fftOrder: UInt8 = 10
-    var lfMode: UInt8 = RTA_LF_1024
     var avgMs: UInt16 = 300
     var peakDecayDBs: UInt8 = 12
     var flags: UInt8 = 0
 
-    /// Points in the fast transform: 256, 512 or 1024.
+    /// Points in the transform: 256, 512, 1024 or 2048.
     var points: Int { 1 << Int(fftOrder) }
 
     func toData() -> Data {
@@ -34,7 +34,6 @@ struct RtaConfig: Equatable {
         d[2] = UInt8(channelMask & 0xFF)
         d[3] = UInt8(channelMask >> 8)
         d[4] = fftOrder
-        d[5] = lfMode
         d[6] = UInt8(avgMs & 0xFF)
         d[7] = UInt8(avgMs >> 8)
         d[8] = peakDecayDBs
@@ -49,7 +48,6 @@ struct RtaConfig: Equatable {
             tap: b[1],
             channelMask: UInt16(b[2]) | (UInt16(b[3]) << 8),
             fftOrder: b[4],
-            lfMode: b[5],
             avgMs: UInt16(b[6]) | (UInt16(b[7]) << 8),
             peakDecayDBs: b[8],
             flags: b[9])
@@ -63,11 +61,9 @@ struct RtaCaps: Equatable {
     var version: UInt8 = 0
     var inputChannels: UInt8 = 0
     var outputChannels: UInt8 = 0
-    var fftOrderMin: UInt8 = 8
-    var fftOrderMax: UInt8 = 10
+    var fftOrderMin: UInt8 = UInt8(RTA_ORDER_MIN)
+    var fftOrderMax: UInt8 = UInt8(RTA_ORDER_MAX)
     var fftOrderDefault: UInt8 = 10
-    /// Bit m set means RTA_LF_ mode m is supported.
-    var lfModes: UInt8 = 0
     var maxBands: UInt8 = UInt8(RTA_MAX_BANDS)
     var levelZero: UInt8 = RTA_LEVEL_ZERO_DBFS
     /// Measured, not theoretical: 78 dB for the RP2040 Q15 kernel, 120 for the
@@ -76,8 +72,6 @@ struct RtaCaps: Equatable {
     var dynamicRangeDB: UInt8 = 0
     var idleTimeoutMs: UInt16 = 0
     var maxBinFrame: UInt16 = 0
-
-    func supportsLf(_ mode: UInt8) -> Bool { lfModes & (1 << mode) != 0 }
 
     static func fromData(_ d: Data) -> RtaCaps? {
         guard d.count >= RTA_CAPS_SIZE else { return nil }
@@ -92,7 +86,6 @@ struct RtaCaps: Equatable {
             fftOrderMin: b[3],
             fftOrderMax: b[4],
             fftOrderDefault: b[5],
-            lfModes: b[6],
             maxBands: b[7],
             levelZero: b[8],
             dynamicRangeDB: b[9],
@@ -106,15 +99,13 @@ struct RtaCaps: Equatable {
 /// `avg` and `peak` always carry `RTA_MAX_BANDS` slots; only the first
 /// `nBands` are meaningful at the current sample rate.  A band that contains no
 /// FFT bin at the current size reads the floor and is never faked from a
-/// neighbour, which is what `RtaStatus.fastFirstBand` lets a display grey out.
+/// neighbour, which is what `RtaStatus.firstBand` lets a display grey out.
 struct RtaBandFrame: Equatable {
     var channel: UInt8 = 0
     var seq: UInt8 = 0
     var nBands: UInt8 = 0
-    /// Milliseconds since this channel's last fast-stream frame; 0xFFFF = never.
+    /// Milliseconds since this channel's last frame; 0xFFFF = never.
     var ageMs: UInt16 = 0xFFFF
-    /// Same for the bass stream; 0xFFFF when it has never run or is off.
-    var lfAgeMs: UInt16 = 0xFFFF
     var avg: [UInt8] = Array(repeating: 0, count: RTA_MAX_BANDS)
     var peak: [UInt8] = Array(repeating: 0, count: RTA_MAX_BANDS)
 
@@ -130,7 +121,6 @@ struct RtaBandFrame: Equatable {
             seq: b[2],
             nBands: b[3],
             ageMs: UInt16(b[4]) | (UInt16(b[5]) << 8),
-            lfAgeMs: UInt16(b[6]) | (UInt16(b[7]) << 8),
             avg: Array(b[8..<(8 + RTA_MAX_BANDS)]),
             peak: Array(b[(8 + RTA_MAX_BANDS)..<(8 + 2 * RTA_MAX_BANDS)]))
     }
@@ -147,30 +137,21 @@ struct RtaBinFrame: Equatable {
     var seq: UInt8 = 0
     var fftOrder: UInt8 = 0
     var sampleRateHz: UInt32 = 0
-    /// Fast-stream bins, one level byte each, bin k centred at
+    /// One level byte per bin, bin k centred at
     /// k * sampleRateHz / (2 * bins.count).
     var bins: [UInt8] = []
-    /// Bass-stream bins when the high-resolution bass stream is running, bin k
-    /// centred at k * lfRateHz / (2 * lfBins.count).  Empty when it is off.
-    var lfBins: [UInt8] = []
-    var lfRateHz: UInt16 = 0
 
-    /// Hz of fast bin `k`.
+    /// Hz of bin `k`.
     func frequency(ofBin k: Int) -> Double {
         guard !bins.isEmpty else { return 0 }
         return Double(k) * Double(sampleRateHz) / Double(2 * bins.count)
     }
 
-    /// Hz of bass-stream bin `k`.
-    func lfFrequency(ofBin k: Int) -> Double {
-        guard !lfBins.isEmpty else { return 0 }
-        return Double(k) * Double(lfRateHz) / Double(2 * lfBins.count)
-    }
-
-    /// Parses a whole frame read in one transfer.  Returns nil for a short
-    /// read, a header that does not describe the bytes that followed, or a
-    /// sequence tail that disagrees with the header - the last of which means
-    /// the engine republished mid-read and the caller should simply try again.
+    /// Parses a whole frame, however many chunks it was read in.  Returns nil
+    /// for a short read, a header that does not describe the bytes that
+    /// followed, or a sequence tail that disagrees with the header - the last
+    /// of which means the engine republished mid-read and the caller should
+    /// simply read it again.
     static func fromData(_ d: Data) -> RtaBinFrame? {
         guard d.count >= RTA_BIN_HEADER_SIZE else { return nil }
         let b = [UInt8](d)
@@ -179,20 +160,15 @@ struct RtaBinFrame: Equatable {
         // 0xFF is the in-progress marker the engine writes before it fills the
         // frame, never a published sequence number.
         guard seq != 0xFF else { return nil }
-        let nBins   = Int(UInt16(b[8])  | (UInt16(b[9])  << 8))
-        let nLfBins = Int(UInt16(b[10]) | (UInt16(b[11]) << 8))
-        let lfRate  = UInt16(b[12]) | (UInt16(b[13]) << 8)
-        let lfArea  = Int(UInt16(b[14]) | (UInt16(b[15]) << 8))
-        let tail = RTA_BIN_HEADER_SIZE + nBins + lfArea
-        guard nBins > 0, nLfBins <= lfArea, b.count > tail, b[tail] == seq else { return nil }
+        let nBins = Int(UInt16(b[8]) | (UInt16(b[9]) << 8))
+        let tail = RTA_BIN_HEADER_SIZE + nBins
+        guard nBins > 0, b.count > tail, b[tail] == seq else { return nil }
         return RtaBinFrame(
             channel: b[1],
             seq: seq,
             fftOrder: b[3],
             sampleRateHz: UInt32(b[4]) | (UInt32(b[5]) << 8) | (UInt32(b[6]) << 16) | (UInt32(b[7]) << 24),
-            bins: Array(b[RTA_BIN_HEADER_SIZE..<(RTA_BIN_HEADER_SIZE + nBins)]),
-            lfBins: Array(b[(RTA_BIN_HEADER_SIZE + nBins)..<(RTA_BIN_HEADER_SIZE + nBins + nLfBins)]),
-            lfRateHz: lfRate)
+            bins: Array(b[RTA_BIN_HEADER_SIZE..<tail]))
     }
 }
 
@@ -202,8 +178,8 @@ struct RtaBinFrame: Equatable {
 struct RtaStatus: Equatable {
     var state: UInt8 = RTA_STATE_IDLE
     var tap: UInt8 = RTA_TAP_OUTPUT
-    var fastChannel: UInt8 = RTA_CH_NONE
-    var lfChannel: UInt8 = RTA_CH_NONE
+    /// The channel being captured or transformed; RTA_CH_NONE while idle.
+    var channel: UInt8 = RTA_CH_NONE
     var liveCount: UInt8 = 0
     /// Selected AND actually live: disabled outputs and inactive input rows are
     /// dropped from the rotation, so they never slow the channels that remain.
@@ -215,17 +191,16 @@ struct RtaStatus: Equatable {
     var lastFrameUs: UInt16 = 0
     var idleMs: UInt16 = 0xFFFF
     var sampleRateHz: UInt32 = 0
-    /// The lowest band the fast stream resolves; everything below it reads the
-    /// floor unless the bass stream is filling it in.
-    var fastFirstBand: UInt8 = 0
-    /// Same for the bass stream, or 0xFF when the bass stream is off.
-    var lfFirstBand: UInt8 = 0xFF
+    /// The lowest band this size and rate resolve; everything below it reads
+    /// the floor because no bin lands in it, and 0xFF means none of them do.
+    var firstBand: UInt8 = 0
 
     var isRunning: Bool { state != RTA_STATE_IDLE }
 
-    /// The lowest band anything resolves, taking the bass stream into account.
+    /// The lowest band with a reading, as a band index the display can compare
+    /// against.  A device reporting "no band resolves" greys out the lot.
     var firstResolvedBand: Int {
-        lfFirstBand == 0xFF ? Int(fastFirstBand) : min(Int(fastFirstBand), Int(lfFirstBand))
+        firstBand == 0xFF ? RTA_MAX_BANDS : Int(firstBand)
     }
 
     static func fromData(_ d: Data) -> RtaStatus? {
@@ -235,8 +210,7 @@ struct RtaStatus: Equatable {
         return RtaStatus(
             state: b[1],
             tap: b[2],
-            fastChannel: b[3],
-            lfChannel: b[4],
+            channel: b[3],
             liveCount: b[5],
             liveMask: UInt16(b[6]) | (UInt16(b[7]) << 8),
             framesPerSecond: UInt16(b[8]) | (UInt16(b[9]) << 8),
@@ -244,8 +218,7 @@ struct RtaStatus: Equatable {
             lastFrameUs: UInt16(b[12]) | (UInt16(b[13]) << 8),
             idleMs: UInt16(b[14]) | (UInt16(b[15]) << 8),
             sampleRateHz: UInt32(b[16]) | (UInt32(b[17]) << 8) | (UInt32(b[18]) << 16) | (UInt32(b[19]) << 24),
-            fastFirstBand: b[20],
-            lfFirstBand: b[21])
+            firstBand: b[20])
     }
 }
 
@@ -277,14 +250,12 @@ struct RtaSnapshot: Equatable {
     var tap: UInt8 = RTA_TAP_OUTPUT
 }
 
-/// The four settings the device owns rather than the app: transform size,
-/// averaging, peak-hold decay and the high-resolution bass stream.  They are
-/// never persisted on the device (the analyser is transient), so the Console
-/// keeps them in its own preferences and pushes them whenever it starts
-/// watching.
+/// The three settings the device owns rather than the app: transform size,
+/// averaging and peak-hold decay.  They are never persisted on the device (the
+/// analyser is transient), so the Console keeps them in its own preferences and
+/// pushes them whenever it starts watching.
 struct RtaOptions: Equatable {
     var fftOrder: UInt8 = 10
-    var lfMode: UInt8 = RTA_LF_1024
     /// Power-domain averaging time constant; 0 turns averaging off.
     var avgMs: UInt16 = 300
     /// Peak-hold decay in dB per second; 0 turns the peak hold off.
@@ -340,9 +311,14 @@ final class RtaEngine: ObservableObject {
     /// different resets the give-up counter instead of inheriting it.
     private var lastAttempted: RtaConfig? = nil
     private var pushAttempts = 0
-    private var tickCount: UInt64 = 0
     /// The poll queue's copy of `options`, kept in step by `setOptions`.
     private var pollOptions = RtaOptions()
+    /// How long the device takes to publish one frame, as last measured from
+    /// the status.  The bin cadence follows it, so a 2048-point transform is
+    /// not read four times per frame the way a 256-point one is read once.
+    private var pollFrameInterval: TimeInterval = 1024.0 / 48000.0
+    private var lastBinRead: Date = .distantPast
+    private var lastStatusRead: Date = .distantPast
 
     init(usb: USBDevice) {
         self.usb = usb
@@ -472,15 +448,11 @@ final class RtaEngine: ObservableObject {
             self.caps = caps
             self.bandCentresHz = centres
             self.supported = true
-            // Fold this device's limits into the options: an RP2040 caps out at
-            // 512 points where an RP2350 does 1024, and a setting carried over
-            // from the other platform would be STALLed on every push.
+            // Fold this device's limits into the options: a size outside the
+            // range this device reports would be STALLed on every push.
             var o = self.options
             if o.fftOrder < caps.fftOrderMin || o.fftOrder > caps.fftOrderMax {
                 o.fftOrder = caps.fftOrderDefault
-            }
-            if !caps.supportsLf(o.lfMode) {
-                o.lfMode = caps.supportsLf(RTA_LF_1024) ? RTA_LF_1024 : RTA_LF_OFF
             }
             self.setOptions(o)
         }
@@ -511,8 +483,10 @@ final class RtaEngine: ObservableObject {
         return !requests.isEmpty
     }
 
-    /// One poll.  Called from the view model's 60 ms timer on its poll queue,
-    /// which is the same queue every other vendor read runs on.
+    /// One poll.  Called from the view model's poll timer on its poll queue,
+    /// which is the same queue every other vendor read runs on.  Each product
+    /// has its own cadence in elapsed time, so a slower timer or a larger
+    /// transform changes how often things are read but not what is read.
     func tick() {
         guard supported, let usb else { return }
 
@@ -532,7 +506,6 @@ final class RtaEngine: ObservableObject {
             tap: primary.tap,
             channelMask: mask,
             fftOrder: pollOptions.fftOrder,
-            lfMode: pollOptions.lfMode,
             avgMs: pollOptions.avgMs,
             peakDecayDBs: pollOptions.peakDecayDBs,
             flags: 0)
@@ -556,8 +529,16 @@ final class RtaEngine: ObservableObject {
                 needsPush = true
             }
         }
-        let tick = tickCount
-        tickCount &+= 1
+        let now = Date()
+        // Read the bins no faster than the device publishes them, which is a
+        // frame time apart: at 2048 points that is 43 ms, at 256 points 5 ms,
+        // and the poll timer is slower than both.
+        let readBins = wantsBins
+            && now.timeIntervalSince(lastBinRead) >= max(pollFrameInterval, RTA_MIN_BIN_INTERVAL)
+        let readStatus = now.timeIntervalSince(lastStatusRead) >= RTA_STATUS_INTERVAL
+        if readBins { lastBinRead = now }
+        if readStatus { lastStatusRead = now }
+        let binFrameLength = caps.maxBinFrame > 0 ? Int(caps.maxBinFrame) : RTA_BIN_FRAME_MAX
         lock.unlock()
 
         if needsPush {
@@ -587,26 +568,14 @@ final class RtaEngine: ObservableObject {
             }
         }
 
-        // Raw bins are eight times the traffic of a band read for one channel,
-        // and the underlying frame only turns over at the frame rate, so they
-        // go at half the band cadence.
         var bins: RtaBinFrame? = nil
-        if wantsBins && tick % 2 == 0 {
-            let len = caps.maxBinFrame > 0 ? Int(caps.maxBinFrame) : RTA_BIN_FRAME_MAX
-            if let d = usb.getControlRequest(request: REQ_RTA_GET_BINS, value: 0, index: 2,
-                                             length: UInt16(len)) {
-                // nil here usually means the engine republished mid-read; the
-                // next tick picks up the new frame.
-                bins = RtaBinFrame.fromData(d)
-            }
+        if readBins {
+            bins = Self.readBinFrame(usb: usb, length: binFrameLength)
         }
 
-        // Status every eighth tick (about twice a second): it drives the
-        // greyed-out bands, the rotation readout and the running indicator,
-        // none of which needs the band cadence.
         var status: RtaStatus? = nil
         var applied: RtaConfig? = nil
-        if tick % 8 == 0 {
+        if readStatus {
             if let d = usb.getControlRequest(request: REQ_RTA_GET_STATUS, value: 0, index: 2,
                                              length: UInt16(RTA_STATUS_SIZE)) {
                 status = RtaStatus.fromData(d)
@@ -617,12 +586,18 @@ final class RtaEngine: ObservableObject {
             }
         }
 
+        if let s = status {
+            lock.lock()
+            pollFrameInterval = Self.frameInterval(status: s, order: want.fftOrder)
+            lock.unlock()
+        }
+
         // The device clamps `avgMs` and `peakDecayDBs` rather than refusing
         // them, so compare only the fields it either takes or STALLs on.
         var rejected: Bool? = nil
         if let a = applied {
             let agrees = a.tap == want.tap && a.channelMask == want.channelMask
-                && a.fftOrder == want.fftOrder && a.lfMode == want.lfMode
+                && a.fftOrder == want.fftOrder
             lock.lock()
             if agrees {
                 pushAttempts = 0
@@ -655,6 +630,53 @@ final class RtaEngine: ObservableObject {
             if s != self.snapshot { self.snapshot = s }
             if let rejected, rejected != self.configRejected { self.configRejected = rejected }
         }
+    }
+
+    // MARK: Reads that need more than one transfer
+
+    /// Reads the published bin frame and validates it.
+    ///
+    /// `wValue` is a byte offset into the frame, so a transport that cannot
+    /// carry the whole thing reads it in chunks; USB manages it in one, and a
+    /// short answer here is picked up from where it stopped.  The frame is
+    /// published without a lock and carries its sequence number in the header
+    /// and again as its last byte, so a disagreement means the engine
+    /// republished mid-read: read it again rather than draw half of each.
+    private static func readBinFrame(usb: USBDevice, length: Int) -> RtaBinFrame? {
+        for _ in 0..<2 {
+            var frame = Data()
+            while frame.count < length {
+                guard let chunk = usb.getControlRequest(request: REQ_RTA_GET_BINS,
+                                                        value: UInt16(frame.count), index: 2,
+                                                        length: UInt16(length - frame.count)),
+                      !chunk.isEmpty else { break }
+                frame.append(chunk)
+                // A complete frame is shorter than the ceiling at every size
+                // below the largest, so stop once the header's own length is in.
+                if let n = binFrameLength(of: frame), frame.count >= n { break }
+            }
+            if let f = RtaBinFrame.fromData(frame) { return f }
+        }
+        return nil
+    }
+
+    /// Total frame length from a header that has arrived, or nil while it has
+    /// not: 16 header bytes, one byte per bin, and the repeated sequence byte.
+    private static func binFrameLength(of d: Data) -> Int? {
+        guard d.count >= RTA_BIN_HEADER_SIZE else { return nil }
+        let b = [UInt8](d.prefix(RTA_BIN_HEADER_SIZE))
+        let nBins = Int(UInt16(b[8]) | (UInt16(b[9]) << 8))
+        return nBins > 0 ? RTA_BIN_HEADER_SIZE + nBins + 1 : nil
+    }
+
+    /// How long one channel waits between frames, from the device's own frame
+    /// rate where it has one and from the configured size otherwise.
+    private static func frameInterval(status: RtaStatus, order: UInt8) -> TimeInterval {
+        if status.framesPerSecond > 0 {
+            return Double(max(Int(status.liveCount), 1)) / Double(status.framesPerSecond)
+        }
+        let rate = status.sampleRateHz > 0 ? Double(status.sampleRateHz) : 48000
+        return Double(1 << Int(order)) / rate * Double(max(Int(status.liveCount), 1))
     }
 
     // MARK: Level conversion

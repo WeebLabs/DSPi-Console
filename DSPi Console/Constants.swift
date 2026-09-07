@@ -93,7 +93,7 @@ let REQ_RTA_GET_STATUS: UInt8    = 0x0D   // IN 24 bytes: RtaStatus
 let REQ_RTA_CONTROL: UInt8       = 0x0E   // IN 1 byte: wValue = RTA_CTL_*
 let REQ_RTA_GET_BANDS_ALL: UInt8 = 0x0F   // IN: every live channel's band frame, USB only
 
-let RTA_CFG_VERSION: UInt8 = 1
+let RTA_CFG_VERSION: UInt8 = 2
 /// Wire sizes.  Fixed for the life of the config version; a short read means
 /// firmware that predates the analyser and is treated as "unsupported".
 let RTA_CONFIG_SIZE: Int      = 12
@@ -105,23 +105,29 @@ let RTA_BIN_HEADER_SIZE: Int  = 16
 /// at 44.1/48 kHz, 34 at 96 kHz.  The frame always carries `RTA_MAX_BANDS`
 /// slots and says how many are valid at the current rate.
 let RTA_MAX_BANDS: Int = 36
-/// Largest bin frame the device will ever publish: the 16-byte header, 512 fast
-/// bins, 512 bass-stream bins and the repeated sequence byte.  The caps carry
-/// the real figure; this is the ceiling used to size a single read.
-let RTA_BIN_FRAME_MAX: Int = 16 + 512 + 512 + 1
+/// Largest bin frame the device will ever publish: the 16-byte header, the
+/// 1024 bins of a 2048-point transform and the repeated sequence byte.  The
+/// caps carry the real figure; this is the ceiling used to size a single read.
+let RTA_BIN_FRAME_MAX: Int = 16 + 1024 + 1
+
+/// Transform sizes on the wire, as FFT orders: 256 to 2048 points.  The caps
+/// report the device's own range; these bound the app's own pickers.
+let RTA_ORDER_MIN: Int = 8
+let RTA_ORDER_MAX: Int = 11
+
+/// How often the engine re-reads each product, in seconds of elapsed time
+/// rather than in ticks of the shared poll timer, so the cadence follows the
+/// device's frame rate instead of the timer's period.  A bin frame is eight
+/// times the traffic of a band read and only turns over once per frame, so it
+/// is never read faster than this; the status drives the greyed-out bands and
+/// the rotation readout, neither of which needs the frame cadence.
+let RTA_MIN_BIN_INTERVAL: TimeInterval = 0.05
+let RTA_STATUS_INTERVAL: TimeInterval = 0.5
 
 /// Which side of the chain the engine is tapping.  One engine, so the two taps
 /// are exclusive: switching tap restarts the frame and clears the averaging.
 let RTA_TAP_INPUT: UInt8  = 0
 let RTA_TAP_OUTPUT: UInt8 = 1
-
-/// High-resolution bass stream.  Resolving the 20 Hz band (about 5 Hz wide)
-/// needs roughly 170 ms of signal, so a decimated copy of the tapped channel is
-/// transformed separately and supplies the bands below about 2 kHz.  Off is
-/// cheaper; 512 points refreshes twice as fast but blurs the 20 Hz band.
-let RTA_LF_OFF: UInt8  = 0
-let RTA_LF_512: UInt8  = 1
-let RTA_LF_1024: UInt8 = 2
 
 /// With MANUAL set, the run state belongs to REQ_RTA_CONTROL entirely: no
 /// auto-start on a read and no auto-off.  The Console leaves it clear, so

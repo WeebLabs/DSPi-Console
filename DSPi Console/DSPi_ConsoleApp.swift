@@ -53,7 +53,7 @@ class AppSettings: ObservableObject {
     // Advanced
     @AppStorage("showDebugInfo") var showDebugInfo: Bool = false
 
-    // Spectrum analyser (RTA / FFT).  The four device-side options are kept
+    // Spectrum analyser (RTA / FFT).  The three device-side options are kept
     // here rather than on the device because the analyser is transient: the
     // firmware forgets them at every power cycle, so the Console is the only
     // place they can live.  See `AppSettings.rtaOptions`.
@@ -68,7 +68,6 @@ class AppSettings: ObservableObject {
     /// the rotation.
     @AppStorage("rtaSmoothing") var rtaSmoothing: Double = 0.6
     @AppStorage("rtaFftOrder") var rtaFftOrder: Int = 10
-    @AppStorage("rtaLfMode") var rtaLfMode: Int = 2
     @AppStorage("rtaAvgMs") var rtaAvgMs: Int = 300
     @AppStorage("rtaPeakDecayDBs") var rtaPeakDecayDBs: Int = 12
 
@@ -78,7 +77,6 @@ class AppSettings: ObservableObject {
     var rtaOptions: RtaOptions {
         RtaOptions(
             fftOrder: UInt8(clamping: rtaFftOrder),
-            lfMode: UInt8(clamping: rtaLfMode),
             avgMs: UInt16(clamping: rtaAvgMs),
             peakDecayDBs: UInt8(clamping: rtaPeakDecayDBs))
     }
@@ -1475,16 +1473,25 @@ struct GlobalSettingsTab: View {
 ///
 /// Two kinds of setting sit together here, and the difference matters. Where
 /// the strips appear and how they are drawn are the Console's own preferences.
-/// The transform size, the averaging, the peak-hold decay and the bass stream
-/// belong to the device, but the analyser is transient - the firmware forgets
-/// them at every power cycle - so the Console is the only place they can be
-/// remembered, and it pushes them whenever a view starts watching.
+/// The transform size, the averaging and the peak-hold decay belong to the
+/// device, but the analyser is transient - the firmware forgets them at every
+/// power cycle - so the Console is the only place they can be remembered, and
+/// it pushes them whenever a view starts watching.
 struct SpectrumSettingsTab: View {
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var vm = AppState.shared.viewModel
     @ObservedObject private var engine = AppState.shared.viewModel.rta
 
     private func push() { engine.setOptions(settings.rtaOptions) }
+
+    /// Sizes this device offers, from the caps where they have been read and
+    /// from the protocol's own range before that, so the picker never offers a
+    /// size the device would STALL.
+    private var availableOrders: [Int] {
+        let lo = Int(engine.caps.fftOrderMin), hi = Int(engine.caps.fftOrderMax)
+        guard engine.supported, hi >= lo else { return Array(RTA_ORDER_MIN...RTA_ORDER_MAX) }
+        return Array(lo...hi)
+    }
 
     var body: some View {
         Form {
@@ -1582,6 +1589,7 @@ struct SpectrumSettingsTab: View {
                             Text("256 points").tag(8)
                             Text("512 points").tag(9)
                             Text("1024 points").tag(10)
+                            Text("2048 points").tag(11)
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
@@ -1589,23 +1597,6 @@ struct SpectrumSettingsTab: View {
                             .font(.caption).foregroundColor(.secondary)
                     }
 
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("High-Resolution Bass").font(.body)
-                        Picker("", selection: Binding(
-                            get: { settings.rtaLfMode },
-                            set: { settings.rtaLfMode = $0; push() }
-                        )) {
-                            Text("Off").tag(Int(RTA_LF_OFF))
-                            Text("Fast").tag(Int(RTA_LF_512))
-                            Text("Full").tag(Int(RTA_LF_1024))
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        Text("Resolving the 20 Hz third-octave band takes about 170 ms of signal, which no practical transform of the full-rate stream reaches. A second, decimated transform fills in the bottom two octaves instead; without it those bands read empty rather than silent.")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
 
                     Divider()
 
