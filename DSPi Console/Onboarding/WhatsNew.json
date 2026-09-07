@@ -3,6 +3,7 @@
     "version": "1.1.7",
     "headline": "A first run that explains itself",
     "items": [
+      "A spectrum analyser. Select an input or an output and its third-octave picture appears above the filter table; the dashboard shows every enabled output at once. Tools > Spectrum Analyser (Cmd+Shift+A) opens the full view, with the raw FFT bins as well as the bands. It runs on the device, so it sees S/PDIF, ADAT and I2S sources the host never touches - and it only runs while something is watching it.",
       "A Getting Started wizard runs on a first launch. It has one job - installing the DSPi firmware on your Pico and confirming it came back running - and it hands you the console the moment that is done. Skippable in one click, and rerunnable from the Help menu.",
       "Firmware Update now installs. Put a board into bootloader mode, or let the app restart the connected device into it, and Console writes the matching firmware and confirms the device came back running it.",
       "Console ships the firmware it expects. The RP2040 and RP2350 images are bundled, so the app and the device can no longer drift apart.",

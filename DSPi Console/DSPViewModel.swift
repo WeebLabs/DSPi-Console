@@ -2283,6 +2283,12 @@ class DSPViewModel: ObservableObject {
     // Live Data
     let meters = DSPMeterModel()
 
+    /// The device's spectrum analyser.  Its own observable, because it
+    /// republishes at the poll rate and everything watching the view model
+    /// would otherwise redraw with it.  Nothing is polled until a view
+    /// subscribes; see `RtaEngine`.
+    let rta: RtaEngine
+
     /// Returns true if the matrix output is disabled or muted.
     func isOutputInactive(_ outputIndex: Int) -> Bool {
         !outputEnabled[outputIndex] || outputMuted[outputIndex]
@@ -2538,6 +2544,7 @@ class DSPViewModel: ObservableObject {
 
     init(usb: USBDevice = AppState.shared.usb) {
         self.usb = usb
+        self.rta = RtaEngine(usb: usb)
 
         // Initialize Default Data (V16 unified model: inputs 0..chOut1-1 are
         // first-class EQ channels; outputs chOut1..numChannels-1 add crossover).
@@ -2710,6 +2717,7 @@ class DSPViewModel: ObservableObject {
                 }
                 if !connected {
                     AppState.shared.interruptMonitor.stop()
+                    self?.rta.deviceDisconnected()
                 }
                 if connected {
                     AppState.shared.interruptMonitor.start()
@@ -2759,6 +2767,12 @@ class DSPViewModel: ObservableObject {
             if self.upmixStatusPolling && self.firmwareSupportsUpmixer {
                 self.fetchUpmixStatus()
             }
+            // Spectrum analyser frames, only while a view is watching.  It
+            // shares this timer rather than running one of its own so all
+            // vendor traffic stays on one queue in one order, and because
+            // 60 ms is already a faster cadence than the device refreshes a
+            // channel at.
+            if self.rta.isWatching { self.rta.tick() }
         }
         timer.resume()
         pollTimer = timer

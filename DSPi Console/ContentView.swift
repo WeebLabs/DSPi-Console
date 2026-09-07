@@ -846,6 +846,19 @@ struct ContentView: View {
                         // Edits mirror onto the other half of a linked pair.
                         let mirrorLink = vm.linkedPartner(of: ch)
                         VStack(spacing: 16) {
+                            // The analyser taps inputs after their own PEQ, so
+                            // this strip shows the effect of the filters in the
+                            // table below it rather than the raw source.
+                            if settings.rtaShowOnChannelPages {
+                                ChannelSpectrumStrip(
+                                    vm: vm, engine: vm.rta,
+                                    title: vm.channelNames[ch],
+                                    channel: ch,
+                                    tap: RTA_TAP_INPUT,
+                                    color: ChannelPalette.input(ch))
+                                    .padding(.horizontal)
+                            }
+
                             InputChannelHeader(
                                 channel: ch,
                                 vm: vm,
@@ -878,8 +891,24 @@ struct ContentView: View {
                         }
 
                     case .output(let idx):
-                        OutputChannelDetail(vm: vm, outputIndex: idx,
-                                            availableTypes: availableFilterTypes(vm: vm))
+                        VStack(spacing: 16) {
+                            // The output tap sits after gain and delay and
+                            // before encoding, so this is exactly what the slot
+                            // transmits.
+                            if settings.rtaShowOnChannelPages {
+                                ChannelSpectrumStrip(
+                                    vm: vm, engine: vm.rta,
+                                    title: vm.channelNames[vm.eqChannel(forOutput: idx)],
+                                    channel: idx,
+                                    tap: RTA_TAP_OUTPUT,
+                                    color: idx == vm.pdmOutputIndex
+                                        ? ChannelPalette.pdm : ChannelPalette.output(idx))
+                                    .padding(.horizontal)
+                            }
+
+                            OutputChannelDetail(vm: vm, outputIndex: idx,
+                                                availableTypes: availableFilterTypes(vm: vm))
+                        }
 
                     case .overview:
                         // `.never`, not `.hidden`: on macOS `.hidden` still

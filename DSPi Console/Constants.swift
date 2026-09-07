@@ -72,6 +72,84 @@ let REQ_GET_PSYBASS_MASK: UInt8       = 0x3D
 /// channel that can reproduce real bass is counterproductive.
 let PSYBASS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
 
+// Spectrum analyser (RTA / FFT).  One FFT engine on the device, pointed at any
+// set of channels on either the input side (after the per-input PEQ, before the
+// matrix) or the output side (after gain and delay, exactly what the slot
+// transmits).  It transforms one channel per frame and rotates through the
+// selected set, so selecting more channels costs no CPU - it only lengthens the
+// interval between refreshes of any one channel.
+//
+// Entirely transient: off at boot, absent from presets and from the bulk wire
+// format, and it switches itself off RTA_IDLE_TIMEOUT_MS after the last read.
+// That is why the feature is gated on a successful GET_CAPS rather than on a
+// wire-format version - there is no wire-format change to gate on.
+// See Documentation/Features/spectrum_analyser_spec.md in the firmware repo.
+let REQ_RTA_SET_CONFIG: UInt8    = 0x08   // OUT: 12-byte RtaConfig; STALL on invalid
+let REQ_RTA_GET_CONFIG: UInt8    = 0x09   // IN 12 bytes: the applied RtaConfig
+let REQ_RTA_GET_CAPS: UInt8      = 0x0A   // IN: wValue 0 = RtaCaps (16 B), 1.. = band centres
+let REQ_RTA_GET_BANDS: UInt8     = 0x0B   // IN 80 bytes: wValue = channel at the applied tap
+let REQ_RTA_GET_BINS: UInt8      = 0x0C   // IN: wValue = byte offset into the bin frame
+let REQ_RTA_GET_STATUS: UInt8    = 0x0D   // IN 24 bytes: RtaStatus
+let REQ_RTA_CONTROL: UInt8       = 0x0E   // IN 1 byte: wValue = RTA_CTL_*
+let REQ_RTA_GET_BANDS_ALL: UInt8 = 0x0F   // IN: every live channel's band frame, USB only
+
+let RTA_CFG_VERSION: UInt8 = 1
+/// Wire sizes.  Fixed for the life of the config version; a short read means
+/// firmware that predates the analyser and is treated as "unsupported".
+let RTA_CONFIG_SIZE: Int      = 12
+let RTA_CAPS_SIZE: Int        = 16
+let RTA_BAND_FRAME_SIZE: Int  = 80
+let RTA_STATUS_SIZE: Int      = 24
+let RTA_BIN_HEADER_SIZE: Int  = 16
+/// Third-octave bands with IEC 61260 nominal centres from 20 Hz up: 31 of them
+/// at 44.1/48 kHz, 34 at 96 kHz.  The frame always carries `RTA_MAX_BANDS`
+/// slots and says how many are valid at the current rate.
+let RTA_MAX_BANDS: Int = 36
+/// Largest bin frame the device will ever publish: the 16-byte header, 512 fast
+/// bins, 512 bass-stream bins and the repeated sequence byte.  The caps carry
+/// the real figure; this is the ceiling used to size a single read.
+let RTA_BIN_FRAME_MAX: Int = 16 + 512 + 512 + 1
+
+/// Which side of the chain the engine is tapping.  One engine, so the two taps
+/// are exclusive: switching tap restarts the frame and clears the averaging.
+let RTA_TAP_INPUT: UInt8  = 0
+let RTA_TAP_OUTPUT: UInt8 = 1
+
+/// High-resolution bass stream.  Resolving the 20 Hz band (about 5 Hz wide)
+/// needs roughly 170 ms of signal, so a decimated copy of the tapped channel is
+/// transformed separately and supplies the bands below about 2 kHz.  Off is
+/// cheaper; 512 points refreshes twice as fast but blurs the 20 Hz band.
+let RTA_LF_OFF: UInt8  = 0
+let RTA_LF_512: UInt8  = 1
+let RTA_LF_1024: UInt8 = 2
+
+/// With MANUAL set, the run state belongs to REQ_RTA_CONTROL entirely: no
+/// auto-start on a read and no auto-off.  The Console leaves it clear, so
+/// reading band frames is all it takes to keep the analyser alive.
+let RTA_FLAG_MANUAL: UInt8 = 0x01
+
+let RTA_STATE_IDLE: UInt8         = 0
+let RTA_STATE_CAPTURING: UInt8    = 1
+let RTA_STATE_TRANSFORMING: UInt8 = 2
+
+let RTA_CTL_STOP: UInt16      = 0
+let RTA_CTL_START: UInt16     = 1
+let RTA_CTL_RESET_AVG: UInt16 = 2
+
+/// Levels ride the wire as one byte in 0.5 dB steps, with 243 meaning 0 dBFS -
+/// six decibels of headroom above it, because upmix-derived rows and hot EQ can
+/// legitimately exceed full scale.  0 is the floor (-121.5 dBFS or below).  The
+/// caps report the zero point so it is never hard-coded at the point of use;
+/// this is the fallback before the first caps read.
+let RTA_LEVEL_ZERO_DBFS: UInt8 = 243
+let RTA_LEVEL_STEP_DB: Double = 0.5
+
+/// A channel index that means "none" in RtaStatus.
+let RTA_CH_NONE: UInt8 = 0xFF
+
+/// Band-centre chunk size: GET_CAPS wValue 1.. returns up to 32 uint16 values.
+let RTA_CENTRES_PER_CHUNK: Int = 32
+
 // Subharmonic Synthesizer ("subharm", V29; extended V30): dbx 120A style octave
 // divider.  Three fixed program bands (48-72, 72-112 and 112-160 Hz) each drive
 // their own divider, producing a real fundamental one octave down (24-36, 36-56

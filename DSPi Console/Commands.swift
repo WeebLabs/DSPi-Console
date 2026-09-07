@@ -82,6 +82,11 @@ extension DSPViewModel {
         guard usb.generation == generation else { return }
 
         fetchSiggen()
+        // The analyser's caps read is its whole feature gate: it is transient
+        // and absent from the bulk blob, so there is no wire-format version to
+        // key off.  Firmware without it STALLs the read and every analyser view
+        // shows its unsupported notice.
+        rta.fetchCaps()
         fetchAdatConfig()
         fetchAdatInputConfig()
         guard usb.generation == generation else { return }

@@ -14,9 +14,18 @@ private func formatTrimmed(_ value: Double, decimals: Int, signed: Bool = false)
 
 struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var settings = AppSettings.shared
 
     var body: some View {
         VStack(spacing: 18) {
+            // Every enabled output at once.  The device transforms one channel
+            // per frame and rotates through the set, so watching all of them
+            // costs exactly what watching one does - only the interval between
+            // refreshes of any single channel grows.
+            if settings.rtaShowOnDashboard {
+                DashboardSpectrumCard(vm: vm, engine: vm.rta)
+            }
+
             StereoDashboardCard(
                 title: "STEREO INPUT (USB)",
                 left: .masterLeft,

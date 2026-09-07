@@ -53,6 +53,31 @@ class AppSettings: ObservableObject {
     // Advanced
     @AppStorage("showDebugInfo") var showDebugInfo: Bool = false
 
+    // Spectrum analyser (RTA / FFT).  The four device-side options are kept
+    // here rather than on the device because the analyser is transient: the
+    // firmware forgets them at every power cycle, so the Console is the only
+    // place they can live.  See `AppSettings.rtaOptions`.
+    @AppStorage("rtaShowOnDashboard") var rtaShowOnDashboard: Bool = true
+    @AppStorage("rtaShowOnChannelPages") var rtaShowOnChannelPages: Bool = true
+    @AppStorage("rtaFloorDB") var rtaFloorDB: Double = -90.0
+    @AppStorage("rtaCeilingDB") var rtaCeilingDB: Double = 6.0
+    @AppStorage("rtaShowPeakHold") var rtaShowPeakHold: Bool = true
+    @AppStorage("rtaFftOrder") var rtaFftOrder: Int = 10
+    @AppStorage("rtaLfMode") var rtaLfMode: Int = 2
+    @AppStorage("rtaAvgMs") var rtaAvgMs: Int = 300
+    @AppStorage("rtaPeakDecayDBs") var rtaPeakDecayDBs: Int = 12
+
+    /// The device-side half of the analyser settings, in the shape the engine
+    /// pushes over the wire.  Clamped on the way out so a preference carried
+    /// over from another platform can never become a STALLed configuration.
+    var rtaOptions: RtaOptions {
+        RtaOptions(
+            fftOrder: UInt8(clamping: rtaFftOrder),
+            lfMode: UInt8(clamping: rtaLfMode),
+            avgMs: UInt16(clamping: rtaAvgMs),
+            peakDecayDBs: UInt8(clamping: rtaPeakDecayDBs))
+    }
+
     // Sidebar volume slider mode — "auto" (host on USB / user on SPDIF/I2S)
     // or "master" (drives master volume directly with a red track tint).
     // String-backed because @AppStorage doesn't support raw enums.
@@ -67,7 +92,7 @@ class AppSettings: ObservableObject {
 /// Symbol, and tint so the sidebar row and the detail navigation title stay in
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
-    case general, graphing, advanced
+    case general, graphing, spectrum, advanced
     case overview
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
     case channelGroups, macros, auxOutputs
@@ -79,6 +104,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .overview:         return "Overview"
         case .general:          return "About"
         case .graphing:         return "Graphing"
+        case .spectrum:         return "Spectrum Analyser"
         case .advanced:         return "Advanced"
         case .globalParams:     return "Global Parameters"
         case .outputAssignment: return "Outputs"
@@ -97,6 +123,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .overview:         return "cpu.fill"
         case .general:          return "gear"
         case .graphing:         return "waveform.path.ecg"
+        case .spectrum:         return "waveform.and.magnifyingglass"
         case .advanced:         return "gearshape.2"
         case .globalParams:     return "externaldrive"
         case .outputAssignment: return "cable.connector"
@@ -126,6 +153,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .general:          return Color(red: 0.392, green: 0.412, blue: 0.443)  // #646971 slate
         case .advanced:         return Color(red: 0.447, green: 0.471, blue: 0.502)  // #727880 slate light
         case .graphing:         return Color(red: 0.345, green: 0.478, blue: 0.537)  // #587a89 steel cyan
+        case .spectrum:         return Color(red: 0.298, green: 0.502, blue: 0.541)  // #4c808a steel cyan light
         // Pin-owning pages, matched to their role on the Overview map.
         case .spdifInput:       return Color(red: 0.016, green: 0.522, blue: 0.435)  // #04856f input teal
         case .outputAssignment: return Color(red: 0.008, green: 0.471, blue: 0.780)  // #0278c7 output blue
@@ -165,7 +193,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     /// Non-collapsible sidebar groups, in display order.
     static let groups: [(title: String, items: [SettingsCategory])] = [
         ("Application", [.general, .advanced]),
-        ("Display",     [.graphing]),
+        ("Display",     [.graphing, .spectrum]),
         // Overview leads the group: it is the read-only summary of what every
         // page below it has claimed.
         ("System",      [.overview, .spdifInput, .outputAssignment, .i2sConfig, .globalParams]),
@@ -415,6 +443,7 @@ struct SettingsView: View {
         case .overview:         PinOverviewTab()
         case .general:          GeneralSettingsTab()
         case .graphing:         GraphingSettingsTab()
+        case .spectrum:         SpectrumSettingsTab()
         case .advanced:         AdvancedSettingsTab()
         case .globalParams:     GlobalSettingsTab()
         // Several specialist subsystems are settings pages rather than
@@ -1435,6 +1464,179 @@ struct GlobalSettingsTab: View {
         }
     }
 
+}
+
+/// Preferences for the device's spectrum analyser.
+///
+/// Two kinds of setting sit together here, and the difference matters. Where
+/// the strips appear and how they are drawn are the Console's own preferences.
+/// The transform size, the averaging, the peak-hold decay and the bass stream
+/// belong to the device, but the analyser is transient - the firmware forgets
+/// them at every power cycle - so the Console is the only place they can be
+/// remembered, and it pushes them whenever a view starts watching.
+struct SpectrumSettingsTab: View {
+    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var vm = AppState.shared.viewModel
+    @ObservedObject private var engine = AppState.shared.viewModel.rta
+
+    private func push() { engine.setOptions(settings.rtaOptions) }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: $settings.rtaShowOnDashboard) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show on the Dashboard").font(.body)
+                        Text("A thumbnail per enabled output above the channel cards")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+
+                Toggle(isOn: $settings.rtaShowOnChannelPages) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show on Channel Pages").font(.body)
+                        Text("A strip for the selected channel alone, above its filter table")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+
+                Toggle(isOn: $settings.rtaShowPeakHold) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Peak Hold").font(.body)
+                        Text("A cap above each band marking its recent maximum")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .padding(.vertical, 4)
+            } header: {
+                Label("Where It Appears", systemImage: "rectangle.3.group")
+            } footer: {
+                Text("The analyser only runs while something is watching it. With every strip switched off and the analyser window closed, the device stops it and spends nothing.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Floor").font(.body)
+                            Picker("", selection: $settings.rtaFloorDB) {
+                                Text("-60 dB").tag(-60.0)
+                                Text("-90 dB").tag(-90.0)
+                                Text("-120 dB").tag(-120.0)
+                            }
+                            .labelsHidden()
+                        }
+                        Spacer()
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Ceiling").font(.body)
+                            Picker("", selection: $settings.rtaCeilingDB) {
+                                Text("0 dBFS").tag(0.0)
+                                Text("+6 dBFS").tag(6.0)
+                                Text("+12 dBFS").tag(12.0)
+                            }
+                            .labelsHidden()
+                        }
+                    }
+                    Text("Six decibels of headroom above full scale is the default because upmix-derived rows and hot EQ can legitimately exceed 0 dBFS.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Label("Vertical Scale", systemImage: "ruler")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Transform Size").font(.body)
+                        Picker("", selection: Binding(
+                            get: { settings.rtaFftOrder },
+                            set: { settings.rtaFftOrder = $0; push() }
+                        )) {
+                            Text("256 points").tag(8)
+                            Text("512 points").tag(9)
+                            Text("1024 points").tag(10)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text("More points resolve lower frequencies, but a frame takes longer to fill, so each channel refreshes less often.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("High-Resolution Bass").font(.body)
+                        Picker("", selection: Binding(
+                            get: { settings.rtaLfMode },
+                            set: { settings.rtaLfMode = $0; push() }
+                        )) {
+                            Text("Off").tag(Int(RTA_LF_OFF))
+                            Text("Fast").tag(Int(RTA_LF_512))
+                            Text("Full").tag(Int(RTA_LF_1024))
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text("Resolving the 20 Hz third-octave band takes about 170 ms of signal, which no practical transform of the full-rate stream reaches. A second, decimated transform fills in the bottom two octaves instead; without it those bands read empty rather than silent.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+
+                    Divider()
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Averaging").font(.body)
+                            Picker("", selection: Binding(
+                                get: { settings.rtaAvgMs },
+                                set: { settings.rtaAvgMs = $0; push() }
+                            )) {
+                                Text("Off").tag(0)
+                                Text("125 ms").tag(125)
+                                Text("300 ms").tag(300)
+                                Text("1 s").tag(1000)
+                                Text("3 s").tag(3000)
+                            }
+                            .labelsHidden()
+                        }
+                        Spacer()
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Peak Decay").font(.body)
+                            Picker("", selection: Binding(
+                                get: { settings.rtaPeakDecayDBs },
+                                set: { settings.rtaPeakDecayDBs = $0; push() }
+                            )) {
+                                Text("Off").tag(0)
+                                Text("4 dB/s").tag(4)
+                                Text("12 dB/s").tag(12)
+                                Text("30 dB/s").tag(30)
+                            }
+                            .labelsHidden()
+                            .disabled(!settings.rtaShowPeakHold)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Label("Engine", systemImage: "cpu")
+            } footer: {
+                if vm.isDeviceConnected && !engine.supported {
+                    Text("The connected firmware has no spectrum analyser, so these settings have nothing to apply to until it is updated.")
+                        .font(.caption).foregroundColor(.orange)
+                } else if engine.supported {
+                    Text("This device reports \(engine.caps.dynamicRangeDB) dB of usable range and transforms up to \(1 << Int(engine.caps.fftOrderMax)) points.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Spectrum Analyser")
+    }
 }
 
 struct GraphingSettingsTab: View {
@@ -10504,6 +10706,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var graphWindowController = GraphWindowController()
     @StateObject private var interruptMonitorWindowController = InterruptMonitorWindowController()
     @StateObject private var testSignalsWindowController = TestSignalsWindowController()
+    @StateObject private var spectrumWindowController = SpectrumAnalyserWindowController()
     @StateObject private var firmwareUpdateWindowController = FirmwareUpdateWindowController()
     @StateObject private var whatsNewWindowController = WhatsNewWindowController()
     // The shared instance, not a fresh one: AppKit-hosted tool windows read
@@ -10540,6 +10743,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(statsWindowController)
                 .environmentObject(graphWindowController)
                 .environmentObject(interruptMonitorWindowController)
+                .environmentObject(spectrumWindowController)
                 .environmentObject(firmwareUpdateWindowController)
                 .environmentObject(whatsNewWindowController)
                 .environmentObject(onboarding)
@@ -10746,6 +10950,11 @@ struct DSPi_ConsoleApp: App {
                     testSignalsWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("G", modifiers: [.command, .shift])
+
+                Button("Spectrum Analyser...") {
+                    spectrumWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("A", modifiers: [.command, .shift])
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)
