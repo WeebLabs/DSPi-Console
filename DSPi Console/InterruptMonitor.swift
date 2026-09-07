@@ -190,13 +190,15 @@ struct InterruptEvent: Identifiable {
             return "\(seqStr) v2.AdatInputState             \(state) rate=\(rate) mode=\(mode)"
 
         case NOTIFY_EVT_CS_AUX:
-            // 8 bytes: [ver, evt, flags, seq, aux, state, level, src].  Both
-            // values ride every event, so which of the pair moved never has to
-            // be read back.
-            guard bytes.count >= 8 else {
+            // 9 bytes: [ver, evt, flags, seq, slot, state, level_q8 LE(2),
+            // src].  Both values ride every event, so which of the pair moved
+            // never has to be read back.
+            guard bytes.count >= 9 else {
                 return "\(seqStr) v2.CsAux (short: \(bytes.count) bytes)"
             }
-            return "\(seqStr) v2.CsAux                      aux=\(bytes[4]) state=\(bytes[5]) level=\(bytes[6]) src=\(sourceLabel(bytes[7]))"
+            let q8 = UInt16(bytes[6]) | (UInt16(bytes[7]) << 8)
+            let pct = String(format: "%.1f", Double(q8) / 256.0)
+            return "\(seqStr) v2.CsAux                      slot=\(bytes[4]) state=\(bytes[5]) level=\(pct)% src=\(sourceLabel(bytes[8]))"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -610,7 +612,7 @@ class InterruptMonitor: ObservableObject {
     /// macro step, a display page, this host, or an external transport.  Both
     /// values ride every event, so nothing has to be read back.  `source` is
     /// the ParamSource of the dispatch (PARAM_SRC_GPIO for a panel control).
-    var onCsAux: ((_ aux: UInt8, _ state: Bool, _ level: UInt8, _ source: UInt8) -> Void)?
+    var onCsAux: ((_ slot: UInt8, _ state: Bool, _ level: UInt16, _ source: UInt8) -> Void)?
 
     private let usb: USBDevice
 
@@ -949,18 +951,18 @@ class InterruptMonitor: ObservableObject {
         }
 
         // Dispatch auxiliary-output pushes so a panel button switching a relay
-        // is reflected in the Settings page immediately.  8 bytes:
-        // [ver, evt, flags, seq, aux, state, level, src].
+        // is reflected in the Settings page immediately.  9 bytes:
+        // [ver, evt, flags, seq, slot, state, level_q8 LE(2), src].
         if let handler = onCsAux,
-           bytes.count >= 8,
+           bytes.count >= 9,
            bytes[0] == NOTIFY_V2_VERSION,
            bytes[1] == NOTIFY_EVT_CS_AUX {
-            let aux = bytes[4]
+            let slot = bytes[4]
             let state = bytes[5] != 0
-            let level = bytes[6]
-            let source = bytes[7]
+            let level = UInt16(bytes[6]) | (UInt16(bytes[7]) << 8)
+            let source = bytes[8]
             DispatchQueue.main.async {
-                handler(aux, state, level, source)
+                handler(slot, state, level, source)
             }
         }
 

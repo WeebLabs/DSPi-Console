@@ -186,8 +186,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // header, so a pre-v9 device reports zero and the pages stay hidden.
         case .channelGroups:     return vm.csGroupsSupported
         case .macros:            return vm.csMacrosSupported
-        // Auxiliary outputs arrived with caps v17; a pre-v17 device has no nouns
-        // for them and STALLs their commands, so the page stays hidden.
+        // Auxiliary outputs are the caps v18 component types; a device without
+        // them in its type table has nothing for this page to add.
         case .auxOutputs:        return vm.csAuxSupported
         default:                 return true
         }
@@ -2461,14 +2461,6 @@ struct ControlSurfacesSettingsTab: View {
     @State private var groupMessages: [Int: (message: String, isError: Bool)] = [:]
     @State private var macroMessages: [Int: (message: String, isError: Bool)] = [:]
 
-    // Auxiliary outputs (caps v17).  Only the config is drafted: the live state
-    // and level apply the moment they are touched, so they are read straight
-    // from the view model rather than staged here.
-    @State private var auxDrafts: [CsAuxCfg] = Array(repeating: CsAuxCfg(), count: CS_MAX_AUX)
-    @State private var expandedAux: Set<Int> = []
-    @State private var applyingAux: Int? = nil
-    @State private var auxMessages: [Int: (message: String, isError: Bool)] = [:]
-
     // User-given names, shown in the card header so collapsed cards are
     // tellable apart.  Names are device-persistent (spec §3.4), read into
     // `vm.csNames`; this is a local editing buffer committed on submit / close
@@ -2577,15 +2569,6 @@ struct ControlSurfacesSettingsTab: View {
             seedDrafts()
             nameEdits.removeAll()
             slotMessages.removeAll()
-        }
-        // Same for an aux config: another host, a revert, or a save folding the
-        // live values into a boot-saved slot can all move it underneath us.
-        .onReceive(vm.$csAuxCfgs) { newCfgs in
-            for a in 0..<min(auxDrafts.count, newCfgs.count) {
-                if applyingAux != a && auxDrafts[a] == vm.csAuxCfgs[a] {
-                    auxDrafts[a] = newCfgs[a]
-                }
-            }
         }
         // Re-seed a slot when its live binding changes and the user has no
         // pending edits for it, so an external change never strands a draft.
@@ -2734,9 +2717,6 @@ struct ControlSurfacesSettingsTab: View {
         var seededMacros = Array(repeating: CsMacro(), count: CS_MAX_MACROS)
         for m in 0..<min(CS_MAX_MACROS, vm.csMacros.count) { seededMacros[m] = vm.csMacros[m] }
         macroDrafts = seededMacros
-        var seededAux = Array(repeating: CsAuxCfg(), count: CS_MAX_AUX)
-        for a in 0..<min(CS_MAX_AUX, vm.csAuxCfgs.count) { seededAux[a] = vm.csAuxCfgs[a] }
-        auxDrafts = seededAux
     }
 
     // MARK: Custom names (device-persistent; spec §3.4)
@@ -2854,8 +2834,13 @@ struct ControlSurfacesSettingsTab: View {
 
     /// Slots that currently hold a control (edited draft or live on the device),
     /// shown as cards.  Empty slots are hidden until "Add a Control" fills one.
+    /// Aux outputs are binding slots too, but they get the Auxiliary Outputs
+    /// page to themselves so each slot appears exactly once.
     private var visibleSlots: [Int] {
-        (0..<slotCount).filter { drafts[$0].isConfigured || vm.csBindings[$0].isConfigured }
+        (0..<slotCount).filter {
+            (drafts[$0].isConfigured || vm.csBindings[$0].isConfigured)
+                && (isAuxSlot($0) == (section == .aux))
+        }
     }
 
     /// The lowest slot with neither a draft nor a live binding, or nil when full.
@@ -2894,7 +2879,7 @@ struct ControlSurfacesSettingsTab: View {
             VStack(spacing: 14) {
                 // A hint of what can be wired up: one badge per component type.
                 HStack(spacing: 10) {
-                    ForEach(realTypes, id: \.self) { t in
+                    ForEach(realTypes.filter { !isAuxType($0) }, id: \.self) { t in
                         csTypeBadge(t, size: 28)
                     }
                 }
@@ -2929,75 +2914,57 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    // MARK: Auxiliary outputs (caps v17; aux spec §1)
+    // MARK: Auxiliary outputs (caps v18; aux spec §1)
     //
-    // Eight device-global on/off + level values the firmware attaches no
-    // meaning to.  Nothing here claims a GPIO: an output reaches hardware only
-    // when the user adds an LED control that follows it, which is why the card
-    // says so and lists the controls that already do.  The config (name, boot
-    // behaviour) is a deferred preview under the shared Save / Revert; the live
-    // state and level apply instantly and are never written to flash on change.
+    // An auxiliary output is a component in a binding slot (CS_TYPE_AUX_OUT
+    // on/off, CS_TYPE_AUX_PWM dimmable) that owns its GPIO, so this page is
+    // the ordinary control card list filtered to those two types.  The pin,
+    // boot behaviour and delays are the binding, under the shared Apply /
+    // Save / Revert; the live on/off flag and level apply instantly and are
+    // never written to flash on change.
 
-    /// Whether an aux slot is worth showing.  Deliberately broad: an output the
-    /// user has named, set to boot on, currently switched on, or bound a
-    /// control to is one they are using, even when its config record is still
-    /// all-zero.
-    private func auxSlotInUse(_ a: Int) -> Bool {
-        auxDrafts[a].isConfigured
-            || vm.csAuxCfgs[a].isConfigured
-            || (vm.csAuxState.indices.contains(a) && vm.csAuxState[a])
-            || (vm.csAuxLevel.indices.contains(a) && vm.csAuxLevel[a] > 0)
-            || !controlsFollowingAux(a).isEmpty
-            || !irCommandsUsingAux(a).isEmpty
-            || !macrosUsingAux(a).isEmpty
+    private func isAuxType(_ type: Int) -> Bool {
+        type == CS_TYPE_AUX_OUT || type == CS_TYPE_AUX_PWM
     }
 
-    private var visibleAux: [Int] {
-        (0..<vm.csAuxCount).filter { auxSlotInUse($0) }
+    /// True when the slot holds an aux output, staged or live.
+    private func isAuxSlot(_ slot: Int) -> Bool {
+        isAuxType(Int(drafts[slot].type)) || isAuxType(Int(vm.csBindings[slot].type))
     }
 
-    private var firstFreeAux: Int? {
-        (0..<vm.csAuxCount).first { !auxSlotInUse($0) }
+    private var auxTypes: [Int] { realTypes.filter { isAuxType($0) } }
+
+    /// Component types the card's badge menu may switch a slot to.  An aux
+    /// slot stays an aux output (the other kind), and a control never becomes
+    /// one: the two lists live on different pages.
+    private func typeMenuTypes(forSlot slot: Int) -> [Int] {
+        isAuxSlot(slot) ? auxTypes : realTypes.filter { !isAuxType($0) }
     }
 
-    /// Binding slots pointed at this aux output, whichever of the two nouns
-    /// they use.  Both halves of the feature - what drives an output and what
-    /// follows it - are ordinary bindings, so this is the card's answer to "is
-    /// anything actually wired to this?".
-    private func controlsFollowingAux(_ a: Int) -> [Int] {
+    /// Binding slots pointed at this aux output through either noun.
+    private func controlsDrivingAux(_ slot: Int) -> [Int] {
         (0..<slotCount).filter {
-            let b = vm.csBindings[$0]
-            guard b.isConfigured, Int(b.target) == a, b.flags & CS_FLAG_GROUP == 0 else { return false }
+            let b = drafts[$0]
+            guard b.isConfigured, Int(b.target) == slot, b.flags & CS_FLAG_GROUP == 0 else { return false }
             return Int(b.noun) == CS_NOUN_AUX || Int(b.noun) == CS_NOUN_AUX_LEVEL
         }
     }
 
-    /// Remote keys and macros pointed at this output.  They drive it exactly as
-    /// a button does, so an output reached only from a remote is still in use.
-    private func irCommandsUsingAux(_ a: Int) -> [Int] {
-        guard vm.csIrSupported else { return [] }
+    private func irCommandsDrivingAux(_ slot: Int) -> Int {
+        guard vm.csIrSupported else { return 0 }
         return (0..<min(Int(vm.csCaps.maxIrCommands), CS_MAX_IR_COMMANDS)).filter {
             let c = vm.csIrCommands[$0]
-            guard c.isConfigured, Int(c.target) == a, c.flags & CS_FLAG_GROUP == 0 else { return false }
+            guard c.isConfigured, Int(c.target) == slot, c.flags & CS_FLAG_GROUP == 0 else { return false }
             return Int(c.noun) == CS_NOUN_AUX || Int(c.noun) == CS_NOUN_AUX_LEVEL
-        }
+        }.count
     }
 
-    private func macrosUsingAux(_ a: Int) -> [Int] {
+    private func macrosDrivingAux(_ slot: Int) -> [Int] {
         (0..<vm.csMacroCount).filter { m in
             vm.csMacros[m].steps.contains { st in
-                st.isConfigured && !st.isGrouped && Int(st.target) == a
+                st.isConfigured && !st.isGrouped && Int(st.target) == slot
                     && (Int(st.noun) == CS_NOUN_AUX || Int(st.noun) == CS_NOUN_AUX_LEVEL)
             }
-        }
-    }
-
-    /// True when a binding on this output drives a pin rather than reading one
-    /// (spec §1.2): that is the only thing that makes an aux switch hardware.
-    private func pinFollowsAux(_ a: Int) -> Bool {
-        controlsFollowingAux(a).contains {
-            let t = Int(vm.csBindings[$0].type)
-            return t == CS_TYPE_LED || t == CS_TYPE_LED_PWM
         }
     }
 
@@ -3006,285 +2973,234 @@ struct ControlSurfacesSettingsTab: View {
         if vm.csCaps.types.isEmpty {
             awaitingCapsSection
         } else {
-            auxSection
-            Section {
-                Text("An auxiliary output is a switch the DSPi keeps for you and never reads itself: it changes nothing about the sound. It exists so a button, knob, remote key or macro can drive something the device knows nothing about - an amplifier trigger, a speaker relay, a panel lamp, a fan.\n\nAn output only reaches a pin once you add a control that follows it: an LED on the on/off value for a switch, a dimmable LED on the level for a lamp. Turn on \"Active-Low LED\" for the relay and opto-isolator boards that switch when the pin goes low.\n\nA GPIO is a 3.3 V pin good for a few milliamps. Anything real needs a MOSFET, a transistor with a flyback diode, or an opto-isolated relay module in between, and a dimmed load should have its own supply so its switching noise stays out of the DAC.\n\nSwitching an output is instant and never writes to flash. Names and power-on behaviour are stored on the device alongside the controls and share their Save and Revert.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var auxSection: some View {
-        if visibleAux.isEmpty {
-            Section {
-                VStack(spacing: 14) {
-                    Image(systemName: "power")
-                        .font(.system(size: 28))
-                        .foregroundColor(.secondary)
-                    VStack(spacing: 3) {
-                        Text("No Auxiliary Outputs Set Up")
-                            .font(.headline)
-                        Text("Name a switch the DSPi holds for you, then point a button at it and an LED control at the pin that should follow it.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 340)
+            if visibleSlots.isEmpty {
+                Section {
+                    VStack(spacing: 14) {
+                        HStack(spacing: 10) {
+                            ForEach(auxTypes, id: \.self) { t in csTypeBadge(t, size: 28) }
+                        }
+                        VStack(spacing: 3) {
+                            Text("No Auxiliary Outputs Set Up")
+                                .font(.headline)
+                            Text("Put a relay, lamp or fan on a spare GPIO, then point a button, knob or remote key at it from the Control Surfaces page.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 340)
+                        }
+                        addAuxMenu(prominent: true)
                     }
-                    addAuxButton(prominent: true)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
-            }
-        } else {
-            ForEach(cardIDs("aux", visibleAux)) { key in
-                auxCard(key.index)
-            }
-            Section {
-                HStack {
-                    addAuxButton(prominent: false)
-                    Spacer()
-                    if firstFreeAux == nil {
-                        Text("All \(vm.csAuxCount) auxiliary outputs are in use.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+            } else {
+                ForEach(cardIDs("aux", visibleSlots)) { key in
+                    slotSection(key.index)
                 }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func addAuxButton(prominent: Bool) -> some View {
-        let button = Button { addAux() } label: {
-            Label("Add Output", systemImage: "plus")
-        }
-        .fixedSize()
-        .disabled(firstFreeAux == nil || !vm.isDeviceConnected)
-
-        if prominent {
-            button.buttonStyle(.borderedProminent).controlSize(.regular)
-        } else {
-            button.buttonStyle(.bordered).controlSize(.regular)
-        }
-    }
-
-    /// Claim the first unused output by naming it, and open its card.  Unlike a
-    /// control this changes nothing on the device yet: the eight outputs always
-    /// exist, and Apply is what stores the name and boot behaviour.
-    private func addAux() {
-        guard let a = firstFreeAux else { return }
-        var fresh = CsAuxCfg()
-        fresh.name = "Aux \(a + 1)"
-        auxMessages[a] = nil
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-            auxDrafts[a] = fresh
-            expandedAux.insert(a)
-        }
-    }
-
-    /// One line for the collapsed card: what the output is doing now, and
-    /// whether anything is listening to it.
-    private func auxSummary(_ a: Int) -> String {
-        let on = vm.csAuxState.indices.contains(a) && vm.csAuxState[a]
-        let level = vm.csAuxLevel.indices.contains(a) ? Int(vm.csAuxLevel[a]) : 0
-        var s = on ? "On" : "Off"
-        if level > 0 { s += " - level \(level)%" }
-        let followers = controlsFollowingAux(a).count
-            + irCommandsUsingAux(a).count + macrosUsingAux(a).count
-        if followers == 0 {
-            s += " - nothing drives or follows it"
-        } else {
-            s += " - \(followers) control\(followers == 1 ? "" : "s")"
-        }
-        return s
-    }
-
-    @ViewBuilder
-    private func auxCard(_ a: Int) -> some View {
-        let draft = auxDrafts[a]
-        let expanded = expandedAux.contains(a)
-        let dirty = draft != vm.csAuxCfgs[a]
-        let isOn = vm.csAuxState.indices.contains(a) && vm.csAuxState[a]
-        Section {
-            HStack(spacing: 12) {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        if expanded { expandedAux.remove(a) } else { expandedAux.insert(a) }
-                    }
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
-                        .frame(width: 14, height: 14)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-
-                Image(systemName: isOn ? "power.circle.fill" : "power")
-                    .font(.system(size: 13))
-                    .foregroundColor(isOn ? .accentColor : .secondary)
-                    .frame(width: 20)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    LeftAlignedTextField(text: Binding(
-                        get: { auxDrafts[a].name },
-                        set: { auxDrafts[a].name = String($0.prefix(CS_NAME_LEN - 1)) }),
-                                         placeholder: "Aux \(a + 1)")
-                        .frame(maxWidth: 240, alignment: .leading)
-                    Text(auxSummary(a))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                // The live switch sits in the header, collapsed or not: it is
-                // the one control on this page anyone reaches for twice, and it
-                // applies instantly rather than waiting on Apply.
-                Toggle("", isOn: Binding(
-                    get: { isOn },
-                    set: { vm.setCsAuxState(a, on: $0) }))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .disabled(!vm.isDeviceConnected)
-                Button(role: .destructive) { removeAux(a) } label: {
-                    Image(systemName: "trash").font(.system(size: 12))
-                }
-                .buttonStyle(.borderless)
-                .foregroundColor(.secondary)
-                .disabled(applyingAux == a || !vm.isDeviceConnected)
-            }
-            .padding(.vertical, 4)
-
-            if expanded {
-                settingRow(title: "Level",
-                           detail: "What a dimmable LED following this output runs at. Whole percent.",
-                           icon: "sun.max") {
-                    HStack(spacing: 8) {
-                        Slider(value: Binding(
-                            get: { Double(vm.csAuxLevel.indices.contains(a) ? vm.csAuxLevel[a] : 0) },
-                            set: { vm.setCsAuxLevel(a, level: UInt8($0.rounded())) }),
-                               in: 0...Double(CS_AUX_LEVEL_MAX))
-                            .frame(width: 160)
-                        Text("\(vm.csAuxLevel.indices.contains(a) ? Int(vm.csAuxLevel[a]) : 0)%")
-                            .font(.body.monospacedDigit())
-                            .frame(width: 38, alignment: .trailing)
-                    }
-                    .disabled(!vm.isDeviceConnected)
-                }
-
-                settingRow(title: "At Power-On",
-                           detail: "What this output does when the device starts up.",
-                           icon: "bolt") {
-                    Picker("", selection: Binding(
-                        get: { auxDrafts[a].bootMode },
-                        set: { auxDrafts[a].bootMode = $0 })) {
-                        Text("Fixed").tag(CS_AUX_BOOT_FIXED)
-                        Text("As Last Saved").tag(CS_AUX_BOOT_SAVED)
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                }
-
-                if draft.bootMode == CS_AUX_BOOT_SAVED {
-                    Text("Saving takes a copy of the switch and level as they are at that moment, and the output comes back that way. Changing them afterwards does not move the stored values until the next save.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                } else {
-                    settingRow(title: "Starts On",
-                               detail: "Leave this off for anything that should never wake with the device, such as an amplifier trigger.",
-                               icon: "power") {
-                        Toggle("", isOn: Binding(
-                            get: { auxDrafts[a].bootState != 0 },
-                            set: { auxDrafts[a].bootState = $0 ? 1 : 0 }))
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .controlSize(.mini)
-                    }
-                    settingRow(title: "Starting Level",
-                               detail: "The level this output comes up at.",
-                               icon: "gauge.with.dots.needle.bottom.50percent") {
-                        HStack(spacing: 8) {
-                            Slider(value: Binding(
-                                get: { Double(auxDrafts[a].bootLevel) },
-                                set: { auxDrafts[a].bootLevel = UInt8($0.rounded()) }),
-                                   in: 0...Double(CS_AUX_LEVEL_MAX))
-                                .frame(width: 160)
-                            Text("\(Int(auxDrafts[a].bootLevel))%")
-                                .font(.body.monospacedDigit())
-                                .frame(width: 38, alignment: .trailing)
+                Section {
+                    HStack {
+                        addAuxMenu(prominent: false)
+                        Spacer()
+                        if firstFreeSlot == nil {
+                            Text("All \(slotCount) control slots are in use.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
-
-                auxFollowerRows(a)
             }
+            Section {
+                Text("An auxiliary output is a GPIO the DSPi switches or dims for you and never reads itself: it changes nothing about the sound. It exists so a button, knob, remote key or macro can drive something the device knows nothing about - an amplifier trigger, a speaker relay, a panel lamp, a fan.\n\nAn on/off output follows its switch. A dimmable output follows its switch and its level, so one button and one knob can share a lamp. Turn on \"Active-Low Output\" for the relay and opto-isolator boards that switch when the pin goes low.\n\nA GPIO is a 3.3 V pin good for a few milliamps. Anything real needs a MOSFET, a transistor with a flyback diode, or an opto-isolated relay module in between, and a dimmed load should have its own supply so its switching noise stays out of the DAC.\n\nSwitching an output is instant and never writes to flash. The pin, name and power-on behaviour are stored on the device alongside the controls and share their Save and Revert.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
 
-            if expanded || dirty || applyingAux == a || auxMessages[a] != nil {
+    /// The "Add Output" menu: one entry per aux kind, creating its card in the
+    /// first free slot exactly as "Add Control" does.
+    @ViewBuilder
+    private func addAuxMenu(prominent: Bool) -> some View {
+        let menu = Menu {
+            ForEach(auxTypes, id: \.self) { t in
+                Button { addControl(type: t) } label: {
+                    Label(typeName(t), systemImage: typeIcon(t))
+                }
+            }
+        } label: {
+            Label("Add Output", systemImage: "plus")
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .disabled(firstFreeSlot == nil || !vm.isDeviceConnected)
+
+        if prominent {
+            menu.buttonStyle(.borderedProminent).controlSize(.regular)
+        } else {
+            menu.controlSize(.regular)
+        }
+    }
+
+    /// The live switch and (for a dimmable output) level.  Both apply the
+    /// moment they are touched and only exist while the output is running, so
+    /// a slot that has not been applied yet, or is down on a pin conflict,
+    /// shows them disabled.
+    @ViewBuilder
+    private func auxLiveRows(_ slot: Int) -> some View {
+        let live = vm.csBindings[slot].isConfigured && vm.csStatus.isSlotActive(slot)
+        settingRow(title: "Output",
+                   detail: live ? "Switches the pin now. Instant, and never written to flash."
+                                : "Apply the output first; the switch works once it is running.",
+                   icon: "power") {
+            Toggle("", isOn: Binding(
+                get: { vm.csAuxState.indices.contains(slot) && vm.csAuxState[slot] },
+                set: { vm.setCsAuxState(slot, on: $0) }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .disabled(!live || !vm.isDeviceConnected)
+        }
+        if Int(drafts[slot].type) == CS_TYPE_AUX_PWM {
+            let pct = vm.csAuxLevel.indices.contains(slot) ? Double(vm.csAuxLevel[slot]) / 256.0 : 0
+            settingRow(title: "Level",
+                       detail: "How bright or fast the load runs while the output is on.",
+                       icon: "sun.max") {
                 HStack(spacing: 8) {
-                    if let msg = auxMessages[a], msg.isError, !dirty {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange).font(.caption)
-                        Text(msg.message).font(.caption).foregroundColor(.orange)
+                    Slider(value: Binding(
+                        get: { pct },
+                        set: { vm.setCsAuxLevel(slot, percent: Float($0)) }),
+                           in: 0...100)
+                        .frame(width: 160)
+                    Text("\(Int(pct.rounded()))%")
+                        .font(.body.monospacedDigit())
+                        .frame(width: 38, alignment: .trailing)
+                }
+                .disabled(!live || !vm.isDeviceConnected)
+            }
+        }
+    }
+
+    private func extrasBinding(_ slot: Int, _ mask: UInt8) -> Binding<Bool> {
+        Binding(
+            get: { drafts[slot].extras & mask != 0 },
+            set: { on in
+                var nb = drafts[slot]
+                if on { nb.extras |= mask } else { nb.extras &= ~mask }
+                drafts[slot] = nb
+            })
+    }
+
+    /// Dimmable-output extras: the duty ceiling (the same wire field a PWM LED
+    /// uses) and the curve.
+    @ViewBuilder
+    private func auxPwmRows(_ slot: Int) -> some View {
+        settingRow(title: "Level Limit",
+                   detail: "Cap on the output's duty as a share of full. Everything below the cap scales with it.",
+                   icon: "sun.min") {
+            ValueField(label: "%",
+                       value: Float(drafts[slot].baseBright == 0 ? CS_LED_BRIGHT_MAX
+                                                                : drafts[slot].baseBright),
+                       width: 48, scrollStep: 5, minValue: 1, maxDecimals: 0) { v in
+                var nb = drafts[slot]
+                nb.baseBright = UInt8(min(Float(CS_LED_BRIGHT_MAX), max(1, v.rounded())))
+                drafts[slot] = nb
+            }
+        }
+        settingRow(title: "Linear Response",
+                   detail: "Off: the level follows the eye's curve, right for a lamp. On: duty is proportional to the level, right for a fan or heater.",
+                   icon: "chart.line.uptrend.xyaxis") {
+            Toggle("", isOn: extrasBinding(slot, CS_AUX_X_LINEAR))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+        }
+    }
+
+    /// Power-on behaviour, carried in the binding's extras and boot level.
+    @ViewBuilder
+    private func auxBootRows(_ slot: Int) -> some View {
+        let b = drafts[slot]
+        let saved = b.extras & CS_AUX_X_BOOT_SAVED != 0
+        settingRow(title: "At Power-On",
+                   detail: "What this output does when the device starts up.",
+                   icon: "bolt") {
+            Picker("", selection: extrasBinding(slot, CS_AUX_X_BOOT_SAVED)) {
+                Text("Fixed").tag(false)
+                Text("As Last Saved").tag(true)
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+        if saved {
+            Text("Saving takes a copy of the switch and level as they are at that moment, and the output comes back that way after a restart. Changing them afterwards does not move the stored values until the next save.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        } else {
+            settingRow(title: "Starts On",
+                       detail: "Leave this off for anything that should never wake with the device, such as an amplifier trigger.",
+                       icon: "power") {
+                Toggle("", isOn: extrasBinding(slot, CS_AUX_X_BOOT_ON))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+            }
+            if Int(b.type) == CS_TYPE_AUX_PWM {
+                settingRow(title: "Starting Level",
+                           detail: "The level this output comes up at.",
+                           icon: "gauge.with.dots.needle.bottom.50percent") {
+                    HStack(spacing: 8) {
+                        Slider(value: Binding(
+                            get: { Double(drafts[slot].value) / 256.0 },
+                            set: { drafts[slot].value = Int16(min(Double(CS_AUX_LEVEL_MAX_Q8), max(0, ($0 * 256).rounded()))) }),
+                               in: 0...100)
+                            .frame(width: 160)
+                        Text("\(Int((Double(b.value) / 256.0).rounded()))%")
+                            .font(.body.monospacedDigit())
+                            .frame(width: 38, alignment: .trailing)
                     }
-                    Spacer(minLength: 8)
-                    if applyingAux == a { ProgressView().controlSize(.small) }
-                    Button("Revert") { auxDrafts[a] = vm.csAuxCfgs[a]; auxMessages[a] = nil }
-                        .buttonStyle(.plain)
-                        .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
-                        .disabled(!dirty || applyingAux == a)
-                    Button("Apply") { applyAux(a) }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .disabled(!dirty || applyingAux == a || csBusy || !vm.isDeviceConnected)
                 }
             }
         }
     }
 
-    /// What is wired to this output, on both sides.  Without a driving LED the
-    /// output is only a value a host can read, which is the single thing people
-    /// get wrong about this feature, so the card says it outright.
+    /// What drives this output.  A freshly added output does nothing until a
+    /// control points at it, which is the one thing people get wrong, so the
+    /// card says so outright.
     @ViewBuilder
-    private func auxFollowerRows(_ a: Int) -> some View {
-        let followers = controlsFollowingAux(a)
-        let remotes = irCommandsUsingAux(a)
-        let macros = macrosUsingAux(a)
+    private func auxDriverRows(_ slot: Int) -> some View {
+        let drivers = controlsDrivingAux(slot)
+        let remotes = irCommandsDrivingAux(slot)
+        let macros = macrosDrivingAux(slot)
+        let pwm = Int(drafts[slot].type) == CS_TYPE_AUX_PWM
         VStack(alignment: .leading, spacing: 6) {
-            settingLabel(title: "Wired To",
-                         detail: "Controls on the Control Surfaces page that drive or follow this output.",
+            settingLabel(title: "Driven By",
+                         detail: "Controls on the Control Surfaces page, remote keys and macros pointed at this output.",
                          icon: "link")
-            if followers.isEmpty && remotes.isEmpty && macros.isEmpty {
-                Text("Nothing yet. Add a control that follows this output - an LED on its on/off value to drive a relay, or a dimmable LED on its level to dim a lamp - and a button or remote key to switch it.")
+            if drivers.isEmpty && remotes == 0 && macros.isEmpty {
+                Text(pwm ? "Nothing yet. Add a button on \"Aux Switch\" or an encoder or fader on \"Aux Level\" and point it at this output."
+                         : "Nothing yet. Add a button or switch on \"Aux Switch\" and point it at this output.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             } else {
-                ForEach(followers, id: \.self) { slot in
-                    let b = vm.csBindings[slot]
+                ForEach(drivers, id: \.self) { s in
+                    let b = vm.csBindings[s]
                     HStack(spacing: 6) {
                         Image(systemName: typeIcon(Int(b.type)))
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                             .frame(width: 14)
-                        Text(slotName(slot).isEmpty ? typeName(Int(b.type)) : slotName(slot))
+                        Text(slotName(s).isEmpty ? typeName(Int(b.type)) : slotName(s))
                             .font(.caption2)
                         Text("- \(actionName(Int(b.action), noun: Int(b.noun))) on \(nounName(Int(b.noun), forType: Int(b.type)))")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                 }
-                if !pinFollowsAux(a) {
-                    Text("No LED control follows this output, so it drives no pin. It is still a value a host, a display page or a macro can use.")
+                if remotes > 0 || !macros.isEmpty {
+                    Text(auxOtherUsersSummary(remotes: remotes, macros: macros))
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-            }
-            if !remotes.isEmpty || !macros.isEmpty {
-                Text(auxOtherUsersSummary(remotes: remotes, macros: macros))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
             }
         }
         .padding(.vertical, 2)
@@ -3292,10 +3208,10 @@ struct ControlSurfacesSettingsTab: View {
 
     /// "Also driven by 2 remote keys and the macro Movie Night." - the two other
     /// things that can move an output, which the binding list above cannot show.
-    private func auxOtherUsersSummary(remotes: [Int], macros: [Int]) -> String {
+    private func auxOtherUsersSummary(remotes: Int, macros: [Int]) -> String {
         var parts: [String] = []
-        if !remotes.isEmpty {
-            parts.append("\(remotes.count) remote key\(remotes.count == 1 ? "" : "s")")
+        if remotes > 0 {
+            parts.append("\(remotes) remote key\(remotes == 1 ? "" : "s")")
         }
         if !macros.isEmpty {
             parts.append("the macro\(macros.count == 1 ? "" : "s") " + macros.map { vm.csMacroName($0) }.joined(separator: ", "))
@@ -3303,34 +3219,14 @@ struct ControlSurfacesSettingsTab: View {
         return "Also driven by " + parts.joined(separator: " and ") + "."
     }
 
-    /// Clear an output back to unnamed and boot-fixed.  The output itself does
-    /// not go away - all eight always exist - so this only drops the config;
-    /// the live state is left alone for the same reason a Revert leaves it
-    /// alone, and switching it off is the header toggle's job.
-    private func removeAux(_ a: Int) {
-        auxMessages[a] = nil
-        let hadConfig = vm.csAuxCfgs[a].isConfigured
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-            auxDrafts[a] = CsAuxCfg()
-            expandedAux.remove(a)
-        }
-        if hadConfig { applyAux(a) }
-    }
-
-    private func applyAux(_ a: Int) {
-        let cfg = auxDrafts[a]
-        applyingAux = a
-        auxMessages[a] = nil
-        coordinator.beginCsOperation()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let status = vm.setCsAuxCfg(a, cfg: cfg)
-            DispatchQueue.main.async {
-                applyingAux = nil
-                coordinator.endCsOperation()
-                auxDrafts[a] = vm.csAuxCfgs[a]
-                let msg = statusMessage(status)
-                auxMessages[a] = msg.isError ? msg : nil
-            }
+    /// Targets a picker may offer for `nd`.  Channel kinds are 0..<targetCount;
+    /// the aux kind is the binding slots holding an aux output on the device (a
+    /// dimmable one for the level noun), which is what the firmware accepts.
+    private func targetChoices(_ nd: CsNounDesc, noun: Int) -> [Int] {
+        guard nd.targetKind == CS_TARGET_AUX else { return Array(0..<Int(nd.targetCount)) }
+        return (0..<min(Int(nd.targetCount), slotCount)).filter { s in
+            let t = Int(vm.csBindings[s].type)
+            return noun == CS_NOUN_AUX_LEVEL ? t == CS_TYPE_AUX_PWM : isAuxType(t)
         }
     }
 
@@ -3992,7 +3888,7 @@ struct ControlSurfacesSettingsTab: View {
                         macroDrafts[m].steps[s] = st
                     })) {
                     Section(targetNounPlural(nd)) {
-                        ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                        ForEach(targetChoices(nd, noun: noun), id: \.self) { t in
                             Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
                     }
@@ -4075,7 +3971,6 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_INC, CS_ACT_DEC:
             if kind == CS_KIND_CONTINUOUS {
                 let isLog = csUnitIsLog(unit)
-                let whole = nounStepsInWholeUnits(Int(macroDrafts[m].steps[s].noun))
                 let cur = macroDrafts[m].steps[s].step == 0
                     ? csDefaultStep(unit)
                     : csDecodeStep(macroDrafts[m].steps[s].step, unit: unit)
@@ -4085,9 +3980,9 @@ struct ControlSurfacesSettingsTab: View {
                            icon: "arrow.up.arrow.down") {
                     ValueField(label: isLog ? "oct" : csUnitSymbol(unit), value: cur, width: 64,
                                scrollStep: isLog ? csDefaultStep(unit) : unitScrollStep(unit),
-                               minValue: whole ? 1 : 0,
+                               minValue: 0,
                                maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
-                        macroDrafts[m].steps[s].step = csEncodeStep(whole ? max(1, v.rounded()) : v, unit: unit)
+                        macroDrafts[m].steps[s].step = csEncodeStep(v, unit: unit)
                     }
                 }
             } else if kind == CS_KIND_ENUM {
@@ -4398,6 +4293,19 @@ struct ControlSurfacesSettingsTab: View {
                     displayWiringRows(slot)
                     displayConfigRows()
                     displayPagesSection()
+                } else if isAuxType(Int(b.type)) {
+                    // An aux output owns its pin: live values first, then the
+                    // wiring, timing and power-on behaviour (aux spec §2.1).
+                    auxLiveRows(slot)
+                    pinRows(slot)
+                    flagToggle(slot, CS_FLAG_INVERT,
+                               title: invertTitle(Int(b.type)),
+                               detail: invertDetail(Int(b.type)),
+                               icon: "bolt")
+                    if Int(b.type) == CS_TYPE_AUX_PWM { auxPwmRows(slot) }
+                    csDelayRows(slot)
+                    auxBootRows(slot)
+                    auxDriverRows(slot)
                 } else {
                     nounRow(slot)
                     targetRows(slot)
@@ -4448,7 +4356,7 @@ struct ControlSurfacesSettingsTab: View {
             .help(expanded ? "Collapse" : "Expand")
 
             Menu {
-                ForEach(realTypes, id: \.self) { t in
+                ForEach(typeMenuTypes(forSlot: slot), id: \.self) { t in
                     Button { typeBinding(slot).wrappedValue = t } label: {
                         Label(typeName(t), systemImage: typeIcon(t))
                     }
@@ -4645,7 +4553,7 @@ struct ControlSurfacesSettingsTab: View {
                        icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
                 Picker("", selection: targetChoiceBinding(slot)) {
                     Section(targetNounPlural(nd)) {
-                        ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                        ForEach(targetChoices(nd, noun: Int(drafts[slot].noun)), id: \.self) { t in
                             Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
                     }
@@ -4934,7 +4842,8 @@ struct ControlSurfacesSettingsTab: View {
     /// delay left on any other combination is rejected outright, so the editor
     /// clears the fields whenever an edit moves the binding out of this set.
     private func csDelaysAllowed(type: Int, action: Int) -> Bool {
-        isIndicatorType(type) && (action == CS_ACT_IND_EQUALS || action == CS_ACT_IND_ABOVE)
+        isAuxType(type)
+            || (isIndicatorType(type) && (action == CS_ACT_IND_EQUALS || action == CS_ACT_IND_ABOVE))
     }
 
     /// Indicator condition timing (caps v8, spec §6.5): the raw condition must
@@ -5101,8 +5010,7 @@ struct ControlSurfacesSettingsTab: View {
         let unit = nounUnit(slot)
         let isLog = csUnitIsLog(unit)
         let logMin: Float = 1.0 / 48.0
-        let whole = nounStepsInWholeUnits(Int(drafts[slot].noun))
-        let minStep = isLog ? logMin : (whole ? 1 : unitMinStep(unit))
+        let minStep = isLog ? logMin : unitMinStep(unit)
         let cur = drafts[slot].step == 0 ? csDefaultStep(unit) : csDecodeStep(drafts[slot].step, unit: unit)
         settingRow(title: "Step Size",
                    detail: isLog ? "Ratio per detent/press, in octaves." : "Amount added or removed per detent/press.",
@@ -5113,8 +5021,7 @@ struct ControlSurfacesSettingsTab: View {
                        minValue: minStep,
                        maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
                 var nb = drafts[slot]
-                let clamped = max(minStep, whole ? v.rounded() : v)
-                nb.step = csEncodeStep(clamped, unit: unit)
+                nb.step = csEncodeStep(max(minStep, v), unit: unit)
                 drafts[slot] = nb
             }
         }
@@ -5715,7 +5622,7 @@ struct ControlSurfacesSettingsTab: View {
                         irDrafts[sub] = c
                     })) {
                     Section(targetNounPlural(nd)) {
-                        ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                        ForEach(targetChoices(nd, noun: Int(irDrafts[sub].noun)), id: \.self) { t in
                             Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
                     }
@@ -5774,8 +5681,7 @@ struct ControlSurfacesSettingsTab: View {
         let unit = unitFor(noun: Int(irDrafts[sub].noun))
         let isLog = csUnitIsLog(unit)
         let logMin: Float = 1.0 / 48.0
-        let whole = nounStepsInWholeUnits(Int(irDrafts[sub].noun))
-        let minStep = isLog ? logMin : (whole ? 1 : unitMinStep(unit))
+        let minStep = isLog ? logMin : unitMinStep(unit)
         let cur = irDrafts[sub].step == 0 ? csDefaultStep(unit) : csDecodeStep(irDrafts[sub].step, unit: unit)
         settingRow(title: "Step Size",
                    detail: isLog ? "Ratio per press, in octaves." : "Amount added or removed per press.",
@@ -5785,7 +5691,7 @@ struct ControlSurfacesSettingsTab: View {
                        minValue: minStep,
                        maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
                 var c = irDrafts[sub]
-                c.step = csEncodeStep(max(minStep, whole ? v.rounded() : v), unit: unit)
+                c.step = csEncodeStep(max(minStep, v), unit: unit)
                 irDrafts[sub] = c
             }
         }
@@ -6059,9 +5965,11 @@ struct ControlSurfacesSettingsTab: View {
         return existing == slot
     }
 
-    /// Types offerable when adding a control: hide IR once a receiver exists.
+    /// Types offerable when adding a control: hide IR once a receiver exists,
+    /// and the aux outputs, which the Auxiliary Outputs page adds.
     private var addableTypes: [Int] {
         realTypes.filter {
+            if isAuxType($0) { return false }
             if $0 == CS_TYPE_IR { return irReceiverSlot == nil }
             if $0 == CS_TYPE_DISPLAY { return displaySlot == nil }
             return true
@@ -6225,6 +6133,16 @@ struct ControlSurfacesSettingsTab: View {
             disp.index = UInt8(CS_DISP_MODEL_SSD1306_128X64)
             disp.value = 0   // 0 means the model's conventional address
             return disp
+        }
+        // An aux output is a container too: its pin, and nothing else until
+        // the user sets the sense, delays or boot behaviour.  All-zero extras
+        // means off at power-on, the safe default for an amplifier trigger.
+        if isAuxType(type) {
+            var aux = CsBinding()
+            aux.type = UInt8(type)
+            aux.gpio0 = freePins(slot: slot, adcOnly: false).first ?? (HardwareSettingsTab.validPins.first ?? 0)
+            aux.gpio1 = CS_GPIO_UNUSED
+            return aux
         }
         var b = CsBinding()
         b.type = UInt8(type)
@@ -6787,7 +6705,7 @@ struct ControlSurfacesSettingsTab: View {
                             applyDisplayPage(i, p)
                         })) {
                         Section(targetNounPlural(nd)) {
-                            ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
+                            ForEach(targetChoices(nd, noun: Int(page.noun)), id: \.self) { t in
                                 Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                             }
                         }
@@ -6971,6 +6889,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED_PWM: return "Dimmable LED"
         case CS_TYPE_IR:      return "IR Remote"
         case CS_TYPE_DISPLAY: return "Display"
+        case CS_TYPE_AUX_OUT: return "On/Off Output"
+        case CS_TYPE_AUX_PWM: return "Dimmable Output"
         default:              return "Type \(type)"
         }
     }
@@ -6985,6 +6905,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED_PWM: return "sun.max.fill"
         case CS_TYPE_IR:      return "av.remote"
         case CS_TYPE_DISPLAY: return "display"
+        case CS_TYPE_AUX_OUT: return "power"
+        case CS_TYPE_AUX_PWM: return "sun.max"
         default:              return "dial.medium"
         }
     }
@@ -7001,6 +6923,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED_PWM: return Color(red: 0.90, green: 0.45, blue: 0.20)  // warm orange
         case CS_TYPE_IR:      return Color(red: 0.55, green: 0.35, blue: 0.72)  // violet
         case CS_TYPE_DISPLAY: return Color(red: 0.016, green: 0.522, blue: 0.435) // teal
+        case CS_TYPE_AUX_OUT: return Color(red: 0.478, green: 0.353, blue: 0.675) // purple, as the sidebar
+        case CS_TYPE_AUX_PWM: return Color(red: 0.62, green: 0.40, blue: 0.62)  // mauve
         default:              return Color(red: 0.46, green: 0.53, blue: 0.62)  // slate
         }
     }
@@ -7170,6 +7094,12 @@ struct ControlSurfacesSettingsTab: View {
 
     private func actionPhrase(_ b: CsBinding) -> String {
         if Int(b.type) == CS_TYPE_IR { return "Receives commands from an IR remote." }
+        if isAuxType(Int(b.type)) {
+            let boots = b.extras & CS_AUX_X_BOOT_SAVED != 0 ? "comes back as last saved"
+                      : (b.extras & CS_AUX_X_BOOT_ON != 0 ? "starts on" : "starts off")
+            let what = Int(b.type) == CS_TYPE_AUX_PWM ? "Dimmable output" : "On/off output"
+            return "\(what) on GPIO \(b.gpio0), \(boots)."
+        }
         if Int(b.type) == CS_TYPE_DISPLAY {
             return "\(csDisplayModelName(Int(b.index))) on I2C, address 0x\(String(displayAddress(b), radix: 16, uppercase: true))."
         }
@@ -7396,6 +7326,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_POT:                    return "ADC pin (GPIO 26, 27, or 28), wiper to the pin."
         case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Output pin driving the LED."
         case CS_TYPE_IR:                     return "GPIO wired to the receiver module's OUT (VCC to 3V3, GND to GND)."
+        case CS_TYPE_AUX_OUT:                return "Output pin driving the relay or MOSFET input."
+        case CS_TYPE_AUX_PWM:                return "PWM output pin driving the dimmer or fan input."
         default:                             return "Wired between this GPIO and GND."
         }
     }
@@ -7405,6 +7337,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Active-Low LED"
         case CS_TYPE_POT, CS_TYPE_ENCODER:   return "Pull-Down Wiring"
         case CS_TYPE_IR:                     return "Idle-Low Receiver"
+        case CS_TYPE_AUX_OUT, CS_TYPE_AUX_PWM: return "Active-Low Output"
         default:                             return "Active-High Wiring"
         }
     }
@@ -7419,6 +7352,10 @@ struct ControlSurfacesSettingsTab: View {
             return "Wire the common terminal to 3V3 instead of GND (internal pull-down)."
         case CS_TYPE_IR:
             return "The receiver idles low and pulls high on a mark; default is the usual idle-high, active-low module."
+        case CS_TYPE_AUX_OUT:
+            return "Drive the pin low to switch the load on, which is what most relay and opto-isolator boards expect."
+        case CS_TYPE_AUX_PWM:
+            return "Invert the PWM duty for a driver that switches on when the pin goes low."
         default:
             return "Component wired to 3V3 with the internal pull-down; default is to GND with pull-up."
         }
@@ -7467,15 +7404,6 @@ struct ControlSurfacesSettingsTab: View {
         unit == CS_UNIT_MS ? 0.01 : 0.1
     }
 
-    /// True for a noun whose step must be a whole number of its unit.  The caps
-    /// table has no flag for this, so it is a named exception rather than a
-    /// derived rule: an aux level is whole percent, and the firmware rejects a
-    /// fractional step outright because it would round back onto the live value
-    /// and stall an encoder (aux spec §6.2).
-    private func nounStepsInWholeUnits(_ noun: Int) -> Bool {
-        noun == CS_NOUN_AUX_LEVEL
-    }
-
     /// Why a stored-but-enabled binding isn't running (from its slot health code).
     private func inactiveReason(_ slot: Int) -> String {
         let code = vm.csStatus.slotHealth(slot)
@@ -7498,7 +7426,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_PENDING:         return ("Still applying, please retry", true)
         case CS_STATUS_INVALID_TARGET:  return ("The selected channel or band isn't valid for this function", true)
         case CS_STATUS_INVALID_EVENT:   return ("That press gesture isn't allowed here", true)
-        case CS_STATUS_PWM_CONFLICT:    return ("This PWM LED pin conflicts with another dimmable LED", true)
+        case CS_STATUS_PWM_CONFLICT:    return ("This PWM pin conflicts with another dimmable LED or output", true)
         case CS_STATUS_EVENT_IN_USE:    return ("Another button already uses this GPIO and gesture", true)
         case CS_STATUS_BUSY:            return ("The device was busy; please try again", true)
         case CS_STATUS_FLASH_ERROR:     return ("The device could not write to flash", true)
@@ -7511,7 +7439,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_PIN_NOT_I2C:     return ("SDA and SCL must be an even/odd GPIO pair on the same I2C bus", true)
         case CS_STATUS_I2C_IN_USE:      return ("That I2C bus belongs to the I2C control interface", true)
         case CS_STATUS_INVALID_PAGE:    return ("That display page isn't valid", true)
-        case CS_STATUS_INVALID_AUX:     return ("That auxiliary output doesn't exist on this device", true)
+        case CS_STATUS_INVALID_AUX:     return ("The target isn't an auxiliary output, or a level control needs a dimmable one", true)
         default:                        return ("Failed to apply the binding", true)
         }
     }

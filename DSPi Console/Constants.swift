@@ -790,9 +790,10 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // (max_groups / max_macros / max_macro_steps).  See
 // control_surfaces_groups_macros_spec.md.  v10-v13 add the I2C display bundle
 // (see control_surfaces_display_spec.md), v14-v16 append the subharmonic
-// synthesizer nouns and widen three of their ranges, and v17 adds the
-// auxiliary outputs on commands 0x02-0x07 and nouns 68-69 (see
-// control_surfaces_aux_spec.md).  No caps header field is added after v9.
+// synthesizer nouns and widen three of their ranges.  v17 never shipped; v18
+// adds the auxiliary output component types (CS_TYPE_AUX_OUT / _PWM, commands
+// 0x04-0x07, nouns 68-69; see control_surfaces_aux_spec.md).  No caps header
+// field is added after v9: the type table simply grows.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
@@ -827,20 +828,17 @@ let REQ_SET_CS_DISPLAY_PAGE: UInt8   = 0x29   // OUT 4 bytes: CsDisplayPage, wVa
 let REQ_GET_CS_DISPLAY_PAGE: UInt8   = 0x2A   // IN 4 bytes: CsDisplayPage, wValue = page
 let REQ_GET_CS_DISPLAY_STATUS: UInt8 = 0x2B   // IN 8 bytes: CsDisplayStatus
 
-// Auxiliary outputs (caps v17; control_surfaces_aux_spec.md).  Eight
-// device-global on/off + level values the firmware attaches no meaning to,
-// addressed through the new CS_TARGET_AUX target kind.  Nothing here claims a
-// GPIO: a pin follows an aux only when the user binds an ordinary LED (state)
-// or PWM LED (level) to one of the two nouns, which is what turns an aux into
-// a relay driver or a lamp dimmer.  The config SET is deferred and covered by
-// the shared Save / Revert; the two runtime SETs apply in the handler with no
-// flash write, so a front-panel toggle never stalls the audio clocks.
-let REQ_SET_CS_AUX_CFG: UInt8   = 0x02   // OUT 36 bytes: CsAuxCfg, wValue = aux (0-7); deferred preview
-let REQ_GET_CS_AUX_CFG: UInt8   = 0x03   // IN 36 bytes: live CsAuxCfg, wValue = aux
-let REQ_SET_CS_AUX_STATE: UInt8 = 0x04   // OUT 1 byte (non-zero = on), wValue = aux; immediate
-let REQ_GET_CS_AUX_STATE: UInt8 = 0x05   // IN 1 byte, wValue = aux; wValue 0xFFFF -> 16 bytes (all states then levels)
-let REQ_SET_CS_AUX_LEVEL: UInt8 = 0x06   // OUT 1 byte 0..100, wValue = aux; immediate
-let REQ_GET_CS_AUX_LEVEL: UInt8 = 0x07   // IN 1 byte, wValue = aux
+// Auxiliary outputs (caps v18; control_surfaces_aux_spec.md).  An output is a
+// CS_TYPE_AUX_OUT / CS_TYPE_AUX_PWM binding that owns its GPIO, so its pin,
+// name and boot behaviour travel in the ordinary binding and name SETs.  Only
+// the two live values have commands, keyed by binding slot; both apply in the
+// firmware's handler with no flash write, so a front-panel toggle never stalls
+// the audio clocks.  On USB a rejected write is acknowledged and reported only
+// through REQ_GET_CS_STATUS (CS_STATUS_INVALID_AUX).
+let REQ_SET_CS_AUX_STATE: UInt8 = 0x04   // OUT 1 byte (non-zero = on), wValue = slot; immediate
+let REQ_GET_CS_AUX_STATE: UInt8 = 0x05   // IN 1 byte, wValue = slot; wValue 0xFFFF -> 48 bytes (16 states, 16 x 8.8 levels LE)
+let REQ_SET_CS_AUX_LEVEL: UInt8 = 0x06   // OUT 2 bytes 8.8 percent LE, wValue = slot (AUX_PWM only); immediate
+let REQ_GET_CS_AUX_LEVEL: UInt8 = 0x07   // IN 2 bytes 8.8 percent LE, wValue = slot
 
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
@@ -866,7 +864,7 @@ let CS_STATUS_DISPLAY_IN_USE: UInt8  = 0x22   // another slot already holds the 
 let CS_STATUS_PIN_NOT_I2C: UInt8     = 0x23   // SDA/SCL are not a valid same-instance pair
 let CS_STATUS_I2C_IN_USE: UInt8      = 0x24   // that I2C instance belongs to the control interface
 let CS_STATUS_INVALID_PAGE: UInt8    = 0x25   // display config or page record invalid
-let CS_STATUS_INVALID_AUX: UInt8     = 0x26   // aux index >= 8 on an aux config or runtime write
+let CS_STATUS_INVALID_AUX: UInt8     = 0x26   // target slot is not an aux output (or not a dimmable one for the level noun)
 
 // Limits / sentinels (spec §2).
 let CS_MAX_BINDINGS: Int       = 16
@@ -892,10 +890,6 @@ let CS_LAST_SLOT_GROUP_FLAG: UInt8 = 0x40
 let CS_LAST_SLOT_MACRO_FLAG: UInt8 = 0x60
 /// `lastSlot` for the display: 0x50 bare for the config, 0x50 | page for a page.
 let CS_LAST_SLOT_DISPLAY_FLAG: UInt8 = 0x50
-/// `lastSlot` for an auxiliary output: 0x70 | aux, so an aux config apply is
-/// tellable from a binding slot, a group, a macro, the display and an IR
-/// sub-slot in the one shared status channel (aux spec 3.1).
-let CS_LAST_SLOT_AUX_FLAG: UInt8 = 0x70
 
 // Target group / macro limits (caps v9).  The device reports its own in the
 // caps header (`maxGroups` / `maxMacros` / `maxMacroSteps`); these are the wire
@@ -921,25 +915,22 @@ let CS_DISPLAY_STATUS_LEN: UInt16   = 8
 // I2C display (caps v10; display spec §1).
 let CS_MAX_DISPLAY_PAGES: Int = 16
 
-// Auxiliary outputs (caps v17).  The count is not in the caps header: a host
-// learns the outputs exist from the version byte and how many there are from
-// `targetCount` on the two aux noun descriptors, so this is only the wire
-// maximum the app allocates for (aux spec 2.4).
-let CS_MAX_AUX: Int             = 8
-let CS_AUX_CFG_LEN: UInt16      = 36   // CsAuxCfg, identical on the wire and in flash
-let CS_AUX_CONFIG_VERSION: UInt8 = 1   // CsAuxConfig.version (the flash block)
-/// `REQ_GET_CS_AUX_STATE` wValue that reads all sixteen values in one transfer:
-/// eight states followed by eight levels.
+// Auxiliary outputs (caps v18; aux spec 2.2 / 3.3).  One output per binding
+// slot, so the wire maximum is CS_MAX_BINDINGS and needs no constant of its own.
+/// `REQ_GET_CS_AUX_STATE` wValue that reads every slot's state and level in
+/// one 48-byte transfer.
 let CS_AUX_STATE_ALL: UInt16    = 0xFFFF
-/// An aux level is whole percent; the firmware clamps above this.
-let CS_AUX_LEVEL_MAX: UInt8     = 100
+/// Levels are 8.8 percent; the firmware clamps above 100 %.
+let CS_AUX_LEVEL_MAX_Q8: UInt16 = 25600
 
-/// `CsAuxCfg.bootMode`.  Both modes boot from `bootState` / `bootLevel`; the
-/// mode only decides whether a save rewrites those two fields from the live
-/// values first.  There is deliberately no "remember on every change": a flash
-/// write freezes the audio clocks for about 44 ms (aux spec 2.3 / 4).
-let CS_AUX_BOOT_FIXED: UInt8 = 0
-let CS_AUX_BOOT_SAVED: UInt8 = 1
+/// `CsBinding.extras` bits on an aux slot.  Both boot modes come up from
+/// BOOT_ON and `value`; BOOT_SAVED only makes a save rewrite those from the
+/// live values first.  There is deliberately no "remember on every change": a
+/// flash write freezes the audio clocks for about 44 ms (aux spec 4).
+let CS_AUX_X_BOOT_ON: UInt8    = 0x01   // boot with the output on
+let CS_AUX_X_BOOT_SAVED: UInt8 = 0x02   // REQ_CS_SAVE folds the live flag / level into the boot fields
+let CS_AUX_X_LINEAR: UInt8     = 0x04   // AUX_PWM: linear duty instead of the squared perceptual curve
+let CS_AUX_X_MASK: UInt8       = 0x07
 
 // Display models - CsBinding.index on a CS_TYPE_DISPLAY slot.  Wire and flash
 // persistent, so these are never renumbered.  Geometry and bus speed are fixed
@@ -1053,6 +1044,8 @@ let CS_TYPE_LED: Int      = 5
 let CS_TYPE_LED_PWM: Int  = 6   // hardware-PWM-dimmed LED (IND_LEVEL meter)
 let CS_TYPE_IR: Int       = 7   // IR remote receiver (container: one pin + learned command sub-slots)
 let CS_TYPE_DISPLAY: Int  = 8   // I2C character/OLED display (container: SDA + SCL, model, address)
+let CS_TYPE_AUX_OUT: Int  = 9   // auxiliary on/off output (container: one output pin; caps v18)
+let CS_TYPE_AUX_PWM: Int  = 10  // auxiliary dimmable output (container: one PWM pin; caps v18)
 
 // CsNoun (firmware parameter driven or shown).  Append-only (v2 = 35 nouns,
 // v4 = 49, v7 = 51); the app reads the live count and per-noun descriptors from
@@ -1147,12 +1140,11 @@ let CS_NOUN_SUBHARM_SOLO: Int       = 67   // bool: monitor the synthesized sub 
 // Caps v16 changes no nouns: it only widens the three band-level nouns above
 // from +6 to +12 dB, matching SUBHARM_LEVEL_MAX.  The app takes noun ranges
 // from the device caps table, so nothing here gates on it.
-// Caps v17 additions (aux spec 1.1): eight device-global user values with no
-// audio meaning, on the CS_TARGET_AUX target kind.  Neither noun claims a pin;
-// an LED bound to AUX (IND_EQUALS, value 1) or a PWM LED bound to AUX_LEVEL
-// (IND_LEVEL) is what puts one on a GPIO.  Groups are rejected on both.
+// Caps v18 (aux spec 1.2): both nouns target the binding slot holding a
+// CS_TYPE_AUX_* component; AUX_LEVEL needs the PWM kind.  Groups are rejected
+// on both.
 let CS_NOUN_AUX: Int                = 68   // bool: auxiliary output on/off
-let CS_NOUN_AUX_LEVEL: Int          = 69   // continuous percent 0..100, whole steps only
+let CS_NOUN_AUX_LEVEL: Int          = 69   // continuous percent 0..100 (8.8, any step)
 /// `CS_NOUN_MACRO` live value while no macro is running (also
 /// `CsExtStatusPacket.macroRunning` when idle).
 let CS_MACRO_NONE: UInt8            = 0xFF
@@ -1249,7 +1241,7 @@ let CS_TARGET_INPUT_CH: UInt8  = 1   // target = input channel 0..N-1
 let CS_TARGET_OUTPUT_CH: UInt8 = 2   // target = output channel 0..N-1
 let CS_TARGET_DSP_CH: UInt8    = 3   // target = DSP channel (inputs first, then outputs)
 let CS_TARGET_DSP_BAND: UInt8  = 4   // target = DSP channel, index = filter band
-let CS_TARGET_AUX: UInt8       = 5   // target = auxiliary output 0..7 (caps v17)
+let CS_TARGET_AUX: UInt8       = 5   // target = binding slot 0..15 holding an aux output (caps v18)
 
 // CsNounDesc.dflags bitfield.
 let CS_NDF_DEFERRED: UInt8 = 0x01   // apply is deferred; the engine steps from a target shadow

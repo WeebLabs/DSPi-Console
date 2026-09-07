@@ -464,7 +464,10 @@ struct CsBinding: Equatable {
     // anything else must write 0 or the device rejects the binding.
     var onDelay: UInt16 = 0       // Bytes 18-19
     var offDelay: UInt16 = 0      // Bytes 20-21
-    // Bytes 22-23: reserved2[2] (0)
+    // Byte 22: type-extras flags (caps v18).  CS_AUX_X_* on an aux output
+    // slot; every other type must write 0 or the device rejects the binding.
+    var extras: UInt8 = 0
+    // Byte 23: reserved2 (0)
 
     /// True when the slot holds a component (not CS_TYPE_NONE).
     var isConfigured: Bool { type != UInt8(CS_TYPE_NONE) }
@@ -497,7 +500,8 @@ struct CsBinding: Equatable {
         }
         putU16(onDelay, 18)
         putU16(offDelay, 20)
-        // 22-23 reserved2 (0)
+        d[22] = extras
+        // 23 reserved2 (0)
         return d
     }
 
@@ -517,7 +521,7 @@ struct CsBinding: Equatable {
             event: data[b + 6], target: data[b + 7], index: data[b + 8],
             baseBright: data[b + 9],
             value: i16(10), step: i16(12), rangeMin: i16(14), rangeMax: i16(16),
-            onDelay: u16(18), offDelay: u16(20))
+            onDelay: u16(18), offDelay: u16(20), extras: data[b + 22])
     }
 }
 
@@ -776,44 +780,6 @@ private func csReadName(_ data: Data, at offset: Int, length: Int = CS_NAME_LEN)
 /// firmware does on its side.
 private func csWriteName(_ name: String, into d: inout Data, at offset: Int, length: Int = CS_NAME_LEN) {
     for (i, byte) in name.utf8.prefix(length - 1).enumerated() { d[offset + i] = byte }
-}
-
-/// One auxiliary output's config (36 bytes; aux spec §2.1).  Identical on the
-/// wire and in flash.  This is the *configuration* only: the live `state` and
-/// `level` are runtime values that never reach flash on change and are not part
-/// of the unsaved-changes picture, which is what keeps a front-panel toggle
-/// from looking like an unsaved edit (and a Revert from clicking a relay).
-/// An all-zero record is the safe default: off, 0 %, unnamed and boot-fixed.
-struct CsAuxCfg: Equatable {
-    var bootMode: UInt8 = 0    // Byte 0: CS_AUX_BOOT_FIXED / _SAVED
-    var bootState: UInt8 = 0   // Byte 1: 0/1, applied at boot in both modes
-    var bootLevel: UInt8 = 0   // Byte 2: 0..100, applied at boot in both modes
-    // Byte 3: reserved (must be 0)
-    var name: String = ""      // Bytes 4-35: NUL-terminated user label
-
-    /// True when the record says anything at all.  Unlike a binding there is no
-    /// "empty slot" on the wire - every aux output always exists - so this only
-    /// decides whether the editor shows the slot as one the user has set up.
-    var isConfigured: Bool { self != CsAuxCfg() }
-    var bootsOn: Bool { bootState != 0 }
-    var remembersLastState: Bool { bootMode == CS_AUX_BOOT_SAVED }
-
-    func toData() -> Data {
-        var d = Data(count: Int(CS_AUX_CFG_LEN))
-        d[0] = bootMode
-        d[1] = bootState
-        d[2] = min(bootLevel, CS_AUX_LEVEL_MAX)
-        // 3 reserved (0)
-        csWriteName(name, into: &d, at: 4)
-        return d
-    }
-
-    static func fromData(_ data: Data) -> CsAuxCfg? {
-        guard data.count >= Int(CS_AUX_CFG_LEN) else { return nil }
-        let b = data.startIndex
-        return CsAuxCfg(bootMode: data[b + 0], bootState: data[b + 1],
-                        bootLevel: data[b + 2], name: csReadName(data, at: 4))
-    }
 }
 
 /// One target group (40 bytes; groups+macros spec §2.1).  `targetKind` picks
@@ -1735,33 +1701,25 @@ class DSPViewModel: ObservableObject {
         let n = Int(csDisplayMaxPages)
         return n > 0 ? min(n, CS_MAX_DISPLAY_PAGES) : CS_MAX_DISPLAY_PAGES
     }
-    // Auxiliary outputs (caps v17).  Eight device-global user values with no
-    // audio meaning: `csAuxCfgs` is configuration under the shared Save /
-    // Revert, while `csAuxState` and `csAuxLevel` are runtime values that
-    // change instantly, never reach flash on change, and are pushed back by
-    // NOTIFY_EVT_CS_AUX whenever anything moves one.  See
+    // Auxiliary outputs (caps v18).  An output is a CS_TYPE_AUX_OUT / _PWM
+    // binding, so its config lives in `csBindings` / `csNames` under the shared
+    // Save / Revert.  Only the live on/off flag and 8.8 level are here, indexed
+    // by binding slot: runtime values that never reach flash on change and are
+    // pushed back by NOTIFY_EVT_CS_AUX whenever anything moves one.  See
     // control_surfaces_aux_spec.md.
-    @Published var csAuxCfgs: [CsAuxCfg] = Array(repeating: CsAuxCfg(), count: CS_MAX_AUX)
-    @Published var csAuxState: [Bool] = Array(repeating: false, count: CS_MAX_AUX)
-    @Published var csAuxLevel: [UInt8] = Array(repeating: 0, count: CS_MAX_AUX)
-    /// True when the firmware exposes the auxiliary outputs.  No caps header
-    /// field is added for them, so the version byte is the only signal: a
-    /// pre-v17 device STALLs 0x02-0x07 and has no nouns 68-69 (aux spec §2.4).
-    var csAuxSupported: Bool { csCaps.capsVersion >= 17 }
-    /// How many outputs this device offers, taken from the aux noun's
-    /// `targetCount` as the spec directs, falling back to the wire maximum.
-    var csAuxCount: Int {
-        guard csAuxSupported else { return 0 }
-        let n = Int(csNounDescs.indices.contains(CS_NOUN_AUX) ? csNounDescs[CS_NOUN_AUX].targetCount : 0)
-        return min(n > 0 ? n : CS_MAX_AUX, CS_MAX_AUX)
+    @Published var csAuxState: [Bool] = Array(repeating: false, count: CS_MAX_BINDINGS)
+    @Published var csAuxLevel: [UInt16] = Array(repeating: 0, count: CS_MAX_BINDINGS)
+    /// True when the firmware has the aux component types.  The type table is
+    /// the signal; a pre-v18 device STALLs 0x04-0x07 anyway (aux spec §2.3).
+    var csAuxSupported: Bool {
+        csCaps.capsVersion >= 18 && csCaps.typeCount > UInt8(CS_TYPE_AUX_PWM)
     }
 
-    /// Display name for an aux output, falling back to its index when unnamed -
-    /// the same "Aux N" the device's own display pages use (aux spec §6.3).
-    func csAuxName(_ index: Int) -> String {
-        guard csAuxCfgs.indices.contains(index) else { return "Aux \(index + 1)" }
-        let n = csAuxCfgs[index].name
-        return n.isEmpty ? "Aux \(index + 1)" : n
+    /// Display name for an aux output: its slot name, else the "Aux N" the
+    /// device's own display pages use, with N = slot + 1 (aux spec §6.4).
+    func csAuxName(_ slot: Int) -> String {
+        if csNames.indices.contains(slot), !csNames[slot].isEmpty { return csNames[slot] }
+        return "Aux \(slot + 1)"
     }
 
     /// The slot holding the display component, if one is configured.
@@ -1799,11 +1757,6 @@ class DSPViewModel: ObservableObject {
     private var csCleanMacros: [CsMacro]? = nil
     private var csCleanDisplayCfg: CsDisplayCfg? = nil
     private var csCleanDisplayPages: [CsDisplayPage]? = nil
-    // Only the aux *config* is part of the baseline.  The live state and level
-    // are deliberately outside it: toggling an output must never raise the
-    // unsaved-changes banner, and a Revert leaves them alone rather than
-    // clicking a relay (aux spec §4).
-    private var csCleanAuxCfgs: [CsAuxCfg]? = nil
 
     /// True when the live Control Surfaces config has unsaved preview changes.
     /// Requires the firmware's sticky dirty flag AND a real difference from the
@@ -1816,8 +1769,7 @@ class DSPViewModel: ObservableObject {
               let cleanNames = csCleanNames, let cleanGroups = csCleanGroups,
               let cleanMacros = csCleanMacros,
               let cleanDisplayCfg = csCleanDisplayCfg,
-              let cleanDisplayPages = csCleanDisplayPages,
-              let cleanAuxCfgs = csCleanAuxCfgs else {
+              let cleanDisplayPages = csCleanDisplayPages else {
             return true   // no known-clean baseline: defer to the firmware flag
         }
         // Groups and macros share the one dirty flag and the one Save, so an
@@ -1825,7 +1777,6 @@ class DSPViewModel: ObservableObject {
         return csBindings != cleanBindings || csIrCommands != cleanIr || csNames != cleanNames
             || csGroups != cleanGroups || csMacros != cleanMacros
             || csDisplayCfg != cleanDisplayCfg || csDisplayPages != cleanDisplayPages
-            || csAuxCfgs != cleanAuxCfgs
     }
 
     /// Record the current live config as the clean (== flash) baseline.  Call
@@ -1839,7 +1790,6 @@ class DSPViewModel: ObservableObject {
         csCleanMacros = csMacros
         csCleanDisplayCfg = csDisplayCfg
         csCleanDisplayPages = csDisplayPages
-        csCleanAuxCfgs = csAuxCfgs
     }
 
     // Test signal generator (siggen) - onboard measurement/diagnostic signals
@@ -2663,13 +2613,13 @@ class DSPViewModel: ObservableObject {
             self.pollQueue.async { self.fetchAdatInputStatus() }
         }
 
-        // Auxiliary-output pushes (caps v17).  Every state or level change is
-        // announced, whoever made it, and the 8-byte event carries both values,
+        // Auxiliary-output pushes (caps v18).  Every state or level change is
+        // announced, whoever made it, and the 9-byte event carries both values,
         // so this needs no read-back at all - which matters because a panel
         // button switching a relay must show up here without polling.
-        AppState.shared.interruptMonitor.onCsAux = { [weak self] aux, state, level, _ in
-            guard let self = self, aux < UInt8(CS_MAX_AUX) else { return }
-            let i = Int(aux)
+        AppState.shared.interruptMonitor.onCsAux = { [weak self] slot, state, level, _ in
+            guard let self = self, slot < UInt8(CS_MAX_BINDINGS) else { return }
+            let i = Int(slot)
             if self.csAuxState[i] != state { self.csAuxState[i] = state }
             if self.csAuxLevel[i] != level { self.csAuxLevel[i] = level }
         }

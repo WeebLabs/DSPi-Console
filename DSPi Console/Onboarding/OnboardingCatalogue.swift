@@ -252,7 +252,7 @@ enum OnboardingCatalogue {
             "One control, several actions. A macro runs a short list of steps in order, with optional delays, so a single button press can change volume, switch a preset and mute an output together.",
             { $0.controlSurfacesSupported }),
         jit("aux-outputs", "Auxiliary Outputs",
-            "Eight on/off switches with a level, that the DSPi itself makes no use of. They exist so a front-panel button or remote key can drive something the device knows nothing about - an amplifier trigger, a speaker relay, a panel lamp. An output only reaches a pin once you add an LED control that follows it.",
+            "A GPIO the DSPi switches or dims for you and never reads itself: an amplifier trigger, a speaker relay, a panel lamp, a fan. Add one here on a spare pin, then point a button, knob, remote key or macro at it from the Control Surfaces page.",
             { $0.csAuxSupported }),
         jit("channel-groups", "Channel Groups",
             "Groups let one control move several channels at once, keeping their relative levels or setting them all to the same value. Useful when a pair of speakers should always track together.",

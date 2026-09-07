@@ -2582,10 +2582,8 @@ extension DSPViewModel {
             for i in 0..<min(Int(pages), CS_MAX_DISPLAY_PAGES) { fetchCsDisplayPage(i) }
             fetchCsDisplayStatus()
         }
-        // Auxiliary outputs (caps v17).  No caps header field counts them, so
-        // the version byte is the gate; a pre-v17 device STALLs these anyway.
-        if caps.capsVersion >= 17 {
-            for a in 0..<CS_MAX_AUX { fetchCsAuxCfg(a) }
+        // Auxiliary outputs (caps v18): the component types are the gate.
+        if caps.typeCount > UInt8(CS_TYPE_AUX_PWM) {
             fetchCsAuxValues()
         }
         // Runs after every fetch above (all dispatch to main in FIFO order): if
@@ -2673,6 +2671,9 @@ extension DSPViewModel {
         usb.sendControlRequest(request: REQ_SET_CS_BINDING, value: UInt16(slot), index: 2, data: binding.toData())
         let result = pollCsDeferred(expectedSlot: UInt8(slot))
         fetchCsBinding(slot: slot)
+        // An aux slot that appeared, changed kind or went away moves its live
+        // on/off flag and level (a same-type edit keeps them; aux spec 4).
+        fetchCsAuxValues()
         fetchCsStatus()
         return result
     }
@@ -2721,10 +2722,10 @@ extension DSPViewModel {
         // subsequent net-zero churn doesn't re-strand the banner.
         if result == PIN_CONFIG_SUCCESS {
             // A save folds the live state and level into the boot fields of
-            // every CS_AUX_BOOT_SAVED slot (aux spec 4), so those records
-            // changed underneath us.  Re-read them before rebasing or the next
-            // refresh would read as an unsaved edit.
-            for a in 0..<CS_MAX_AUX { fetchCsAuxCfg(a) }
+            // every boot-saved aux slot's binding (aux spec 4), so those
+            // records changed underneath us.  Re-read the bindings before
+            // rebasing or the next refresh would read as an unsaved edit.
+            for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
             DispatchQueue.main.async { self.captureCsCleanSnapshot() }
         }
         return result
@@ -2756,10 +2757,10 @@ extension DSPViewModel {
         let pages = fetchCsDisplayCfg()
         for i in 0..<min(Int(pages), CS_MAX_DISPLAY_PAGES) { fetchCsDisplayPage(i) }
         fetchCsDisplayStatus()
-        // Revert reloads the stored aux config (names, boot mode, boot values)
-        // and deliberately leaves the live state and level alone, so nothing
-        // here re-reads those: a revert must not click a relay (aux spec 4).
-        for a in 0..<CS_MAX_AUX { fetchCsAuxCfg(a) }
+        // Revert carries each aux output's live value across when its slot
+        // reloads with the same type, but a slot whose type changed comes up at
+        // its boot value, so the live picture has to be re-read (aux spec 4).
+        fetchCsAuxValues()
         fetchCsStatus()
         // Live now mirrors flash again; rebase the clean baseline after the
         // re-fetches above land (FIFO on main).
@@ -2767,75 +2768,52 @@ extension DSPViewModel {
         return result
     }
 
-    // MARK: - Control Surfaces: auxiliary outputs (caps v17)
+    // MARK: - Control Surfaces: auxiliary outputs (caps v18)
     //
-    // Eight device-global on/off + level values the firmware attaches no
-    // meaning to.  The config (name, boot behaviour) is deferred and shares the
-    // bindings' Save / Revert; the two runtime values apply in the handler with
-    // no flash write, so a toggle costs nothing and is safe to drive from a
-    // front-panel button.  See control_surfaces_aux_spec.md.
-
-    /// Read one live 36-byte aux config record into `csAuxCfgs[aux]`.
-    func fetchCsAuxCfg(_ aux: Int) {
-        guard aux >= 0, aux < CS_MAX_AUX,
-              let d = usb.getControlRequest(request: REQ_GET_CS_AUX_CFG, value: UInt16(aux), index: 2, length: CS_AUX_CFG_LEN),
-              let cfg = CsAuxCfg.fromData(d) else { return }
-        DispatchQueue.main.async {
-            if aux < self.csAuxCfgs.count { self.csAuxCfgs[aux] = cfg }
-        }
-    }
+    // An aux output is a CS_TYPE_AUX_OUT / CS_TYPE_AUX_PWM binding: its pin,
+    // name and boot behaviour go through the ordinary binding and name SETs.
+    // Only the two live values have commands of their own, applied in the
+    // firmware's handler with no flash write.  See control_surfaces_aux_spec.md.
 
     /// Read every live state and level in one transfer (0x05 with wValue
-    /// 0xFFFF): eight state bytes followed by eight level bytes.  One call
-    /// gives the whole aux picture at connect, after which NOTIFY_EVT_CS_AUX
-    /// keeps it current (aux spec 3.3).
+    /// 0xFFFF): sixteen state bytes, then sixteen little-endian 8.8 levels.
+    /// Slots that are not an up aux output read zero (aux spec 3.3).  A
+    /// pre-v18 device STALLs and the arrays keep their zeros.
     func fetchCsAuxValues() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_AUX_STATE, value: CS_AUX_STATE_ALL, index: 2, length: 16),
-              d.count >= 16 else { return }
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_AUX_STATE, value: CS_AUX_STATE_ALL, index: 2, length: 48),
+              d.count >= 48 else { return }
         let b = d.startIndex
-        let states = (0..<CS_MAX_AUX).map { d[b + $0] != 0 }
-        let levels = (0..<CS_MAX_AUX).map { min(d[b + CS_MAX_AUX + $0], CS_AUX_LEVEL_MAX) }
+        let states = (0..<CS_MAX_BINDINGS).map { d[b + $0] != 0 }
+        let levels = (0..<CS_MAX_BINDINGS).map { i -> UInt16 in
+            let off = b + CS_MAX_BINDINGS + 2 * i
+            return min(UInt16(d[off]) | (UInt16(d[off + 1]) << 8), CS_AUX_LEVEL_MAX_Q8)
+        }
         DispatchQueue.main.async {
             self.csAuxState = states
             self.csAuxLevel = levels
         }
     }
 
-    /// Apply one aux config (live-only preview, deferred like a binding; aux
-    /// spec 3.1).  The outcome lands in the shared status channel tagged
-    /// `0x70 | aux`, which is how it stays tellable from a binding slot.
-    /// Returns the PIN_CONFIG_* / CS_STATUS_* result.  USB-only; must be called
-    /// off the main thread (blocks on the poll).
-    @discardableResult
-    func setCsAuxCfg(_ aux: Int, cfg: CsAuxCfg) -> UInt8 {
-        guard aux >= 0, aux < CS_MAX_AUX else { return CS_STATUS_INVALID_AUX }
-        usb.sendControlRequest(request: REQ_SET_CS_AUX_CFG, value: UInt16(aux), index: 2, data: cfg.toData())
-        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_AUX_FLAG | UInt8(aux))
-        fetchCsAuxCfg(aux)
-        fetchCsStatus()
-        return result
-    }
-
     /// Switch one aux output on or off.  Applied in the firmware's handler with
     /// no flash write and no dirty flag, so this is a plain fire-and-forget SET
     /// like a volume change; the device echoes it back on NOTIFY_EVT_CS_AUX.
-    func setCsAuxState(_ aux: Int, on: Bool) {
-        guard aux >= 0, aux < CS_MAX_AUX else { return }
-        self.csAuxState[aux] = on
+    func setCsAuxState(_ slot: Int, on: Bool) {
+        guard slot >= 0, slot < CS_MAX_BINDINGS else { return }
+        self.csAuxState[slot] = on
         guard csAuxSupported else { return }
-        usb.sendControlRequest(request: REQ_SET_CS_AUX_STATE, value: UInt16(aux), index: 2,
+        usb.sendControlRequest(request: REQ_SET_CS_AUX_STATE, value: UInt16(slot), index: 2,
                                data: Data([on ? 1 : 0]))
     }
 
-    /// Set one aux output's level in whole percent (the firmware clamps above
-    /// 100).  Immediate, like the state above.
-    func setCsAuxLevel(_ aux: Int, level: UInt8) {
-        guard aux >= 0, aux < CS_MAX_AUX else { return }
-        let clamped = min(level, CS_AUX_LEVEL_MAX)
-        self.csAuxLevel[aux] = clamped
+    /// Set a dimmable output's level in percent.  8.8 on the wire, clamped to
+    /// 100 %; immediate, like the state above.
+    func setCsAuxLevel(_ slot: Int, percent: Float) {
+        guard slot >= 0, slot < CS_MAX_BINDINGS else { return }
+        let q8 = UInt16(min(Float(CS_AUX_LEVEL_MAX_Q8), max(0, (percent * 256).rounded())))
+        self.csAuxLevel[slot] = q8
         guard csAuxSupported else { return }
-        usb.sendControlRequest(request: REQ_SET_CS_AUX_LEVEL, value: UInt16(aux), index: 2,
-                               data: Data([clamped]))
+        usb.sendControlRequest(request: REQ_SET_CS_AUX_LEVEL, value: UInt16(slot), index: 2,
+                               data: Data([UInt8(q8 & 0xFF), UInt8(q8 >> 8)]))
     }
 
     // MARK: - Control Surfaces: target groups and macros (caps v9)
