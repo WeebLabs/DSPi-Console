@@ -62,6 +62,11 @@ class AppSettings: ObservableObject {
     @AppStorage("rtaFloorDB") var rtaFloorDB: Double = -90.0
     @AppStorage("rtaCeilingDB") var rtaCeilingDB: Double = 6.0
     @AppStorage("rtaShowPeakHold") var rtaShowPeakHold: Bool = true
+    /// How much of the gap between device frames to interpolate across, as a
+    /// fraction of the channel rotation interval.  0 draws the numbers as they
+    /// arrive, which steps visibly once more than a couple of channels share
+    /// the rotation.
+    @AppStorage("rtaSmoothing") var rtaSmoothing: Double = 0.6
     @AppStorage("rtaFftOrder") var rtaFftOrder: Int = 10
     @AppStorage("rtaLfMode") var rtaLfMode: Int = 2
     @AppStorage("rtaAvgMs") var rtaAvgMs: Int = 300
@@ -1512,6 +1517,21 @@ struct SpectrumSettingsTab: View {
                     }
                 }
                 .toggleStyle(.switch)
+                .padding(.vertical, 4)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Smoothing").font(.body)
+                    Picker("", selection: $settings.rtaSmoothing) {
+                        Text("Off").tag(0.0)
+                        Text("Light").tag(0.35)
+                        Text("Medium").tag(0.6)
+                        Text("Heavy").tag(1.0)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text("Glides the bars between device frames the way the peak meters glide between polls. It matters most with several channels selected, where one channel refreshes only every few hundred milliseconds and the bars would otherwise step.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
                 .padding(.vertical, 4)
             } header: {
                 Label("Where It Appears", systemImage: "rectangle.3.group")

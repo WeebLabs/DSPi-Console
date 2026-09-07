@@ -336,6 +336,169 @@ final class RtaWireTests: XCTestCase {
         XCTAssertNotEqual(RtaOptions(fftOrder: 9), RtaOptions(fftOrder: 10))
     }
 
+    // MARK: - Which bands the transform can measure
+
+    /// A third-octave band near the bottom of the scale is narrower than one
+    /// FFT bin, so it contains no bin and can only read the floor.  The gaps
+    /// are patchy rather than a clean cutoff, which is why the display cannot
+    /// work from `RtaStatus.fastFirstBand` alone.
+    func testBandsWithNoBinAt48kAnd1024Points() {
+        // Bin spacing is 46.875 Hz here.
+        let empty: [Double] = [20, 25, 31.5, 40, 63, 80, 125, 160]
+        let filled: [Double] = [50, 100, 200, 250, 500, 1000, 4000, 16000]
+        for hz in empty {
+            XCTAssertFalse(rtaBandHasBin(centreHz: hz, sampleRateHz: 48000, fftOrder: 10),
+                           "the \(hz) Hz band holds no bin at 1024 points / 48 kHz")
+        }
+        for hz in filled {
+            XCTAssertTrue(rtaBandHasBin(centreHz: hz, sampleRateHz: 48000, fftOrder: 10),
+                          "the \(hz) Hz band does hold a bin at 1024 points / 48 kHz")
+        }
+    }
+
+    /// 50 Hz is the band the user notices, because it works while the 40 Hz
+    /// band directly below it does not: bin 1 lands at 46.875 Hz, inside the
+    /// 50 Hz band's 44.5-56.1 Hz span and above the 40 Hz band's 44.9 Hz top.
+    func testFortyHertzIsEmptyWhileFiftyIsNot() {
+        XCTAssertFalse(rtaBandHasBin(centreHz: 40, sampleRateHz: 48000, fftOrder: 10))
+        XCTAssertTrue(rtaBandHasBin(centreHz: 50, sampleRateHz: 48000, fftOrder: 10))
+    }
+
+    /// Halving the transform size doubles the bin spacing, so more bands empty
+    /// out - including the 50 Hz one.
+    func testSmallerTransformEmptiesMoreBands() {
+        XCTAssertTrue(rtaBandHasBin(centreHz: 50, sampleRateHz: 48000, fftOrder: 10))
+        XCTAssertFalse(rtaBandHasBin(centreHz: 50, sampleRateHz: 48000, fftOrder: 9))
+        XCTAssertFalse(rtaBandHasBin(centreHz: 50, sampleRateHz: 48000, fftOrder: 8))
+    }
+
+    /// The bass stream runs at about 6 kHz, which is the whole point: at that
+    /// rate a 1024-point transform fills in the bands the fast stream leaves
+    /// empty.
+    ///
+    /// The 20 Hz band is deliberately absent from the list.  It is about 4.6 Hz
+    /// wide against 5.86 Hz bins, so whether a bin lands inside it comes down to
+    /// the edge convention - these nominal-centre edges say no, the 44.1 kHz
+    /// stream's finer 5.38 Hz bins say yes, and the firmware's own generated
+    /// table is the authority either way.  The display never has to decide,
+    /// because it stops consulting this heuristic entirely once the bass stream
+    /// is running and reports its own `lfFirstBand`.
+    func testTheBassStreamRateFillsInTheLowBands() {
+        for hz in [25.0, 31.5, 40, 50, 63, 80, 125, 160] {
+            XCTAssertTrue(rtaBandHasBin(centreHz: hz, sampleRateHz: 6000, fftOrder: 10),
+                          "the bass stream should resolve the \(hz) Hz band")
+        }
+        // Halving the bass transform costs the 40 Hz band, which is what the
+        // spec means by 512 points being "accurate from 31 Hz up".
+        XCTAssertFalse(rtaBandHasBin(centreHz: 40, sampleRateHz: 6000, fftOrder: 9))
+    }
+
+    /// Nonsense in, "assume it is measurable" out - the heuristic is only ever
+    /// used to explain a band that is already reading the floor, so failing
+    /// open can never grey out live data.
+    func testBandHasBinFailsOpenOnNonsense() {
+        XCTAssertTrue(rtaBandHasBin(centreHz: 0, sampleRateHz: 48000, fftOrder: 10))
+        XCTAssertTrue(rtaBandHasBin(centreHz: 1000, sampleRateHz: 0, fftOrder: 10))
+        XCTAssertTrue(rtaBandHasBin(centreHz: 1000, sampleRateHz: 48000, fftOrder: 0))
+    }
+
+    // MARK: - Display interpolation
+
+    /// The smoothing time constant tracks the rotation interval, so one channel
+    /// and nine channels both glide rather than one stepping and the other
+    /// crawling.  Zero switches it off entirely.
+    func testFallTauTracksRefreshIntervalAndClamps() {
+        XCTAssertEqual(rtaFallTau(refreshInterval: 0.19, amount: 0), 0)
+        // One channel at 1024 points / 48 kHz: 21 ms, below the floor.
+        XCTAssertEqual(rtaFallTau(refreshInterval: 0.021, amount: 0.6), 0.035, accuracy: 0.0001)
+        // Nine channels: 192 ms, inside the range.
+        XCTAssertEqual(rtaFallTau(refreshInterval: 0.192, amount: 0.6), 0.1152, accuracy: 0.0001)
+        // Absurdly long rotation, clamped at the top.
+        XCTAssertEqual(rtaFallTau(refreshInterval: 5.0, amount: 1.0), 0.40, accuracy: 0.0001)
+    }
+
+    /// The first call adopts the target outright: there is nothing to glide
+    /// from, and easing up from zero would flash the whole display on connect.
+    func testSmootherAdoptsTheFirstFrame() {
+        let s = RtaBarSmoother()
+        let out = s.step(now: Date(), target: [-20, -30], identity: 1, riseTau: 0.1, fallTau: 0.1)
+        XCTAssertEqual(out, [-20, -30])
+    }
+
+    /// A step lands between the old value and the new one, never past it.
+    func testSmootherMovesPartwayTowardTheTarget() {
+        let s = RtaBarSmoother()
+        let t0 = Date()
+        _ = s.step(now: t0, target: [-60], identity: 1, riseTau: 0.1, fallTau: 0.1)
+        let out = s.step(now: t0.addingTimeInterval(0.033), target: [-20],
+                         identity: 1, riseTau: 0.1, fallTau: 0.1)
+        XCTAssertGreaterThan(out[0], -60)
+        XCTAssertLessThan(out[0], -20)
+    }
+
+    /// Repeated steps converge, so a held level settles rather than creeping.
+    func testSmootherConverges() {
+        let s = RtaBarSmoother()
+        var t = Date()
+        _ = s.step(now: t, target: [-60], identity: 1, riseTau: 0.05, fallTau: 0.05)
+        var out: [Double] = []
+        for _ in 0..<60 {
+            t = t.addingTimeInterval(1.0 / 30.0)
+            out = s.step(now: t, target: [-20], identity: 1, riseTau: 0.05, fallTau: 0.05)
+        }
+        XCTAssertEqual(out[0], -20, accuracy: 0.01)
+    }
+
+    /// A peak cap is passed riseTau 0: it must jump straight to a new peak, or
+    /// it stops being a peak, while still easing on the way down.
+    func testZeroRiseTauSnapsUpButStillEasesDown() {
+        let s = RtaBarSmoother()
+        let t0 = Date()
+        _ = s.step(now: t0, target: [-60], identity: 1, riseTau: 0, fallTau: 0.2)
+        let up = s.step(now: t0.addingTimeInterval(0.033), target: [-10],
+                        identity: 1, riseTau: 0, fallTau: 0.2)
+        XCTAssertEqual(up[0], -10, accuracy: 0.0001)
+        let down = s.step(now: t0.addingTimeInterval(0.066), target: [-60],
+                          identity: 1, riseTau: 0, fallTau: 0.2)
+        XCTAssertGreaterThan(down[0], -60)
+        XCTAssertLessThan(down[0], -10)
+    }
+
+    /// Switching channel must snap.  Sliding across would show the new channel
+    /// briefly wearing the old channel's levels, which is simply wrong data.
+    func testSmootherSnapsWhenTheSeriesChanges() {
+        let s = RtaBarSmoother()
+        let t0 = Date()
+        _ = s.step(now: t0, target: [-60, -60], identity: 1, riseTau: 0.2, fallTau: 0.2)
+        let out = s.step(now: t0.addingTimeInterval(0.033), target: [-10, -10],
+                         identity: 2, riseTau: 0.2, fallTau: 0.2)
+        XCTAssertEqual(out, [-10, -10])
+    }
+
+    /// A resize changes the number of columns; the series is replaced rather
+    /// than half-filtered against values that meant a different frequency.
+    func testSmootherSnapsWhenTheSeriesLengthChanges() {
+        let s = RtaBarSmoother()
+        let t0 = Date()
+        _ = s.step(now: t0, target: [-60, -60], identity: 1, riseTau: 0.2, fallTau: 0.2)
+        let out = s.step(now: t0.addingTimeInterval(0.033), target: [-10, -10, -10],
+                         identity: 1, riseTau: 0.2, fallTau: 0.2)
+        XCTAssertEqual(out, [-10, -10, -10])
+    }
+
+    /// Two draws at the same instant must not double-step: a zero or negative
+    /// dt leaves the values alone.
+    func testSmootherIgnoresARepeatedTimestamp() {
+        let s = RtaBarSmoother()
+        let t0 = Date()
+        _ = s.step(now: t0, target: [-60], identity: 1, riseTau: 0.1, fallTau: 0.1)
+        let first = s.step(now: t0.addingTimeInterval(0.033), target: [-20],
+                           identity: 1, riseTau: 0.1, fallTau: 0.1)
+        let again = s.step(now: t0.addingTimeInterval(0.033), target: [-20],
+                           identity: 1, riseTau: 0.1, fallTau: 0.1)
+        XCTAssertEqual(first, again)
+    }
+
     // MARK: - Live device (spec §5.1)
 
     /// Reading the caps is the whole feature probe.  Firmware without the
