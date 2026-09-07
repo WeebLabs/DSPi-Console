@@ -70,7 +70,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
     case general, graphing, advanced
     case overview
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
-    case channelGroups, macros
+    case channelGroups, macros, auxOutputs
 
     var id: Self { self }
 
@@ -88,6 +88,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .controlSurfaces:  return "Control Surfaces"
         case .channelGroups:    return "Channel Groups"
         case .macros:           return "Macros"
+        case .auxOutputs:       return "Auxiliary Outputs"
         }
     }
 
@@ -105,6 +106,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .controlSurfaces:  return "dial.medium"
         case .channelGroups:    return "rectangle.3.group"
         case .macros:           return "list.number"
+        case .auxOutputs:       return "power"
         }
     }
 
@@ -135,6 +137,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .controlInterfaces: return Color(red: 0.561, green: 0.376, blue: 0.678) // #8f60ad
         case .channelGroups:    return Color(red: 0.424, green: 0.392, blue: 0.718)  // #6c64b7
         case .macros:           return Color(red: 0.620, green: 0.322, blue: 0.553)  // #9e528d
+        case .auxOutputs:       return Color(red: 0.478, green: 0.353, blue: 0.675)  // #7a5aac
         }
     }
 
@@ -152,6 +155,9 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // header, so a pre-v9 device reports zero and the pages stay hidden.
         case .channelGroups:     return vm.csGroupsSupported
         case .macros:            return vm.csMacrosSupported
+        // Auxiliary outputs arrived with caps v17; a pre-v17 device has no nouns
+        // for them and STALLs their commands, so the page stays hidden.
+        case .auxOutputs:        return vm.csAuxSupported
         default:                 return true
         }
     }
@@ -168,7 +174,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // those reference.  Groups and macros are referenced by many controls
         // rather than owned by one, which is why they are peers here and not
         // nested inside the Control Surfaces page.
-        ("Control",     [.controlSurfaces, .controlInterfaces, .channelGroups, .macros]),
+        ("Control",     [.controlSurfaces, .controlInterfaces, .channelGroups, .macros, .auxOutputs]),
     ]
 }
 
@@ -426,6 +432,8 @@ struct SettingsView: View {
                                     .onboardingHint("channel-groups")
         case .macros:           ControlSurfacesSettingsTab(section: .macros)
                                     .onboardingHint("macros")
+        case .auxOutputs:       ControlSurfacesSettingsTab(section: .aux)
+                                    .onboardingHint("aux-outputs")
         }
     }
 }
@@ -2240,6 +2248,14 @@ struct ControlSurfacesSettingsTab: View {
     @State private var groupMessages: [Int: (message: String, isError: Bool)] = [:]
     @State private var macroMessages: [Int: (message: String, isError: Bool)] = [:]
 
+    // Auxiliary outputs (caps v17).  Only the config is drafted: the live state
+    // and level apply the moment they are touched, so they are read straight
+    // from the view model rather than staged here.
+    @State private var auxDrafts: [CsAuxCfg] = Array(repeating: CsAuxCfg(), count: CS_MAX_AUX)
+    @State private var expandedAux: Set<Int> = []
+    @State private var applyingAux: Int? = nil
+    @State private var auxMessages: [Int: (message: String, isError: Bool)] = [:]
+
     // User-given names, shown in the card header so collapsed cards are
     // tellable apart.  Names are device-persistent (spec §3.4), read into
     // `vm.csNames`; this is a local editing buffer committed on submit / close
@@ -2263,7 +2279,7 @@ struct ControlSurfacesSettingsTab: View {
     /// machinery or hoisting it somewhere artificial.  Separate pages also give
     /// each list a sidebar of its own, so the three card lists stop being
     /// siblings in one flattened Form.
-    enum Page { case controls, groups, macros }
+    enum Page { case controls, groups, macros, aux }
     var section: Page = .controls
 
     /// Number of binding slots the device exposes (falls back to the wire max).
@@ -2325,6 +2341,7 @@ struct ControlSurfacesSettingsTab: View {
             case .controls: controlsPage
             case .groups:   groupsPage
             case .macros:   macrosPage
+            case .aux:      auxPage
             }
         }
         .formStyle(.grouped)
@@ -2347,6 +2364,15 @@ struct ControlSurfacesSettingsTab: View {
             seedDrafts()
             nameEdits.removeAll()
             slotMessages.removeAll()
+        }
+        // Same for an aux config: another host, a revert, or a save folding the
+        // live values into a boot-saved slot can all move it underneath us.
+        .onReceive(vm.$csAuxCfgs) { newCfgs in
+            for a in 0..<min(auxDrafts.count, newCfgs.count) {
+                if applyingAux != a && auxDrafts[a] == vm.csAuxCfgs[a] {
+                    auxDrafts[a] = newCfgs[a]
+                }
+            }
         }
         // Re-seed a slot when its live binding changes and the user has no
         // pending edits for it, so an external change never strands a draft.
@@ -2495,6 +2521,9 @@ struct ControlSurfacesSettingsTab: View {
         var seededMacros = Array(repeating: CsMacro(), count: CS_MAX_MACROS)
         for m in 0..<min(CS_MAX_MACROS, vm.csMacros.count) { seededMacros[m] = vm.csMacros[m] }
         macroDrafts = seededMacros
+        var seededAux = Array(repeating: CsAuxCfg(), count: CS_MAX_AUX)
+        for a in 0..<min(CS_MAX_AUX, vm.csAuxCfgs.count) { seededAux[a] = vm.csAuxCfgs[a] }
+        auxDrafts = seededAux
     }
 
     // MARK: Custom names (device-persistent; spec §3.4)
@@ -2683,6 +2712,411 @@ struct ControlSurfacesSettingsTab: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+            }
+        }
+    }
+
+    // MARK: Auxiliary outputs (caps v17; aux spec §1)
+    //
+    // Eight device-global on/off + level values the firmware attaches no
+    // meaning to.  Nothing here claims a GPIO: an output reaches hardware only
+    // when the user adds an LED control that follows it, which is why the card
+    // says so and lists the controls that already do.  The config (name, boot
+    // behaviour) is a deferred preview under the shared Save / Revert; the live
+    // state and level apply instantly and are never written to flash on change.
+
+    /// Whether an aux slot is worth showing.  Deliberately broad: an output the
+    /// user has named, set to boot on, currently switched on, or bound a
+    /// control to is one they are using, even when its config record is still
+    /// all-zero.
+    private func auxSlotInUse(_ a: Int) -> Bool {
+        auxDrafts[a].isConfigured
+            || vm.csAuxCfgs[a].isConfigured
+            || (vm.csAuxState.indices.contains(a) && vm.csAuxState[a])
+            || (vm.csAuxLevel.indices.contains(a) && vm.csAuxLevel[a] > 0)
+            || !controlsFollowingAux(a).isEmpty
+            || !irCommandsUsingAux(a).isEmpty
+            || !macrosUsingAux(a).isEmpty
+    }
+
+    private var visibleAux: [Int] {
+        (0..<vm.csAuxCount).filter { auxSlotInUse($0) }
+    }
+
+    private var firstFreeAux: Int? {
+        (0..<vm.csAuxCount).first { !auxSlotInUse($0) }
+    }
+
+    /// Binding slots pointed at this aux output, whichever of the two nouns
+    /// they use.  Both halves of the feature - what drives an output and what
+    /// follows it - are ordinary bindings, so this is the card's answer to "is
+    /// anything actually wired to this?".
+    private func controlsFollowingAux(_ a: Int) -> [Int] {
+        (0..<slotCount).filter {
+            let b = vm.csBindings[$0]
+            guard b.isConfigured, Int(b.target) == a, b.flags & CS_FLAG_GROUP == 0 else { return false }
+            return Int(b.noun) == CS_NOUN_AUX || Int(b.noun) == CS_NOUN_AUX_LEVEL
+        }
+    }
+
+    /// Remote keys and macros pointed at this output.  They drive it exactly as
+    /// a button does, so an output reached only from a remote is still in use.
+    private func irCommandsUsingAux(_ a: Int) -> [Int] {
+        guard vm.csIrSupported else { return [] }
+        return (0..<min(Int(vm.csCaps.maxIrCommands), CS_MAX_IR_COMMANDS)).filter {
+            let c = vm.csIrCommands[$0]
+            guard c.isConfigured, Int(c.target) == a, c.flags & CS_FLAG_GROUP == 0 else { return false }
+            return Int(c.noun) == CS_NOUN_AUX || Int(c.noun) == CS_NOUN_AUX_LEVEL
+        }
+    }
+
+    private func macrosUsingAux(_ a: Int) -> [Int] {
+        (0..<vm.csMacroCount).filter { m in
+            vm.csMacros[m].steps.contains { st in
+                st.isConfigured && !st.isGrouped && Int(st.target) == a
+                    && (Int(st.noun) == CS_NOUN_AUX || Int(st.noun) == CS_NOUN_AUX_LEVEL)
+            }
+        }
+    }
+
+    /// True when a binding on this output drives a pin rather than reading one
+    /// (spec §1.2): that is the only thing that makes an aux switch hardware.
+    private func pinFollowsAux(_ a: Int) -> Bool {
+        controlsFollowingAux(a).contains {
+            let t = Int(vm.csBindings[$0].type)
+            return t == CS_TYPE_LED || t == CS_TYPE_LED_PWM
+        }
+    }
+
+    @ViewBuilder
+    private var auxPage: some View {
+        if vm.csCaps.types.isEmpty {
+            awaitingCapsSection
+        } else {
+            auxSection
+            Section {
+                Text("An auxiliary output is a switch the DSPi keeps for you and never reads itself: it changes nothing about the sound. It exists so a button, knob, remote key or macro can drive something the device knows nothing about - an amplifier trigger, a speaker relay, a panel lamp, a fan.\n\nAn output only reaches a pin once you add a control that follows it: an LED on the on/off value for a switch, a dimmable LED on the level for a lamp. Turn on \"Active-Low LED\" for the relay and opto-isolator boards that switch when the pin goes low.\n\nA GPIO is a 3.3 V pin good for a few milliamps. Anything real needs a MOSFET, a transistor with a flyback diode, or an opto-isolated relay module in between, and a dimmed load should have its own supply so its switching noise stays out of the DAC.\n\nSwitching an output is instant and never writes to flash. Names and power-on behaviour are stored on the device alongside the controls and share their Save and Revert.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var auxSection: some View {
+        if visibleAux.isEmpty {
+            Section {
+                VStack(spacing: 14) {
+                    Image(systemName: "power")
+                        .font(.system(size: 28))
+                        .foregroundColor(.secondary)
+                    VStack(spacing: 3) {
+                        Text("No Auxiliary Outputs Set Up")
+                            .font(.headline)
+                        Text("Name a switch the DSPi holds for you, then point a button at it and an LED control at the pin that should follow it.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 340)
+                    }
+                    addAuxButton(prominent: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            }
+        } else {
+            ForEach(cardIDs("aux", visibleAux)) { key in
+                auxCard(key.index)
+            }
+            Section {
+                HStack {
+                    addAuxButton(prominent: false)
+                    Spacer()
+                    if firstFreeAux == nil {
+                        Text("All \(vm.csAuxCount) auxiliary outputs are in use.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func addAuxButton(prominent: Bool) -> some View {
+        let button = Button { addAux() } label: {
+            Label("Add Output", systemImage: "plus")
+        }
+        .fixedSize()
+        .disabled(firstFreeAux == nil || !vm.isDeviceConnected)
+
+        if prominent {
+            button.buttonStyle(.borderedProminent).controlSize(.regular)
+        } else {
+            button.buttonStyle(.bordered).controlSize(.regular)
+        }
+    }
+
+    /// Claim the first unused output by naming it, and open its card.  Unlike a
+    /// control this changes nothing on the device yet: the eight outputs always
+    /// exist, and Apply is what stores the name and boot behaviour.
+    private func addAux() {
+        guard let a = firstFreeAux else { return }
+        var fresh = CsAuxCfg()
+        fresh.name = "Aux \(a + 1)"
+        auxMessages[a] = nil
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            auxDrafts[a] = fresh
+            expandedAux.insert(a)
+        }
+    }
+
+    /// One line for the collapsed card: what the output is doing now, and
+    /// whether anything is listening to it.
+    private func auxSummary(_ a: Int) -> String {
+        let on = vm.csAuxState.indices.contains(a) && vm.csAuxState[a]
+        let level = vm.csAuxLevel.indices.contains(a) ? Int(vm.csAuxLevel[a]) : 0
+        var s = on ? "On" : "Off"
+        if level > 0 { s += " - level \(level)%" }
+        let followers = controlsFollowingAux(a).count
+            + irCommandsUsingAux(a).count + macrosUsingAux(a).count
+        if followers == 0 {
+            s += " - nothing drives or follows it"
+        } else {
+            s += " - \(followers) control\(followers == 1 ? "" : "s")"
+        }
+        return s
+    }
+
+    @ViewBuilder
+    private func auxCard(_ a: Int) -> some View {
+        let draft = auxDrafts[a]
+        let expanded = expandedAux.contains(a)
+        let dirty = draft != vm.csAuxCfgs[a]
+        let isOn = vm.csAuxState.indices.contains(a) && vm.csAuxState[a]
+        Section {
+            HStack(spacing: 12) {
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        if expanded { expandedAux.remove(a) } else { expandedAux.insert(a) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+
+                Image(systemName: isOn ? "power.circle.fill" : "power")
+                    .font(.system(size: 13))
+                    .foregroundColor(isOn ? .accentColor : .secondary)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    LeftAlignedTextField(text: Binding(
+                        get: { auxDrafts[a].name },
+                        set: { auxDrafts[a].name = String($0.prefix(CS_NAME_LEN - 1)) }),
+                                         placeholder: "Aux \(a + 1)")
+                        .frame(maxWidth: 240, alignment: .leading)
+                    Text(auxSummary(a))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                // The live switch sits in the header, collapsed or not: it is
+                // the one control on this page anyone reaches for twice, and it
+                // applies instantly rather than waiting on Apply.
+                Toggle("", isOn: Binding(
+                    get: { isOn },
+                    set: { vm.setCsAuxState(a, on: $0) }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .disabled(!vm.isDeviceConnected)
+                Button(role: .destructive) { removeAux(a) } label: {
+                    Image(systemName: "trash").font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .disabled(applyingAux == a || !vm.isDeviceConnected)
+            }
+            .padding(.vertical, 4)
+
+            if expanded {
+                settingRow(title: "Level",
+                           detail: "What a dimmable LED following this output runs at. Whole percent.",
+                           icon: "sun.max") {
+                    HStack(spacing: 8) {
+                        Slider(value: Binding(
+                            get: { Double(vm.csAuxLevel.indices.contains(a) ? vm.csAuxLevel[a] : 0) },
+                            set: { vm.setCsAuxLevel(a, level: UInt8($0.rounded())) }),
+                               in: 0...Double(CS_AUX_LEVEL_MAX))
+                            .frame(width: 160)
+                        Text("\(vm.csAuxLevel.indices.contains(a) ? Int(vm.csAuxLevel[a]) : 0)%")
+                            .font(.body.monospacedDigit())
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                    .disabled(!vm.isDeviceConnected)
+                }
+
+                settingRow(title: "At Power-On",
+                           detail: "What this output does when the device starts up.",
+                           icon: "bolt") {
+                    Picker("", selection: Binding(
+                        get: { auxDrafts[a].bootMode },
+                        set: { auxDrafts[a].bootMode = $0 })) {
+                        Text("Fixed").tag(CS_AUX_BOOT_FIXED)
+                        Text("As Last Saved").tag(CS_AUX_BOOT_SAVED)
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+
+                if draft.bootMode == CS_AUX_BOOT_SAVED {
+                    Text("Saving takes a copy of the switch and level as they are at that moment, and the output comes back that way. Changing them afterwards does not move the stored values until the next save.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                } else {
+                    settingRow(title: "Starts On",
+                               detail: "Leave this off for anything that should never wake with the device, such as an amplifier trigger.",
+                               icon: "power") {
+                        Toggle("", isOn: Binding(
+                            get: { auxDrafts[a].bootState != 0 },
+                            set: { auxDrafts[a].bootState = $0 ? 1 : 0 }))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+                    }
+                    settingRow(title: "Starting Level",
+                               detail: "The level this output comes up at.",
+                               icon: "gauge.with.dots.needle.bottom.50percent") {
+                        HStack(spacing: 8) {
+                            Slider(value: Binding(
+                                get: { Double(auxDrafts[a].bootLevel) },
+                                set: { auxDrafts[a].bootLevel = UInt8($0.rounded()) }),
+                                   in: 0...Double(CS_AUX_LEVEL_MAX))
+                                .frame(width: 160)
+                            Text("\(Int(auxDrafts[a].bootLevel))%")
+                                .font(.body.monospacedDigit())
+                                .frame(width: 38, alignment: .trailing)
+                        }
+                    }
+                }
+
+                auxFollowerRows(a)
+            }
+
+            if expanded || dirty || applyingAux == a || auxMessages[a] != nil {
+                HStack(spacing: 8) {
+                    if let msg = auxMessages[a], msg.isError, !dirty {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange).font(.caption)
+                        Text(msg.message).font(.caption).foregroundColor(.orange)
+                    }
+                    Spacer(minLength: 8)
+                    if applyingAux == a { ProgressView().controlSize(.small) }
+                    Button("Revert") { auxDrafts[a] = vm.csAuxCfgs[a]; auxMessages[a] = nil }
+                        .buttonStyle(.plain)
+                        .foregroundColor(dirty ? .accentColor : .secondary.opacity(0.5))
+                        .disabled(!dirty || applyingAux == a)
+                    Button("Apply") { applyAux(a) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!dirty || applyingAux == a || csBusy || !vm.isDeviceConnected)
+                }
+            }
+        }
+    }
+
+    /// What is wired to this output, on both sides.  Without a driving LED the
+    /// output is only a value a host can read, which is the single thing people
+    /// get wrong about this feature, so the card says it outright.
+    @ViewBuilder
+    private func auxFollowerRows(_ a: Int) -> some View {
+        let followers = controlsFollowingAux(a)
+        let remotes = irCommandsUsingAux(a)
+        let macros = macrosUsingAux(a)
+        VStack(alignment: .leading, spacing: 6) {
+            settingLabel(title: "Wired To",
+                         detail: "Controls on the Control Surfaces page that drive or follow this output.",
+                         icon: "link")
+            if followers.isEmpty && remotes.isEmpty && macros.isEmpty {
+                Text("Nothing yet. Add a control that follows this output - an LED on its on/off value to drive a relay, or a dimmable LED on its level to dim a lamp - and a button or remote key to switch it.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(followers, id: \.self) { slot in
+                    let b = vm.csBindings[slot]
+                    HStack(spacing: 6) {
+                        Image(systemName: typeIcon(Int(b.type)))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .frame(width: 14)
+                        Text(slotName(slot).isEmpty ? typeName(Int(b.type)) : slotName(slot))
+                            .font(.caption2)
+                        Text("- \(actionName(Int(b.action), noun: Int(b.noun))) on \(nounName(Int(b.noun), forType: Int(b.type)))")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                if !pinFollowsAux(a) {
+                    Text("No LED control follows this output, so it drives no pin. It is still a value a host, a display page or a macro can use.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if !remotes.isEmpty || !macros.isEmpty {
+                Text(auxOtherUsersSummary(remotes: remotes, macros: macros))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// "Also driven by 2 remote keys and the macro Movie Night." - the two other
+    /// things that can move an output, which the binding list above cannot show.
+    private func auxOtherUsersSummary(remotes: [Int], macros: [Int]) -> String {
+        var parts: [String] = []
+        if !remotes.isEmpty {
+            parts.append("\(remotes.count) remote key\(remotes.count == 1 ? "" : "s")")
+        }
+        if !macros.isEmpty {
+            parts.append("the macro\(macros.count == 1 ? "" : "s") " + macros.map { vm.csMacroName($0) }.joined(separator: ", "))
+        }
+        return "Also driven by " + parts.joined(separator: " and ") + "."
+    }
+
+    /// Clear an output back to unnamed and boot-fixed.  The output itself does
+    /// not go away - all eight always exist - so this only drops the config;
+    /// the live state is left alone for the same reason a Revert leaves it
+    /// alone, and switching it off is the header toggle's job.
+    private func removeAux(_ a: Int) {
+        auxMessages[a] = nil
+        let hadConfig = vm.csAuxCfgs[a].isConfigured
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            auxDrafts[a] = CsAuxCfg()
+            expandedAux.remove(a)
+        }
+        if hadConfig { applyAux(a) }
+    }
+
+    private func applyAux(_ a: Int) {
+        let cfg = auxDrafts[a]
+        applyingAux = a
+        auxMessages[a] = nil
+        coordinator.beginCsOperation()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setCsAuxCfg(a, cfg: cfg)
+            DispatchQueue.main.async {
+                applyingAux = nil
+                coordinator.endCsOperation()
+                auxDrafts[a] = vm.csAuxCfgs[a]
+                let msg = statusMessage(status)
+                auxMessages[a] = msg.isError ? msg : nil
             }
         }
     }
@@ -3321,8 +3755,10 @@ struct ControlSurfacesSettingsTab: View {
             let grouped = step.isGrouped
             // Same merged picker as a binding's target (see targetRows).
             let usable = Int(step.action) == CS_ACT_TRIGGER ? [] : compatibleGroups(forNoun: noun)
-            settingRow(title: usable.isEmpty && !grouped ? "Channel" : "Channel or Group",
-                       detail: "Which channel, or named set of channels, this step affects.",
+            settingRow(title: usable.isEmpty && !grouped ? targetNoun(nd) : "Channel or Group",
+                       detail: usable.isEmpty && !grouped
+                           ? "Which \(targetNoun(nd).lowercased()) this step affects."
+                           : "Which channel, or named set of channels, this step affects.",
                        icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
                 Picker("", selection: Binding<CsTargetChoice>(
                     get: {
@@ -3342,7 +3778,7 @@ struct ControlSurfacesSettingsTab: View {
                         }
                         macroDrafts[m].steps[s] = st
                     })) {
-                    Section("Channels") {
+                    Section(targetNounPlural(nd)) {
                         ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
                             Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
@@ -3426,6 +3862,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_ACT_INC, CS_ACT_DEC:
             if kind == CS_KIND_CONTINUOUS {
                 let isLog = csUnitIsLog(unit)
+                let whole = nounStepsInWholeUnits(Int(macroDrafts[m].steps[s].noun))
                 let cur = macroDrafts[m].steps[s].step == 0
                     ? csDefaultStep(unit)
                     : csDecodeStep(macroDrafts[m].steps[s].step, unit: unit)
@@ -3435,8 +3872,9 @@ struct ControlSurfacesSettingsTab: View {
                            icon: "arrow.up.arrow.down") {
                     ValueField(label: isLog ? "oct" : csUnitSymbol(unit), value: cur, width: 64,
                                scrollStep: isLog ? csDefaultStep(unit) : unitScrollStep(unit),
-                               minValue: 0, maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
-                        macroDrafts[m].steps[s].step = csEncodeStep(v, unit: unit)
+                               minValue: whole ? 1 : 0,
+                               maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
+                        macroDrafts[m].steps[s].step = csEncodeStep(whole ? max(1, v.rounded()) : v, unit: unit)
                     }
                 }
             } else if kind == CS_KIND_ENUM {
@@ -3987,13 +4425,13 @@ struct ControlSurfacesSettingsTab: View {
             // targeted trigger noun), so it simply contributes no group rows.
             let usable = Int(drafts[slot].action) == CS_ACT_TRIGGER
                 ? [] : compatibleGroups(forNoun: Int(drafts[slot].noun))
-            settingRow(title: usable.isEmpty && !grouped ? "Channel" : "Channel or Group",
+            settingRow(title: usable.isEmpty && !grouped ? targetNoun(nd) : "Channel or Group",
                        detail: usable.isEmpty && !grouped
-                           ? "Which channel this control affects."
+                           ? "Which \(targetNoun(nd).lowercased()) this control affects."
                            : "Which channel, or named set of channels, this control affects.",
                        icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
                 Picker("", selection: targetChoiceBinding(slot)) {
-                    Section("Channels") {
+                    Section(targetNounPlural(nd)) {
                         ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
                             Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
@@ -4450,7 +4888,8 @@ struct ControlSurfacesSettingsTab: View {
         let unit = nounUnit(slot)
         let isLog = csUnitIsLog(unit)
         let logMin: Float = 1.0 / 48.0
-        let minStep = isLog ? logMin : unitMinStep(unit)
+        let whole = nounStepsInWholeUnits(Int(drafts[slot].noun))
+        let minStep = isLog ? logMin : (whole ? 1 : unitMinStep(unit))
         let cur = drafts[slot].step == 0 ? csDefaultStep(unit) : csDecodeStep(drafts[slot].step, unit: unit)
         settingRow(title: "Step Size",
                    detail: isLog ? "Ratio per detent/press, in octaves." : "Amount added or removed per detent/press.",
@@ -4461,7 +4900,8 @@ struct ControlSurfacesSettingsTab: View {
                        minValue: minStep,
                        maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
                 var nb = drafts[slot]
-                nb.step = csEncodeStep(max(minStep, v), unit: unit)
+                let clamped = max(minStep, whole ? v.rounded() : v)
+                nb.step = csEncodeStep(clamped, unit: unit)
                 drafts[slot] = nb
             }
         }
@@ -5038,8 +5478,10 @@ struct ControlSurfacesSettingsTab: View {
             // press.  Same merged picker a binding gets.
             let grouped = irDrafts[sub].flags & CS_FLAG_GROUP != 0
             let usable = vm.csIrGroupsSupported ? compatibleGroups(forNoun: Int(irDrafts[sub].noun)) : []
-            settingRow(title: usable.isEmpty && !grouped ? "Channel" : "Channel or Group",
-                       detail: "Which channel, or named set of channels, this affects.",
+            settingRow(title: usable.isEmpty && !grouped ? targetNoun(nd) : "Channel or Group",
+                       detail: usable.isEmpty && !grouped
+                           ? "Which \(targetNoun(nd).lowercased()) this affects."
+                           : "Which channel, or named set of channels, this affects.",
                        icon: grouped ? "rectangle.3.group" : "square.stack.3d.up") {
                 Picker("", selection: Binding<CsTargetChoice>(
                     get: {
@@ -5059,7 +5501,7 @@ struct ControlSurfacesSettingsTab: View {
                         }
                         irDrafts[sub] = c
                     })) {
-                    Section("Channels") {
+                    Section(targetNounPlural(nd)) {
                         ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
                             Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                         }
@@ -5119,7 +5561,8 @@ struct ControlSurfacesSettingsTab: View {
         let unit = unitFor(noun: Int(irDrafts[sub].noun))
         let isLog = csUnitIsLog(unit)
         let logMin: Float = 1.0 / 48.0
-        let minStep = isLog ? logMin : unitMinStep(unit)
+        let whole = nounStepsInWholeUnits(Int(irDrafts[sub].noun))
+        let minStep = isLog ? logMin : (whole ? 1 : unitMinStep(unit))
         let cur = irDrafts[sub].step == 0 ? csDefaultStep(unit) : csDecodeStep(irDrafts[sub].step, unit: unit)
         settingRow(title: "Step Size",
                    detail: isLog ? "Ratio per press, in octaves." : "Amount added or removed per press.",
@@ -5128,7 +5571,9 @@ struct ControlSurfacesSettingsTab: View {
                        scrollStep: isLog ? csDefaultStep(unit) : unitScrollStep(unit),
                        minValue: minStep,
                        maxDecimals: isLog ? 3 : unitDecimals(unit)) { v in
-                var c = irDrafts[sub]; c.step = csEncodeStep(max(minStep, v), unit: unit); irDrafts[sub] = c
+                var c = irDrafts[sub]
+                c.step = csEncodeStep(max(minStep, whole ? v.rounded() : v), unit: unit)
+                irDrafts[sub] = c
             }
         }
     }
@@ -5459,6 +5904,13 @@ struct ControlSurfacesSettingsTab: View {
                              CS_NOUN_PSYBASS_DRIVE, CS_NOUN_PSYBASS_CHARACTER,
                              CS_NOUN_PSYBASS_ORIGINAL],
                      strip: ["Psych Bass"], enableNoun: CS_NOUN_PSYBASS),
+        NounCategory(name: "Subharmonic Synth",
+                     nouns: [CS_NOUN_SUBHARM, CS_NOUN_SUBHARM_LOW, CS_NOUN_SUBHARM_HIGH,
+                             CS_NOUN_SUBHARM_TOP, CS_NOUN_SUBHARM_BOOST,
+                             CS_NOUN_SUBHARM_SELECT, CS_NOUN_SUBHARM_DEPTH,
+                             CS_NOUN_SUBHARM_HOLD, CS_NOUN_SUBHARM_CEILING,
+                             CS_NOUN_SUBHARM_LINK, CS_NOUN_SUBHARM_SOLO],
+                     strip: ["Subharm"], enableNoun: CS_NOUN_SUBHARM),
         NounCategory(name: "Upmixer",
                      nouns: [CS_NOUN_UPMIX, CS_NOUN_UPMIX_CENTER_MODE, CS_NOUN_UPMIX_SURROUND_MODE,
                              CS_NOUN_UPMIX_STRENGTH, CS_NOUN_UPMIX_WIDTH, CS_NOUN_UPMIX_PRESENCE],
@@ -5478,6 +5930,9 @@ struct ControlSurfacesSettingsTab: View {
         NounCategory(name: "Display",
                      nouns: [CS_NOUN_DISPLAY_PAGE, CS_NOUN_PAGE_VALUE, CS_NOUN_DISPLAY_EDIT],
                      strip: ["Display"]),
+        NounCategory(name: "Auxiliary Outputs",
+                     nouns: [CS_NOUN_AUX, CS_NOUN_AUX_LEVEL],
+                     strip: ["Aux"], enableNoun: CS_NOUN_AUX),
         NounCategory(name: "Status",
                      nouns: [CS_NOUN_CPU_LOAD, CS_NOUN_CLIP_CH, CS_NOUN_LEVEL, CS_NOUN_INPUT_LEVEL_MAX,
                              CS_NOUN_SPDIF_LOCK, CS_NOUN_SAMPLE_RATE,
@@ -6118,7 +6573,7 @@ struct ControlSurfacesSettingsTab: View {
                             }
                             applyDisplayPage(i, p)
                         })) {
-                        Section("Channels") {
+                        Section(targetNounPlural(nd)) {
                             ForEach(Array(0..<Int(nd.targetCount)), id: \.self) { t in
                                 Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
                             }
@@ -6416,6 +6871,17 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_PSYBASS_DRIVE:      return "Psych Bass Drive"
         case CS_NOUN_PSYBASS_CHARACTER:  return "Psych Bass Character"
         case CS_NOUN_PSYBASS_ORIGINAL:   return "Psych Bass Original Level"
+        case CS_NOUN_SUBHARM:            return "Subharmonic Synthesizer"
+        case CS_NOUN_SUBHARM_LOW:        return "Subharm 24-36 Hz Level"
+        case CS_NOUN_SUBHARM_HIGH:       return "Subharm 36-56 Hz Level"
+        case CS_NOUN_SUBHARM_TOP:        return "Subharm 56-80 Hz Level"
+        case CS_NOUN_SUBHARM_BOOST:      return "Subharm LF Boost"
+        case CS_NOUN_SUBHARM_SELECT:     return "Subharm Selectivity"
+        case CS_NOUN_SUBHARM_DEPTH:      return "Subharm Selectivity Depth"
+        case CS_NOUN_SUBHARM_HOLD:       return "Subharm Selectivity Hold"
+        case CS_NOUN_SUBHARM_CEILING:    return "Subharm Sub Ceiling"
+        case CS_NOUN_SUBHARM_LINK:       return "Subharm Pair Link"
+        case CS_NOUN_SUBHARM_SOLO:       return "Subharm Solo"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
@@ -6426,6 +6892,10 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_DISPLAY_PAGE:       return "Show Page"
         case CS_NOUN_DISPLAY_EDIT:       return "Allow Editing"
         case CS_NOUN_PAGE_VALUE:         return "Browse/Adjust"
+        // Named after what they do, not what they are: "Aux Output" would be a
+        // second word for the target the picker already shows.
+        case CS_NOUN_AUX:                return "Aux Switch"
+        case CS_NOUN_AUX_LEVEL:          return "Aux Level"
         default:                         return "Parameter \(noun)"
         }
     }
@@ -6671,6 +7141,17 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
+    /// What a target picker is choosing between.  Every noun but the aux pair
+    /// addresses a channel; an aux noun addresses one of the auxiliary outputs,
+    /// which are not channels and can never take a group, so the picker has to
+    /// stop saying "Channel" for them.
+    private func targetNoun(_ nd: CsNounDesc) -> String {
+        nd.targetKind == CS_TARGET_AUX ? "Auxiliary Output" : "Channel"
+    }
+    private func targetNounPlural(_ nd: CsNounDesc) -> String {
+        nd.targetKind == CS_TARGET_AUX ? "Auxiliary Outputs" : "Channels"
+    }
+
     /// Display name for a targeted noun's channel address (`target` byte).
     private func targetName(_ nd: CsNounDesc, _ target: Int) -> String {
         func dsp(_ c: Int) -> String {
@@ -6682,6 +7163,10 @@ struct ControlSurfacesSettingsTab: View {
             return dsp(target)
         case CS_TARGET_OUTPUT_CH:
             return dsp(target + vm.chOut1)
+        case CS_TARGET_AUX:
+            // Not a channel at all: the user's own name for the aux output,
+            // falling back to the "Aux N" the device's display pages use.
+            return vm.csAuxName(target)
         default: // DSP_CH / DSP_BAND
             return dsp(target)
         }
@@ -6769,6 +7254,15 @@ struct ControlSurfacesSettingsTab: View {
         unit == CS_UNIT_MS ? 0.01 : 0.1
     }
 
+    /// True for a noun whose step must be a whole number of its unit.  The caps
+    /// table has no flag for this, so it is a named exception rather than a
+    /// derived rule: an aux level is whole percent, and the firmware rejects a
+    /// fractional step outright because it would round back onto the live value
+    /// and stall an encoder (aux spec §6.2).
+    private func nounStepsInWholeUnits(_ noun: Int) -> Bool {
+        noun == CS_NOUN_AUX_LEVEL
+    }
+
     /// Why a stored-but-enabled binding isn't running (from its slot health code).
     private func inactiveReason(_ slot: Int) -> String {
         let code = vm.csStatus.slotHealth(slot)
@@ -6804,6 +7298,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_PIN_NOT_I2C:     return ("SDA and SCL must be an even/odd GPIO pair on the same I2C bus", true)
         case CS_STATUS_I2C_IN_USE:      return ("That I2C bus belongs to the I2C control interface", true)
         case CS_STATUS_INVALID_PAGE:    return ("That display page isn't valid", true)
+        case CS_STATUS_INVALID_AUX:     return ("That auxiliary output doesn't exist on this device", true)
         default:                        return ("Failed to apply the binding", true)
         }
     }
@@ -10001,6 +10496,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var loudnessWindowController = LoudnessWindowController()
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var psybassWindowController = PsychoacousticBassWindowController()
+    @StateObject private var subharmWindowController = SubharmonicSynthWindowController()
     @StateObject private var upmixerWindowController = UpmixerWindowController()
     @StateObject private var levellerWindowController = VolumeLevellerWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
@@ -10038,6 +10534,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(loudnessWindowController)
                 .environmentObject(crossfeedWindowController)
                 .environmentObject(psybassWindowController)
+                .environmentObject(subharmWindowController)
                 .environmentObject(upmixerWindowController)
                 .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
@@ -10230,6 +10727,11 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("P", modifiers: [.command, .shift])
 
+                Button("Subharmonic Synthesizer...") {
+                    subharmWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("S", modifiers: [.command, .shift])
+
                 Button("Stereo Upmixer...") {
                     upmixerWindowController.show(vm: AppState.shared.viewModel)
                 }
@@ -10270,14 +10772,18 @@ struct DSPi_ConsoleApp: App {
                 }
 
                 // Asked for outright, so it runs rather than being offered.
-                Button("Replay the Basics Tour") {
-                    onboarding.replayBasics()
-                    onboarding.startBasicsTour(vm: AppState.shared.viewModel)
+                // Hidden entirely while the post-setup half is switched off,
+                // rather than left as a menu item that does nothing.
+                if OnboardingCoordinator.postSetupOnboardingEnabled {
+                    Button("Replay the Basics Tour") {
+                        onboarding.replayBasics()
+                        onboarding.startBasicsTour(vm: AppState.shared.viewModel)
+                    }
+                    // The wizard replaces the console, and the tour's overlay
+                    // lives on the console: running both at once strands the
+                    // tour off screen with no way to dismiss it.
+                    .disabled(onboarding.shouldTakeOverMainWindow())
                 }
-                // The wizard replaces the console, and the tour's overlay
-                // lives on the console: running both at once strands the tour
-                // off screen with no way to dismiss it.
-                .disabled(onboarding.shouldTakeOverMainWindow())
 
                 Divider()
 

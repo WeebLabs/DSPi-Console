@@ -72,6 +72,106 @@ let REQ_GET_PSYBASS_MASK: UInt8       = 0x3D
 /// channel that can reproduce real bass is counterproductive.
 let PSYBASS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
 
+// Subharmonic Synthesizer ("subharm", V29; extended V30): dbx 120A style octave
+// divider.  Three fixed program bands (48-72, 72-112 and 112-160 Hz) each drive
+// their own divider, producing a real fundamental one octave down (24-36, 36-56
+// and 56-80 Hz) at its own level, followed by a gentle 70 Hz LF boost bell.  The
+// opposite of psybass: psybass implies a fundamental a small speaker cannot
+// play, subharm adds one a big system can.  Same shape as psybass on the wire -
+// one global parameter set applied to the outputs a 16-bit mask selects.
+// The block occupies 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 0x10-0x1F are the first
+// application commands allocated inside 0x00-0x1F.
+let REQ_SET_SUBHARM: UInt8            = 0x10
+let REQ_GET_SUBHARM: UInt8            = 0x11
+let REQ_SET_SUBHARM_LOW: UInt8        = 0x12
+let REQ_GET_SUBHARM_LOW: UInt8        = 0x13
+let REQ_SET_SUBHARM_HIGH: UInt8       = 0x14
+let REQ_GET_SUBHARM_HIGH: UInt8       = 0x15
+let REQ_SET_SUBHARM_BOOST: UInt8      = 0x16
+let REQ_GET_SUBHARM_BOOST: UInt8      = 0x17
+let REQ_SET_SUBHARM_MASK: UInt8       = 0x18
+let REQ_GET_SUBHARM_MASK: UInt8       = 0x19
+/// Read-only: the worst-case gain of the current configuration, in dB.  The
+/// effect is amplitude-linear, so cutting the preamp feeding the masked outputs
+/// by this much is an exact fix rather than an approximation.  Computed from
+/// live state on every GET, so a SET may be followed immediately by this GET.
+let REQ_GET_SUBHARM_HEADROOM: UInt8   = 0x1A
+// V30 additions.  The third band and the selectivity/ceiling settings all feed
+// the coefficient recompute, so each of their SETs is followed by a headroom
+// re-read exactly like the first three levels.
+let REQ_SET_SUBHARM_TOP: UInt8        = 0x1B
+let REQ_GET_SUBHARM_TOP: UInt8        = 0x1C
+let REQ_SET_SUBHARM_SELECT: UInt8     = 0x1D
+let REQ_GET_SUBHARM_SELECT: UInt8     = 0x1E
+/// Read-only: a decaying peak of the synthesized sub per output channel, one
+/// uint16 LE each on the same 0..32767 scale as SystemStatusPacket.peaks.  It
+/// meters the sub alone rather than the output, which is what makes it useful
+/// while the band levels are being dialled in.
+let REQ_GET_SUBHARM_METER: UInt8      = 0x1F
+/// Runtime-only monitoring aid: masked outputs carry the synthesized sub with
+/// the program signal removed.  Never persisted and absent from the bulk wire
+/// format, so no saved configuration can leave a device playing without program.
+let REQ_SET_SUBHARM_SOLO: UInt8       = 0x2C
+let REQ_GET_SUBHARM_SOLO: UInt8       = 0x2D
+let REQ_SET_SUBHARM_LINK: UInt8       = 0x2E
+let REQ_GET_SUBHARM_LINK: UInt8       = 0x2F
+let REQ_SET_SUBHARM_DEPTH: UInt8      = 0xA9
+let REQ_GET_SUBHARM_DEPTH: UInt8      = 0xAA
+let REQ_SET_SUBHARM_HOLD: UInt8       = 0xAB
+let REQ_GET_SUBHARM_HOLD: UInt8       = 0xAC
+let REQ_SET_SUBHARM_CEILING: UInt8    = 0xAD
+let REQ_GET_SUBHARM_CEILING: UInt8    = 0xAE
+/// Factory-default subharm output mask (all outputs).  Safe because the effect
+/// ships disabled; a real setup masks exactly the subwoofer or full-range
+/// outputs, since a satellite's highpass crossover removes the sub again.
+let SUBHARM_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
+/// Band level range (dB).  The floor turns a band off and skips its divider.
+/// The top is deliberately well above unity so the synthesized octave can sit
+/// louder than the bass that produced it, and so a hot level into the ceiling
+/// works as a sub maximizer.  Firmware older than caps v16 clamps to +6; there
+/// is no wire-format change to gate on, and a refresh corrects the field.
+let SUBHARM_LEVEL_MIN: Float = -30.0
+let SUBHARM_LEVEL_MAX: Float = 12.0
+/// LF boost bell range (dB); 0 skips the stage.  The ceiling keeps the RP2040
+/// Q28 sum inside its representable range at every legal setting.
+let SUBHARM_BOOST_MIN: Float = 0.0
+let SUBHARM_BOOST_MAX: Float = 6.0
+/// Selectivity mode: which kind of bass material gets a sub.  `percussive`
+/// favours short bursts after an attack, `sustained` notes that have already
+/// been ringing.  Depth and hold are ignored while the mode is `all`.
+let SUBHARM_SELECT_ALL: Int        = 0
+let SUBHARM_SELECT_PERCUSSIVE: Int = 1
+let SUBHARM_SELECT_SUSTAINED: Int  = 2
+/// How hard the unfavoured material is gated down (%); 0 makes the selectivity
+/// inaudible whatever the mode, 100 is full gating.
+let SUBHARM_DEPTH_MIN: Float = 0.0
+let SUBHARM_DEPTH_MAX: Float = 100.0
+/// The span the selectivity decision is made over (ms): the burst length after
+/// an attack in percussive mode, the ring time before the sub opens in sustained.
+let SUBHARM_HOLD_MIN_MS: Float = 50.0
+let SUBHARM_HOLD_MAX_MS: Float = 400.0
+/// Soft limit on the synthesized sub before it is mixed in (dBFS).  It is an
+/// absolute level, so a ceiling at full scale limits nothing and means "off".
+let SUBHARM_CEILING_MIN: Float = -40.0
+let SUBHARM_CEILING_MAX: Float = 0.0
+/// Full-scale value of one REQ_GET_SUBHARM_METER entry, matching the peaks
+/// scale in SystemStatusPacket so one meter widget can be driven from either.
+let SUBHARM_METER_FULL_SCALE: Float = 32767.0
+/// Fixed band edges (Hz).  Band 0 listens to 48-72 Hz and synthesizes 24-36 Hz,
+/// band 1 to 72-112 Hz for 36-56 Hz, band 2 to 112-160 Hz for 56-80 Hz.  The LF
+/// boost bell sits at 70 Hz with Q 0.9, filling the gap between sub and program
+/// mid-bass.  160 Hz is also the anti-alias corner for the decimated core.
+let SUBHARM_BAND_LO_HZ: Float   = 48.0
+let SUBHARM_BAND_MID_HZ: Float  = 72.0
+let SUBHARM_BAND_HI_HZ: Float   = 112.0
+let SUBHARM_BAND_TOP_HZ: Float  = 160.0
+let SUBHARM_BOOST_HZ: Float     = 70.0
+let SUBHARM_BOOST_Q: Float      = 0.9
+/// The divider's natural gain: a band sine flipped once per cycle puts 0.849 of
+/// the band amplitude at f/2 (the rest lands on 3f/2 upward and is lowpassed
+/// away).  A band at 0 dB is therefore 1.4 dB below the program it came from.
+let SUBHARM_DIVIDER_GAIN: Float = 0.849
+
 // Stereo Upmixer (V25): derives Centre + Left/Right Surround as ordinary matrix
 // source rows (2 = C, 3 = Ls, 4 = Rs) from a plain stereo input.  RP2350 only;
 // on RP2040 the SETs STALL and the GETs return all-zero payloads.  See
@@ -252,6 +352,15 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
+/// Wire format V30 (Subharmonic Synthesizer, extended): grows WireSubharmParams
+/// from 16 to 36 bytes by tail-appending the third band level, the selectivity
+/// settings, the sub ceiling and the pair link, taking the total from 5960 to
+/// 5980 bytes.  No earlier section moved.  `solo` is deliberately absent from
+/// the wire, so a bulk apply can never leave a device playing without program.
+/// Wire format V29 (Subharmonic Synthesizer): appends a 16-byte
+/// WireSubharmParams section at offset 5944, growing the flat layout from 5944
+/// to 5960 bytes.  Present on both platforms - the kernel is written once and
+/// runs in float on RP2350, Q28 fixed point on RP2040.
 /// Wire format V28 (fourth selectable S/PDIF input): WireInputConfig's
 /// `spdif_rx_pin_ext` grows from 2 to 3 entries, consuming that section's last
 /// reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and
@@ -289,10 +398,11 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 28
-/// Full V28 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
-/// Unchanged since V25 - V26/V27/V28 all reuse bytes inside existing sections.
-let BULK_PARAMS_SIZE: UInt16            = 5944
+let WIRE_FORMAT_VERSION: Int            = 30
+/// Full V30 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+/// V26/V27/V28 all reused bytes inside existing sections; V29 appended the
+/// subharm section and V30 grew it from 16 to 36 bytes.
+let BULK_PARAMS_SIZE: UInt16            = 5980
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
@@ -337,6 +447,17 @@ let BULK_PSYBASS_OFFSET: Int            = 5876
 /// enabled/center_mode/surround_mode (+0..2), presence_q1 i8 (+3, V26+), then ten
 /// f32 params (+4..+40).
 let BULK_UPMIX_OFFSET: Int              = 5900
+/// WireSubharmParams (V29, 36 bytes from V30): enabled (+0), reserved (+1),
+/// output_mask u16 (+2), then three floats low/high/boost (+4/+8/+12).  V30
+/// tail-appends top_db (+16), select_depth (+20), select_hold_ms (+24),
+/// ceiling_db (+28), select_mode (+32), link_pairs (+33) and two reserved bytes.
+/// Neither the headroom reading nor the sub meter is on the wire - read them
+/// with REQ_GET_SUBHARM_HEADROOM and REQ_GET_SUBHARM_METER.  `solo` is absent by
+/// design, so a bulk apply never changes it.
+let BULK_SUBHARM_OFFSET: Int            = 5944
+/// Bytes in WireSubharmParams (V30).  It is the last section, so this takes the
+/// image to its full size.
+let WIRE_SUBHARM_PARAMS_SIZE: Int       = 36
 
 /// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
 let WIRE_CROSSPOINT_SIZE: Int           = 8
@@ -565,7 +686,7 @@ let PARAM_SRC_I2C: UInt8               = 9
 // makes (spec §7.3); mirrors the firmware ParamSource enum.
 let PARAM_SRC_GPIO: UInt8              = 5
 
-// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 8
+// Request codes (0x84-0x87, 0x8B-0x8F, 0x9D-0x9E).  Capability format version 17
 // (spec §"Wire reference" / §11): v2 grew the binding 16 -> 24 bytes, the
 // noun descriptor 8 -> 12, added per-slot names; v3 adds the IR remote receiver
 // component with a learned-command table, and the Apply/Save/Revert preview
@@ -583,7 +704,11 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // alongside them: target groups and macros on commands 0x20-0x26, noun 52, the
 // three group flags, and the caps header's three former reserved bytes
 // (max_groups / max_macros / max_macro_steps).  See
-// control_surfaces_groups_macros_spec.md.
+// control_surfaces_groups_macros_spec.md.  v10-v13 add the I2C display bundle
+// (see control_surfaces_display_spec.md), v14-v16 append the subharmonic
+// synthesizer nouns and widen three of their ranges, and v17 adds the
+// auxiliary outputs on commands 0x02-0x07 and nouns 68-69 (see
+// control_surfaces_aux_spec.md).  No caps header field is added after v9.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
 let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
@@ -618,6 +743,21 @@ let REQ_SET_CS_DISPLAY_PAGE: UInt8   = 0x29   // OUT 4 bytes: CsDisplayPage, wVa
 let REQ_GET_CS_DISPLAY_PAGE: UInt8   = 0x2A   // IN 4 bytes: CsDisplayPage, wValue = page
 let REQ_GET_CS_DISPLAY_STATUS: UInt8 = 0x2B   // IN 8 bytes: CsDisplayStatus
 
+// Auxiliary outputs (caps v17; control_surfaces_aux_spec.md).  Eight
+// device-global on/off + level values the firmware attaches no meaning to,
+// addressed through the new CS_TARGET_AUX target kind.  Nothing here claims a
+// GPIO: a pin follows an aux only when the user binds an ordinary LED (state)
+// or PWM LED (level) to one of the two nouns, which is what turns an aux into
+// a relay driver or a lamp dimmer.  The config SET is deferred and covered by
+// the shared Save / Revert; the two runtime SETs apply in the handler with no
+// flash write, so a front-panel toggle never stalls the audio clocks.
+let REQ_SET_CS_AUX_CFG: UInt8   = 0x02   // OUT 36 bytes: CsAuxCfg, wValue = aux (0-7); deferred preview
+let REQ_GET_CS_AUX_CFG: UInt8   = 0x03   // IN 36 bytes: live CsAuxCfg, wValue = aux
+let REQ_SET_CS_AUX_STATE: UInt8 = 0x04   // OUT 1 byte (non-zero = on), wValue = aux; immediate
+let REQ_GET_CS_AUX_STATE: UInt8 = 0x05   // IN 1 byte, wValue = aux; wValue 0xFFFF -> 16 bytes (all states then levels)
+let REQ_SET_CS_AUX_LEVEL: UInt8 = 0x06   // OUT 1 byte 0..100, wValue = aux; immediate
+let REQ_GET_CS_AUX_LEVEL: UInt8 = 0x07   // IN 1 byte, wValue = aux
+
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
 let CS_STATUS_INVALID_SLOT: UInt8    = 0x10   // slot index >= 16 (IR sub-slot >= 16)
@@ -642,6 +782,7 @@ let CS_STATUS_DISPLAY_IN_USE: UInt8  = 0x22   // another slot already holds the 
 let CS_STATUS_PIN_NOT_I2C: UInt8     = 0x23   // SDA/SCL are not a valid same-instance pair
 let CS_STATUS_I2C_IN_USE: UInt8      = 0x24   // that I2C instance belongs to the control interface
 let CS_STATUS_INVALID_PAGE: UInt8    = 0x25   // display config or page record invalid
+let CS_STATUS_INVALID_AUX: UInt8     = 0x26   // aux index >= 8 on an aux config or runtime write
 
 // Limits / sentinels (spec §2).
 let CS_MAX_BINDINGS: Int       = 16
@@ -667,6 +808,10 @@ let CS_LAST_SLOT_GROUP_FLAG: UInt8 = 0x40
 let CS_LAST_SLOT_MACRO_FLAG: UInt8 = 0x60
 /// `lastSlot` for the display: 0x50 bare for the config, 0x50 | page for a page.
 let CS_LAST_SLOT_DISPLAY_FLAG: UInt8 = 0x50
+/// `lastSlot` for an auxiliary output: 0x70 | aux, so an aux config apply is
+/// tellable from a binding slot, a group, a macro, the display and an IR
+/// sub-slot in the one shared status channel (aux spec 3.1).
+let CS_LAST_SLOT_AUX_FLAG: UInt8 = 0x70
 
 // Target group / macro limits (caps v9).  The device reports its own in the
 // caps header (`maxGroups` / `maxMacros` / `maxMacroSteps`); these are the wire
@@ -691,6 +836,26 @@ let CS_DISPLAY_STATUS_LEN: UInt16   = 8
 
 // I2C display (caps v10; display spec §1).
 let CS_MAX_DISPLAY_PAGES: Int = 16
+
+// Auxiliary outputs (caps v17).  The count is not in the caps header: a host
+// learns the outputs exist from the version byte and how many there are from
+// `targetCount` on the two aux noun descriptors, so this is only the wire
+// maximum the app allocates for (aux spec 2.4).
+let CS_MAX_AUX: Int             = 8
+let CS_AUX_CFG_LEN: UInt16      = 36   // CsAuxCfg, identical on the wire and in flash
+let CS_AUX_CONFIG_VERSION: UInt8 = 1   // CsAuxConfig.version (the flash block)
+/// `REQ_GET_CS_AUX_STATE` wValue that reads all sixteen values in one transfer:
+/// eight states followed by eight levels.
+let CS_AUX_STATE_ALL: UInt16    = 0xFFFF
+/// An aux level is whole percent; the firmware clamps above this.
+let CS_AUX_LEVEL_MAX: UInt8     = 100
+
+/// `CsAuxCfg.bootMode`.  Both modes boot from `bootState` / `bootLevel`; the
+/// mode only decides whether a save rewrites those two fields from the live
+/// values first.  There is deliberately no "remember on every change": a flash
+/// write freezes the audio clocks for about 44 ms (aux spec 2.3 / 4).
+let CS_AUX_BOOT_FIXED: UInt8 = 0
+let CS_AUX_BOOT_SAVED: UInt8 = 1
 
 // Display models - CsBinding.index on a CS_TYPE_DISPLAY slot.  Wire and flash
 // persistent, so these are never renumbered.  Geometry and bus speed are fixed
@@ -878,6 +1043,32 @@ let CS_NOUN_CPU_LOAD: Int           = 53   // continuous percent 0..100, read-on
 let CS_NOUN_DISPLAY_PAGE: Int       = 54   // enum: which page is shown (steps skip empty slots)
 let CS_NOUN_DISPLAY_EDIT: Int       = 55   // bool: editing of the shown page is armed
 let CS_NOUN_PAGE_VALUE: Int         = 56   // virtual: adjusts whatever the display is showing
+// Caps v14 additions (subharmonic synth spec §3).  The output mask, the headroom
+// reading and the sub meter stay host-only: none is a front-panel control.
+let CS_NOUN_SUBHARM: Int            = 57   // bool: subharmonic synthesizer enable
+let CS_NOUN_SUBHARM_LOW: Int        = 58   // continuous dB -30..+12 (24-36 Hz band)
+let CS_NOUN_SUBHARM_HIGH: Int       = 59   // continuous dB -30..+12 (36-56 Hz band)
+let CS_NOUN_SUBHARM_BOOST: Int      = 60   // continuous dB 0..+6 (LF boost bell)
+// Caps v15 additions (subharmonic synth spec §3): the third band, selectivity,
+// the ceiling, the pair link and the monitoring solo.  The hold noun's
+// front-panel span stops at 127 ms because the caps table encodes ranges as
+// signed 8.8 fixed point; REQ_SET_SUBHARM_HOLD itself still takes 50..400 ms.
+let CS_NOUN_SUBHARM_TOP: Int        = 61   // continuous dB -30..+12 (56-80 Hz band)
+let CS_NOUN_SUBHARM_SELECT: Int     = 62   // enum: 0 all, 1 percussive, 2 sustained
+let CS_NOUN_SUBHARM_DEPTH: Int      = 63   // continuous percent 0..100
+let CS_NOUN_SUBHARM_HOLD: Int       = 64   // continuous ms (caps span stops at 127)
+let CS_NOUN_SUBHARM_CEILING: Int    = 65   // continuous dBFS -40..0 (0 = off)
+let CS_NOUN_SUBHARM_LINK: Int       = 66   // bool: link an output pair to its mono sum
+let CS_NOUN_SUBHARM_SOLO: Int       = 67   // bool: monitor the synthesized sub alone
+// Caps v16 changes no nouns: it only widens the three band-level nouns above
+// from +6 to +12 dB, matching SUBHARM_LEVEL_MAX.  The app takes noun ranges
+// from the device caps table, so nothing here gates on it.
+// Caps v17 additions (aux spec 1.1): eight device-global user values with no
+// audio meaning, on the CS_TARGET_AUX target kind.  Neither noun claims a pin;
+// an LED bound to AUX (IND_EQUALS, value 1) or a PWM LED bound to AUX_LEVEL
+// (IND_LEVEL) is what puts one on a GPIO.  Groups are rejected on both.
+let CS_NOUN_AUX: Int                = 68   // bool: auxiliary output on/off
+let CS_NOUN_AUX_LEVEL: Int          = 69   // continuous percent 0..100, whole steps only
 /// `CS_NOUN_MACRO` live value while no macro is running (also
 /// `CsExtStatusPacket.macroRunning` when idle).
 let CS_MACRO_NONE: UInt8            = 0xFF
@@ -974,6 +1165,7 @@ let CS_TARGET_INPUT_CH: UInt8  = 1   // target = input channel 0..N-1
 let CS_TARGET_OUTPUT_CH: UInt8 = 2   // target = output channel 0..N-1
 let CS_TARGET_DSP_CH: UInt8    = 3   // target = DSP channel (inputs first, then outputs)
 let CS_TARGET_DSP_BAND: UInt8  = 4   // target = DSP channel, index = filter band
+let CS_TARGET_AUX: UInt8       = 5   // target = auxiliary output 0..7 (caps v17)
 
 // CsNounDesc.dflags bitfield.
 let CS_NDF_DEFERRED: UInt8 = 0x01   // apply is deferred; the engine steps from a target shadow
@@ -1063,8 +1255,8 @@ func csUnitSymbol(_ unit: UInt8) -> String {
     }
 }
 
-// Test signal generator ("siggen") request codes (0xA4-0xA8; 0xA9-0xAF
-// reserved).  See Documentation/Features/test_signals_spec.md.  Transient
+// Test signal generator ("siggen") request codes (0xA4-0xA8; 0xA9-0xAE went to
+// the subharmonic synthesizer at V30).  See Documentation/Features/test_signals_spec.md.  Transient
 // only: never persisted, stopped by preset load / factory reset.  SET_CONFIG
 // is an OUT transfer carrying the 36-byte SiggenConfig (never auto-starts;
 // restarts with a fade if already running); CONTROL is write-as-read (an IN

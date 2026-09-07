@@ -778,6 +778,44 @@ private func csWriteName(_ name: String, into d: inout Data, at offset: Int, len
     for (i, byte) in name.utf8.prefix(length - 1).enumerated() { d[offset + i] = byte }
 }
 
+/// One auxiliary output's config (36 bytes; aux spec §2.1).  Identical on the
+/// wire and in flash.  This is the *configuration* only: the live `state` and
+/// `level` are runtime values that never reach flash on change and are not part
+/// of the unsaved-changes picture, which is what keeps a front-panel toggle
+/// from looking like an unsaved edit (and a Revert from clicking a relay).
+/// An all-zero record is the safe default: off, 0 %, unnamed and boot-fixed.
+struct CsAuxCfg: Equatable {
+    var bootMode: UInt8 = 0    // Byte 0: CS_AUX_BOOT_FIXED / _SAVED
+    var bootState: UInt8 = 0   // Byte 1: 0/1, applied at boot in both modes
+    var bootLevel: UInt8 = 0   // Byte 2: 0..100, applied at boot in both modes
+    // Byte 3: reserved (must be 0)
+    var name: String = ""      // Bytes 4-35: NUL-terminated user label
+
+    /// True when the record says anything at all.  Unlike a binding there is no
+    /// "empty slot" on the wire - every aux output always exists - so this only
+    /// decides whether the editor shows the slot as one the user has set up.
+    var isConfigured: Bool { self != CsAuxCfg() }
+    var bootsOn: Bool { bootState != 0 }
+    var remembersLastState: Bool { bootMode == CS_AUX_BOOT_SAVED }
+
+    func toData() -> Data {
+        var d = Data(count: Int(CS_AUX_CFG_LEN))
+        d[0] = bootMode
+        d[1] = bootState
+        d[2] = min(bootLevel, CS_AUX_LEVEL_MAX)
+        // 3 reserved (0)
+        csWriteName(name, into: &d, at: 4)
+        return d
+    }
+
+    static func fromData(_ data: Data) -> CsAuxCfg? {
+        guard data.count >= Int(CS_AUX_CFG_LEN) else { return nil }
+        let b = data.startIndex
+        return CsAuxCfg(bootMode: data[b + 0], bootState: data[b + 1],
+                        bootLevel: data[b + 2], name: csReadName(data, at: 4))
+    }
+}
+
 /// One target group (40 bytes; groups+macros spec §2.1).  `targetKind` picks
 /// the channel space and `memberMask` bit N selects channel N of it, so the
 /// same group record means different channels under different kinds - which is
@@ -1298,6 +1336,45 @@ class DSPViewModel: ObservableObject {
     /// on RP2350 / bit 4 on RP2040).  Default 0xFFFF = every output.
     @Published var psybassOutputMask: UInt16 = PSYBASS_DEFAULT_OUTPUT_MASK
 
+    // Subharmonic Synthesizer (V29, extended V30): a dbx-style octave divider that
+    // adds a real fundamental an octave below the program bass, per output channel
+    // selected by `subharmOutputMask`.  Same wire shape as psybass; the firmware
+    // clamps each value to the range shown and the app enforces the same ranges so
+    // its state matches without a read-back.
+    @Published var subharmEnabled: Bool = false
+    @Published var subharmLowDB: Float = 0.0      // -30..+12 dB (24-36 Hz sub; -30 = band off)
+    @Published var subharmHighDB: Float = 0.0     // -30..+12 dB (36-56 Hz sub; -30 = band off)
+    @Published var subharmTopDB: Float = -30.0    // -30..+12 dB (56-80 Hz sub; ships off)
+    @Published var subharmBoostDB: Float = 0.0    // 0..+6 dB (70 Hz LF boost bell)
+    /// Per-output subharm mask: bit k processes output channel k (PDM sub = bit 8
+    /// on RP2350 / bit 4 on RP2040).  Default 0xFFFF = every output.
+    @Published var subharmOutputMask: UInt16 = SUBHARM_DEFAULT_OUTPUT_MASK
+    /// Selectivity: which kind of bass material gets a sub, how hard the rest is
+    /// gated down, and the span the decision is made over.  Depth and hold do
+    /// nothing while the mode is `all`.
+    @Published var subharmSelectMode: Int = SUBHARM_SELECT_ALL
+    @Published var subharmSelectDepthPct: Float = 100.0   // 0..100 %
+    @Published var subharmSelectHoldMs: Float = 150.0     // 50..400 ms
+    /// Soft limit on the synthesized sub before it is mixed in (dBFS); 0 = off.
+    @Published var subharmCeilingDB: Float = 0.0
+    /// Synthesize one sub per output pair from its mono sum rather than one per
+    /// channel, so a panned event cannot leave the two dividers in opposite
+    /// polarity.  On by default, as on the dbx.
+    @Published var subharmLinkPairs: Bool = true
+    /// Runtime-only monitor: masked outputs carry the sub with the program signal
+    /// removed.  Never persisted, absent from the bulk image, so it has to be read
+    /// with 0x2D rather than coming back with `fetchAllParams`.
+    @Published var subharmSolo: Bool = false
+    /// Worst-case gain of the live configuration (dB), read back with 0x1A after
+    /// every change.  Not carried on the wire and not part of the preset: it is
+    /// derived from enable, the band levels, the boost and the ceiling, and
+    /// nothing else - not the mask, the pair link or the sample rate.
+    @Published var subharmHeadroomDB: Float = 0.0
+    /// Decaying peak of the synthesized sub per output channel (0x1F), normalized
+    /// to 0..1 like `SystemStatus.peaks` so one meter widget drives either.
+    /// Polled only while the subharm window is open; empty when never read.
+    @Published var subharmSubMeter: [Float] = []
+
     // Stereo Upmixer (V25): derives Centre + Ls/Rs matrix source rows from a
     // stereo input.  These mirror UpmixConfigPacket (spec §6.1); defaults match
     // the firmware factory defaults so a fresh device and the app agree before
@@ -1658,6 +1735,35 @@ class DSPViewModel: ObservableObject {
         let n = Int(csDisplayMaxPages)
         return n > 0 ? min(n, CS_MAX_DISPLAY_PAGES) : CS_MAX_DISPLAY_PAGES
     }
+    // Auxiliary outputs (caps v17).  Eight device-global user values with no
+    // audio meaning: `csAuxCfgs` is configuration under the shared Save /
+    // Revert, while `csAuxState` and `csAuxLevel` are runtime values that
+    // change instantly, never reach flash on change, and are pushed back by
+    // NOTIFY_EVT_CS_AUX whenever anything moves one.  See
+    // control_surfaces_aux_spec.md.
+    @Published var csAuxCfgs: [CsAuxCfg] = Array(repeating: CsAuxCfg(), count: CS_MAX_AUX)
+    @Published var csAuxState: [Bool] = Array(repeating: false, count: CS_MAX_AUX)
+    @Published var csAuxLevel: [UInt8] = Array(repeating: 0, count: CS_MAX_AUX)
+    /// True when the firmware exposes the auxiliary outputs.  No caps header
+    /// field is added for them, so the version byte is the only signal: a
+    /// pre-v17 device STALLs 0x02-0x07 and has no nouns 68-69 (aux spec §2.4).
+    var csAuxSupported: Bool { csCaps.capsVersion >= 17 }
+    /// How many outputs this device offers, taken from the aux noun's
+    /// `targetCount` as the spec directs, falling back to the wire maximum.
+    var csAuxCount: Int {
+        guard csAuxSupported else { return 0 }
+        let n = Int(csNounDescs.indices.contains(CS_NOUN_AUX) ? csNounDescs[CS_NOUN_AUX].targetCount : 0)
+        return min(n > 0 ? n : CS_MAX_AUX, CS_MAX_AUX)
+    }
+
+    /// Display name for an aux output, falling back to its index when unnamed -
+    /// the same "Aux N" the device's own display pages use (aux spec §6.3).
+    func csAuxName(_ index: Int) -> String {
+        guard csAuxCfgs.indices.contains(index) else { return "Aux \(index + 1)" }
+        let n = csAuxCfgs[index].name
+        return n.isEmpty ? "Aux \(index + 1)" : n
+    }
+
     /// The slot holding the display component, if one is configured.
     var csDisplaySlot: Int? {
         (0..<min(csBindings.count, CS_MAX_BINDINGS)).first {
@@ -1693,6 +1799,11 @@ class DSPViewModel: ObservableObject {
     private var csCleanMacros: [CsMacro]? = nil
     private var csCleanDisplayCfg: CsDisplayCfg? = nil
     private var csCleanDisplayPages: [CsDisplayPage]? = nil
+    // Only the aux *config* is part of the baseline.  The live state and level
+    // are deliberately outside it: toggling an output must never raise the
+    // unsaved-changes banner, and a Revert leaves them alone rather than
+    // clicking a relay (aux spec §4).
+    private var csCleanAuxCfgs: [CsAuxCfg]? = nil
 
     /// True when the live Control Surfaces config has unsaved preview changes.
     /// Requires the firmware's sticky dirty flag AND a real difference from the
@@ -1705,7 +1816,8 @@ class DSPViewModel: ObservableObject {
               let cleanNames = csCleanNames, let cleanGroups = csCleanGroups,
               let cleanMacros = csCleanMacros,
               let cleanDisplayCfg = csCleanDisplayCfg,
-              let cleanDisplayPages = csCleanDisplayPages else {
+              let cleanDisplayPages = csCleanDisplayPages,
+              let cleanAuxCfgs = csCleanAuxCfgs else {
             return true   // no known-clean baseline: defer to the firmware flag
         }
         // Groups and macros share the one dirty flag and the one Save, so an
@@ -1713,6 +1825,7 @@ class DSPViewModel: ObservableObject {
         return csBindings != cleanBindings || csIrCommands != cleanIr || csNames != cleanNames
             || csGroups != cleanGroups || csMacros != cleanMacros
             || csDisplayCfg != cleanDisplayCfg || csDisplayPages != cleanDisplayPages
+            || csAuxCfgs != cleanAuxCfgs
     }
 
     /// Record the current live config as the clean (== flash) baseline.  Call
@@ -1726,6 +1839,7 @@ class DSPViewModel: ObservableObject {
         csCleanMacros = csMacros
         csCleanDisplayCfg = csDisplayCfg
         csCleanDisplayPages = csDisplayPages
+        csCleanAuxCfgs = csAuxCfgs
     }
 
     // Test signal generator (siggen) - onboard measurement/diagnostic signals
@@ -2025,6 +2139,18 @@ class DSPViewModel: ObservableObject {
     /// appends WirePsybassParams to the bulk layout.  The whole feature (window
     /// contents + output mask) is gated on this so older firmware never sees it.
     var firmwareSupportsPsybass: Bool { firmwareWireFormatVersion >= 23 }
+
+    /// Subharmonic Synthesizer (cmds 0x10-0x1A) shipped in wire format V29,
+    /// which appends WireSubharmParams to the bulk layout.  Both platforms run
+    /// it, so unlike the upmixer there is no platform half to the gate.
+    var firmwareSupportsSubharm: Bool { firmwareWireFormatVersion >= 29 }
+
+    /// The V30 additions: the third band, selectivity, the ceiling and the pair
+    /// link (cmds 0x1B-0x1F, 0x2C-0x2F, 0xA9-0xAE).  `fetchAllParams` only
+    /// accepts an exact version match, so in practice this rides with
+    /// `firmwareSupportsSubharm`; it is spelled out separately because the
+    /// individual GETs STALL on V29 firmware and the UI hides these controls.
+    var firmwareSupportsSubharmExtended: Bool { firmwareWireFormatVersion >= 30 }
 
     /// Stereo Upmixer (cmds 0x4A-0x4E) shipped in wire format V25 and gained the
     /// presence control in V26; the app is a V26 client (strict version match on
@@ -2530,6 +2656,17 @@ class DSPViewModel: ObservableObject {
             self.pollQueue.async { self.fetchAdatInputStatus() }
         }
 
+        // Auxiliary-output pushes (caps v17).  Every state or level change is
+        // announced, whoever made it, and the 8-byte event carries both values,
+        // so this needs no read-back at all - which matters because a panel
+        // button switching a relay must show up here without polling.
+        AppState.shared.interruptMonitor.onCsAux = { [weak self] aux, state, level, _ in
+            guard let self = self, aux < UInt8(CS_MAX_AUX) else { return }
+            let i = Int(aux)
+            if self.csAuxState[i] != state { self.csAuxState[i] = state }
+            if self.csAuxLevel[i] != level { self.csAuxLevel[i] = level }
+        }
+
         // The device loaded a preset without us asking - an IR button or macro
         // bound to PRESET_RELOAD, a control-surface encoder, a preset load over
         // UART/I2C, or a second host.  Follow the active slot immediately; the
@@ -2769,6 +2906,17 @@ class DSPViewModel: ObservableObject {
             psybassDriveDB: psybassDriveDB,
             psybassCharacterPct: psybassCharacterPct,
             psybassOriginalDB: psybassOriginalDB,
+            subharmEnabled: subharmEnabled,
+            subharmOutputMask: subharmOutputMask,
+            subharmLowDB: subharmLowDB,
+            subharmHighDB: subharmHighDB,
+            subharmTopDB: subharmTopDB,
+            subharmBoostDB: subharmBoostDB,
+            subharmSelectMode: subharmSelectMode,
+            subharmSelectDepthPct: subharmSelectDepthPct,
+            subharmSelectHoldMs: subharmSelectHoldMs,
+            subharmCeilingDB: subharmCeilingDB,
+            subharmLinkPairs: subharmLinkPairs,
             upmixEnabled: upmixEnabled,
             upmixCenterMode: upmixCenterMode,
             upmixSurroundMode: upmixSurroundMode,

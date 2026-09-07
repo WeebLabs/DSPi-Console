@@ -96,6 +96,26 @@ extension PresetDocument {
             doc.upmix = block
         }
 
+        if vm.firmwareSupportsSubharm {
+            var block = SubharmBlock()
+            block.enabled = vm.subharmEnabled
+            block.lowDb = vm.subharmLowDB
+            block.highDb = vm.subharmHighDB
+            block.boostDb = vm.subharmBoostDB
+            block.outputMask = Int(vm.subharmOutputMask)
+            // V30 fields keep their defaults on V29 firmware, which has no such
+            // state to capture.  Solo is never written: it is runtime-only.
+            if vm.firmwareSupportsSubharmExtended {
+                block.topDb = vm.subharmTopDB
+                block.selectMode = vm.subharmSelectMode
+                block.selectDepthPct = vm.subharmSelectDepthPct
+                block.selectHoldMs = vm.subharmSelectHoldMs
+                block.ceilingDb = vm.subharmCeilingDB
+                block.linkPairs = vm.subharmLinkPairs
+            }
+            doc.subharm = block
+        }
+
         // Channels: every input the platform has (not just the ones currently
         // streaming - the dormant ones still hold EQ on the device), then every
         // output.
@@ -524,6 +544,28 @@ enum PresetDocumentApply {
                 vm.setPsybass(psybass.enabled)
             } else {
                 report.skip("Psychoacoustic bass (not supported by this firmware)")
+            }
+        }
+
+        if let subharm = doc.subharm {
+            if vm.firmwareSupportsSubharm {
+                vm.setSubharmLow(subharm.lowDb)
+                vm.setSubharmHigh(subharm.highDb)
+                vm.setSubharmBoost(subharm.boostDb)
+                vm.setSubharmMask(UInt16(truncatingIfNeeded: subharm.outputMask))
+                if vm.firmwareSupportsSubharmExtended {
+                    vm.setSubharmTop(subharm.topDb)
+                    vm.setSubharmSelectMode(subharm.selectMode)
+                    vm.setSubharmSelectDepth(subharm.selectDepthPct)
+                    vm.setSubharmSelectHold(subharm.selectHoldMs)
+                    vm.setSubharmCeiling(subharm.ceilingDb)
+                    vm.setSubharmLinkPairs(subharm.linkPairs)
+                } else if subharm.topDb > SUBHARM_LEVEL_MIN {
+                    report.skip("Subharm 56-80 Hz band (needs wire format V30)")
+                }
+                vm.setSubharm(subharm.enabled)
+            } else {
+                report.skip("Subharmonic synthesizer (not supported by this firmware)")
             }
         }
 

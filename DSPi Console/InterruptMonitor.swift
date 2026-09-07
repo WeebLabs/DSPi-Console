@@ -43,6 +43,7 @@ private let NOTIFY_EVT_SIGGEN_STATE: UInt8 = 0x07
 private let NOTIFY_EVT_ADAT_STATE: UInt8 = 0x08
 private let NOTIFY_EVT_I2S_SLAVE_STATE: UInt8 = 0x09
 private let NOTIFY_EVT_ADAT_INPUT_STATE: UInt8 = 0x0B
+private let NOTIFY_EVT_CS_AUX: UInt8 = 0x0C
 
 // Source tags (from ParamSource enum in firmware notify.h)
 private func sourceLabel(_ src: UInt8) -> String {
@@ -187,6 +188,15 @@ struct InterruptEvent: Identifiable {
             let rate = UInt32(bytes[5]) | (UInt32(bytes[6]) << 8) | (UInt32(bytes[7]) << 16) | (UInt32(bytes[8]) << 24)
             let mode = bytes[9] == 1 ? "slave" : "master"
             return "\(seqStr) v2.AdatInputState             \(state) rate=\(rate) mode=\(mode)"
+
+        case NOTIFY_EVT_CS_AUX:
+            // 8 bytes: [ver, evt, flags, seq, aux, state, level, src].  Both
+            // values ride every event, so which of the pair moved never has to
+            // be read back.
+            guard bytes.count >= 8 else {
+                return "\(seqStr) v2.CsAux (short: \(bytes.count) bytes)"
+            }
+            return "\(seqStr) v2.CsAux                      aux=\(bytes[4]) state=\(bytes[5]) level=\(bytes[6]) src=\(sourceLabel(bytes[7]))"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -451,6 +461,25 @@ private enum ParamOffsetDecoder {
             }
         }
 
+        // Subharmonic Synthesizer (5944..5979) — WireSubharmParams.  `solo` has no
+        // wire offset, so it never appears here; a UI that shows it must poll 0x2D.
+        if off >= BULK_SUBHARM_OFFSET && off < BULK_SUBHARM_OFFSET + WIRE_SUBHARM_PARAMS_SIZE {
+            switch off - BULK_SUBHARM_OFFSET {
+            case 0:  return ("subharm.enabled", fmtBool(payload))
+            case 2:  return ("subharm.output_mask", fmtHex(payload))
+            case 4:  return ("subharm.low_db", fmtFloat(payload, suffix: " dB"))
+            case 8:  return ("subharm.high_db", fmtFloat(payload, suffix: " dB"))
+            case 12: return ("subharm.boost_db", fmtFloat(payload, suffix: " dB"))
+            case 16: return ("subharm.top_db", fmtFloat(payload, suffix: " dB"))
+            case 20: return ("subharm.select_depth", fmtFloat(payload, suffix: "%"))
+            case 24: return ("subharm.select_hold_ms", fmtFloat(payload, suffix: " ms"))
+            case 28: return ("subharm.ceiling_db", fmtFloat(payload, suffix: " dBFS"))
+            case 32: return ("subharm.select_mode", fmtHex(payload))
+            case 33: return ("subharm.link_pairs", fmtBool(payload))
+            default: break
+            }
+        }
+
         // Fallback — unknown offset
         return (String(format: "offset=0x%04X size=%d", off, sz), fmtHex(payload))
     }
@@ -575,6 +604,13 @@ class InterruptMonitor: ObservableObject {
     /// RELOCKING).  Carries the AdatInputState, the detected rate in Hz (0 unless
     /// LOCKED), and the live clock mode (0 master / 1 slave).
     var onAdatInputState: ((_ state: UInt8, _ detectedRate: UInt32, _ clockMode: UInt8) -> Void)?
+
+    /// Fires on the main thread for every auxiliary-output change
+    /// (NOTIFY_EVT_CS_AUX), whatever moved it: a bound button, an IR key, a
+    /// macro step, a display page, this host, or an external transport.  Both
+    /// values ride every event, so nothing has to be read back.  `source` is
+    /// the ParamSource of the dispatch (PARAM_SRC_GPIO for a panel control).
+    var onCsAux: ((_ aux: UInt8, _ state: Bool, _ level: UInt8, _ source: UInt8) -> Void)?
 
     private let usb: USBDevice
 
@@ -909,6 +945,22 @@ class InterruptMonitor: ObservableObject {
             let mode = bytes[9]
             DispatchQueue.main.async {
                 handler(state, rate, mode)
+            }
+        }
+
+        // Dispatch auxiliary-output pushes so a panel button switching a relay
+        // is reflected in the Settings page immediately.  8 bytes:
+        // [ver, evt, flags, seq, aux, state, level, src].
+        if let handler = onCsAux,
+           bytes.count >= 8,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_CS_AUX {
+            let aux = bytes[4]
+            let state = bytes[5] != 0
+            let level = bytes[6]
+            let source = bytes[7]
+            DispatchQueue.main.async {
+                handler(aux, state, level, source)
             }
         }
 

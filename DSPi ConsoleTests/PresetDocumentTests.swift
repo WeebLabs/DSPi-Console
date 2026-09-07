@@ -37,6 +37,8 @@ final class PresetDocumentTests: XCTestCase {
         doc.psybass?.cutoffHz = 95
         doc.upmix = PresetDocument.UpmixBlock()
         doc.upmix?.presenceDb = -1.5
+        doc.subharm = PresetDocument.SubharmBlock()
+        doc.subharm?.lowDb = -6
 
         var channel = PresetDocument.ChannelBlock()
         channel.channelId = 2
@@ -79,6 +81,7 @@ final class PresetDocumentTests: XCTestCase {
         XCTAssertEqual(decoded.leveller.detectorMask, 0x03)
         XCTAssertEqual(decoded.psybass?.cutoffHz, 95)
         XCTAssertEqual(decoded.upmix?.presenceDb, -1.5)
+        XCTAssertEqual(decoded.subharm?.lowDb, -6)
 
         let out = try XCTUnwrap(decoded.channels.first)
         XCTAssertEqual(out.channelId, 2)
@@ -333,6 +336,7 @@ final class PresetDocumentTests: XCTestCase {
         doc.matrix = [PresetDocument.CrosspointBlock()]
         doc.psybass = PresetDocument.PsybassBlock()
         doc.upmix = PresetDocument.UpmixBlock()
+        doc.subharm = PresetDocument.SubharmBlock()
         doc.io.dacHwMute = PresetDocument.DacHwMuteBlock()
 
         let object = try XCTUnwrap(
@@ -356,7 +360,7 @@ final class PresetDocumentTests: XCTestCase {
 
         XCTAssertTrue(Set(object.keys).isSuperset(of: [
             "schemaVersion", "meta", "global", "loudness", "crossfeed",
-            "leveller", "psybass", "upmix", "channels", "matrix", "io",
+            "leveller", "psybass", "upmix", "subharm", "channels", "matrix", "io",
         ]), "top-level keys drifted: \(Set(object.keys).sorted())")
 
         try XCTAssertTrue(keys(["meta"]).isSuperset(of: [
@@ -383,6 +387,10 @@ final class PresetDocumentTests: XCTestCase {
             "enabled", "centerMode", "surroundMode", "strengthPct", "centerWidthPct",
             "thresholdPct", "attackMs", "releaseMs", "detectorHpfHz",
             "surroundDelayMs", "surroundHpfHz", "surroundLpfHz", "decorrPct", "presenceDb",
+        ]))
+        try XCTAssertTrue(keys(["subharm"]).isSuperset(of: [
+            "enabled", "lowDb", "highDb", "topDb", "boostDb", "outputMask",
+            "selectMode", "selectDepthPct", "selectHoldMs", "ceilingDb", "linkPairs",
         ]))
         try XCTAssertTrue(keys(["channels"]).isSuperset(of: [
             "channelId", "name", "isOutput", "delayMs", "gainDb", "muted",

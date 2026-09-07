@@ -62,6 +62,17 @@ struct PresetSnapshot: Equatable {
     let psybassDriveDB: Float
     let psybassCharacterPct: Float
     let psybassOriginalDB: Float
+    let subharmEnabled: Bool
+    let subharmOutputMask: UInt16
+    let subharmLowDB: Float
+    let subharmHighDB: Float
+    let subharmTopDB: Float
+    let subharmBoostDB: Float
+    let subharmSelectMode: Int
+    let subharmSelectDepthPct: Float
+    let subharmSelectHoldMs: Float
+    let subharmCeilingDB: Float
+    let subharmLinkPairs: Bool
     let upmixEnabled: Bool
     let upmixCenterMode: Int
     let upmixSurroundMode: Int
@@ -227,6 +238,55 @@ extension PresetSnapshot {
         }
         if old.psybassOriginalDB != new.psybassOriginalDB {
             changes.append(.init(category: "Psybass", description: "Psybass original bass: \(formatVal(old.psybassOriginalDB)) dB → \(formatVal(new.psybassOriginalDB)) dB"))
+        }
+
+        if old.subharmEnabled != new.subharmEnabled {
+            changes.append(.init(category: "Subharm", description: "Subharmonic Synthesizer: \(new.subharmEnabled ? "enabled" : "disabled")"))
+        }
+        if old.subharmOutputMask != new.subharmOutputMask {
+            changes.append(.init(category: "Subharm", description: "Subharm outputs: \(String(format: "0x%04X", old.subharmOutputMask)) → \(String(format: "0x%04X", new.subharmOutputMask))"))
+        }
+        // The floor is "band off", not a level, so it is worth naming as such.
+        func subharmLevel(_ db: Float) -> String {
+            db <= SUBHARM_LEVEL_MIN ? "off" : "\(formatVal(db)) dB"
+        }
+        if old.subharmLowDB != new.subharmLowDB {
+            changes.append(.init(category: "Subharm", description: "Subharm 24-36 Hz: \(subharmLevel(old.subharmLowDB)) → \(subharmLevel(new.subharmLowDB))"))
+        }
+        if old.subharmHighDB != new.subharmHighDB {
+            changes.append(.init(category: "Subharm", description: "Subharm 36-56 Hz: \(subharmLevel(old.subharmHighDB)) → \(subharmLevel(new.subharmHighDB))"))
+        }
+        if old.subharmTopDB != new.subharmTopDB {
+            changes.append(.init(category: "Subharm", description: "Subharm 56-80 Hz: \(subharmLevel(old.subharmTopDB)) → \(subharmLevel(new.subharmTopDB))"))
+        }
+        if old.subharmSelectMode != new.subharmSelectMode {
+            func selectName(_ mode: Int) -> String {
+                switch mode {
+                case SUBHARM_SELECT_PERCUSSIVE: return "percussive"
+                case SUBHARM_SELECT_SUSTAINED:  return "sustained"
+                default:                        return "all material"
+                }
+            }
+            changes.append(.init(category: "Subharm", description: "Subharm selectivity: \(selectName(old.subharmSelectMode)) → \(selectName(new.subharmSelectMode))"))
+        }
+        if old.subharmSelectDepthPct != new.subharmSelectDepthPct {
+            changes.append(.init(category: "Subharm", description: "Subharm selectivity depth: \(formatVal(old.subharmSelectDepthPct))% → \(formatVal(new.subharmSelectDepthPct))%"))
+        }
+        if old.subharmSelectHoldMs != new.subharmSelectHoldMs {
+            changes.append(.init(category: "Subharm", description: "Subharm selectivity hold: \(formatVal(old.subharmSelectHoldMs)) ms → \(formatVal(new.subharmSelectHoldMs)) ms"))
+        }
+        if old.subharmCeilingDB != new.subharmCeilingDB {
+            // 0 dBFS is not a ceiling at full scale, it is the stage switched off.
+            func ceilingText(_ db: Float) -> String {
+                db >= SUBHARM_CEILING_MAX ? "off" : "\(formatVal(db)) dBFS"
+            }
+            changes.append(.init(category: "Subharm", description: "Subharm sub ceiling: \(ceilingText(old.subharmCeilingDB)) → \(ceilingText(new.subharmCeilingDB))"))
+        }
+        if old.subharmLinkPairs != new.subharmLinkPairs {
+            changes.append(.init(category: "Subharm", description: "Subharm pair link: \(new.subharmLinkPairs ? "linked" : "independent")"))
+        }
+        if old.subharmBoostDB != new.subharmBoostDB {
+            changes.append(.init(category: "Subharm", description: "Subharm LF boost: \(formatVal(old.subharmBoostDB)) dB → \(formatVal(new.subharmBoostDB)) dB"))
         }
 
         // Stereo Upmixer

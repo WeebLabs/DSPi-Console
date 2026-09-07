@@ -41,6 +41,8 @@ struct PresetDocument: Codable {
     var psybass: PsybassBlock?
     /// Absent when the source device had no upmixer (pre-V25 / RP2040).
     var upmix: UpmixBlock?
+    /// Absent when the source device had no subharmonic synthesizer (pre-V29).
+    var subharm: SubharmBlock?
     var channels: [ChannelBlock] = []
     var matrix: [CrosspointBlock] = []
     /// Physical wiring.  Applied only when the user opts in on import, since
@@ -59,6 +61,7 @@ struct PresetDocument: Codable {
         leveller = c.value(.leveller, LevellerBlock())
         psybass = c.value(.psybass, nil)
         upmix = c.value(.upmix, nil)
+        subharm = c.value(.subharm, nil)
         channels = c.value(.channels, [])
         matrix = c.value(.matrix, [])
         io = c.value(.io, IoBlock())
@@ -223,6 +226,41 @@ struct PresetDocument: Codable {
             characterPct = c.value(.characterPct, 50)
             originalDb = c.value(.originalDb, 0)
             outputMask = c.value(.outputMask, Int(PSYBASS_DEFAULT_OUTPUT_MASK))
+        }
+    }
+
+    /// The V30 fields default to the firmware's own V36-slot defaults, so a
+    /// document written by a V29 console (or by the Windows console) restores a
+    /// two-band setup rather than an arbitrary one.  `solo` is absent by design:
+    /// it is runtime-only and no saved configuration may switch program off.
+    struct SubharmBlock: Codable {
+        var enabled = false
+        var lowDb: Float = 0
+        var highDb: Float = 0
+        var topDb: Float = SUBHARM_LEVEL_MIN
+        var boostDb: Float = 0
+        var outputMask: Int = Int(SUBHARM_DEFAULT_OUTPUT_MASK)
+        var selectMode: Int = SUBHARM_SELECT_ALL
+        var selectDepthPct: Float = 100
+        var selectHoldMs: Float = 150
+        var ceilingDb: Float = 0
+        var linkPairs = true
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = c.value(.enabled, false)
+            lowDb = c.value(.lowDb, 0)
+            highDb = c.value(.highDb, 0)
+            topDb = c.value(.topDb, SUBHARM_LEVEL_MIN)
+            boostDb = c.value(.boostDb, 0)
+            outputMask = c.value(.outputMask, Int(SUBHARM_DEFAULT_OUTPUT_MASK))
+            selectMode = c.value(.selectMode, SUBHARM_SELECT_ALL)
+            selectDepthPct = c.value(.selectDepthPct, 100)
+            selectHoldMs = c.value(.selectHoldMs, 150)
+            ceilingDb = c.value(.ceilingDb, 0)
+            linkPairs = c.value(.linkPairs, true)
         }
     }
 

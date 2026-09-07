@@ -25,6 +25,20 @@ enum OnboardingCohort: Equatable {
 /// can be tested without a window on screen.  Nothing here draws anything.
 final class OnboardingCoordinator: ObservableObject {
 
+    /// Master switch for everything that happens *after* first-run setup: the
+    /// basics tour, its offer banner, and the first-open hint cards.
+    ///
+    /// Off while that half is still being worked on, so it cannot reach a
+    /// build.  The code and its tests stay put, and nothing is recorded as
+    /// seen while it is off, so flipping this back to `true` picks up exactly
+    /// where it left off.  The Getting Started wizard is unaffected.
+    static let postSetupOnboardingEnabled = false
+
+    /// This instance's copy of the switch above.  An instance parameter so the
+    /// tests can keep exercising the tour and the hint cards while the shipped
+    /// instance has them off.
+    private let postSetupEnabled: Bool
+
     // MARK: Persistence
 
     enum Key {
@@ -69,9 +83,12 @@ final class OnboardingCoordinator: ObservableObject {
     /// `UserDefaults`.
     static let shared = OnboardingCoordinator()
 
-    init(defaults: UserDefaults = .standard, debug: OnboardingDebug = .fromDefaults()) {
+    init(defaults: UserDefaults = .standard,
+         debug: OnboardingDebug = .fromDefaults(),
+         postSetupEnabled: Bool = OnboardingCoordinator.postSetupOnboardingEnabled) {
         self.defaults = defaults
         self.debug = debug
+        self.postSetupEnabled = postSetupEnabled
     }
 
     // MARK: State
@@ -119,7 +136,14 @@ final class OnboardingCoordinator: ObservableObject {
             // state is cleared, and a first run becomes unreachable on
             // exactly the machines that need to see one.
             if hasPriorAppUse && !simulatingFresh {
-                completedIDs = Set(OnboardingCatalogue.all.map(\.id))
+                // Only the phases that are actually live get seeded.  Seeding
+                // a step nobody can be shown would spend it: the user would be
+                // recorded as having seen a tour that never ran, and turning
+                // the tour back on later would skip them.
+                let seedable = OnboardingCatalogue.all.filter {
+                    postSetupEnabled || $0.phase == .setup
+                }
+                completedIDs = Set(seedable.map(\.id))
                 defaults.set(FirmwareVersion.expected?.description, forKey: Key.lastSeenVersion)
                 cohort = .existingUser
                 pending = []
@@ -134,7 +158,10 @@ final class OnboardingCoordinator: ObservableObject {
         }
 
         let seen = completedIDs
-        pending = OnboardingCatalogue.all.filter { !seen.contains($0.id) && $0.applies(vm) }
+        pending = OnboardingCatalogue.all.filter {
+            guard !seen.contains($0.id), $0.applies(vm) else { return false }
+            return postSetupEnabled || $0.phase == .setup
+        }
 
         if pending.isEmpty {
             cohort = .upToDate
@@ -223,6 +250,7 @@ final class OnboardingCoordinator: ObservableObject {
     /// that they would still be *offered* the tour once, so the offer stands
     /// on the cohort rather than on the pending list.
     var canOfferBasicsTour: Bool {
+        guard postSetupEnabled else { return false }
         guard cohort != .declined, pending(.setup).isEmpty else { return false }
         return cohort == .existingUser || !pending(.basics).isEmpty
     }
@@ -248,6 +276,7 @@ final class OnboardingCoordinator: ObservableObject {
     /// check, so a replay cannot resurrect a step for hardware that is not
     /// attached.
     func startBasicsTour(vm: DSPViewModel) {
+        guard postSetupEnabled else { return }
         if pending(.basics).isEmpty {
             completedIDs = completedIDs.subtracting(OnboardingCatalogue.basics.map(\.id))
             evaluate(vm: vm)

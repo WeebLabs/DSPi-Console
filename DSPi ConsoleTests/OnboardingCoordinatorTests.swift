@@ -681,6 +681,11 @@ final class OnboardingCoordinatorTests: XCTestCase {
     // MARK: - Helpers
 
     private func makeCoordinator() -> OnboardingCoordinator {
-        OnboardingCoordinator(defaults: defaults, debug: .fromDefaults(defaults))
+        // The tour and the hint cards are switched off in shipped builds while
+        // that half is still being worked on, but the logic is still here and
+        // still worth testing, so these coordinators turn it on.
+        OnboardingCoordinator(defaults: defaults,
+                              debug: .fromDefaults(defaults),
+                              postSetupEnabled: true)
     }
 }

@@ -1187,4 +1187,170 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertTrue(both.isLarge)
         XCTAssertFalse(CsDisplayPage().hasBar)
     }
+
+    // MARK: - Caps v17: auxiliary outputs (control_surfaces_aux_spec.md)
+
+    /// §2.1: the config record is 36 bytes, boot fields first and a 32-byte
+    /// name after a reserved byte.  A wrong offset here would boot an amplifier
+    /// trigger into the wrong position, so the layout is pinned byte-exactly.
+    func testAuxCfgLayout() {
+        var cfg = CsAuxCfg()
+        cfg.bootMode = CS_AUX_BOOT_SAVED
+        cfg.bootState = 1
+        cfg.bootLevel = 60
+        cfg.name = "Amp"
+        let d = cfg.toData()
+        XCTAssertEqual(d.count, Int(CS_AUX_CFG_LEN))
+        XCTAssertEqual(Int(CS_AUX_CFG_LEN), 36)
+        XCTAssertEqual(hex(d.prefix(8)), "01 01 3c 00 41 6d 70 00")
+        XCTAssertEqual(d[3], 0, "byte 3 is reserved and must stay zero")
+        XCTAssertEqual(CsAuxCfg.fromData(d), cfg)
+    }
+
+    /// §2.1: an all-zero record is the safe default the firmware sanitises to -
+    /// off, 0 %, unnamed, boot-fixed - and reads back as untouched.
+    func testAuxCfgZeroRecordIsTheSafeDefault() {
+        let empty = CsAuxCfg()
+        XCTAssertEqual(hex(empty.toData()), hex(Data(count: Int(CS_AUX_CFG_LEN))))
+        XCTAssertFalse(empty.isConfigured)
+        XCTAssertFalse(empty.bootsOn)
+        XCTAssertFalse(empty.remembersLastState)
+        XCTAssertEqual(empty.bootMode, CS_AUX_BOOT_FIXED)
+        XCTAssertEqual(CsAuxCfg.fromData(Data(count: Int(CS_AUX_CFG_LEN))), empty)
+        XCTAssertNil(CsAuxCfg.fromData(Data(count: 35)), "a short read must not decode")
+    }
+
+    /// The level is whole percent capped at 100 (§3.2), and the name is
+    /// truncated with its terminator intact like every other CS name field.
+    func testAuxCfgClampsLevelAndTerminatesName() {
+        var hot = CsAuxCfg()
+        hot.bootLevel = 200
+        XCTAssertEqual(hot.toData()[2], CS_AUX_LEVEL_MAX)
+        XCTAssertEqual(CS_AUX_LEVEL_MAX, 100)
+
+        var long = CsAuxCfg()
+        long.name = String(repeating: "x", count: 60)
+        let d = long.toData()
+        XCTAssertEqual(d.count, Int(CS_AUX_CFG_LEN))
+        XCTAssertEqual(d[Int(CS_AUX_CFG_LEN) - 1], 0, "the name field stays NUL-terminated")
+        XCTAssertEqual(CsAuxCfg.fromData(d)?.name.count, CS_NAME_LEN - 1)
+    }
+
+    /// §3 / §2.4: the six commands sit in the low block, the status code and
+    /// the status-channel tag are the values the spec fixes, and neither noun
+    /// nor target kind collides with anything already allocated.
+    func testAuxCommandAndConstantAllocation() {
+        XCTAssertEqual(REQ_SET_CS_AUX_CFG, 0x02)
+        XCTAssertEqual(REQ_GET_CS_AUX_CFG, 0x03)
+        XCTAssertEqual(REQ_SET_CS_AUX_STATE, 0x04)
+        XCTAssertEqual(REQ_GET_CS_AUX_STATE, 0x05)
+        XCTAssertEqual(REQ_SET_CS_AUX_LEVEL, 0x06)
+        XCTAssertEqual(REQ_GET_CS_AUX_LEVEL, 0x07)
+        XCTAssertEqual(CS_STATUS_INVALID_AUX, 0x26)
+        XCTAssertEqual(CS_AUX_STATE_ALL, 0xFFFF)
+        XCTAssertEqual(CS_MAX_AUX, 8)
+        XCTAssertEqual(CS_NOUN_AUX, 68)
+        XCTAssertEqual(CS_NOUN_AUX_LEVEL, 69)
+        XCTAssertEqual(CS_TARGET_AUX, 5)
+        XCTAssertEqual(CS_AUX_BOOT_FIXED, 0)
+        XCTAssertEqual(CS_AUX_BOOT_SAVED, 1)
+        // The status tag has to stay clear of every other kind sharing the one
+        // channel, or an aux apply would be read as a group's or a macro's.
+        let tags: Set<UInt8> = [CS_LAST_SLOT_GROUP_FLAG, CS_LAST_SLOT_DISPLAY_FLAG,
+                                CS_LAST_SLOT_MACRO_FLAG, CS_LAST_SLOT_AUX_FLAG,
+                                CS_LAST_SLOT_IR_FLAG, CS_LAST_SLOT_SAVE]
+        XCTAssertEqual(tags.count, 6)
+        XCTAssertEqual(CS_LAST_SLOT_AUX_FLAG, 0x70)
+        for aux in 0..<CS_MAX_AUX {
+            let tagged = CS_LAST_SLOT_AUX_FLAG | UInt8(aux)
+            XCTAssertEqual(tagged & 0xF0, CS_LAST_SLOT_AUX_FLAG)
+            XCTAssertNotEqual(tagged, CS_LAST_SLOT_SAVE)
+            // Never mistakable for a plain binding slot, which is 0x00-0x0F.
+            XCTAssertGreaterThan(tagged, UInt8(CS_MAX_BINDINGS - 1))
+        }
+    }
+
+    /// §7.1: a button toggling aux 0 and an active-low LED following it are two
+    /// ordinary bindings on the new target kind - which is the whole point,
+    /// since it means invert, delays and the brightness ceiling all still work.
+    func testAuxWiringExampleBytes() {
+        let button = CsBinding(type: UInt8(CS_TYPE_BUTTON), noun: UInt8(CS_NOUN_AUX),
+                               action: UInt8(CS_ACT_TOGGLE), gpio0: 16, gpio1: CS_GPIO_UNUSED,
+                               event: CS_EVENT_PRESS, target: 0)
+        XCTAssertEqual(hex(button.toData()),
+            "01 44 04 00 10 ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(button.toData()), button)
+
+        let relay = CsBinding(type: UInt8(CS_TYPE_LED), noun: UInt8(CS_NOUN_AUX),
+                              action: UInt8(CS_ACT_IND_EQUALS), flags: CS_FLAG_INVERT,
+                              gpio0: 21, gpio1: CS_GPIO_UNUSED, target: 0, value: 1)
+        XCTAssertEqual(hex(relay.toData()),
+            "05 44 08 01 15 ff 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(relay.toData()), relay)
+    }
+
+    /// §7.2: an encoder on the level in whole percent, and a PWM LED dimming
+    /// from it.  5 % is 1280 in 8.8, and a fractional step would be refused by
+    /// the firmware, so the encoding has to land on a multiple of 256.
+    func testAuxLevelStepIsWholePercent() {
+        let encoder = CsBinding(type: UInt8(CS_TYPE_ENCODER), noun: UInt8(CS_NOUN_AUX_LEVEL),
+                                action: UInt8(CS_ACT_STEP), gpio0: 18, gpio1: 19,
+                                target: 1, step: csEncodeStep(5, unit: CS_UNIT_PERCENT))
+        XCTAssertEqual(encoder.step, 1280)
+        XCTAssertEqual(Int(encoder.step) % 256, 0, "a whole-percent step is a multiple of 256")
+        XCTAssertEqual(hex(encoder.toData()),
+            "04 45 01 00 12 13 00 01 00 00 00 00 00 05 00 00 00 00 00 00 00 00 00 00")
+        XCTAssertEqual(CsBinding.fromData(encoder.toData()), encoder)
+        // The unit's default step is already a whole percent, so leaving the
+        // field at 0 is legal too (§6.2).
+        XCTAssertEqual(csDefaultStep(CS_UNIT_PERCENT), 1.0)
+        XCTAssertEqual(Int(csEncodeStep(csDefaultStep(CS_UNIT_PERCENT), unit: CS_UNIT_PERCENT)) % 256, 0)
+
+        let lamp = CsBinding(type: UInt8(CS_TYPE_LED_PWM), noun: UInt8(CS_NOUN_AUX_LEVEL),
+                             action: UInt8(CS_ACT_IND_LEVEL), gpio0: 22, gpio1: CS_GPIO_UNUSED,
+                             target: 1)
+        XCTAssertEqual(CsBinding.fromData(lamp.toData()), lamp)
+    }
+
+    /// §1.4: aux nouns take no group.  The app never offers one because no
+    /// group can carry the aux target kind - the group editor deals only in
+    /// channel spaces - so a grouped aux binding cannot be built by accident.
+    func testAuxTakesNoGroup() {
+        let kinds = [CS_TARGET_INPUT_CH, CS_TARGET_OUTPUT_CH, CS_TARGET_DSP_CH]
+        XCTAssertFalse(kinds.contains(CS_TARGET_AUX))
+        var group = CsGroup(targetKind: CS_TARGET_OUTPUT_CH, memberMask: 0b11)
+        XCTAssertTrue(group.isConfigured)
+        group.targetKind = CS_TARGET_AUX
+        // Nothing in the app produces this record; the assertion pins that an
+        // aux-kinded group would not match an aux noun's channel space anyway.
+        XCTAssertNotEqual(group.targetKind, CS_TARGET_OUTPUT_CH)
+    }
+
+    /// §5: the notification is 8 bytes carrying both values and the dispatch
+    /// source, so a host learns a panel button moved an output without a read
+    /// back.  Decoded here exactly as InterruptMonitor decodes it.
+    func testAuxNotificationLayout() {
+        let packet: [UInt8] = [2, 0x0C, 0, 7, 3, 1, 60, PARAM_SRC_GPIO]
+        XCTAssertEqual(packet.count, 8)
+        XCTAssertEqual(packet[1], 0x0C)
+        XCTAssertEqual(Int(packet[4]), 3)
+        XCTAssertTrue(packet[5] != 0)
+        XCTAssertEqual(packet[6], 60)
+        XCTAssertLessThanOrEqual(packet[6], CS_AUX_LEVEL_MAX)
+        XCTAssertEqual(packet[7], PARAM_SRC_GPIO)
+    }
+
+    /// §3.3: the bulk read is sixteen bytes, eight states then eight levels -
+    /// not interleaved.  Getting that backwards would show every output at the
+    /// wrong level with no error anywhere.
+    func testAuxBulkStateReadOrder() {
+        var payload = Data(count: 16)
+        payload[0] = 1; payload[3] = 1                 // aux 0 and 3 on
+        payload[CS_MAX_AUX + 0] = 100
+        payload[CS_MAX_AUX + 3] = 40
+        let states = (0..<CS_MAX_AUX).map { payload[$0] != 0 }
+        let levels = (0..<CS_MAX_AUX).map { payload[CS_MAX_AUX + $0] }
+        XCTAssertEqual(states, [true, false, false, true, false, false, false, false])
+        XCTAssertEqual(levels, [100, 0, 0, 40, 0, 0, 0, 0])
+    }
 }

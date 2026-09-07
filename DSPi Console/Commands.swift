@@ -1097,6 +1097,284 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Subharmonic Synthesizer
+
+    // Every SET is fire-and-forget and updates app state first, exactly like
+    // psybass.  What differs is the headroom: the effect can add gain, and the
+    // firmware recomputes an exact worst-case figure on every 0x1A GET, so each
+    // SET is followed by a re-read rather than an app-side estimate.
+
+    func setSubharm(_ enabled: Bool) {
+        self.subharmEnabled = enabled
+        var val: UInt8 = enabled ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharm() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1), !d.isEmpty {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.subharmEnabled = val }
+        }
+    }
+
+    func setSubharmLow(_ db: Float) {
+        self.subharmLowDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmLow() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmLowDB - val) > 0.01 { self.subharmLowDB = val }
+            }
+        }
+    }
+
+    func setSubharmHigh(_ db: Float) {
+        self.subharmHighDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_HIGH, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmHigh() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HIGH, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmHighDB - val) > 0.01 { self.subharmHighDB = val }
+            }
+        }
+    }
+
+    func setSubharmTop(_ db: Float) {
+        self.subharmTopDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_TOP, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmTop() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_TOP, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmTopDB - val) > 0.01 { self.subharmTopDB = val }
+            }
+        }
+    }
+
+    func setSubharmBoost(_ db: Float) {
+        self.subharmBoostDB = db
+        var val = db
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmBoost() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmBoostDB - val) > 0.01 { self.subharmBoostDB = val }
+            }
+        }
+    }
+
+    /// Sets the per-output subharm mask.  Bit k processes output channel k, sent
+    /// as a 2-byte little-endian uint16.  The firmware switches masks from the
+    /// next audio packet with no coefficient recompute, clearing skipped
+    /// outputs' state so re-enabling one is transient-free.  The headroom figure
+    /// does not depend on the mask, so this SET needs no re-read.
+    func setSubharmMask(_ mask: UInt16) {
+        self.subharmOutputMask = mask
+        let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_MASK, value: 0, index: 0, data: data)
+    }
+
+    /// Toggles a single output channel's bit in the subharm mask and pushes it.
+    func setSubharmOutputChannel(_ output: Int, enabled: Bool) {
+        guard output >= 0, output < 16 else { return }
+        var mask = subharmOutputMask
+        if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
+        setSubharmMask(mask)
+    }
+
+    func fetchSubharmMask() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
+            let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
+            DispatchQueue.main.async { self.subharmOutputMask = val }
+        }
+    }
+
+    /// Reads the worst-case gain of the live configuration (0 dB while disabled).
+    /// Computed by the firmware on each GET, so it can never lag a coefficient
+    /// recompute that a SET just triggered.
+    func fetchSubharmHeadroom() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HEADROOM, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmHeadroomDB - val) > 0.001 { self.subharmHeadroomDB = val }
+            }
+        }
+    }
+
+    /// Re-reads the headroom off the main thread.  Called after every SET that
+    /// can change it; the USB serial queue orders the GET behind the SET, so the
+    /// figure always reflects the value just written.
+    private func fetchSubharmHeadroomAsync() {
+        guard firmwareSupportsSubharm else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.fetchSubharmHeadroom()
+        }
+    }
+
+    // MARK: Selectivity, ceiling, pair link, solo and meter (V30)
+
+    /// Selectivity mode (0 all, 1 percussive, 2 sustained).  The firmware clamps
+    /// anything above 2, so the app clamps to the same range rather than relying
+    /// on a read-back.
+    func setSubharmSelectMode(_ mode: Int) {
+        let clamped = min(max(mode, SUBHARM_SELECT_ALL), SUBHARM_SELECT_SUSTAINED)
+        self.subharmSelectMode = clamped
+        var val = UInt8(clamped)
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_SELECT, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmSelectMode() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1), !d.isEmpty {
+            let val = min(Int(d[0]), SUBHARM_SELECT_SUSTAINED)
+            DispatchQueue.main.async { self.subharmSelectMode = val }
+        }
+    }
+
+    func setSubharmSelectDepth(_ pct: Float) {
+        self.subharmSelectDepthPct = pct
+        var val = pct
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_DEPTH, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmSelectDepth() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_DEPTH, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmSelectDepthPct - val) > 0.01 { self.subharmSelectDepthPct = val }
+            }
+        }
+    }
+
+    func setSubharmSelectHold(_ ms: Float) {
+        self.subharmSelectHoldMs = ms
+        var val = ms
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_HOLD, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmSelectHold() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HOLD, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmSelectHoldMs - val) > 0.01 { self.subharmSelectHoldMs = val }
+            }
+        }
+    }
+
+    /// Sub ceiling in dBFS; 0 turns the limiter off.  It bounds the sub before it
+    /// is mixed in, so the firmware's headroom figure drops to whatever the
+    /// ceiling allows - which is why this SET re-reads it like a level does.
+    func setSubharmCeiling(_ dbfs: Float) {
+        self.subharmCeilingDB = dbfs
+        var val = dbfs
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: data)
+        fetchSubharmHeadroomAsync()
+    }
+
+    func fetchSubharmCeiling() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4), d.count >= 4 {
+            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
+            DispatchQueue.main.async {
+                if abs(self.subharmCeilingDB - val) > 0.01 { self.subharmCeilingDB = val }
+            }
+        }
+    }
+
+    /// Link each output pair to its mono sum.  Read live each packet by the
+    /// firmware, so there is no recompute and the headroom cannot change: a
+    /// mono sum is never larger than the louder of the two channels.
+    func setSubharmLinkPairs(_ linked: Bool) {
+        self.subharmLinkPairs = linked
+        var val: UInt8 = linked ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_LINK, value: 0, index: 0, data: data)
+    }
+
+    func fetchSubharmLinkPairs() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_LINK, value: 0, index: 0, length: 1), !d.isEmpty {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.subharmLinkPairs = val }
+        }
+    }
+
+    /// Solo the synthesized sub on the masked outputs.  Runtime only: it is not
+    /// on the wire and not in any preset, so the app has to read it back with
+    /// 0x2D rather than expecting it from `fetchAllParams`, and clears it when
+    /// the window closes so a device is never left playing without program.
+    func setSubharmSolo(_ solo: Bool) {
+        self.subharmSolo = solo
+        var val: UInt8 = solo ? 1 : 0
+        let data = Data(bytes: &val, count: 1)
+        usb.sendControlRequest(request: REQ_SET_SUBHARM_SOLO, value: 0, index: 0, data: data)
+    }
+
+    func fetchSubharmSolo() {
+        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_SOLO, value: 0, index: 0, length: 1), !d.isEmpty {
+            let val = d[0] != 0
+            DispatchQueue.main.async { self.subharmSolo = val }
+        }
+    }
+
+    /// Reads the per-output sub meter: one uint16 LE per output channel on the
+    /// same 0..32767 scale as the status peaks, normalized here so it drives the
+    /// same meter widget.  A short read is kept rather than discarded, since the
+    /// entries that did arrive are still valid.
+    func fetchSubharmMeter() {
+        let want = numOutputChannels
+        guard want > 0 else { return }
+        guard let d = usb.getControlRequest(request: REQ_GET_SUBHARM_METER, value: 0, index: 0,
+                                            length: UInt16(want * 2)), d.count >= 2 else { return }
+        var levels: [Float] = []
+        levels.reserveCapacity(min(want, d.count / 2))
+        for i in 0..<min(want, d.count / 2) {
+            let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
+            levels.append(Float(raw) / SUBHARM_METER_FULL_SCALE)
+        }
+        DispatchQueue.main.async { self.subharmSubMeter = levels }
+    }
+
+    /// Reads back the two subharm values the bulk image does not carry: solo,
+    /// which is runtime-only, and the headroom, which the firmware derives.
+    /// Called when the subharm window opens.
+    func fetchSubharmRuntimeState() {
+        guard firmwareSupportsSubharm else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            self.fetchSubharmHeadroom()
+            if self.firmwareSupportsSubharmExtended { self.fetchSubharmSolo() }
+        }
+    }
+
     // MARK: - Stereo Upmixer (V25, cmds 0x4A-0x4E)
 
     /// Sends one upmix parameter as a 4-byte LE float via REQ_UPMIX_SET_PARAM
@@ -2299,6 +2577,12 @@ extension DSPViewModel {
             for i in 0..<min(Int(pages), CS_MAX_DISPLAY_PAGES) { fetchCsDisplayPage(i) }
             fetchCsDisplayStatus()
         }
+        // Auxiliary outputs (caps v17).  No caps header field counts them, so
+        // the version byte is the gate; a pre-v17 device STALLs these anyway.
+        if caps.capsVersion >= 17 {
+            for a in 0..<CS_MAX_AUX { fetchCsAuxCfg(a) }
+            fetchCsAuxValues()
+        }
         // Runs after every fetch above (all dispatch to main in FIFO order): if
         // the device is clean, snapshot the loaded config as the saved baseline
         // so csDirty can tell net-zero edits from real ones.
@@ -2431,6 +2715,11 @@ extension DSPViewModel {
         // The live config is now the saved config: rebase the clean baseline so
         // subsequent net-zero churn doesn't re-strand the banner.
         if result == PIN_CONFIG_SUCCESS {
+            // A save folds the live state and level into the boot fields of
+            // every CS_AUX_BOOT_SAVED slot (aux spec 4), so those records
+            // changed underneath us.  Re-read them before rebasing or the next
+            // refresh would read as an unsaved edit.
+            for a in 0..<CS_MAX_AUX { fetchCsAuxCfg(a) }
             DispatchQueue.main.async { self.captureCsCleanSnapshot() }
         }
         return result
@@ -2462,11 +2751,86 @@ extension DSPViewModel {
         let pages = fetchCsDisplayCfg()
         for i in 0..<min(Int(pages), CS_MAX_DISPLAY_PAGES) { fetchCsDisplayPage(i) }
         fetchCsDisplayStatus()
+        // Revert reloads the stored aux config (names, boot mode, boot values)
+        // and deliberately leaves the live state and level alone, so nothing
+        // here re-reads those: a revert must not click a relay (aux spec 4).
+        for a in 0..<CS_MAX_AUX { fetchCsAuxCfg(a) }
         fetchCsStatus()
         // Live now mirrors flash again; rebase the clean baseline after the
         // re-fetches above land (FIFO on main).
         DispatchQueue.main.async { self.captureCsCleanSnapshot() }
         return result
+    }
+
+    // MARK: - Control Surfaces: auxiliary outputs (caps v17)
+    //
+    // Eight device-global on/off + level values the firmware attaches no
+    // meaning to.  The config (name, boot behaviour) is deferred and shares the
+    // bindings' Save / Revert; the two runtime values apply in the handler with
+    // no flash write, so a toggle costs nothing and is safe to drive from a
+    // front-panel button.  See control_surfaces_aux_spec.md.
+
+    /// Read one live 36-byte aux config record into `csAuxCfgs[aux]`.
+    func fetchCsAuxCfg(_ aux: Int) {
+        guard aux >= 0, aux < CS_MAX_AUX,
+              let d = usb.getControlRequest(request: REQ_GET_CS_AUX_CFG, value: UInt16(aux), index: 2, length: CS_AUX_CFG_LEN),
+              let cfg = CsAuxCfg.fromData(d) else { return }
+        DispatchQueue.main.async {
+            if aux < self.csAuxCfgs.count { self.csAuxCfgs[aux] = cfg }
+        }
+    }
+
+    /// Read every live state and level in one transfer (0x05 with wValue
+    /// 0xFFFF): eight state bytes followed by eight level bytes.  One call
+    /// gives the whole aux picture at connect, after which NOTIFY_EVT_CS_AUX
+    /// keeps it current (aux spec 3.3).
+    func fetchCsAuxValues() {
+        guard let d = usb.getControlRequest(request: REQ_GET_CS_AUX_STATE, value: CS_AUX_STATE_ALL, index: 2, length: 16),
+              d.count >= 16 else { return }
+        let b = d.startIndex
+        let states = (0..<CS_MAX_AUX).map { d[b + $0] != 0 }
+        let levels = (0..<CS_MAX_AUX).map { min(d[b + CS_MAX_AUX + $0], CS_AUX_LEVEL_MAX) }
+        DispatchQueue.main.async {
+            self.csAuxState = states
+            self.csAuxLevel = levels
+        }
+    }
+
+    /// Apply one aux config (live-only preview, deferred like a binding; aux
+    /// spec 3.1).  The outcome lands in the shared status channel tagged
+    /// `0x70 | aux`, which is how it stays tellable from a binding slot.
+    /// Returns the PIN_CONFIG_* / CS_STATUS_* result.  USB-only; must be called
+    /// off the main thread (blocks on the poll).
+    @discardableResult
+    func setCsAuxCfg(_ aux: Int, cfg: CsAuxCfg) -> UInt8 {
+        guard aux >= 0, aux < CS_MAX_AUX else { return CS_STATUS_INVALID_AUX }
+        usb.sendControlRequest(request: REQ_SET_CS_AUX_CFG, value: UInt16(aux), index: 2, data: cfg.toData())
+        let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_AUX_FLAG | UInt8(aux))
+        fetchCsAuxCfg(aux)
+        fetchCsStatus()
+        return result
+    }
+
+    /// Switch one aux output on or off.  Applied in the firmware's handler with
+    /// no flash write and no dirty flag, so this is a plain fire-and-forget SET
+    /// like a volume change; the device echoes it back on NOTIFY_EVT_CS_AUX.
+    func setCsAuxState(_ aux: Int, on: Bool) {
+        guard aux >= 0, aux < CS_MAX_AUX else { return }
+        self.csAuxState[aux] = on
+        guard csAuxSupported else { return }
+        usb.sendControlRequest(request: REQ_SET_CS_AUX_STATE, value: UInt16(aux), index: 2,
+                               data: Data([on ? 1 : 0]))
+    }
+
+    /// Set one aux output's level in whole percent (the firmware clamps above
+    /// 100).  Immediate, like the state above.
+    func setCsAuxLevel(_ aux: Int, level: UInt8) {
+        guard aux >= 0, aux < CS_MAX_AUX else { return }
+        let clamped = min(level, CS_AUX_LEVEL_MAX)
+        self.csAuxLevel[aux] = clamped
+        guard csAuxSupported else { return }
+        usb.sendControlRequest(request: REQ_SET_CS_AUX_LEVEL, value: UInt16(aux), index: 2,
+                               data: Data([clamped]))
     }
 
     // MARK: - Control Surfaces: target groups and macros (caps v9)
@@ -2835,11 +3199,12 @@ extension DSPViewModel {
             }
             return false
         }
-        // V23 is all-or-nothing: only the full, current layout is accepted.
-        // A short or wrong-version payload means incompatible firmware - the
-        // device is still connected, so don't disconnect (avoids a reconnect
-        // loop); just record the version so the UI can react.  Require the full
-        // V23 size so the psybass section (offset 5876..5899) is always in range.
+        // The bulk image is all-or-nothing: only the full, current layout is
+        // accepted.  A short or wrong-version payload means incompatible
+        // firmware - the device is still connected, so don't disconnect (avoids
+        // a reconnect loop); just record the version so the UI can react.
+        // Requiring the full V30 size keeps the last section (subharm, offset
+        // 5944..5979) in range along with every section before it.
         guard data.count >= Int(BULK_PARAMS_SIZE), Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
@@ -3084,6 +3449,17 @@ extension DSPViewModel {
         let umStrength = umF(4), umWidth = umF(8), umThreshold = umF(12), umAttack = umF(16), umRelease = umF(20)
         let umDetHpf = umF(24), umSurDelay = umF(28), umSurHpf = umF(32), umSurLpf = umF(36), umDecorr = umF(40)
 
+        // --- Subharmonic Synthesizer (offset 5944, WireSubharmParams 36 bytes) ---
+        // `solo` is deliberately not on the wire, so it is not parsed here and a
+        // bulk apply can never switch the program signal off.
+        let shEnabled = data[BULK_SUBHARM_OFFSET] != 0
+        let shOutputMask = UInt16(data[BULK_SUBHARM_OFFSET + 2]) | (UInt16(data[BULK_SUBHARM_OFFSET + 3]) << 8)
+        func shF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: BULK_SUBHARM_OFFSET + off, as: Float.self) } }
+        let shLow = shF(4), shHigh = shF(8), shBoost = shF(12)
+        let shTop = shF(16), shDepth = shF(20), shHold = shF(24), shCeiling = shF(28)
+        let shSelectMode = min(Int(data[BULK_SUBHARM_OFFSET + 32]), SUBHARM_SELECT_SUSTAINED)
+        let shLinkPairs = data[BULK_SUBHARM_OFFSET + 33] != 0
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -3112,6 +3488,18 @@ extension DSPViewModel {
             self.psybassDriveDB = pbDrive
             self.psybassCharacterPct = pbCharacter
             self.psybassOriginalDB = pbOriginal
+
+            self.subharmEnabled = shEnabled
+            self.subharmOutputMask = shOutputMask
+            self.subharmLowDB = shLow
+            self.subharmHighDB = shHigh
+            self.subharmTopDB = shTop
+            self.subharmBoostDB = shBoost
+            self.subharmSelectMode = shSelectMode
+            self.subharmSelectDepthPct = shDepth
+            self.subharmSelectHoldMs = shHold
+            self.subharmCeilingDB = shCeiling
+            self.subharmLinkPairs = shLinkPairs
 
             self.upmixEnabled = umEnabled
             self.upmixCenterMode = umCenterMode

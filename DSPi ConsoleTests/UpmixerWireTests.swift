@@ -52,13 +52,14 @@ final class UpmixerWireTests: XCTestCase {
     /// 5900, growing the flat layout to 5944 bytes; V26 claims its reserved byte
     /// +3 for presence_q1 with no size change (spec §7).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 28)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5944)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 30)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 5980)
         XCTAssertEqual(BULK_UPMIX_OFFSET, 5900)
         XCTAssertEqual(UPMIX_CONFIG_PACKET_SIZE, 44)
         XCTAssertEqual(UPMIX_STATUS_SIZE, 16)
-        // The section is the final member: offset + 44 == total size.
-        XCTAssertEqual(BULK_UPMIX_OFFSET + UPMIX_CONFIG_PACKET_SIZE, Int(BULK_PARAMS_SIZE))
+        // V29 appended the subharm section after it, so the upmix block is no
+        // longer last: offset + 44 lands on the start of subharm.
+        XCTAssertEqual(BULK_UPMIX_OFFSET + UPMIX_CONFIG_PACKET_SIZE, BULK_SUBHARM_OFFSET)
         // It sits immediately after the 24-byte psybass section (offset 5876).
         XCTAssertEqual(BULK_PSYBASS_OFFSET + 24, BULK_UPMIX_OFFSET)
     }
