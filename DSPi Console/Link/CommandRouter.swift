@@ -53,7 +53,15 @@ final class CommandRouter {
     /// notification is read does not steal A's attribution.  Best effort: the
     /// firmware coalesces repeated writes to one parameter, so the queue can
     /// run ahead; expired entries are dropped.
-    private var recentWriters: [(session: LinkSessionID, at: Date)] = []
+    private struct WriterEntry {
+        let token: UInt64
+        let session: LinkSessionID
+        let code: UInt8
+        let wValue: UInt16
+        let at: Date
+    }
+    private var recentWriters: [WriterEntry] = []
+    private var nextWriterToken: UInt64 = 0
     private let stateLock = NSLock()
 
     /// How long to wait for the device before giving up.  Bulk gets longer.
@@ -131,13 +139,37 @@ final class CommandRouter {
             let gen = device.generation
             // Anything that can change device state is a write for attribution,
             // whichever transfer direction carries it (write-as-read included).
+            var writerToken: UInt64?
             if self.policy.classify(code: request.bRequest, direction: direction) != .read {
                 self.stateLock.lock()
-                self.recentWriters.append((session.id, Date()))
-                if self.recentWriters.count > 64 { self.recentWriters.removeFirst() }
+                // A repeat of the same parameter by the same session is one entry:
+                // the firmware coalesces those into one notification, and the
+                // queue must coalesce the same way to stay aligned with it.
+                if let last = self.recentWriters.last, last.session == session.id,
+                   last.code == request.bRequest, last.wValue == request.wValue {
+                    self.recentWriters[self.recentWriters.count - 1] =
+                        WriterEntry(token: last.token, session: last.session, code: last.code,
+                                    wValue: last.wValue, at: Date())
+                    writerToken = last.token
+                } else {
+                    let token = self.nextWriterToken; self.nextWriterToken &+= 1
+                    self.recentWriters.append(WriterEntry(token: token, session: session.id,
+                                                          code: request.bRequest,
+                                                          wValue: request.wValue, at: Date()))
+                    if self.recentWriters.count > 64 { self.recentWriters.removeFirst() }
+                    writerToken = token
+                }
                 self.stateLock.unlock()
             }
             let response = self.runWithTimeout(request, on: device, timeout: timeout)
+
+            // A write the device refused produced no notification; leaving its
+            // entry would charge the next client's change to this session.
+            if let token = writerToken, response.status != .ok {
+                self.stateLock.lock()
+                self.recentWriters.removeAll { $0.token == token }
+                self.stateLock.unlock()
+            }
 
             // A device that was replaced while the command ran cannot have its
             // result attributed to this session; treat as a soft failure the

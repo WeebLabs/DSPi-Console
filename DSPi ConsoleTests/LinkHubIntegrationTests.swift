@@ -314,4 +314,48 @@ final class LinkHubIntegrationTests: XCTestCase {
         wait(for: [got], timeout: 3)
         XCTAssertEqual(origins, [a.id, b.id])
     }
+
+    // MARK: Review round 3
+
+    /// A refused write must not leave an attribution behind: 7's write fails,
+    /// 9's succeeds, and the one notification belongs to 9.
+    func testFailedWriteDoesNotStealTheNextAttribution() {
+        let (hub, _) = makeHub()
+        let device = LinkFakeDevice()
+        // Refuse the write whose payload starts with 0xFF.
+        device.responder = { req in
+            LinkCmdResponse(tag: req.tag, status: req.payload.first == 0xFF ? .error : .ok)
+        }
+        hub.attachDevice(device)
+        let seven = hub.openSession(role: .control), nine = hub.openSession(role: .control)
+        var origin: LinkSessionID = 0
+        let got = expectation(description: "notified")
+        nine.onNotify = { f in origin = f.origin; got.fulfill() }
+
+        let wrote = expectation(description: "both"); wrote.expectedFulfillmentCount = 2
+        hub.submit(LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
+                                  wIndex: 2, payload: Data([0xFF, 0, 0, 0])), from: seven.id) { r in
+            XCTAssertEqual(r.status, .error); wrote.fulfill()
+        }
+        hub.submit(LinkCmdRequest(tag: 2, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
+                                  wIndex: 2, payload: Data([0, 0, 0, 0])), from: nine.id) { r in
+            XCTAssertEqual(r.status, .ok); wrote.fulfill()
+        }
+        wait(for: [wrote], timeout: 3)
+        hub.ingest(LinkNotification(packet: makeParamChangedPacket(source: 1), origin: 1, receivedAt: Date()))
+        wait(for: [got], timeout: 3)
+        XCTAssertEqual(origin, nine.id, "the failed write left nothing in the queue")
+    }
+
+    /// Closing a session clears the callbacks it owns, so a callback that
+    /// captured the session cannot keep it alive.
+    func testClosedSessionDeallocates() {
+        let (hub, _) = makeHub()
+        var s: LinkHubSession? = hub.openSession(role: .control)
+        weak var weakSession = s
+        s!.onClosedByHub = { [s] in _ = s }      // the cycle the review found
+        hub.closeSession(s!.id)
+        s = nil
+        XCTAssertNil(weakSession, "a closed session is released once the hub drops its callbacks")
+    }
 }

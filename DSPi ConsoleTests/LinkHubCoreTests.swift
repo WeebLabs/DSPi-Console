@@ -367,4 +367,21 @@ extension LinkHubCoreTests {
         XCTAssertEqual(router.consumeAttribution(within: 1, now: Date().addingTimeInterval(5)), 0,
                        "an entry older than the window is dropped, not attributed")
     }
+
+    /// Repeated writes of one parameter by one session are one queue entry,
+    /// matching the firmware's coalescing, so a knob sweep does not run the
+    /// queue ahead of the notifications.
+    func testRepeatedWritesOfOneParameterCoalesceInTheQueue() {
+        let dev = FakeDevice()
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        let done = expectation(description: "sweep"); done.expectedFulfillmentCount = 5
+        for _ in 0..<5 {
+            let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
+                                   wIndex: 2, payload: Data([0,0,0,0]))
+            router.submit(r, session: control(7)) { _ in done.fulfill() }
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(router.consumeAttribution(within: 1), 7)
+        XCTAssertEqual(router.consumeAttribution(within: 1), 0, "five sweeps, one entry")
+    }
 }

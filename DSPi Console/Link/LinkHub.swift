@@ -312,7 +312,17 @@ final class LinkHub {
     }
 
     func closeSession(_ id: LinkSessionID) {
-        sessionLock.lock(); sessions[id] = nil; sessionLock.unlock()
+        sessionLock.lock()
+        let closing = sessions.removeValue(forKey: id)
+        sessionLock.unlock()
+        // Callbacks are owned by the session and can capture it (or the
+        // transport that owns it); clearing them here is what lets a closed
+        // session deallocate.
+        closing?.onNotify = nil
+        closing?.onResync = nil
+        closing?.onPoll = nil
+        closing?.onDeviceEvent = nil
+        closing?.onClosedByHub = nil
         relay.removeSession(id)
         currentScheduler?.unsubscribeAll(session: id)
         currentRouter?.sessionDidClose(id)
@@ -326,8 +336,9 @@ final class LinkHub {
         let victims = sessions.values.filter { $0.clientID == cid }
         sessionLock.unlock()
         for s in victims {
+            let tellTransport = s.onClosedByHub   // closeSession clears it
             closeSession(s.id)
-            s.onClosedByHub?()
+            tellTransport?()
         }
     }
 

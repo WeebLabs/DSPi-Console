@@ -190,8 +190,8 @@ final class LinkSessionHandler {
     private func wireSessionCallbacks(_ s: LinkHubSession) {
         // Revoked while connected: the hub has already closed the session;
         // drop our reference so nothing routes, and close with code 4002.
-        s.onClosedByHub = { [weak self] in
-            guard let self = self, self.session === s else { return }
+        s.onClosedByHub = { [weak self, weak s] in
+            guard let self = self, let s = s, self.session === s else { return }
             self.session = nil
             self.emit(.close(4002))
         }
