@@ -600,7 +600,10 @@ Offset  Size  Field     Meaning
 
 If a poll fails (device busy, offline), the hub sends nothing for that
 tick; three consecutive failures produce a `poll.error` JSON event and the
-hub keeps trying at a reduced rate until the device recovers.
+hub keeps trying at a reduced rate until the device recovers. The event is
+`{"t": "poll.error", "handle": H, "slot": S, "code": "busy"|"no_device"|...,
+"msg": "..."}`; `slot`, `code` and `msg` are optional and `code` reuses the
+error-code vocabulary of section 7.1.
 
 ### 8.5 FWDATA
 
@@ -618,9 +621,11 @@ verifies the SHA-256 when the last byte lands and only then proceeds.
 
 ### 8.6 RESYNC
 
-Type 0x05, body `[handle u8][reason u8]`. Reasons: 0 = hub dropped
-notifications for this session (slow reader), 1 = device reattached,
-2 = hub cache rebuilt. The client re-reads state.
+Type 0x05, body `[handle u8][reason u8]`. The 2-byte header `tag` is
+unused here: senders write 0 and receivers ignore it. Reasons: 0 = hub
+dropped notifications for this session (slow reader), 1 = device reattached,
+2 = hub cache rebuilt. A receiver treats an unknown reason as reason 0 (re-read
+state) rather than an error. The client re-reads state.
 
 ---
 
