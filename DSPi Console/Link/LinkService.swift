@@ -12,6 +12,7 @@
 import Foundation
 import Combine
 import AppKit
+import os
 
 /// The server the service starts and stops.  A protocol so the service builds
 /// and tests without the NIO server present; LinkServer conforms to it.
@@ -85,6 +86,8 @@ final class LinkService: ObservableObject {
 
     /// Turn sharing on: start the server, advertise, and hold the power
     /// assertions.  Persists the choice.
+    private static let log = Logger(subsystem: "WeebLabs.DSPi-Console", category: "link")
+
     func start() {
         lastError = nil
         do {
@@ -92,12 +95,14 @@ final class LinkService: ObservableObject {
         } catch {
             lastError = "Could not start on port \(port): \(error.localizedDescription)"
             isRunning = false
+            Self.log.error("Link hub failed to start on port \(self.port, privacy: .public): \(String(describing: error), privacy: .public)")
             return
         }
         sharingEnabled = true
         isRunning = true
         advertise()
         beginPowerActivity()
+        Self.log.notice("Link hub listening on port \(self.server.boundPort ?? self.port, privacy: .public)")
     }
 
     /// Turn sharing off: stop advertising and the server, drop the assertions.
@@ -107,6 +112,7 @@ final class LinkService: ObservableObject {
         isRunning = false
         sharingEnabled = false
         endPowerActivity()
+        Self.log.notice("Link hub stopped")
     }
 
     func setSharing(_ on: Bool) { on ? start() : stop() }

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import os
 import Combine
 import UniformTypeIdentifiers
 
@@ -10640,7 +10641,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Network sharing is a persisted choice; bring the gateway up at launch
         // if it was on, rather than only when the Networking page is opened.
-        if UserDefaults.standard.bool(forKey: "LinkSharingEnabled") {
+        let resumeSharing = UserDefaults.standard.bool(forKey: "LinkSharingEnabled")
+        Logger(subsystem: "WeebLabs.DSPi-Console", category: "link")
+            .notice("Launch: sharing preference is \(resumeSharing, privacy: .public)")
+        if resumeSharing {
             _ = AppState.shared.linkService
         }
 
