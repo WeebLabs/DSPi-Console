@@ -236,7 +236,7 @@ class AppSettings: ObservableObject {
 /// Symbol, and tint so the sidebar row and the detail navigation title stay in
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
-    case general, graphing, spectrum, advanced
+    case general, graphing, spectrum, advanced, networking
     case overview
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
     case channelGroups, macros, auxOutputs
@@ -250,6 +250,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .graphing:         return "Graphing"
         case .spectrum:         return "Spectrum Analyser"
         case .advanced:         return "Advanced"
+        case .networking:       return "Networking"
         case .globalParams:     return "Global Parameters"
         case .outputAssignment: return "Outputs"
         case .i2sConfig:        return "I2S Configuration"
@@ -269,6 +270,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .graphing:         return "waveform.path.ecg"
         case .spectrum:         return "waveform.and.magnifyingglass"
         case .advanced:         return "gearshape.2"
+        case .networking:       return "network"
         case .globalParams:     return "externaldrive"
         case .outputAssignment: return "cable.connector"
         case .i2sConfig:        return "waveform.path"
@@ -297,6 +299,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         case .general:          return Color(red: 0.392, green: 0.412, blue: 0.443)  // #646971 slate
         case .advanced:         return Color(red: 0.447, green: 0.471, blue: 0.502)  // #727880 slate light
         case .graphing:         return Color(red: 0.345, green: 0.478, blue: 0.537)  // #587a89 steel cyan
+        case .networking:       return Color(red: 0.290, green: 0.455, blue: 0.600)  // #4a7499 network blue
         case .spectrum:         return Color(red: 0.298, green: 0.502, blue: 0.541)  // #4c808a steel cyan light
         // Pin-owning pages, matched to their role on the Overview map.
         case .spdifInput:       return Color(red: 0.016, green: 0.522, blue: 0.435)  // #04856f input teal
@@ -336,7 +339,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
 
     /// Non-collapsible sidebar groups, in display order.
     static let groups: [(title: String, items: [SettingsCategory])] = [
-        ("Application", [.general, .advanced]),
+        ("Application", [.general, .advanced, .networking]),
         ("Display",     [.graphing, .spectrum]),
         // Overview leads the group: it is the read-only summary of what every
         // page below it has claimed.
@@ -589,6 +592,7 @@ struct SettingsView: View {
         case .graphing:         GraphingSettingsTab()
         case .spectrum:         SpectrumSettingsTab()
         case .advanced:         AdvancedSettingsTab()
+        case .networking:       NetworkingSettingsTab()
         case .globalParams:     GlobalSettingsTab()
         // Several specialist subsystems are settings pages rather than
         // windows, so their first-open card rides on the page.
