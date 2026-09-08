@@ -135,7 +135,8 @@ final class NetworkTransport: DeviceTransport {
             guard let self = self else { return }
             switch result {
             case .success(let token):
-                self.tokens.setToken(token, forHub: self.hubID)
+                // An open-access hub grants a session without a token.
+                if !token.isEmpty { self.tokens.setToken(token, forHub: self.hubID) }
             case .failure(let error):
                 self.errorSubject.send("Pairing failed: \(error)")
                 // A wrong PIN leaves the hub waiting; ask again.

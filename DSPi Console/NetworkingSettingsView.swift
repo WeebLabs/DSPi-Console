@@ -13,6 +13,8 @@ import SwiftUI
 struct NetworkingSettingsTab: View {
     @ObservedObject private var service = AppState.shared.linkService
     @ObservedObject private var menuBar = MenuBarController.shared
+    @ObservedObject private var client = AppState.shared.linkClientCoordinator
+    @State private var manualDraft: String = ""
 
     @State private var hubNameDraft: String = ""
     @State private var portDraft: String = ""
@@ -24,6 +26,7 @@ struct NetworkingSettingsTab: View {
             authSection
             if service.authMode == .pin { clientsSection }
             gatewaySection
+            otherHubsSection
             infoSection
         }
         .formStyle(.grouped)
@@ -197,6 +200,47 @@ struct NetworkingSettingsTab: View {
             Toggle("Start hidden in the menu bar", isOn: Binding(get: { menuBar.startMinimised },
                                                                  set: { menuBar.startMinimised = $0 }))
                 .disabled(!menuBar.showInMenuBar)
+        }
+    }
+
+    // MARK: - Other hubs (client mode)
+
+    private var otherHubsSection: some View {
+        Section("Other Hubs") {
+            Toggle(isOn: Binding(get: { client.lookForHubs }, set: { client.lookForHubs = $0 })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Look for DSPi devices shared on this network")
+                    Text("Devices shared by other Consoles and bridges appear in the device menu, marked with the hub they live on.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            if client.hubs.isEmpty {
+                Text(client.lookForHubs ? "No hubs found yet." : "Not looking.")
+                    .font(.caption).foregroundColor(.secondary)
+            } else {
+                ForEach(client.hubs) { hub in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(hub.name)
+                            Text("\(hub.host):\(hub.port), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s"), \(hub.authMode == "none" ? "open" : "pairing required")")
+                                .font(.caption2).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if hub.isManual {
+                            Button(role: .destructive) { client.removeManual(hub) } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            }
+            HStack {
+                TextField("Add a hub by address (host or host:port)", text: $manualDraft)
+                    .onSubmit { client.addManual(manualDraft); manualDraft = "" }
+                Button("Add") { client.addManual(manualDraft); manualDraft = "" }
+                    .disabled(manualDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
         }
     }
 

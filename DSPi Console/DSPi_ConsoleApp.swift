@@ -37,7 +37,26 @@ class AppState: ObservableObject {
     @MainActor lazy var linkService: LinkService = LinkService(
         hub: linkHub, auth: linkHub.auth, server: linkServer)
 
-    lazy var transport: HubTransport = HubTransport(hub: linkHub, usb: usb)
+    /// The local device, driven as session 1 on the hub.
+    lazy var localTransport: HubTransport = HubTransport(hub: linkHub, usb: usb)
+
+    /// The transport the whole UI drives: local USB devices and devices shared
+    /// by other hubs on the network in one list, with selection routed to
+    /// whichever owns the device.  The view model never learns which.
+    lazy var transport: CompositeTransport = {
+        let composite = CompositeTransport(
+            local: localTransport,
+            tokens: LinkTokenStore(),
+            clientName: Host.current().localizedName ?? "DSPi Console",
+            makeClient: { LinkClient() })
+        composite.pairingPrompt = { hubName in PairingPrompt.ask(hubName: hubName) }
+        return composite
+    }()
+
+    /// Console as a client: the hub browser and the "look for hubs" preference,
+    /// feeding the composite so shared devices reach the device picker.
+    @MainActor lazy var linkClientCoordinator: LinkClientCoordinator =
+        LinkClientCoordinator(composite: transport)
 
     lazy var viewModel: DSPViewModel = DSPViewModel(transport: transport)
 
