@@ -32,6 +32,11 @@ class AppState: ObservableObject {
     lazy var linkServer: LinkServer = LinkServer(hub: linkHub, auth: linkHub.auth,
                                                  policy: LinkPolicy.bundled ?? LinkPolicy.empty)
 
+    /// The network-sharing coordinator: server, DNS-SD advertisement, pairing,
+    /// clients and power assertions.  The Networking settings page drives it.
+    @MainActor lazy var linkService: LinkService = LinkService(
+        hub: linkHub, auth: linkHub.auth, server: linkServer)
+
     lazy var transport: HubTransport = HubTransport(hub: linkHub, usb: usb)
 
     lazy var viewModel: DSPViewModel = DSPViewModel(transport: transport)

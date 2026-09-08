@@ -411,3 +411,7 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
         channel.writeAndFlush(frame, promise: nil)
     }
 }
+
+// The network service starts and stops this server; the protocol lets the
+// service build and test without NIO present.
+extension LinkServer: LinkServing {}

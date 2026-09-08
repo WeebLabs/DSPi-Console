@@ -60,6 +60,19 @@ final class LinkHub {
     /// The handle of the one device this v1 hub exposes.
     static let localHandle: UInt8 = 0
 
+    /// Called after any device event, so the network service can refresh the
+    /// DNS-SD TXT record (device count / serials) without polling.
+    var onRegistryChange: (() -> Void)?
+
+    /// Serials of the devices currently shared, for the advertisement.
+    var sharedDeviceSerials: [String] { registry.devices.map { $0.info.serial } }
+
+    /// Number of open sessions, for hub stats and the settings status line.
+    var sessionCount: Int {
+        sessionLock.lock(); defer { sessionLock.unlock() }
+        return sessions.count
+    }
+
     init(usb: USBDevice, policy: LinkPolicy, auth: LinkAuthStore) {
         self.usb = usb
         self.policy = policy
@@ -231,5 +244,6 @@ final class LinkHub {
     private func broadcastDeviceEvent(_ event: DeviceRegistryEvent) {
         sessionLock.lock(); let all = Array(sessions.values); sessionLock.unlock()
         for s in all { s.onDeviceEvent?(event) }
+        onRegistryChange?()
     }
 }
