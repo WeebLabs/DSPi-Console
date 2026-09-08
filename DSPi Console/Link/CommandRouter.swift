@@ -140,6 +140,7 @@ final class CommandRouter {
             // Anything that can change device state is a write for attribution,
             // whichever transfer direction carries it (write-as-read included).
             var writerToken: UInt64?
+            var previousWriter: WriterEntry?
             if self.policy.classify(code: request.bRequest, direction: direction) != .read {
                 self.stateLock.lock()
                 // A repeat of the same parameter by the same session is one entry:
@@ -147,6 +148,7 @@ final class CommandRouter {
                 // queue must coalesce the same way to stay aligned with it.
                 if let last = self.recentWriters.last, last.session == session.id,
                    last.code == request.bRequest, last.wValue == request.wValue {
+                    previousWriter = last
                     self.recentWriters[self.recentWriters.count - 1] =
                         WriterEntry(token: last.token, session: last.session, code: last.code,
                                     wValue: last.wValue, at: Date())
@@ -163,11 +165,19 @@ final class CommandRouter {
             }
             let response = self.runWithTimeout(request, on: device, timeout: timeout)
 
-            // A write the device refused produced no notification; leaving its
-            // entry would charge the next client's change to this session.
+            // Roll back only this write's attribution. A failed repeat must
+            // preserve the earlier successful write and its original expiry.
+            // If its notification already consumed the entry during execute,
+            // leave it consumed rather than resurrecting it.
             if let token = writerToken, response.status != .ok {
                 self.stateLock.lock()
-                self.recentWriters.removeAll { $0.token == token }
+                if let index = self.recentWriters.firstIndex(where: { $0.token == token }) {
+                    if let previous = previousWriter {
+                        self.recentWriters[index] = previous
+                    } else {
+                        self.recentWriters.remove(at: index)
+                    }
+                }
                 self.stateLock.unlock()
             }
 

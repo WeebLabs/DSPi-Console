@@ -384,4 +384,48 @@ extension LinkHubCoreTests {
         XCTAssertEqual(router.consumeAttribution(within: 1), 7)
         XCTAssertEqual(router.consumeAttribution(within: 1), 0, "five sweeps, one entry")
     }
+
+    func testFailedRepeatPreservesEarlierSuccessfulAttribution() {
+        checkFailedRepeatAttribution(consumeDuringFailure: false)
+    }
+
+    func testFailedRepeatDoesNotRestoreAlreadyConsumedAttribution() {
+        checkFailedRepeatAttribution(consumeDuringFailure: true)
+    }
+
+    private func checkFailedRepeatAttribution(consumeDuringFailure: Bool) {
+        let dev = LinkFakeDevice()
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        dev.responder = { [weak router] request in
+            if request.tag == 2 {
+                if consumeDuringFailure {
+                    // The first write's notification can arrive while its
+                    // repeat is still executing on the device.
+                    XCTAssertEqual(router?.consumeAttribution(within: 10), 7)
+                }
+                return LinkCmdResponse(tag: request.tag, status: .error)
+            }
+            return LinkCmdResponse(tag: request.tag, status: .ok)
+        }
+
+        let done = expectation(description: "success, failed repeat, next writer")
+        done.expectedFulfillmentCount = 3
+        for (tag, sid): (UInt16, LinkSessionID) in [(1, 7), (2, 7), (3, 9)] {
+            let request = LinkCmdRequest(tag: tag, handle: 0, direction: .set,
+                                         bRequest: 0xD2, wIndex: 2, payload: Data([0, 0, 0, 0]))
+            router.submit(request, session: control(sid)) { result in
+                XCTAssertEqual(result.response.status, tag == 2 ? .error : .ok)
+                done.fulfill()
+            }
+        }
+        wait(for: [done], timeout: 3)
+
+        if !consumeDuringFailure {
+            XCTAssertEqual(router.consumeAttribution(within: 10), 7,
+                           "a refused repeat must not erase the successful write")
+        }
+        XCTAssertEqual(router.consumeAttribution(within: 10), 9)
+        XCTAssertEqual(router.consumeAttribution(within: 10), 0,
+                       "the failed repeat must not leave an extra attribution")
+    }
 }
