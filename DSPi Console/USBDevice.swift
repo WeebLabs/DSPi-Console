@@ -6,14 +6,30 @@ import IOKit.serial
 
 // MARK: - Device Model
 
+/// Where a device other than a local USB one lives: the hub sharing it and
+/// the handle it is addressed by there.  Handle 255 (the reserved value)
+/// means "not yet known", as for a device listed from a hub's TXT record
+/// before connecting to it.
+struct RemoteHubRef: Hashable {
+    let hubID: String
+    let hubName: String
+    var handle: UInt8
+}
+
 struct DSPiDevice: Identifiable {
     let serial: String      // IORegistry "USB Serial Number"
     let locationID: UInt32  // IORegistry "locationID" (stable per port)
+    /// Set for a device reached through a DSPi Link hub; nil for local USB.
+    var hub: RemoteHubRef? = nil
+    /// The hub-stored friendly name, when reached through a hub.
+    var remoteName: String? = nil
     var id: String { serial }
     var displayName: String {
         let short = String(serial.suffix(8))
-        return "DSPi (\(short))"
+        guard let hub = hub else { return "DSPi (\(short))" }
+        return "\(remoteName ?? "DSPi (\(short))") via \(hub.hubName)"
     }
+    var isRemote: Bool { hub != nil }
 }
 
 extension DSPiDevice: Hashable {
