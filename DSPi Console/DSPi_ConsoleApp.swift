@@ -10639,6 +10639,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 NotificationCenter.default.removeObserver(obs)
                 self.mainWindowObserver = nil
             }
+            // A gateway that starts at login goes straight to the menu bar.
+            let menuBar = MenuBarController.shared
+            if menuBar.showInMenuBar && menuBar.startMinimised {
+                DispatchQueue.main.async { menuBar.minimise() }
+            }
         }
     }
 
@@ -10681,8 +10686,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Route window close through app termination so the unsaved changes
-        // prompt can prevent the close. NSApp.terminate triggers
+        // With the menu bar item on, closing the window hides to the menu bar
+        // and the gateway keeps serving; nothing is lost, so no prompt.
+        if MenuBarController.shared.showInMenuBar {
+            MenuBarController.shared.minimise()
+            return false
+        }
+        // Otherwise route window close through app termination so the unsaved
+        // changes prompt can prevent the close. NSApp.terminate triggers
         // applicationShouldTerminate, which handles Save/Discard/Cancel.
         // If the user cancels, terminateCancel keeps the window open.
         NSApp.terminate(nil)
@@ -10811,6 +10822,11 @@ struct DSPi_ConsoleApp: App {
     @ObservedObject private var platform = PlatformInfo.shared
     @ObservedObject private var autoEQ = AutoEQManager.shared
 
+    /// Whether the menu bar item is present.  The scene inserts and removes
+    /// the item from this; the controller and the settings page write it.
+    @AppStorage("showInMenuBar") private var showInMenuBar: Bool = false
+    @Environment(\.openWindow) private var openWindow
+
     var body: some Scene {
         Window("DSPi Console", id: "main") {
             MainWindowRoot(vm: AppState.shared.viewModel)
@@ -10834,6 +10850,9 @@ struct DSPi_ConsoleApp: App {
                     NSWindow.allowsAutomaticWindowTabbing = false
                     onboarding.evaluate(vm: AppState.shared.viewModel)
                     showReleaseNotesIfUnread()
+                    // Restoring from the menu bar needs a window to show; if
+                    // none exists yet, the controller asks the scene for one.
+                    MenuBarController.shared.reopenMainWindow = { openWindow(id: "main") }
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -10841,6 +10860,14 @@ struct DSPi_ConsoleApp: App {
             // Restore the standard "Settings..." item (Cmd+,); the plain
             // `Window` Settings scene no longer provides it automatically.
             SettingsCommand()
+
+            // Window menu: hide to the menu bar and keep serving.
+            CommandGroup(after: .windowArrangement) {
+                Button("Minimise to Menu Bar") {
+                    MenuBarController.shared.minimise()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .option])
+            }
 
             // Edit menu: standard pasteboard items, with Cmd+C / Cmd+V falling
             // through to the selected channel when no text field has focus.
@@ -11115,5 +11142,14 @@ struct DSPi_ConsoleApp: App {
         .windowResizability(.contentMinSize)
         // The old `Settings` scene opened centered; preserve that.
         .defaultPosition(.center)
+
+        // The gateway's menu bar presence.  Inserted only when the preference
+        // is on; the controller flips it on when minimising.
+        MenuBarExtra(isInserted: $showInMenuBar) {
+            MenuBarMenu()
+        } label: {
+            MenuBarLabel()
+        }
+        .menuBarExtraStyle(.menu)
     }
 }

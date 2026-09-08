@@ -12,6 +12,7 @@ import SwiftUI
 
 struct NetworkingSettingsTab: View {
     @ObservedObject private var service = AppState.shared.linkService
+    @ObservedObject private var menuBar = MenuBarController.shared
 
     @State private var hubNameDraft: String = ""
     @State private var portDraft: String = ""
@@ -22,6 +23,7 @@ struct NetworkingSettingsTab: View {
             identitySection
             authSection
             if service.authMode == .pin { clientsSection }
+            gatewaySection
             infoSection
         }
         .formStyle(.grouped)
@@ -171,6 +173,30 @@ struct NetworkingSettingsTab: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
+        }
+    }
+
+    // MARK: - Gateway (menu bar and login)
+
+    private var gatewaySection: some View {
+        Section("Run as a Gateway") {
+            Toggle(isOn: Binding(get: { menuBar.showInMenuBar },
+                                 set: { menuBar.showInMenuBar = $0 })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Show in the menu bar")
+                    Text("Closing the window then hides Console to the menu bar while it keeps sharing. Window > Minimise to Menu Bar does the same.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            Toggle("Start at login", isOn: Binding(get: { menuBar.startsAtLogin },
+                                                   set: { menuBar.setStartsAtLogin($0) }))
+            if let error = menuBar.loginItemError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundColor(.orange)
+            }
+            Toggle("Start hidden in the menu bar", isOn: Binding(get: { menuBar.startMinimised },
+                                                                 set: { menuBar.startMinimised = $0 }))
+                .disabled(!menuBar.showInMenuBar)
         }
     }
 
