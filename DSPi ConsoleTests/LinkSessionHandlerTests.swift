@@ -16,7 +16,7 @@ final class LinkSessionHandlerTests: XCTestCase {
     }
 
     private func makeStack() -> (LinkHub, LinkAuthStore, LinkPolicy) {
-        let usb = USBDevice()
+        let usb = USBDevice(startMonitoring: false)
         let auth = LinkAuthStore(storeURL: tmpAuthURL)
         let policy = LinkPolicy.bundled ?? LinkPolicy.empty
         let hub = LinkHub(usb: usb, policy: policy, auth: auth)

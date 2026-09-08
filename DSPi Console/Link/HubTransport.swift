@@ -4,9 +4,10 @@
 //
 //  A DeviceTransport backed by a LinkHub session, so the local Console UI
 //  drives its device as an ordinary hub session, the same path a remote client
-//  will use.  For the one local device it forwards commands straight to the
-//  hub's router and mirrors USBDevice's connection and device-list state, so
-//  the view model sees no behavioural change.  See networking_plan.md Phase 1.
+//  uses.  Commands go through the hub's router; "connected" means the hub has
+//  a router for the device, not merely that USB opened it; device lists and
+//  selection still mirror USBDevice, since the hub shares that one device.
+//  See networking_plan.md Phase 1.
 //
 
 import Foundation
@@ -21,26 +22,38 @@ final class HubTransport: DeviceTransport {
     /// The local UI is always session 1.
     var session: LinkSessionID { localSession.id }
     var generation: UInt64 { usb.generation }
-    var isConnected: Bool { usb.isConnected }
 
     init(hub: LinkHub, usb: USBDevice) {
         self.hub = hub
         self.usb = usb
-        self.localSession = hub.openSession(role: .admin, id: 1)
-        // The local UI receives every relayed notification through the hub,
-        // carrying the hub's session attribution, and re-publishes it on its
-        // own fanout for the view model and the monitor window.
+        self.localSession = hub.openSession(role: .admin, id: LinkHub.localSessionID)
+
+        // Every relayed notification arrives with the hub's session attribution
+        // and is re-published on this transport's fanout for the view model
+        // and the monitor window.
         localSession.onNotify = { [weak self] frame in
             self?.notifyFanout.publish(LinkNotification(packet: frame.packet,
                                                         origin: frame.origin,
                                                         receivedAt: Date()))
         }
+        // A RESYNC means the relay dropped frames for us, or the device came
+        // back.  The view model already re-reads everything on
+        // BULK_INVALIDATED, so a synthetic one is the whole recovery.
+        localSession.onResync = { [weak self] _ in
+            self?.notifyFanout.publish(LinkNotification(packet: Self.syntheticBulkInvalidated,
+                                                        origin: 0, receivedAt: Date()))
+        }
     }
 
-    // Connection and device-list state stay sourced from USBDevice: the hub
-    // shares its one device, so the picker and status dot read the same values
-    // they always did.  Phase 5 merges remote devices into these lists.
-    var isConnectedPublisher: AnyPublisher<Bool, Never> { usb.isConnectedPublisher }
+    /// v2 BULK_INVALIDATED with source UNKNOWN (0): version, event, flags, seq,
+    /// source, reserved x3.
+    private static let syntheticBulkInvalidated = Data([0x02, 0x03, 0, 0, 0, 0, 0, 0])
+
+    // MARK: - Connection state
+
+    var isConnected: Bool { hub.isDeviceAttached }
+    var isConnectedPublisher: AnyPublisher<Bool, Never> { hub.isDeviceAttachedPublisher }
+
     var availableDevices: [DSPiDevice] { usb.availableDevices }
     var availableDevicesPublisher: AnyPublisher<[DSPiDevice], Never> { usb.availableDevicesPublisher }
     var selectedDevice: DSPiDevice? { usb.selectedDevice }
@@ -66,9 +79,9 @@ final class HubTransport: DeviceTransport {
         let req = LinkCmdRequest(tag: 0, handle: LinkHub.localHandle, direction: .get,
                                  bRequest: request, wValue: value, wIndex: index, wLength: length)
         // The command layer calls this synchronously off the main thread and
-        // expects the bytes back, so block on the hub's async completion.  The
-        // router runs on the device's serial queue, never this thread, so
-        // there is no self-deadlock.
+        // expects the bytes back, so block on the hub's completion.  The router
+        // always completes exactly once, and runs the device call on its own
+        // queues, so this cannot deadlock against itself.
         let sem = DispatchSemaphore(value: 0)
         var out: Result<Data, LinkStatus> = .failure(.timeout)
         hub.submit(req, from: localSession.id) { response in

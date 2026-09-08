@@ -314,3 +314,42 @@ final class LinkHubCoreTests: XCTestCase {
         return d
     }
 }
+
+// MARK: - Review fixes: cap exemption and attribution at the router
+
+extension LinkHubCoreTests {
+    func testExemptSessionIsNeverRateLimited() {
+        let dev = FakeDevice()
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        router.maxInflightPerSession = 2
+        let local = RouterSession(id: 1, role: .admin, exemptFromInflightCap: true)
+        let done = expectation(description: "50"); done.expectedFulfillmentCount = 50
+        var limited = 0
+        let lock = NSLock()
+        for i in 0..<50 {
+            let r = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: 0xD2,
+                                   wIndex: 2, payload: Data([0,0,0,0]))
+            router.submit(r, session: local) { res in
+                if res.response.status == .rateLimited { lock.lock(); limited += 1; lock.unlock() }
+                done.fulfill()
+            }
+        }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(limited, 0)
+        XCTAssertEqual(dev.executedOrder.count, 50)
+    }
+
+    func testRouterRecordsLastWriterWithinWindow() {
+        let dev = FakeDevice()
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        XCTAssertEqual(router.attribution(within: 1), 0)
+        let done = expectation(description: "set")
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
+                               wIndex: 2, payload: Data([0,0,0,0]))
+        router.submit(r, session: control(7)) { _ in done.fulfill() }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(router.attribution(within: 1), 7)
+        XCTAssertEqual(router.attribution(within: 1, now: Date().addingTimeInterval(5)), 0,
+                       "attribution expires")
+    }
+}

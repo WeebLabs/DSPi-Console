@@ -17,6 +17,10 @@ import Foundation
 struct RouterSession {
     let id: LinkSessionID
     var role: LinkRole
+    /// The local UI issues fire-and-forget writes in bursts (a preset apply is
+    /// dozens) and cannot retry a rejection, so it is never capped.  Remote
+    /// sessions are, since they can and must retry RATE_LIMITED.
+    var exemptFromInflightCap: Bool = false
 }
 
 /// Outcome of a completed command plus the attribution the notify relay needs.
@@ -41,6 +45,12 @@ final class CommandRouter {
     private var lockDeadline: Date?
     /// In-flight command count per session, for the max-inflight cap.
     private var inflight: [LinkSessionID: Int] = [:]
+    /// The session whose write the device is executing or has just executed,
+    /// for notification attribution.  Recorded before the device call runs,
+    /// since commands are serialised per device: the resulting notification
+    /// cannot arrive before the record exists.
+    private var lastWriteSession: LinkSessionID = 0
+    private var lastWriteAt: Date = .distantPast
     private let stateLock = NSLock()
 
     /// How long to wait for the device before giving up.  Bulk gets longer.
@@ -91,9 +101,9 @@ final class CommandRouter {
             }
         }
 
-        // 3. In-flight cap per session.
+        // 3. In-flight cap per session (remote sessions only).
         let count = inflight[session.id, default: 0]
-        if count >= maxInflightPerSession {
+        if !session.exemptFromInflightCap, count >= maxInflightPerSession {
             stateLock.unlock()
             return completion(reject(request, .rateLimited))
         }
@@ -116,6 +126,14 @@ final class CommandRouter {
             }
 
             let gen = device.generation
+            // Anything that can change device state is a write for attribution,
+            // whichever transfer direction carries it (write-as-read included).
+            if self.policy.classify(code: request.bRequest, direction: direction) != .read {
+                self.stateLock.lock()
+                self.lastWriteSession = session.id
+                self.lastWriteAt = Date()
+                self.stateLock.unlock()
+            }
             let response = self.runWithTimeout(request, on: device, timeout: timeout)
 
             // A device that was replaced while the command ran cannot have its
@@ -181,6 +199,13 @@ final class CommandRouter {
         stateLock.lock(); defer { stateLock.unlock() }
         if lockHolder == session { lockHolder = nil; lockDeadline = nil }
         inflight[session] = nil
+    }
+
+    /// The session to attribute a host-originated notification to: the last
+    /// writer, if it wrote within `window`.  0 when nobody did.
+    func attribution(within window: TimeInterval, now: Date = Date()) -> LinkSessionID {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return now.timeIntervalSince(lastWriteAt) <= window ? lastWriteSession : 0
     }
 
     var currentLockHolder: LinkSessionID? {

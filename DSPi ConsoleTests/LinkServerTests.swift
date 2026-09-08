@@ -13,7 +13,7 @@ import XCTest
 final class LinkServerTests: XCTestCase {
 
     private func makeStack() -> (LinkHub, LinkAuthStore, LinkPolicy) {
-        let usb = USBDevice()
+        let usb = USBDevice(startMonitoring: false)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("lst-\(UUID().uuidString).json")
         let auth = LinkAuthStore(storeURL: url)

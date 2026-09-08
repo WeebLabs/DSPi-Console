@@ -66,6 +66,22 @@ struct LinkNotification {
         guard eventID == 0x02, packet.count >= 9 else { return nil }
         return packet[packet.startIndex + 8]
     }
+
+    /// True when the firmware tags the change as a host or bulk write
+    /// (PARAM_SRC_HOST_SET 1, PARAM_SRC_BULK_SET 2), which is the only kind a
+    /// hub can attribute to one of its sessions.  Reads the source byte where
+    /// each event puts it: PARAM_CHANGED and CS_AUX at 8, BULK_INVALIDATED at 4.
+    var isHostSourced: Bool {
+        let offset: Int
+        switch eventID {
+        case 0x02, 0x0C: offset = 8
+        case 0x03: offset = 4
+        default: return false
+        }
+        guard packet.count > offset else { return false }
+        let source = packet[packet.startIndex + offset]
+        return source == 1 || source == 2
+    }
 }
 
 /// Fans one notification stream out to any number of observers on the main

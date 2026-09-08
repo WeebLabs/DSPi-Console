@@ -101,9 +101,13 @@ class USBDevice: ObservableObject {
                                                                                      0x6c, 0x0d, 0x38, 0xc3, 0xb0, 0x93, 0x4e, 0xa7,
                                                                                      0x80, 0x9b, 0x09, 0xfb, 0x5d, 0xdd, 0xac, 0x16)
 
-    init() {
+    /// - Parameter startMonitoring: false gives an inert instance that never
+    ///   scans or opens hardware.  Tests that need a USBDevice only as a
+    ///   dependency use it, so they do not steal the one real device from the
+    ///   app's own instance (exclusive access) while a board is plugged in.
+    init(startMonitoring: Bool = true) {
         // Just setting up monitoring triggers the initial scan automatically
-        setupMonitoring()
+        if startMonitoring { setupMonitoring() }
     }
 
     deinit {

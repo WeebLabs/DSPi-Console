@@ -4,10 +4,10 @@
 //
 //  The gateway.  It owns the one USB device, drives it through the
 //  CommandRouter, keeps the DeviceRegistry, SnapshotCache, NotifyRelay and
-//  PollScheduler, and holds the sessions (the local UI and, in Phase 3, remote
-//  WebSocket clients) that talk to it.  The decisive property is that the local
-//  UI is a session like any other, so ordering, attribution and locks are the
-//  same for everyone.  See networking_plan.md Phase 1-3.
+//  PollScheduler, and holds the sessions (the local UI and remote WebSocket
+//  clients) that talk to it.  The decisive property is that the local UI is a
+//  session like any other, so ordering, attribution and locks are the same for
+//  everyone.  See networking_plan.md Phase 1-3.
 //
 //  v1 shares the single device Console currently opens, at handle 0.  Multiple
 //  concurrently-open USB devices are a deeper USBDevice change and are out of
@@ -20,7 +20,7 @@ import Combine
 
 /// A session on the hub: an id, a live role, and the closures that deliver
 /// notifications and poll frames to it.  The local UI registers one of these;
-/// the WebSocket server will register one per connection.
+/// the WebSocket server registers one per connection.
 final class LinkHubSession {
     let id: LinkSessionID
     var role: LinkRole
@@ -44,12 +44,24 @@ final class LinkHub {
     private let usb: USBDevice
     private let snapshot = SnapshotCache()
     private let relay = NotifyRelay()
+
+    /// The attached device and its machinery.  Written only through
+    /// attachDevice/detachDevice under `deviceLock`; read from any thread.
     private var router: CommandRouter?
     private var scheduler: PollScheduler?
-    private var hubDevice: USBHubDevice?
+    private var device: HubDevice?
+    private let deviceLock = NSLock()
+
+    /// True once a device is attached and its router exists.  This, not the USB
+    /// layer's own flag, is what the local transport reports as "connected", so
+    /// the view model never sees a device it cannot yet send to.
+    private let attachedSubject = CurrentValueSubject<Bool, Never>(false)
+    var isDeviceAttached: Bool { attachedSubject.value }
+    var isDeviceAttachedPublisher: AnyPublisher<Bool, Never> { attachedSubject.eraseToAnyPublisher() }
 
     /// Sessions by id.  The local UI is always session 1; remote sessions get
-    /// ids from 2 up.
+    /// ids from 2 up.  Session 0xFFFF is the hub's own internal session, used
+    /// for the snapshot reads it issues on its own behalf.
     private var sessions: [LinkSessionID: LinkHubSession] = [:]
     private var nextSessionID: LinkSessionID = 2
     private let sessionLock = NSLock()
@@ -59,6 +71,12 @@ final class LinkHub {
 
     /// The handle of the one device this v1 hub exposes.
     static let localHandle: UInt8 = 0
+    static let localSessionID: LinkSessionID = 1
+    static let internalSessionID: LinkSessionID = 0xFFFF
+
+    /// How long after a write a host-sourced notification is attributed to
+    /// that writer.  USB round trips are milliseconds; this is generous.
+    static let attributionWindow: TimeInterval = 0.5
 
     /// Called after any device event, so the network service can refresh the
     /// DNS-SD TXT record (device count / serials) without polling.
@@ -81,59 +99,111 @@ final class LinkHub {
 
         registry.onEvent = { [weak self] event in self?.broadcastDeviceEvent(event) }
 
-        // Relay the device's notification stream: patch the snapshot cache,
-        // then fan the packet out to every session with its attributed origin.
         notifyCancellable = usb.addNotificationObserver { [weak self] note in
-            self?.handleNotification(note)
+            self?.ingest(note)
         }
 
-        // Follow the USB connection: build the per-device machinery on connect,
-        // tear it down on disconnect.
+        // Follow the USB connection: read the device's identity off the main
+        // thread, then attach synchronously on main so "attached" is published
+        // only once the router exists.  Only a device the USB path attached is
+        // detached on a USB drop; the published value's initial `false` (and
+        // any repeat) must not tear down a device attached another way.
         usb.isConnectedPublisher
+            .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
-                if connected { self?.deviceDidConnect() } else { self?.deviceDidDisconnect() }
+                guard let self = self else { return }
+                if connected {
+                    self.usbDidConnect()
+                } else if self.attachedViaUSB {
+                    self.attachedViaUSB = false
+                    self.detachDevice()
+                }
             }
             .store(in: &cancellables)
     }
 
+    /// True while the attached device came from the USB path, so a USB drop
+    /// is the right reason to detach it.
+    private var attachedViaUSB = false
+
     // MARK: - Device lifecycle
 
-    private func deviceDidConnect() {
-        // Read identity off the main thread; the control transfers block.
+    private func usbDidConnect() {
+        let usb = self.usb
+        let generation = usb.generation
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            let fallback = self.usb.selectedDevice?.serial ?? "unknown"
-            guard let info = USBHubDevice.readInfo(from: self.usb, serialFallback: fallback) else { return }
-            let device = USBHubDevice(usb: self.usb, info: info)
-            let router = CommandRouter(handle: Self.localHandle, device: device, policy: self.policy)
-            let scheduler = PollScheduler(device: device, policy: self.policy)
-            scheduler.onPoll = { [weak self] session, slot, handle, payload in
-                self?.deliverPoll(session: session, slot: slot, handle: handle, payload: payload)
-            }
-            self.hubDevice = device
-            self.router = router
-            self.scheduler = scheduler
-            self.registry.deviceOnline(info)
-            // Warm the snapshot so the first client screen is one reply.
-            if let blob = self.usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0,
-                                                     index: 2, length: BULK_PARAMS_SIZE) {
-                self.snapshot.setBulk(blob)
+            let fallback = usb.selectedDevice?.serial ?? "unknown"
+            guard let info = USBHubDevice.readInfo(from: usb, serialFallback: fallback) else { return }
+            DispatchQueue.main.async {
+                guard let self = self, usb.isConnected, usb.generation == generation else { return }
+                self.attachedViaUSB = true
+                self.attachDevice(USBHubDevice(usb: usb, info: info))
             }
         }
     }
 
-    private func deviceDidDisconnect() {
-        if let serial = hubDevice?.info.serial { registry.deviceOffline(serial: serial) }
+    /// Attach a device: build its router and scheduler, register it, publish
+    /// "attached", then warm the snapshot through the router.  Internal so
+    /// tests can attach a fake device without USB.
+    func attachDevice(_ device: HubDevice) {
+        let router = CommandRouter(handle: Self.localHandle, device: device, policy: policy)
+        let scheduler = PollScheduler(device: device, policy: policy)
+        scheduler.onPoll = { [weak self] session, slot, handle, payload in
+            self?.deliverPoll(session: session, slot: slot, handle: handle, payload: payload)
+        }
+        deviceLock.lock()
+        self.scheduler?.stop()
+        self.device = device
+        self.router = router
+        self.scheduler = scheduler
+        deviceLock.unlock()
+
+        registry.deviceOnline(device.info)
+        attachedSubject.send(true)
+        warmSnapshot()
+    }
+
+    /// Detach the current device.  A no-op when nothing is attached, so a
+    /// stray disconnect does not send every session a resync for nothing.
+    func detachDevice() {
+        deviceLock.lock()
+        guard device != nil else { deviceLock.unlock(); return }
+        let serial = device?.info.serial
         scheduler?.stop()
         scheduler = nil
         router = nil
-        hubDevice = nil
+        device = nil
+        deviceLock.unlock()
+
+        if let serial = serial { registry.deviceOffline(serial: serial) }
         snapshot.invalidate()
+        attachedSubject.send(false)
         relay.resyncAll(handle: Self.localHandle, reason: 1)
     }
 
-    private func handleNotification(_ note: LinkNotification) {
+    private var currentRouter: CommandRouter? {
+        deviceLock.lock(); defer { deviceLock.unlock() }
+        return router
+    }
+
+    private var currentScheduler: PollScheduler? {
+        deviceLock.lock(); defer { deviceLock.unlock() }
+        return scheduler
+    }
+
+    // MARK: - Notifications
+
+    /// Take one notification from the device: attribute it, patch the cache,
+    /// fan it out.  Internal so tests can feed packets without USB.
+    func ingest(_ note: LinkNotification) {
+        // The USB reader marks a packet as host-written; only the hub knows
+        // which session that host write belonged to.
+        let origin: LinkSessionID = note.isHostSourced
+            ? (currentRouter?.attribution(within: Self.attributionWindow) ?? 0)
+            : 0
+        let attributed = LinkNotification(packet: note.packet, origin: origin, receivedAt: note.receivedAt)
+
         // BULK_INVALIDATED (event 0x03) means re-read; a PARAM_CHANGED patches
         // the cache in place.  Either way, fan it out verbatim.
         if note.eventID == 0x03 {
@@ -142,24 +212,41 @@ final class LinkHub {
         } else {
             snapshot.applyParamChange(packet: note.packet)
         }
-        relay.publish(handle: Self.localHandle, notification: note)
+        relay.publish(handle: Self.localHandle, notification: attributed)
+    }
+
+    // MARK: - Snapshot
+
+    /// Read the bulk blob through the router as the hub's internal session, so
+    /// it takes its turn in the device's order and respects locks like any
+    /// other command, and store it in the cache.
+    private func warmSnapshot() {
+        guard let router = currentRouter else { return }
+        let req = LinkCmdRequest(tag: 0, handle: Self.localHandle, direction: .get,
+                                 bRequest: REQ_GET_ALL_PARAMS, wValue: 0, wIndex: 2,
+                                 wLength: BULK_PARAMS_SIZE)
+        let internalSession = RouterSession(id: Self.internalSessionID, role: .admin,
+                                            exemptFromInflightCap: true)
+        router.submit(req, session: internalSession) { [weak self] result in
+            guard result.response.status == .ok, !result.response.payload.isEmpty else { return }
+            self?.snapshot.setBulk(result.response.payload)
+        }
     }
 
     /// Re-read the bulk blob a moment after an invalidation so the cache is
     /// warm again without racing the firmware's own settle.
     private func refreshSnapshotSoon() {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self = self, self.usb.isConnected,
-                  let blob = self.usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0,
-                                                        index: 2, length: BULK_PARAMS_SIZE) else { return }
-            self.snapshot.setBulk(blob)
+            self?.warmSnapshot()
         }
     }
 
+    func currentSnapshot() -> DeviceSnapshot? { snapshot.snapshot() }
+
     // MARK: - Sessions
 
-    /// Register a session.  The local UI passes id 1; remote sessions omit it
-    /// and get the next free id.
+    /// Register a session.  The local UI passes `localSessionID`; remote
+    /// sessions omit the id and get the next free one.
     func openSession(role: LinkRole, id: LinkSessionID? = nil) -> LinkHubSession {
         sessionLock.lock()
         let sid = id ?? { let n = nextSessionID; nextSessionID &+= 1; return n }()
@@ -176,9 +263,9 @@ final class LinkHub {
     func closeSession(_ id: LinkSessionID) {
         sessionLock.lock(); sessions[id] = nil; sessionLock.unlock()
         relay.removeSession(id)
-        scheduler?.unsubscribeAll(session: id)
-        router?.sessionDidClose(id)
-        registry.setLockHolder(handle: Self.localHandle, session: router?.currentLockHolder)
+        currentScheduler?.unsubscribeAll(session: id)
+        currentRouter?.sessionDidClose(id)
+        registry.setLockHolder(handle: Self.localHandle, session: currentRouter?.currentLockHolder)
     }
 
     private func session(_ id: LinkSessionID) -> LinkHubSession? {
@@ -193,45 +280,44 @@ final class LinkHub {
     /// no device is attached, answers NO_DEVICE.
     func submit(_ request: LinkCmdRequest, from sessionID: LinkSessionID,
                 completion: @escaping (LinkCmdResponse) -> Void) {
-        guard let session = session(sessionID) else {
+        guard let session = session(sessionID),
+              request.handle == Self.localHandle,
+              let router = currentRouter else {
             return completion(LinkCmdResponse(tag: request.tag, status: .noDevice))
         }
-        guard request.handle == Self.localHandle, let router = router else {
-            return completion(LinkCmdResponse(tag: request.tag, status: .noDevice))
-        }
-        router.submit(request, session: RouterSession(id: session.id, role: session.role)) { result in
+        let routerSession = RouterSession(id: session.id, role: session.role,
+                                          exemptFromInflightCap: session.id == Self.localSessionID)
+        router.submit(request, session: routerSession) { result in
             completion(result.response)
         }
     }
 
-    // MARK: - Snapshot, polls, locks
-
-    func currentSnapshot() -> DeviceSnapshot? { snapshot.snapshot() }
+    // MARK: - Polls and locks
 
     func subscribePolls(session: LinkSessionID,
                         requests: [(slot: Int, spec: PollScheduler.PollSpec, hz: Double)])
         -> [(slot: Int, grantedHz: Double)] {
-        guard let s = self.session(session), let scheduler = scheduler else {
+        guard let s = self.session(session), let scheduler = currentScheduler else {
             return requests.map { ($0.slot, 0) }
         }
         return scheduler.subscribe(session: session, role: s.role, requests: requests)
     }
 
     func unsubscribePolls(session: LinkSessionID, slots: [Int]) {
-        scheduler?.unsubscribe(session: session, slots: slots)
+        currentScheduler?.unsubscribe(session: session, slots: slots)
     }
 
     @discardableResult
     func acquireLock(session: LinkSessionID, timeout: TimeInterval) -> Bool {
-        guard let router = router else { return false }
+        guard let router = currentRouter else { return false }
         let ok = router.acquireLock(session: session, timeout: timeout)
         if ok { registry.setLockHolder(handle: Self.localHandle, session: session) }
         return ok
     }
 
     func releaseLock(session: LinkSessionID) {
-        router?.releaseLock(session: session)
-        registry.setLockHolder(handle: Self.localHandle, session: router?.currentLockHolder)
+        currentRouter?.releaseLock(session: session)
+        registry.setLockHolder(handle: Self.localHandle, session: currentRouter?.currentLockHolder)
     }
 
     // MARK: - Fan-out helpers

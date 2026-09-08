@@ -9,8 +9,9 @@ import XCTest
 ///
 /// All tests SKIP cleanly when no DSPi is attached (`requireDevice`). Reads use
 /// the synchronous `getControlRequest`, which serializes behind the preceding
-/// async `set*` on the device's serial queue, so a read right after a write
-/// observes the new value deterministically.
+/// async `set*` through the DSPi Link hub, whose router runs the local
+/// session's commands in order; `HardwareTest.readFloat` settles behind them
+/// first, so a read right after a write observes the new value deterministically.
 final class HardwareIntegrationTests: XCTestCase {
 
     func testMasterVolumeRoundTrip() throws {

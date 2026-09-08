@@ -14,7 +14,7 @@ import XCTest
 final class LinkServiceTests: XCTestCase {
 
     private func makeService(port: Int) -> (LinkService, LinkAuthStore) {
-        let usb = USBDevice()
+        let usb = USBDevice(startMonitoring: false)
         let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("lsvc-\(UUID().uuidString).json"))
         let policy = LinkPolicy.bundled ?? LinkPolicy.empty
@@ -37,7 +37,7 @@ final class LinkServiceTests: XCTestCase {
 
     func testSetSharingPersistsPreference() throws {
         let defaults = UserDefaults(suiteName: "lsvc-pref-\(UUID().uuidString)")!
-        let usb = USBDevice()
+        let usb = USBDevice(startMonitoring: false)
         let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("lsvc-\(UUID().uuidString).json"))
         let policy = LinkPolicy.bundled ?? LinkPolicy.empty

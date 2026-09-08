@@ -180,7 +180,7 @@ struct NetworkingSettingsTab: View {
         Section {
             Text("Sharing works only on your local network. Do not forward this port on your router. To reach your devices away from home, use a VPN such as Tailscale or WireGuard.\n\nKeep this Mac awake and Console running (it can sit in the menu bar) for clients to stay connected.")
                 .font(.caption2).foregroundColor(.secondary)
-            Toggle("Prevent this Mac from sleeping while clients are connected",
+            Toggle("Prevent this Mac from sleeping while sharing is on",
                    isOn: Binding(get: { service.preventSleepWhileConnected },
                                  set: { service.preventSleepWhileConnected = $0 }))
                 .font(.caption)

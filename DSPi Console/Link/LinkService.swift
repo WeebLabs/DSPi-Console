@@ -12,7 +12,6 @@
 import Foundation
 import Combine
 import AppKit
-import IOKit.pwr_mgt
 
 /// The server the service starts and stops.  A protocol so the service builds
 /// and tests without the NIO server present; LinkServer conforms to it.
@@ -33,8 +32,14 @@ final class LinkService: ObservableObject {
     // Persisted preferences.
     @Published var sharingEnabled: Bool { didSet { defaults.set(sharingEnabled, forKey: Keys.enabled) } }
     @Published var port: Int { didSet { defaults.set(port, forKey: Keys.port) } }
+    /// Holds an idle-sleep assertion for as long as sharing is on.  It is not
+    /// tied to a client being connected: a phone that has gone to sleep would
+    /// otherwise find the hub asleep too when it comes back.
     @Published var preventSleepWhileConnected: Bool {
-        didSet { defaults.set(preventSleepWhileConnected, forKey: Keys.preventSleep) }
+        didSet {
+            defaults.set(preventSleepWhileConnected, forKey: Keys.preventSleep)
+            if isRunning { endPowerActivity(); beginPowerActivity() }
+        }
     }
 
     // Live state, mirrored for the UI.
@@ -48,7 +53,6 @@ final class LinkService: ObservableObject {
 
     private let defaults: UserDefaults
     private var activityToken: NSObjectProtocol?
-    private var sleepAssertion: IOPMAssertionID = 0
     private var pinTimer: Timer?
 
     private enum Keys {
@@ -198,10 +202,6 @@ final class LinkService: ObservableObject {
         if let token = activityToken {
             ProcessInfo.processInfo.endActivity(token)
             activityToken = nil
-        }
-        if sleepAssertion != 0 {
-            IOPMAssertionRelease(sleepAssertion)
-            sleepAssertion = 0
         }
     }
 

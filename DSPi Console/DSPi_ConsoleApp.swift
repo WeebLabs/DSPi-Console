@@ -10619,6 +10619,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private weak var originalWindowDelegate: NSWindowDelegate?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Network sharing is a persisted choice; bring the gateway up at launch
+        // if it was on, rather than only when the Networking page is opened.
+        if UserDefaults.standard.bool(forKey: "LinkSharingEnabled") {
+            _ = AppState.shared.linkService
+        }
+
         // Find the main window once it appears and set ourselves as its delegate
         // so we can intercept the close button with windowShouldClose.
         mainWindowObserver = NotificationCenter.default.addObserver(
