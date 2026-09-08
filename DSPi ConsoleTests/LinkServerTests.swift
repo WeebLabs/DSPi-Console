@@ -114,3 +114,46 @@ final class LinkServerTests: XCTestCase {
         XCTAssertFalse(server.isRunning)
     }
 }
+
+// MARK: - Web bundle over HTTP
+
+extension LinkServerTests {
+    /// With the built dspi-link-js app shipped in the bundle, the hub serves
+    /// it at / and advertises it.
+    func testWebBundleIsServedAndAdvertised() throws {
+        let usb = USBDevice(startMonitoring: false)
+        let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("web-\(UUID().uuidString).json"))
+        let policy = LinkPolicy.bundled ?? LinkPolicy.empty
+        let hub = LinkHub(usb: usb, policy: policy, auth: auth)
+        let server = LinkServer(hub: hub, auth: auth, policy: policy)
+        try server.start(port: 0)
+        defer { server.stop() }
+        let port = try XCTUnwrap(server.boundPort)
+
+        func get(_ path: String) throws -> (Int, Data, String?) {
+            let e = expectation(description: path)
+            var out: (Int, Data, String?) = (0, Data(), nil)
+            URLSession.shared.dataTask(with: URL(string: "http://127.0.0.1:\(port)\(path)")!) { data, resp, _ in
+                let http = resp as? HTTPURLResponse
+                out = (http?.statusCode ?? 0, data ?? Data(), http?.value(forHTTPHeaderField: "Content-Type"))
+                e.fulfill()
+            }.resume()
+            wait(for: [e], timeout: 5)
+            return out
+        }
+
+        let (code, body, type) = try get("/")
+        XCTAssertEqual(code, 200)
+        XCTAssertEqual(type, "text/html; charset=utf-8")
+        XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("<script"), "index.html of the web app")
+
+        let (infoCode, info, _) = try get("/dspi/v1/info")
+        XCTAssertEqual(infoCode, 200)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: info) as? [String: Any])
+        XCTAssertEqual(json["web"] as? Bool, true)
+
+        let (missing, _, _) = try get("/../Info.plist")
+        XCTAssertNotEqual(missing, 200, "nothing outside the Web folder is reachable")
+    }
+}

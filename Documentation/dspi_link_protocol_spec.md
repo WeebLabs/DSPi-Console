@@ -3,6 +3,7 @@
 *Version: 1.0 (draft)*
 *Status: design, not yet implemented*
 *Last updated: 2026-09-08*
+*Canonical home: `WeebLabs/DSPi-Link` `spec/`; this copy is kept in step with it.*
 
 DSPi Link is the local-network protocol through which a **hub** (DSPi Console
 in gateway mode, or a standalone bridge such as an ESP32 wired to a DSPi over
@@ -395,7 +396,7 @@ several sessions are executed once and fanned out.
 
 ```json
 {"t": "poll.subscribe", "id": 8, "handle": 0, "polls": [
-  {"slot": 0, "req": 80,  "val": 9, "idx": 2, "len": 27, "hz": 10},
+  {"slot": 0, "req": 80,  "val": 9, "idx": 2, "len": 41, "hz": 10},
   {"slot": 1, "req": 11,  "val": 3, "idx": 2, "len": 80, "hz": 15}
 ]}
 {"t": "ok", "id": 8, "granted": [{"slot": 0, "hz": 10}, {"slot": 1, "hz": 12}]}
@@ -403,7 +404,11 @@ several sessions are executed once and fanned out.
 {"t": "poll.unsubscribe", "id": 9, "handle": 0, "slots": [1]}
 ```
 
-`slot` is a session-chosen number 0..15 that comes back in each `POLL` frame.
+`len` is what the client would pass as `wLength` over USB and must fit the
+device: the status frame above is `2 * channels + 7` bytes, 41 on a 17-channel
+RP2350 and 21 on a 7-channel RP2040, so a client reads the channel count from
+the bulk header first. `slot` is a session-chosen number 0..15 that comes back
+in each `POLL` frame.
 The hub may grant a lower rate than requested to stay inside
 `poll_budget_bps`; it reports the granted rates. Poll commands must be
 classed *read*. A subscription ends when the session closes, when the device
@@ -784,13 +789,13 @@ frame and drops it because `origin` matches its own session.
 
 ```json
 {"t": "poll.subscribe", "id": 3, "handle": 0,
- "polls": [{"slot": 0, "req": 80, "val": 9, "idx": 2, "len": 27, "hz": 10}]}
+ "polls": [{"slot": 0, "req": 80, "val": 9, "idx": 2, "len": 41, "hz": 10}]}
 ```
 
 Then, ten times a second:
 
 ```
-03 00 <seq16>  00 00 1B 00  <27 bytes of REQ_GET_STATUS>
+03 00 <seq16>  00 00 29 00  <41 bytes of REQ_GET_STATUS>
 ```
 
 ---
