@@ -98,7 +98,7 @@ enum LinkHubKind: String, Codable {
     case console, bridge
 }
 
-enum LinkDeviceState: String, Codable {
+enum LinkDeviceState: String, Codable, Equatable {
     case online, offline, updating
 }
 
