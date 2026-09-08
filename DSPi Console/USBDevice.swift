@@ -607,6 +607,38 @@ class USBDevice: ObservableObject {
         return nil
     }
 
+    /// Synchronous OUT transfer that reports the outcome, for the Link hub:
+    /// `sendControlRequest` is fire-and-forget and cannot tell a caller whether
+    /// the device took the write.  Same device-binding as the other transfers.
+    /// A firmware STALL (unknown or rejected command) maps to `.error`, matching
+    /// the read path; success is `.ok`, which certifies dispatch, not apply.
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data) -> LinkStatus {
+        let expectedGeneration = generation
+        return serialQueue.sync {
+            guard expectedGeneration == self.generation,
+                  let dev = self.deviceInterface else { return .noDevice }
+            var mutable = data
+            let result: IOReturn = mutable.withUnsafeMutableBytes { raw in
+                var requestPtr = IOUSBDevRequest(
+                    bmRequestType: 0x41,
+                    bRequest: request,
+                    wValue: value,
+                    wIndex: index,
+                    wLength: UInt16(data.count),
+                    pData: raw.baseAddress,
+                    wLenDone: 0)
+                return dev.pointee!.pointee.DeviceRequest(dev, &requestPtr)
+            }
+            switch result {
+            case kIOReturnSuccess: return .ok
+            case kIOUSBPipeStalledValue: return .error
+            case kIOReturnTimeout: return .timeout
+            case kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnNotAttached: return .noDevice
+            default: return .error
+            }
+        }
+    }
+
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Result<Data, LinkStatus> {
         // Same device-binding as sendControlRequest: a read that was issued
         // for the previously-open device fails instead of returning another
