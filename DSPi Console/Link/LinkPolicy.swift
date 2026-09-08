@@ -81,6 +81,18 @@ struct LinkPolicy {
         byCode = Dictionary(doc.commands.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
+    /// An empty table: every command classifies as config and only admin may
+    /// use it.  The last-resort fallback if the bundled JSON is missing, so the
+    /// hub always has a non-nil, fail-safe policy rather than permitting all.
+    private init() {
+        specVersion = "0"
+        generated = ""
+        entries = []
+        byCode = [:]
+    }
+
+    static let empty = LinkPolicy()
+
     /// Load the copy bundled with the app.  `Link/policy` is a synchronized
     /// group, so commands.json is copied into the bundle automatically.
     init(bundle: Bundle = .main) throws {
@@ -97,7 +109,7 @@ struct LinkPolicy {
     /// The shared instance, or nil if the resource is missing or malformed.
     /// A hub that cannot load its table must refuse to forward anything
     /// rather than fall back to permitting everything.
-    static let bundled: LinkPolicy? = try? LinkPolicy()
+    static let bundled: LinkPolicy? = try? LinkPolicy(bundle: .main)
 
     // MARK: - Queries
 

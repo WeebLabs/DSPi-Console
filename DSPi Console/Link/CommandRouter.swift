@@ -57,7 +57,13 @@ final class CommandRouter {
         self.device = device
         self.policy = policy
         self.queue = DispatchQueue(label: "com.foxdac.link.router.\(handle)")
+        self.execQueue = DispatchQueue(label: "com.foxdac.link.exec.\(handle)")
     }
+
+    /// One persistent queue runs the blocking device call, off the router's
+    /// ordering queue, so the timeout guard does not create a queue per
+    /// command on the high-rate local poll path.
+    private let execQueue: DispatchQueue
 
     /// Submit one command.  The completion runs on an arbitrary queue with the
     /// routed result.  Rejections (auth, lock, rate) complete synchronously
@@ -134,8 +140,7 @@ final class CommandRouter {
                                 timeout: TimeInterval) -> LinkCmdResponse {
         let sem = DispatchSemaphore(value: 0)
         var result: LinkCmdResponse?
-        let worker = DispatchQueue(label: "com.foxdac.link.exec.\(handle)")
-        worker.async {
+        execQueue.async {
             let r = device.execute(request)
             result = r
             sem.signal()

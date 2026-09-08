@@ -13,12 +13,26 @@ import UniformTypeIdentifiers
 class AppState: ObservableObject {
     static let shared = AppState()
     let usb = USBDevice()
-    lazy var viewModel: DSPViewModel = DSPViewModel(transport: usb)
 
-    /// Always-on listener for the device's bulk notification endpoint.
-    /// Lifecycle is driven by DSPViewModel based on device connection state.
-    /// The display window observes this same instance.
-    lazy var interruptMonitor: InterruptMonitor = InterruptMonitor(transport: usb)
+    /// The DSPi Link gateway.  It owns the USB device's command path; the local
+    /// UI is session 1 on it, exactly like a remote client, so ordering,
+    /// attribution and locks are one model for everyone.  Sharing over the
+    /// network (Phase 3) adds the server in front of this same hub.
+    lazy var linkHub: LinkHub = LinkHub(
+        usb: usb,
+        policy: LinkPolicy.bundled ?? LinkPolicy.empty,
+        auth: LinkAuthStore(storeURL: LinkAuthStore.defaultURL()))
+
+    /// The transport the whole UI drives.  It routes through the hub as the
+    /// local session, and mirrors USBDevice's connection and device-list state
+    /// so the picker and status behave exactly as before.
+    lazy var transport: HubTransport = HubTransport(hub: linkHub, usb: usb)
+
+    lazy var viewModel: DSPViewModel = DSPViewModel(transport: transport)
+
+    /// Decodes the device notification stream (from the transport) for the
+    /// Interrupt Monitor window and the typed-event handlers.
+    lazy var interruptMonitor: InterruptMonitor = InterruptMonitor(transport: transport)
 
     private init() {}
 }
