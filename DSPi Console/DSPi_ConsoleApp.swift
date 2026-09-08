@@ -26,6 +26,12 @@ class AppState: ObservableObject {
     /// The transport the whole UI drives.  It routes through the hub as the
     /// local session, and mirrors USBDevice's connection and device-list state
     /// so the picker and status behave exactly as before.
+    /// The DSPi Link network server.  Built lazily and left stopped; the
+    /// Networking settings UI calls start/stop.  It fronts the same hub the
+    /// local UI uses, so remote clients are ordinary sessions on it.
+    lazy var linkServer: LinkServer = LinkServer(hub: linkHub, auth: linkHub.auth,
+                                                 policy: LinkPolicy.bundled ?? LinkPolicy.empty)
+
     lazy var transport: HubTransport = HubTransport(hub: linkHub, usb: usb)
 
     lazy var viewModel: DSPViewModel = DSPViewModel(transport: transport)

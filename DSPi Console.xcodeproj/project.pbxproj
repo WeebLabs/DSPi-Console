@@ -8,6 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		667C67492F350A0100264C32 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = 667C67482F350A0100264C32 /* LICENSE */; };
+		D5010000000000000000001B /* NIO in Frameworks */ = {isa = PBXBuildFile; productRef = D5010000000000000000001A /* NIO */; };
+		D5010000000000000000002B /* NIOCore in Frameworks */ = {isa = PBXBuildFile; productRef = D5010000000000000000002A /* NIOCore */; };
+		D5010000000000000000003B /* NIOPosix in Frameworks */ = {isa = PBXBuildFile; productRef = D5010000000000000000003A /* NIOPosix */; };
+		D5010000000000000000004B /* NIOHTTP1 in Frameworks */ = {isa = PBXBuildFile; productRef = D5010000000000000000004A /* NIOHTTP1 */; };
+		D5010000000000000000005B /* NIOWebSocket in Frameworks */ = {isa = PBXBuildFile; productRef = D5010000000000000000005A /* NIOWebSocket */; };
+		D5010000000000000000006B /* NIOFoundationCompat in Frameworks */ = {isa = PBXBuildFile; productRef = D5010000000000000000006A /* NIOFoundationCompat */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,6 +74,12 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D5010000000000000000001B /* NIO in Frameworks */,
+				D5010000000000000000002B /* NIOCore in Frameworks */,
+				D5010000000000000000003B /* NIOPosix in Frameworks */,
+				D5010000000000000000004B /* NIOHTTP1 in Frameworks */,
+				D5010000000000000000005B /* NIOWebSocket in Frameworks */,
+				D5010000000000000000006B /* NIOFoundationCompat in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +137,12 @@
 			);
 			name = "DSPi Console";
 			packageProductDependencies = (
+				D5010000000000000000001A /* NIO */,
+				D5010000000000000000002A /* NIOCore */,
+				D5010000000000000000003A /* NIOPosix */,
+				D5010000000000000000004A /* NIOHTTP1 */,
+				D5010000000000000000005A /* NIOWebSocket */,
+				D5010000000000000000006A /* NIOFoundationCompat */,
 			);
 			productName = "DSPi Console";
 			productReference = 665141C52F0DF37B00093CAF /* DSPi Console.app */;
@@ -181,6 +199,9 @@
 			);
 			mainGroup = 665141BC2F0DF37B00093CAF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 665141C62F0DF37B00093CAF /* Products */;
 			projectDirPath = "";
@@ -486,6 +507,50 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-nio.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.75.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D5010000000000000000001A /* NIO */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIO;
+		};
+		D5010000000000000000002A /* NIOCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOCore;
+		};
+		D5010000000000000000003A /* NIOPosix */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOPosix;
+		};
+		D5010000000000000000004A /* NIOHTTP1 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOHTTP1;
+		};
+		D5010000000000000000005A /* NIOWebSocket */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOWebSocket;
+		};
+		D5010000000000000000006A /* NIOFoundationCompat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D5010000000000000000000A /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOFoundationCompat;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 665141BD2F0DF37B00093CAF /* Project object */;
 }
