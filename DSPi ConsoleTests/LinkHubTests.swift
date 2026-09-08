@@ -38,7 +38,7 @@ final class LinkHubTests: XCTestCase {
         let hub = makeHub()
         let s = hub.openSession(role: .admin)
         let e = expectation(description: "noDevice")
-        let req = LinkCmdRequest(tag: 1, handle: LinkHub.localHandle, direction: .get,
+        let req = LinkCmdRequest(tag: 1, handle: 0, direction: .get,
                                  bRequest: 0x50, wValue: 9, wIndex: 2, wLength: 4)
         hub.submit(req, from: s.id) { response in
             XCTAssertEqual(response.status, .noDevice)
@@ -50,7 +50,7 @@ final class LinkHubTests: XCTestCase {
     func testSubmitFromUnknownSessionIsNoDevice() {
         let hub = makeHub()
         let e = expectation(description: "noDevice")
-        let req = LinkCmdRequest(tag: 1, handle: LinkHub.localHandle, direction: .get,
+        let req = LinkCmdRequest(tag: 1, handle: 0, direction: .get,
                                  bRequest: 0x50, wValue: 9, wIndex: 2, wLength: 4)
         hub.submit(req, from: 999) { response in
             XCTAssertEqual(response.status, .noDevice); e.fulfill()

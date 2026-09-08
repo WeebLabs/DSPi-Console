@@ -192,7 +192,10 @@ final class LinkService: ObservableObject {
     /// meter relay do not get throttled in the background.
     private func beginPowerActivity() {
         guard activityToken == nil else { return }
-        var options: ProcessInfo.ActivityOptions = [.userInitiated]
+        // .userInitiated already disables idle sleep, so it cannot express
+        // "stay out of App Nap but let the Mac sleep".  Start from the variant
+        // that allows sleep and add the sleep hold only when asked.
+        var options: ProcessInfo.ActivityOptions = [.userInitiatedAllowingIdleSystemSleep]
         if preventSleepWhileConnected { options.insert(.idleSystemSleepDisabled) }
         activityToken = ProcessInfo.processInfo.beginActivity(
             options: options, reason: "Sharing DSPi devices on the local network")

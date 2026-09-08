@@ -31,11 +31,15 @@ final class LinkSessionHandler {
 
     private var helloReceived = false
     private var session: LinkHubSession?
-    private var role: LinkRole = .viewer
+    /// The live role, read from the hub session so a re-role takes effect at
+    /// once.  Viewer until a session exists.
+    private var role: LinkRole { session?.role ?? .viewer }
 
-    /// The largest command payload the hub accepts, mirrored into the limits.
-    private static let maxPayload = 8192
-    private static let maxFrame = 65536
+    /// The largest command payload the hub accepts, and the largest WebSocket
+    /// message (after reassembly) the server will buffer; both are advertised
+    /// in hello and enforced.
+    static let maxPayload = 8192
+    static let maxFrame = 65536
 
     init(hub: LinkHub, auth: LinkAuthStore, policy: LinkPolicy,
          peer: String, emit: @escaping (LinkOutbound) -> Void) {
@@ -112,6 +116,12 @@ final class LinkSessionHandler {
         let reply = LinkHelloHub(hub: info, auth: auth.authMode,
                                  caps: Self.capabilities, limits: limits)
         send(.helloHub(reply))
+        // Open access: every connection is an admin session and the auth step
+        // is skipped (spec 5, 6.1).  A client that wants its session id may
+        // still send auth.pair and gets the usual ok.
+        if auth.authMode == .none, session == nil {
+            openSession(cid: nil, role: .admin, reply: nil, token: nil)
+        }
     }
 
     private func dispatchAuthenticated(_ message: LinkMessage) {
@@ -138,7 +148,7 @@ final class LinkSessionHandler {
     private func handleAuthToken(_ m: LinkAuthToken) {
         switch auth.authenticate(token: m.token, from: peer) {
         case .success(let client):
-            openSession(cid: client.id, role: client.role, id: m.id, token: nil)
+            openSession(cid: client.id, role: client.role, reply: m.id, token: nil)
         case .failure(let e):
             emit(err(m.id, authErrorCode(e)))
         }
@@ -147,29 +157,44 @@ final class LinkSessionHandler {
     private func handleAuthPair(_ m: LinkAuthPair) {
         // `none` mode: no PIN, every connection is admin (spec 6.1).
         if auth.authMode == .none {
-            return openSession(cid: 0, role: .admin, id: m.id, token: nil)
+            return openSession(cid: nil, role: .admin, reply: m.id, token: nil)
         }
         switch auth.pair(pin: m.pin, clientName: m.name,
                          requestedRole: m.role ?? .control, from: peer) {
         case .success(let result):
-            openSession(cid: result.client.id, role: result.client.role, id: m.id, token: result.token)
+            openSession(cid: result.client.id, role: result.client.role, reply: m.id, token: result.token)
         case .failure(let e):
             emit(err(m.id, authErrorCode(e)))
         }
     }
 
-    private func openSession(cid: Int, role: LinkRole, id: Int, token: String?) {
+    /// Open the hub session this connection will drive.  A second successful
+    /// authentication on the same connection closes the first session, so its
+    /// subscriptions, locks and callbacks do not outlive it.  `reply` is the
+    /// request id to answer with an ok, or nil when the session opens silently
+    /// (open access on hello).
+    private func openSession(cid: Int?, role: LinkRole, reply: Int?, token: String?) {
+        if let old = session { hub.closeSession(old.id) }
         let s = hub.openSession(role: role)
+        s.clientID = cid
         self.session = s
-        self.role = role
         wireSessionCallbacks(s)
-        let descriptor = LinkPolicyDescriptor(
-            denied: policy.denied(for: role).map { [Int($0.code), Int($0.direction == .set ? 0 : 1)] })
-        let body = LinkAuthOkBody(session: Int(s.id), role: role, token: token, policy: descriptor)
-        sendOk(id: id, body: body)
+        if let id = reply {
+            let descriptor = LinkPolicyDescriptor(
+                denied: policy.denied(for: role).map { [Int($0.code), Int($0.direction == .set ? 0 : 1)] })
+            let body = LinkAuthOkBody(session: Int(s.id), role: role, token: token, policy: descriptor)
+            sendOk(id: id, body: body)
+        }
     }
 
     private func wireSessionCallbacks(_ s: LinkHubSession) {
+        // Revoked while connected: the hub has already closed the session;
+        // drop our reference so nothing routes, and close with code 4002.
+        s.onClosedByHub = { [weak self] in
+            guard let self = self, self.session === s else { return }
+            self.session = nil
+            self.emit(.close(4002))
+        }
         s.onNotify = { [weak self] frame in self?.emit(.binary(LinkFrame.notify(frame).encode())) }
         s.onResync = { [weak self] frame in self?.emit(.binary(LinkFrame.resync(frame).encode())) }
         s.onPoll = { [weak self] frame in self?.emit(.binary(LinkFrame.poll(frame).encode())) }

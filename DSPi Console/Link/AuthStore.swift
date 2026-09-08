@@ -279,6 +279,12 @@ final class LinkAuthStore {
         return state.clients
     }
 
+    /// Fired after a client is revoked or re-roled, outside the lock, so the
+    /// hub can act on its live sessions at once rather than at the client's
+    /// next connect.
+    var onClientRevoked: ((Int) -> Void)?
+    var onClientRoleChanged: ((Int, LinkRole) -> Void)?
+
     /// Forget a client entirely.  Its token then reads as unknown, since no
     /// tombstone of the hash is kept.
     func revoke(cid: Int) {
@@ -286,15 +292,19 @@ final class LinkAuthStore {
         state.clients.removeAll { $0.id == cid }
         saveLocked()
         lock.unlock()
+        onClientRevoked?(cid)
     }
 
     func setRole(cid: Int, role: LinkRole) {
         lock.lock()
+        var changed = false
         if let index = state.clients.firstIndex(where: { $0.id == cid }) {
             state.clients[index].role = role
             saveLocked()
+            changed = true
         }
         lock.unlock()
+        if changed { onClientRoleChanged?(cid, role) }
     }
 
     func rename(cid: Int, name: String) {

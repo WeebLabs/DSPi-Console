@@ -45,12 +45,15 @@ final class CommandRouter {
     private var lockDeadline: Date?
     /// In-flight command count per session, for the max-inflight cap.
     private var inflight: [LinkSessionID: Int] = [:]
-    /// The session whose write the device is executing or has just executed,
-    /// for notification attribution.  Recorded before the device call runs,
-    /// since commands are serialised per device: the resulting notification
-    /// cannot arrive before the record exists.
-    private var lastWriteSession: LinkSessionID = 0
-    private var lastWriteAt: Date = .distantPast
+    /// Recent writers in dispatch order, for notification attribution.  Each
+    /// record is appended before its device call runs (commands are serialised
+    /// per device, so the resulting notification cannot arrive first) and is
+    /// consumed by the next host-sourced notification, oldest first.  A queue
+    /// rather than "latest writer" so that B's write landing before A's
+    /// notification is read does not steal A's attribution.  Best effort: the
+    /// firmware coalesces repeated writes to one parameter, so the queue can
+    /// run ahead; expired entries are dropped.
+    private var recentWriters: [(session: LinkSessionID, at: Date)] = []
     private let stateLock = NSLock()
 
     /// How long to wait for the device before giving up.  Bulk gets longer.
@@ -130,8 +133,8 @@ final class CommandRouter {
             // whichever transfer direction carries it (write-as-read included).
             if self.policy.classify(code: request.bRequest, direction: direction) != .read {
                 self.stateLock.lock()
-                self.lastWriteSession = session.id
-                self.lastWriteAt = Date()
+                self.recentWriters.append((session.id, Date()))
+                if self.recentWriters.count > 64 { self.recentWriters.removeFirst() }
                 self.stateLock.unlock()
             }
             let response = self.runWithTimeout(request, on: device, timeout: timeout)
@@ -201,11 +204,13 @@ final class CommandRouter {
         inflight[session] = nil
     }
 
-    /// The session to attribute a host-originated notification to: the last
-    /// writer, if it wrote within `window`.  0 when nobody did.
-    func attribution(within window: TimeInterval, now: Date = Date()) -> LinkSessionID {
+    /// Consume the oldest writer that wrote within `window`, for attributing
+    /// one host-originated notification.  0 when nobody did.
+    func consumeAttribution(within window: TimeInterval, now: Date = Date()) -> LinkSessionID {
         stateLock.lock(); defer { stateLock.unlock() }
-        return now.timeIntervalSince(lastWriteAt) <= window ? lastWriteSession : 0
+        recentWriters.removeAll { now.timeIntervalSince($0.at) > window }
+        guard !recentWriters.isEmpty else { return 0 }
+        return recentWriters.removeFirst().session
     }
 
     var currentLockHolder: LinkSessionID? {

@@ -69,14 +69,14 @@ final class HubTransport: DeviceTransport {
     // MARK: - Transfers, through the hub router
 
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
-        let req = LinkCmdRequest(tag: 0, handle: LinkHub.localHandle, direction: .set,
+        let req = LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
                                  bRequest: request, wValue: value, wIndex: index, payload: data)
         hub.submit(req, from: localSession.id) { _ in }
     }
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
         -> Result<Data, LinkStatus> {
-        let req = LinkCmdRequest(tag: 0, handle: LinkHub.localHandle, direction: .get,
+        let req = LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
                                  bRequest: request, wValue: value, wIndex: index, wLength: length)
         // The command layer calls this synchronously off the main thread and
         // expects the bytes back, so block on the hub's completion.  The router

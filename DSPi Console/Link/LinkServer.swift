@@ -64,6 +64,8 @@ final class LinkServer {
                 }
                 let httpHandler = LinkHTTPHandler(hub: hub, auth: auth)
                 let upgrader = NIOWebSocketServerUpgrader(
+                    maxFrameSize: LinkSessionHandler.maxFrame,
+                    automaticErrorHandling: true,
                     shouldUpgrade: { channel, head in
                         LinkServer.shouldUpgrade(channel: channel, head: head)
                     },
@@ -354,19 +356,25 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
     }
 
     /// A text or binary frame.  If it is final it is one whole message; if not
-    /// it opens a fragmented message closed by continuation frames.
+    /// it opens a fragmented message closed by continuation frames.  The
+    /// reassembled message is bounded at the advertised max_frame; a peer that
+    /// exceeds it, authenticated or not, is closed rather than buffered.
     private func deliver(opcode: WebSocketOpcode, frame: WebSocketFrame) {
         if frame.fin {
             dispatch(opcode: opcode, data: Data(frame.unmaskedData.readableBytesView))
         } else {
             fragmentOpcode = opcode
             fragmentBuffer = frame.unmaskedData
+            if fragmentBuffer!.readableBytes > LinkSessionHandler.maxFrame { overflow() }
         }
     }
 
     private func continueFragment(_ frame: WebSocketFrame) {
         guard let opcode = fragmentOpcode, var buffer = fragmentBuffer else { return }
         var more = frame.unmaskedData
+        guard buffer.readableBytes + more.readableBytes <= LinkSessionHandler.maxFrame else {
+            return overflow()
+        }
         buffer.writeBuffer(&more)
         fragmentBuffer = buffer
         if frame.fin {
@@ -374,6 +382,12 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
             fragmentOpcode = nil
             fragmentBuffer = nil
         }
+    }
+
+    private func overflow() {
+        fragmentOpcode = nil
+        fragmentBuffer = nil
+        send(.close(4000))
     }
 
     private func dispatch(opcode: WebSocketOpcode, data: Data) {

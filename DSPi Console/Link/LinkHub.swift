@@ -24,6 +24,13 @@ import Combine
 final class LinkHubSession {
     let id: LinkSessionID
     var role: LinkRole
+    /// The paired client this session authenticated as (`cid`), so a
+    /// revocation or role change reaches it while it is connected.  nil for
+    /// the local UI and for open-access sessions.
+    var clientID: Int?
+    /// Fired when the hub closes the session itself (revocation), so the
+    /// transport can close the socket with the right code.
+    var onClosedByHub: (() -> Void)?
     /// Delivered on an arbitrary queue.
     var onNotify: ((LinkNotifyFrame) -> Void)?
     var onResync: ((LinkResyncFrame) -> Void)?
@@ -50,6 +57,10 @@ final class LinkHub {
     private var router: CommandRouter?
     private var scheduler: PollScheduler?
     private var device: HubDevice?
+    /// The registry handle of the attached device.  Not a constant: a
+    /// replacement board plugged in while the old one is still inside its
+    /// offline grace gets the next handle, and routing must follow it.
+    private var attachedHandle: UInt8 = 0
     private let deviceLock = NSLock()
 
     /// True once a device is attached and its router exists.  This, not the USB
@@ -69,8 +80,12 @@ final class LinkHub {
     private var notifyCancellable: AnyCancellable?
     private var cancellables = Set<AnyCancellable>()
 
-    /// The handle of the one device this v1 hub exposes.
-    static let localHandle: UInt8 = 0
+    /// Handle of the attached device, or 0 when none is attached.  Clients
+    /// and the local transport address commands to this.
+    var currentHandle: UInt8 {
+        deviceLock.lock(); defer { deviceLock.unlock() }
+        return attachedHandle
+    }
     static let localSessionID: LinkSessionID = 1
     static let internalSessionID: LinkSessionID = 0xFFFF
 
@@ -99,45 +114,75 @@ final class LinkHub {
 
         registry.onEvent = { [weak self] event in self?.broadcastDeviceEvent(event) }
 
+        // A revoked client is cut off at once; a re-roled one is re-roled at
+        // once.  The router reads the session's role on every command.
+        auth.onClientRevoked = { [weak self] cid in self?.closeSessions(forClient: cid) }
+        auth.onClientRoleChanged = { [weak self] cid, role in self?.setRole(forClient: cid, role) }
+
         notifyCancellable = usb.addNotificationObserver { [weak self] note in
             self?.ingest(note)
         }
 
-        // Follow the USB connection: read the device's identity off the main
-        // thread, then attach synchronously on main so "attached" is published
-        // only once the router exists.  Only a device the USB path attached is
-        // detached on a USB drop; the published value's initial `false` (and
-        // any repeat) must not tear down a device attached another way.
+        // Follow the USB connection.  Every successful open publishes `true`,
+        // including a switch from one board to another, which never publishes
+        // `false` in between; so the trigger is the connection generation
+        // changing, not the flag flipping.  Only a device the USB path attached
+        // is detached on a USB drop.
         usb.isConnectedPublisher
-            .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
                 guard let self = self else { return }
-                if connected {
-                    self.usbDidConnect()
-                } else if self.attachedViaUSB {
-                    self.attachedViaUSB = false
-                    self.detachDevice()
-                }
+                self.usbConnectionChanged(connected: connected, generation: self.usb.generation)
             }
             .store(in: &cancellables)
+
+        // Devices past their offline grace leave the registry.
+        reaper = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.registry.reapOffline()
+        }
     }
 
-    /// True while the attached device came from the USB path, so a USB drop
-    /// is the right reason to detach it.
-    private var attachedViaUSB = false
+    deinit { reaper?.invalidate() }
+
+    private var reaper: Timer?
+
+    /// Generation of the USB connection the attached device belongs to, or nil
+    /// when the attached device did not come from USB (tests) or none is.
+    private var attachedUSBGeneration: UInt64?
+
+    /// Builds the HubDevice for the current USB connection.  Tests replace it
+    /// to drive the switch logic without hardware.
+    var usbDeviceFactory: ((USBDevice) -> HubDevice?)?
+
+    /// The USB connection changed.  `generation` identifies the open; a switch
+    /// between boards is a new generation with no `false` in between.  Internal
+    /// so tests can drive it.
+    func usbConnectionChanged(connected: Bool, generation: UInt64) {
+        if connected {
+            guard attachedUSBGeneration != generation else { return }   // same open
+            usbDidConnect(generation: generation)
+        } else if attachedUSBGeneration != nil {
+            attachedUSBGeneration = nil
+            detachDevice()
+        }
+    }
 
     // MARK: - Device lifecycle
 
-    private func usbDidConnect() {
+    private func usbDidConnect(generation: UInt64) {
         let usb = self.usb
-        let generation = usb.generation
+        if let factory = usbDeviceFactory {
+            guard let device = factory(usb) else { return }
+            attachedUSBGeneration = generation
+            attachDevice(device)
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let fallback = usb.selectedDevice?.serial ?? "unknown"
             guard let info = USBHubDevice.readInfo(from: usb, serialFallback: fallback) else { return }
             DispatchQueue.main.async {
                 guard let self = self, usb.isConnected, usb.generation == generation else { return }
-                self.attachedViaUSB = true
+                self.attachedUSBGeneration = generation
                 self.attachDevice(USBHubDevice(usb: usb, info: info))
             }
         }
@@ -147,19 +192,23 @@ final class LinkHub {
     /// "attached", then warm the snapshot through the router.  Internal so
     /// tests can attach a fake device without USB.
     func attachDevice(_ device: HubDevice) {
-        let router = CommandRouter(handle: Self.localHandle, device: device, policy: policy)
+        // A switch replaces the device: the old one goes offline (its handle
+        // survives the grace window) and every session gets a resync.
+        if self.device != nil { detachDevice() }
+
+        let registered = registry.deviceOnline(device.info)
+        let router = CommandRouter(handle: registered.handle, device: device, policy: policy)
         let scheduler = PollScheduler(device: device, policy: policy)
         scheduler.onPoll = { [weak self] session, slot, handle, payload in
             self?.deliverPoll(session: session, slot: slot, handle: handle, payload: payload)
         }
         deviceLock.lock()
-        self.scheduler?.stop()
         self.device = device
         self.router = router
         self.scheduler = scheduler
+        self.attachedHandle = registered.handle
         deviceLock.unlock()
 
-        registry.deviceOnline(device.info)
         attachedSubject.send(true)
         warmSnapshot()
     }
@@ -170,16 +219,18 @@ final class LinkHub {
         deviceLock.lock()
         guard device != nil else { deviceLock.unlock(); return }
         let serial = device?.info.serial
+        let handle = attachedHandle
         scheduler?.stop()
         scheduler = nil
         router = nil
         device = nil
+        attachedHandle = 0
         deviceLock.unlock()
 
         if let serial = serial { registry.deviceOffline(serial: serial) }
         snapshot.invalidate()
         attachedSubject.send(false)
-        relay.resyncAll(handle: Self.localHandle, reason: 1)
+        relay.resyncAll(handle: handle, reason: 1)
     }
 
     private var currentRouter: CommandRouter? {
@@ -200,7 +251,7 @@ final class LinkHub {
         // The USB reader marks a packet as host-written; only the hub knows
         // which session that host write belonged to.
         let origin: LinkSessionID = note.isHostSourced
-            ? (currentRouter?.attribution(within: Self.attributionWindow) ?? 0)
+            ? (currentRouter?.consumeAttribution(within: Self.attributionWindow) ?? 0)
             : 0
         let attributed = LinkNotification(packet: note.packet, origin: origin, receivedAt: note.receivedAt)
 
@@ -212,7 +263,7 @@ final class LinkHub {
         } else {
             snapshot.applyParamChange(packet: note.packet)
         }
-        relay.publish(handle: Self.localHandle, notification: attributed)
+        relay.publish(handle: currentHandle, notification: attributed)
     }
 
     // MARK: - Snapshot
@@ -222,7 +273,7 @@ final class LinkHub {
     /// other command, and store it in the cache.
     private func warmSnapshot() {
         guard let router = currentRouter else { return }
-        let req = LinkCmdRequest(tag: 0, handle: Self.localHandle, direction: .get,
+        let req = LinkCmdRequest(tag: 0, handle: currentHandle, direction: .get,
                                  bRequest: REQ_GET_ALL_PARAMS, wValue: 0, wIndex: 2,
                                  wLength: BULK_PARAMS_SIZE)
         let internalSession = RouterSession(id: Self.internalSessionID, role: .admin,
@@ -265,7 +316,27 @@ final class LinkHub {
         relay.removeSession(id)
         currentScheduler?.unsubscribeAll(session: id)
         currentRouter?.sessionDidClose(id)
-        registry.setLockHolder(handle: Self.localHandle, session: currentRouter?.currentLockHolder)
+        registry.setLockHolder(handle: currentHandle, session: currentRouter?.currentLockHolder)
+    }
+
+    /// Close every session that authenticated as this client, telling each
+    /// one so its socket closes with the revocation code.
+    func closeSessions(forClient cid: Int) {
+        sessionLock.lock()
+        let victims = sessions.values.filter { $0.clientID == cid }
+        sessionLock.unlock()
+        for s in victims {
+            closeSession(s.id)
+            s.onClosedByHub?()
+        }
+    }
+
+    /// Apply a role change to every live session of this client.  Takes
+    /// effect on the next command, since the router reads the role each time.
+    func setRole(forClient cid: Int, _ role: LinkRole) {
+        sessionLock.lock()
+        for s in sessions.values where s.clientID == cid { s.role = role }
+        sessionLock.unlock()
     }
 
     private func session(_ id: LinkSessionID) -> LinkHubSession? {
@@ -281,7 +352,7 @@ final class LinkHub {
     func submit(_ request: LinkCmdRequest, from sessionID: LinkSessionID,
                 completion: @escaping (LinkCmdResponse) -> Void) {
         guard let session = session(sessionID),
-              request.handle == Self.localHandle,
+              request.handle == currentHandle,
               let router = currentRouter else {
             return completion(LinkCmdResponse(tag: request.tag, status: .noDevice))
         }
@@ -311,13 +382,13 @@ final class LinkHub {
     func acquireLock(session: LinkSessionID, timeout: TimeInterval) -> Bool {
         guard let router = currentRouter else { return false }
         let ok = router.acquireLock(session: session, timeout: timeout)
-        if ok { registry.setLockHolder(handle: Self.localHandle, session: session) }
+        if ok { registry.setLockHolder(handle: currentHandle, session: session) }
         return ok
     }
 
     func releaseLock(session: LinkSessionID) {
         currentRouter?.releaseLock(session: session)
-        registry.setLockHolder(handle: Self.localHandle, session: currentRouter?.currentLockHolder)
+        registry.setLockHolder(handle: currentHandle, session: currentRouter?.currentLockHolder)
     }
 
     // MARK: - Fan-out helpers

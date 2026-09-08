@@ -190,7 +190,7 @@ Close codes used by hubs:
 
 | `auth` | Behaviour |
 |--------|-----------|
-| `none` | Every connection is an `admin` session. For trusted networks and bench use only. Hubs must default to `pin`. |
+| `none` | Every connection is an `admin` session: the hub opens the session as soon as it answers `hello`, and the client sends no auth message. A client that wants its session id (for echo suppression) may still send `auth.pair` with any PIN and receives the usual `ok`. For trusted networks and bench use only. Hubs must default to `pin`. |
 | `pin` | A new client pairs once with a short-lived PIN shown by the hub and receives a long-lived token. Afterwards it presents the token. |
 
 ### 6.2 Pairing
@@ -208,7 +208,10 @@ Close codes used by hubs:
 
 The hub records `{token hash, client name, role, created, last seen}` and
 lists these in its UI so the user can rename, change the role of, or revoke
-any client. A hub stores only a SHA-256 of the token.
+any client. A hub stores only a SHA-256 of the token. Revocation and role
+changes apply to the client's live sessions at once: a revoked client's
+connections are closed with code 4002, and a re-roled client's next command
+is judged by the new role.
 
 Rate limit: after 5 failed `auth.pair` or `auth.token` attempts from one
 address within a minute, the hub answers `rate_limited` for 60 s. The PIN is
@@ -574,10 +577,13 @@ The hub relays every non-idle packet from the device's notification channel
 Clients parse `packet` exactly per `notification_protocol_v2_spec.md`. v1
 legacy packets are never relayed; every v1 event has a v2 twin.
 
-`origin` is the hub's best-effort attribution: when the packet's `source`
-byte is `HOST_SET` (1), `BULK_SET` (2) or `UART` (8) and the hub had just
-completed a SET from session S on that device when the packet arrived, it
-sets `origin = S`. Clients use it to suppress their own echoes and must treat
+`origin` is the hub's best-effort attribution. The hub keeps the sessions of
+its recent writes in dispatch order and, for each packet whose `source` byte
+is `HOST_SET` (1), `BULK_SET` (2) or `UART` (8), consumes the oldest one made
+within a short window as `origin`. Order, not recency, so a second client's
+write landing before the first client's notification is read does not take
+its attribution. The firmware coalesces repeated writes to one parameter, so
+the queue can run ahead of the notifications; that is why this is a hint. Clients use it to suppress their own echoes and must treat
 it as a hint, not a guarantee. A client must **not** suppress by `source`
 alone: over Link, `HOST_SET` means "some Link client", which may be someone
 else.

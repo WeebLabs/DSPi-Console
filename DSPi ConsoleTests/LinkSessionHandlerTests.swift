@@ -226,4 +226,52 @@ final class LinkSessionHandlerTests: XCTestCase {
         // No device attached, so acquireLock returns false -> locked error.
         XCTAssertEqual(sink.lastErr()?.code, "locked")
     }
+
+    // MARK: - Review round 2
+
+    /// P2: a second login on one connection must not leak the first session.
+    func testSecondAuthenticationClosesTheFirstSession() {
+        let (hub, auth, policy) = makeStack()
+        let sink = Sink()
+        let h = handler(hub, auth, policy, sink)
+        let pin1 = auth.beginPairing()
+        h.receiveText(text(.authPair(LinkAuthPair(id: 1, pin: pin1, name: "A", role: .control))))
+        XCTAssertEqual(hub.sessionCount, 1)
+        let pin2 = auth.beginPairing()
+        h.receiveText(text(.authPair(LinkAuthPair(id: 2, pin: pin2, name: "A again", role: .control))))
+        XCTAssertEqual(hub.sessionCount, 1, "the first session is closed, not orphaned")
+        XCTAssertTrue(h.isAuthenticated)
+    }
+
+    /// P2: with auth "none" the session opens on hello and no auth message is
+    /// needed, as the spec says.
+    func testOpenAccessOpensASessionOnHello() {
+        let (hub, auth, policy) = makeStack()
+        auth.authMode = LinkAuthMode.none
+        let sink = Sink()
+        let h = handler(hub, auth, policy, sink)
+        h.receiveText(text(.helloClient(LinkHelloClient(client: LinkClientInfo(name: "Kiosk")))))
+        XCTAssertTrue(h.isAuthenticated, "no auth step in open access")
+        h.receiveText(text(.deviceList(LinkDeviceListRequest(id: 5))))
+        XCTAssertNotNil(sink.lastOk(), "requests work straight after hello")
+        XCTAssertNil(sink.lastErr())
+    }
+
+    /// P1: revoking a connected client closes its socket with 4002 at once.
+    func testRevokedClientIsClosedWith4002() {
+        let (hub, auth, policy) = makeStack()
+        let pin = auth.beginPairing()
+        let sink = Sink()
+        let h = handler(hub, auth, policy, sink)
+        h.receiveText(text(.authPair(LinkAuthPair(id: 1, pin: pin, name: "Phone", role: .admin))))
+        XCTAssertTrue(h.isAuthenticated)
+        let cid = try! XCTUnwrap(auth.clients.first?.id)
+
+        auth.revoke(cid: cid)
+
+        XCTAssertEqual(sink.closes, [4002])
+        XCTAssertFalse(h.isAuthenticated)
+        h.receiveText(text(.deviceList(LinkDeviceListRequest(id: 9))))
+        XCTAssertEqual(sink.lastErr()?.code, "unauthenticated", "nothing routes after revocation")
+    }
 }
