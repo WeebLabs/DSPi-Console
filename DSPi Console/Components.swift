@@ -322,7 +322,7 @@ struct ConnectionStatusIndicator: View {
                     font: .systemFont(ofSize: NSFont.smallSystemFontSize),
                     enabled: vm.availableDevices.count > 1,
                     showsHoverBorder: false,
-                    onRightClick: { vm.usb.reconnect() }
+                    onRightClick: { vm.transport.reconnect() }
                 )
                 .overlay(alignment: .trailing) {
                     if vm.availableDevices.count > 1 {

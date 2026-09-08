@@ -1032,18 +1032,18 @@ struct TestSignalsView: View {
         let cfg = vm.siggenDraft
         // Bind to the device shown when the user clicked: a switch landing
         // before the block runs must not start the new device's generator.
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         DispatchQueue.global(qos: .userInitiated).async {
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
             vm.siggenStart(with: cfg)
         }
     }
 
     private func stop(immediate: Bool) {
         applyWork?.cancel()
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         DispatchQueue.global(qos: .userInitiated).async {
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
             vm.siggenStop(immediate: immediate)
         }
     }

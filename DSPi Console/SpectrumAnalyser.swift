@@ -408,7 +408,7 @@ final class RtaEngine: ObservableObject {
 
     // MARK: Private state
 
-    private weak var usb: USBDevice?
+    private weak var transport: (any DeviceTransport)?
     /// Guards `requests` and the polling bookkeeping, which are touched from
     /// the main thread (subscribe/release) and the poll queue (tick).
     private let lock = NSLock()
@@ -431,8 +431,8 @@ final class RtaEngine: ObservableObject {
     /// Time average of the bin frames.  Main thread only.
     private var binAverage = RtaBinAverage()
 
-    init(usb: USBDevice) {
-        self.usb = usb
+    init(transport: any DeviceTransport) {
+        self.transport = transport
     }
 
     // MARK: Subscription
@@ -473,10 +473,10 @@ final class RtaEngine: ObservableObject {
         guard empty else { return }
         // Nobody is watching.  The device would auto-off five seconds from now
         // anyway; stopping it explicitly hands the CPU back at once.
-        let usb = self.usb
+        let transport = self.transport
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self, !self.isWatching else { return }
-            _ = usb?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
+            _ = transport?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
             DispatchQueue.main.async { [weak self] in
                 // A hidden window can be shown again before STOP completes.
                 // Never clear data belonging to that new subscription.
@@ -491,9 +491,9 @@ final class RtaEngine: ObservableObject {
     /// peak hold without disturbing the frame in flight.  Main thread only.
     func resetAveraging() {
         binAverage.reset()
-        let usb = self.usb
+        let transport = self.transport
         DispatchQueue.global(qos: .utility).async {
-            _ = usb?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_RESET_AVG, index: 2, length: 1)
+            _ = transport?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_RESET_AVG, index: 2, length: 1)
         }
     }
 
@@ -534,9 +534,9 @@ final class RtaEngine: ObservableObject {
     ///
     /// Blocking; call off the main thread.
     func fetchCaps() {
-        guard let usb else { return }
-        let generation = usb.generation
-        guard let d = usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: 0, index: 2,
+        guard let transport else { return }
+        let generation = transport.generation
+        guard let d = transport.getControlRequest(request: REQ_RTA_GET_CAPS, value: 0, index: 2,
                                             length: UInt16(RTA_CAPS_SIZE)),
               let caps = RtaCaps.fromData(d) else {
             DispatchQueue.main.async { [weak self] in
@@ -551,8 +551,8 @@ final class RtaEngine: ObservableObject {
         var centres: [Double] = []
         var chunk: UInt16 = 1
         while centres.count < Int(caps.maxBands), chunk < 16 {
-            guard usb.generation == generation,
-                  let c = usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: chunk, index: 2,
+            guard transport.generation == generation,
+                  let c = transport.getControlRequest(request: REQ_RTA_GET_CAPS, value: chunk, index: 2,
                                                 length: UInt16(RTA_CENTRES_PER_CHUNK * 2)),
                   c.count >= 2 else { break }
             let b = [UInt8](c)
@@ -565,7 +565,7 @@ final class RtaEngine: ObservableObject {
 
         let complete = centres.count >= Int(caps.maxBands)
         DispatchQueue.main.async { [weak self] in
-            guard let self, usb.generation == generation else { return }
+            guard let self, transport.generation == generation else { return }
             self.caps = caps
             self.bandCentresHz = Array(centres.prefix(Int(caps.maxBands)))
             self.frameFeed.advance()
@@ -610,7 +610,7 @@ final class RtaEngine: ObservableObject {
     /// has its own cadence in elapsed time, so a slower timer or a larger
     /// transform changes how often things are read but not what is read.
     func tick() {
-        guard supported, let usb else { return }
+        guard supported, let transport else { return }
 
         lock.lock()
         guard !requests.isEmpty else { lock.unlock(); return }
@@ -666,7 +666,7 @@ final class RtaEngine: ObservableObject {
         lock.unlock()
 
         if needsPush {
-            usb.sendControlRequest(request: REQ_RTA_SET_CONFIG, value: 0, index: 2, data: want.toData())
+            transport.sendControlRequest(request: REQ_RTA_SET_CONFIG, value: 0, index: 2, data: want.toData())
         }
 
         // Band frames.  GET_BANDS_ALL answers for every live channel in one
@@ -675,7 +675,7 @@ final class RtaEngine: ObservableObject {
         var frames: [UInt8: RtaBandFrame] = [:]
         if want.channelMask.nonzeroBitCount > 1 {
             let maxFrames = 16
-            if let d = usb.getControlRequest(request: REQ_RTA_GET_BANDS_ALL, value: 0, index: 2,
+            if let d = transport.getControlRequest(request: REQ_RTA_GET_BANDS_ALL, value: 0, index: 2,
                                              length: UInt16(bandFrameSize * maxFrames)) {
                 var off = 0
                 while off + bandFrameSize <= d.count {
@@ -685,7 +685,7 @@ final class RtaEngine: ObservableObject {
             }
         } else {
             let ch = want.channelMask.trailingZeroBitCount   // exactly one bit set here
-            if let d = usb.getControlRequest(request: REQ_RTA_GET_BANDS, value: UInt16(ch), index: 2,
+            if let d = transport.getControlRequest(request: REQ_RTA_GET_BANDS, value: UInt16(ch), index: 2,
                                              length: UInt16(bandFrameSize)),
                let f = RtaBandFrame.fromData(d, maxBands: bandSlots) {
                 frames[f.channel] = f
@@ -694,18 +694,18 @@ final class RtaEngine: ObservableObject {
 
         var bins: RtaBinFrame? = nil
         if readBins {
-            bins = Self.readBinFrame(usb: usb, length: binFrameLength)
+            bins = Self.readBinFrame(transport: transport, length: binFrameLength)
         }
         let binsReadAt = Date()
 
         var status: RtaStatus? = nil
         var applied: RtaConfig? = nil
         if readStatus {
-            if let d = usb.getControlRequest(request: REQ_RTA_GET_STATUS, value: 0, index: 2,
+            if let d = transport.getControlRequest(request: REQ_RTA_GET_STATUS, value: 0, index: 2,
                                              length: UInt16(RTA_STATUS_SIZE)) {
                 status = RtaStatus.fromData(d)
             }
-            if let d = usb.getControlRequest(request: REQ_RTA_GET_CONFIG, value: 0, index: 2,
+            if let d = transport.getControlRequest(request: REQ_RTA_GET_CONFIG, value: 0, index: 2,
                                              length: UInt16(RTA_CONFIG_SIZE)) {
                 applied = RtaConfig.fromData(d)
             }
@@ -838,11 +838,11 @@ final class RtaEngine: ObservableObject {
     /// published without a lock and carries its sequence number in the header
     /// and again as its last byte, so a disagreement means the engine
     /// republished mid-read: read it again rather than draw half of each.
-    private static func readBinFrame(usb: USBDevice, length: Int) -> RtaBinFrame? {
+    private static func readBinFrame(transport: any DeviceTransport, length: Int) -> RtaBinFrame? {
         for _ in 0..<2 {
             var frame = Data()
             while frame.count < length {
-                guard let chunk = usb.getControlRequest(request: REQ_RTA_GET_BINS,
+                guard let chunk = transport.getControlRequest(request: REQ_RTA_GET_BINS,
                                                         value: UInt16(frame.count), index: 2,
                                                         length: UInt16(length - frame.count)),
                       !chunk.isEmpty else { break }

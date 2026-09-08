@@ -13,12 +13,12 @@ import UniformTypeIdentifiers
 class AppState: ObservableObject {
     static let shared = AppState()
     let usb = USBDevice()
-    lazy var viewModel: DSPViewModel = DSPViewModel(usb: usb)
+    lazy var viewModel: DSPViewModel = DSPViewModel(transport: usb)
 
     /// Always-on listener for the device's bulk notification endpoint.
     /// Lifecycle is driven by DSPViewModel based on device connection state.
     /// The display window observes this same instance.
-    lazy var interruptMonitor: InterruptMonitor = InterruptMonitor(usb: usb)
+    lazy var interruptMonitor: InterruptMonitor = InterruptMonitor(transport: usb)
 
     private init() {}
 }
@@ -1113,12 +1113,12 @@ final class SettingsSaveCoordinator: ObservableObject {
         // Scope the save to the device it was issued for; if a switch lands
         // mid-sequence, stop rather than write the remainder to the new
         // device (noteSelectedDevice has already reset the pending state).
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         DispatchQueue.global(qos: .userInitiated).async {
             // Every exit releases the claim, or the shared bar's buttons stay
             // disabled after a save abandoned by a device switch.
             defer { if doCs { DispatchQueue.main.async { self.endCsOperation() } } }
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
             if doGlobal {
                 if pending.presetStartupMode != deviceState.presetStartupMode
                     || pending.presetDefaultSlot != deviceState.presetDefaultSlot {
@@ -1135,17 +1135,17 @@ final class SettingsSaveCoordinator: ObservableObject {
                 }
             }
             if doOutput {
-                guard vm.usb.generation == generation else { return }
+                guard vm.transport.generation == generation else { return }
                 _ = vm.saveOutputConfig()
             }
             // Control Surfaces persists its whole live config in one directory
             // write (spec §3.5); `csDirty` clears from the device's own flag, so
             // a failed save simply leaves the bar up for a retry.
-            if doCs, vm.usb.generation == generation {
+            if doCs, vm.transport.generation == generation {
                 _ = vm.csSave()
             }
             DispatchQueue.main.async {
-                guard vm.usb.generation == generation else { return }
+                guard vm.transport.generation == generation else { return }
                 self.globalUserEdited = false
                 self.outputConfigDirty = false
                 self.globalDraft = GlobalSettingsDraft.from(vm)
@@ -1165,9 +1165,9 @@ final class SettingsSaveCoordinator: ObservableObject {
             // Scope the restore to the device the baseline was captured from:
             // if a switch lands mid-sequence, the remaining pin/clock writes
             // must not reconfigure the newly selected device.
-            let generation = vm.usb.generation
+            let generation = vm.transport.generation
             DispatchQueue.global(qos: .userInitiated).async {
-                func stillCurrent() -> Bool { vm.usb.generation == generation }
+                func stillCurrent() -> Bool { vm.transport.generation == generation }
                 guard stillCurrent() else { return }
                 // Best-effort restore of the live config to the baseline.
                 for slot in 0..<min(vm.numOutputSlots, base.outputSlotTypes.count)
@@ -1245,7 +1245,7 @@ final class SettingsSaveCoordinator: ObservableObject {
     private func revertControlSurfaces() {
         beginCsOperation()
         let vm = self.vm
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         DispatchQueue.global(qos: .userInitiated).async {
             defer {
                 DispatchQueue.main.async {
@@ -1253,7 +1253,7 @@ final class SettingsSaveCoordinator: ObservableObject {
                     self.csReloadToken &+= 1
                 }
             }
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
             _ = vm.csRevert()
         }
     }
@@ -2888,7 +2888,7 @@ struct ControlSurfacesSettingsTab: View {
         // Bind the migration to the device that triggered it. On a mid-flow
         // device switch, abort BEFORE retiring the local store and re-arm so
         // a later connect retries - and never csSave() the other device.
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         DispatchQueue.global(qos: .userInitiated).async {
             func abortAndRearm() {
                 DispatchQueue.main.async { didMigrateLegacyNames = false }
@@ -2901,11 +2901,11 @@ struct ControlSurfacesSettingsTab: View {
             var wrote = false
             for (key, name) in stored {
                 guard let slot = Int(key), slot >= 0, slot < CS_MAX_BINDINGS, !name.isEmpty else { continue }
-                guard vm.usb.generation == generation else { return abortAndRearm() }
+                guard vm.transport.generation == generation else { return abortAndRearm() }
                 let live = slot < vm.csNames.count ? vm.csNames[slot] : ""
                 if live.isEmpty { _ = vm.setCsName(slot: slot, name: name); wrote = true }
             }
-            guard vm.usb.generation == generation else { return abortAndRearm() }
+            guard vm.transport.generation == generation else { return abortAndRearm() }
             UserDefaults.standard.removeObject(forKey: Self.legacyNamesKey)
             // Persist the migrated names so they stick across a reboot, matching
             // the pre-preview behavior where a name SET wrote flash directly.
@@ -4325,7 +4325,7 @@ struct ControlSurfacesSettingsTab: View {
         let hadName = slot < vm.csNames.count && !vm.csNames[slot].isEmpty
         // Bind the removal to the device it was issued for; a switch between
         // the individual clears must not redirect them to the new device.
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         guard vm.csBindings[slot].isConfigured else {
             // Never applied to the device - just drop the local draft.  A name
             // set for the slot is device state, so clear it there too.
@@ -4334,7 +4334,7 @@ struct ControlSurfacesSettingsTab: View {
             }
             if hadName && vm.isDeviceConnected {
                 DispatchQueue.global(qos: .userInitiated).async {
-                    guard vm.usb.generation == generation else { return }
+                    guard vm.transport.generation == generation else { return }
                     _ = vm.setCsName(slot: slot, name: "")
                 }
             }
@@ -4346,15 +4346,15 @@ struct ControlSurfacesSettingsTab: View {
             func bail() {
                 DispatchQueue.main.async { applyingSlot = nil; coordinator.endCsOperation() }
             }
-            guard vm.usb.generation == generation else { return bail() }
+            guard vm.transport.generation == generation else { return bail() }
             _ = vm.setCsBinding(slot: slot, binding: CsBinding())
-            guard vm.usb.generation == generation else { return bail() }
+            guard vm.transport.generation == generation else { return bail() }
             if hadName { _ = vm.setCsName(slot: slot, name: "") }
             DispatchQueue.main.async {
                 applyingSlot = nil
                 // Ahead of the guard: an abandoned remove must still release.
                 coordinator.endCsOperation()
-                guard vm.usb.generation == generation else { return }
+                guard vm.transport.generation == generation else { return }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     drafts[slot] = vm.csBindings[slot]   // now cleared on the device
                 }
@@ -9420,17 +9420,17 @@ class StatsWindowController: NSObject, ObservableObject {
     private var statsVM: StatsViewModel?
     @Published var isVisible: Bool = false
 
-    func toggle(usb: USBDevice) {
+    func toggle(transport: any DeviceTransport) {
         if isVisible {
             hide()
         } else {
-            show(usb: usb)
+            show(transport: transport)
         }
     }
 
-    func show(usb: USBDevice) {
+    func show(transport: any DeviceTransport) {
         if window == nil {
-            statsVM = StatsViewModel(usb: usb)
+            statsVM = StatsViewModel(transport: transport)
             let statsView = StatsView(vm: statsVM!)
 
             window = NSWindow(
@@ -11004,7 +11004,7 @@ struct DSPi_ConsoleApp: App {
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)
-                    statsWindowController.show(usb: AppState.shared.usb)
+                    statsWindowController.show(transport: AppState.shared.usb)
                 }
                 .keyboardShortcut("T", modifiers: [.command, .shift])
 

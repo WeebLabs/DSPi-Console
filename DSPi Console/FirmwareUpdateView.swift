@@ -337,7 +337,7 @@ struct FirmwareUpdateView: View {
     /// to wait for; its drive then mounts for whatever the user wants to copy,
     /// and nothing is written unless they ask.
     private func enterBootloaderOnly() {
-        _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        _ = vm.transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
     }
 
     // MARK: Buttons
@@ -403,7 +403,7 @@ struct FirmwareUpdateView: View {
         rebootRequested = true
         // The device drops off the bus answering this, so there is no reply to
         // wait for.
-        _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        _ = vm.transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
     }
 
     /// Starts the whole flow over: the view's flags and the installer's

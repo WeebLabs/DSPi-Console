@@ -371,7 +371,7 @@ struct GettingStartedView: View {
         installer.installWhenReady()
         guard !rebootRequested else { return }
         rebootRequested = true
-        _ = vm.usb.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        _ = vm.transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
     }
 
     /// Starts the install flow over after a failure: the view's flags and the

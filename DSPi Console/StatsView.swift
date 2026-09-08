@@ -232,14 +232,14 @@ class StatsViewModel: ObservableObject {
     private var hasConnectedOnce = false
     private var pollTimer: Timer?
     private var bufferPollTimer: Timer?
-    private weak var usb: USBDevice?
+    private weak var transport: (any DeviceTransport)?
     private var cancellables = Set<AnyCancellable>()
 
-    init(usb: USBDevice) {
-        self.usb = usb
+    init(transport: any DeviceTransport) {
+        self.transport = transport
 
         // Subscribe to connection state
-        usb.$isConnected
+        transport.isConnectedPublisher
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
                 guard let self = self else { return }
@@ -266,7 +266,7 @@ class StatsViewModel: ObservableObject {
 
         // Initial fetch
         fetchStats()
-        if usb.isConnected {
+        if transport.isConnected {
             fetchDeviceInfo()
         }
     }
@@ -277,70 +277,70 @@ class StatsViewModel: ObservableObject {
     }
 
     func fetchStats() {
-        guard let usb = usb, isConnected else { return }
+        guard let transport = transport, isConnected else { return }
 
         // wValue=3: pdm_ring_overruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 3, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 3, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.pdmRingOverruns = value }
         }
 
         // wValue=4: pdm_ring_underruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 4, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 4, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.pdmRingUnderruns = value }
         }
 
         // wValue=5: pdm_dma_overruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 5, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 5, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.pdmDmaOverruns = value }
         }
 
         // wValue=6: pdm_dma_underruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 6, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 6, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.pdmDmaUnderruns = value }
         }
 
         // wValue=7: spdif_overruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 7, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 7, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.spdifOverruns = value }
         }
 
         // wValue=8: spdif_underruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 8, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 8, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.spdifUnderruns = value }
         }
 
         // wValue=22: USB audio ring overruns
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 22, index: 2, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 22, index: 2, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.usbRingOverruns = value }
         }
 
         // wValue=13: system clock frequency (Hz)
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 13, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 13, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.systemClockHz = value }
         }
 
         // wValue=14: core voltage (millivolts)
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 14, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 14, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.coreVoltageMillivolts = value }
         }
 
         // wValue=15: sample rate (Hz)
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
             DispatchQueue.main.async { self.sampleRateHz = value }
         }
 
         // wValue=16: system temperature (centi-degrees C)
-        if let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 16, index: 0, length: 4) {
+        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 16, index: 0, length: 4) {
             let value = data.withUnsafeBytes { $0.load(as: Int32.self) }
             DispatchQueue.main.async { self.systemTempCentiC = value }
         }
@@ -356,8 +356,8 @@ class StatsViewModel: ObservableObject {
     /// diagnostics.  A STALL (nil) leaves `i2sClockModeSupported` false so the
     /// section stays hidden on firmware that predates the feature.
     func fetchI2SSlaveStatus() {
-        guard let usb = usb, isConnected else { return }
-        guard let data = usb.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+        guard let transport = transport, isConnected else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
               let status = I2sSlaveStatus.fromData(data) else {
             DispatchQueue.main.async { self.i2sClockModeSupported = false }
             return
@@ -372,8 +372,8 @@ class StatsViewModel: ObservableObject {
     /// STALL (nil) or a non-RP2350 platform leaves `adatSupported` false so the
     /// section stays hidden.  RP2040 returns all-zero, also treated as absent.
     func fetchAdatStatus() {
-        guard let usb = usb, isConnected else { return }
-        guard let data = usb.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+        guard let transport = transport, isConnected else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
               let status = AdatStatus.fromData(data) else {
             DispatchQueue.main.async { self.adatSupported = false }
             return
@@ -389,8 +389,8 @@ class StatsViewModel: ObservableObject {
     /// detect that via the nil response and leave `lgSoundSyncSupported`
     /// false, which hides the section in the UI.
     func fetchLgSoundSyncStatus() {
-        guard let usb = usb, isConnected else { return }
-        guard let data = usb.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_STATUS, value: 0, index: 0, length: 16),
+        guard let transport = transport, isConnected else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_STATUS, value: 0, index: 0, length: 16),
               data.count >= 4 else { return }
 
         var status = LgSoundSyncStatus()
@@ -406,8 +406,8 @@ class StatsViewModel: ObservableObject {
     }
 
     func fetchBufferStats() {
-        guard let usb = usb, isConnected else { return }
-        guard let data = usb.getControlRequest(request: REQ_GET_BUFFER_STATS, value: 0, index: 0, length: 44) else { return }
+        guard let transport = transport, isConnected else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_BUFFER_STATS, value: 0, index: 0, length: 44) else { return }
 
         var packet = BufferStatsPacket()
         packet.numSpdif = data[0]
@@ -440,10 +440,10 @@ class StatsViewModel: ObservableObject {
     }
 
     func fetchStarvationStats() {
-        guard let usb = usb, isConnected else { return }
+        guard let transport = transport, isConnected else { return }
 
         // wValue=17: total SPDIF DMA starvations (wIndex=2 per spec)
-        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 17, index: 2, length: 4) else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 17, index: 2, length: 4) else { return }
         let total = data.withUnsafeBytes { $0.load(as: UInt32.self) }
 
         var delta: UInt32 = 0
@@ -459,7 +459,7 @@ class StatsViewModel: ObservableObject {
         if delta > 0 {
             prevEventTime = starvationLastEventTime
             for i in 0..<4 {
-                if let d = usb.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
+                if let d = transport.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
                     perInstance[i] = d.withUnsafeBytes { $0.load(as: UInt32.self) }
                 }
             }
@@ -467,7 +467,7 @@ class StatsViewModel: ObservableObject {
         } else if total > 0 {
             // No new events but have historical — still read per-instance for display
             for i in 0..<4 {
-                if let d = usb.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
+                if let d = transport.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
                     perInstance[i] = d.withUnsafeBytes { $0.load(as: UInt32.self) }
                 }
             }
@@ -483,9 +483,9 @@ class StatsViewModel: ObservableObject {
     }
 
     func fetchSpdifRxStatus() {
-        guard let usb = usb, isConnected, inputSourceSupported else { return }
+        guard let transport = transport, isConnected, inputSourceSupported else { return }
 
-        guard let data = usb.getControlRequest(request: REQ_GET_SPDIF_RX_STATUS, value: 0, index: 2, length: 16),
+        guard let data = transport.getControlRequest(request: REQ_GET_SPDIF_RX_STATUS, value: 0, index: 2, length: 16),
               data.count >= 16 else { return }
 
         var status = SpdifRxStatus()
@@ -502,7 +502,7 @@ class StatsViewModel: ObservableObject {
         // Fetch IEC 60958 channel status when locked
         var chStatus = SpdifRxChannelStatus()
         if status.state == 2 {
-            if let chData = usb.getControlRequest(request: REQ_GET_SPDIF_RX_CH_STATUS, value: 0, index: 2, length: 24),
+            if let chData = transport.getControlRequest(request: REQ_GET_SPDIF_RX_CH_STATUS, value: 0, index: 2, length: 24),
                chData.count >= 24 {
                 chStatus.raw = Array(chData.prefix(24))
             }
@@ -515,7 +515,7 @@ class StatsViewModel: ObservableObject {
         let extIndex = src - INPUT_SOURCE_SPDIF2 + 1
         let srcIndex = (1..<SPDIF_RX_NUM_INPUTS).contains(extIndex) ? extIndex : 0
         var activePin = self.spdifRxPin
-        if let pd = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(srcIndex), index: 2, length: 1),
+        if let pd = transport.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(srcIndex), index: 2, length: 1),
            pd.count >= 1, pd[0] != 0 {
             activePin = pd[0]
         }
@@ -528,15 +528,15 @@ class StatsViewModel: ObservableObject {
     }
 
     func resetBufferWatermarks() {
-        guard let usb = usb, isConnected else { return }
-        _ = usb.getControlRequest(request: REQ_RESET_BUFFER_STATS, value: 1, index: 0, length: 1)
+        guard let transport = transport, isConnected else { return }
+        _ = transport.getControlRequest(request: REQ_RESET_BUFFER_STATS, value: 1, index: 0, length: 1)
     }
 
     func fetchDeviceInfo() {
-        guard let usb = usb else { return }
+        guard let transport = transport else { return }
 
         // REQ_GET_SERIAL (0x7E): 16-byte ASCII hex serial
-        if let data = usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16) {
+        if let data = transport.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16) {
             let serial = String(data: data, encoding: .ascii)?
                 .trimmingCharacters(in: .controlCharacters.union(.whitespaces)) ?? "—"
             DispatchQueue.main.async { self.serialNumber = serial.isEmpty ? "—" : serial }
@@ -544,7 +544,7 @@ class StatsViewModel: ObservableObject {
 
         // REQ_GET_PLATFORM (0x7F): decoded, short replies included, by
         // FirmwareVersion.fromPlatformReply, the same as fetchPlatform().
-        if let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+        if let data = transport.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
            let reply = FirmwareVersion.fromPlatformReply([UInt8](data)) {
             let outputs = Int(data[data.startIndex + 3])
 
@@ -564,9 +564,9 @@ class StatsViewModel: ObservableObject {
         }
 
         // Probe input source feature support
-        if let data = usb.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1),
+        if let data = transport.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1),
            data.count >= 1 {
-            if let pinData = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: 0, index: 2, length: 1),
+            if let pinData = transport.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: 0, index: 2, length: 1),
                pinData.count >= 1 {
                 DispatchQueue.main.async { self.spdifRxPin = pinData[0] }
             }

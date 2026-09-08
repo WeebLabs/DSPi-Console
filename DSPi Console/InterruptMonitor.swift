@@ -2,9 +2,11 @@
 //  InterruptMonitor.swift
 //  DSPi Console
 //
-//  Receives notification packets from the device's bulk IN endpoint
-//  (EP 0x83 on the vendor interface) and presents them in a scrolling log
-//  window opened via Tools → Interrupt Monitor.
+//  Decodes the notification packets the transport delivers (USBDevice reads
+//  EP 0x83 on the vendor interface, see USBNotificationReader) and presents
+//  them in a scrolling log window opened via Tools > Interrupt Monitor.  It
+//  also fans typed events (parameter changes, preset loads, siggen state...)
+//  out to the view model.
 //
 //  Two wire-level protocol versions coexist:
 //    v1 (8-byte MASTER_VOLUME packets, legacy)
@@ -18,17 +20,15 @@
 import Foundation
 import SwiftUI
 import AppKit
-import IOKit
-import IOKit.usb
+import Combine
 
 // MARK: - Wire-Level Constants (mirror firmware notify.h / usb_descriptors.h)
 
-// EP 0x83 max packet size.  Bumped from 8 to 64 when the v2 protocol shipped.
-// The monitor reads with a 64-byte buffer regardless of the actual packet
-// size the device sends — IOKit reports the actual size.
-private let NOTIFY_EP_MAX_PKT: UInt32 = 64
-private let NOTIFY_EP_ADDRESS: UInt8 = 0x83
-
+//  Decodes the notification packets the transport delivers (USBDevice reads
+//  EP 0x83 on the vendor interface, see USBNotificationReader) and presents
+//  them in a scrolling log window opened via Tools > Interrupt Monitor.  It
+//  also fans typed events (parameter changes, preset loads, siggen state...)
+//  out to the view model.
 // Legacy v1 event (packet byte 0 == event_id when byte 0 < 0x02).
 private let NOTIFY_EVT_IDLE: UInt8 = 0x00
 private let NOTIFY_EVT_MASTER_VOLUME_V1: UInt8 = 0x01
@@ -551,6 +551,7 @@ class InterruptMonitor: ObservableObject {
     private struct PendingParam {
         var size: UInt16
         var source: UInt8
+        var origin: LinkSessionID
         var payload: Data
     }
     private var pendingParams: [UInt16: PendingParam] = [:]
@@ -563,7 +564,7 @@ class InterruptMonitor: ObservableObject {
     /// of pause state.  Consumers (e.g. DSPViewModel) use this to mirror
     /// non-host parameter changes back into the UI without waiting for the
     /// next bulk fetch.  Pause only affects the display log.
-    var onParamChanged: ((_ offset: UInt16, _ size: UInt16, _ source: UInt8, _ payload: Data) -> Void)?
+    var onParamChanged: ((_ offset: UInt16, _ size: UInt16, _ source: UInt8, _ origin: LinkSessionID, _ payload: Data) -> Void)?
 
     /// Fires on the main thread when the host switches the USB input format
     /// (NOTIFY_EVT_INPUT_FORMAT).  Carries the new active input channel count
@@ -614,57 +615,11 @@ class InterruptMonitor: ObservableObject {
     /// the ParamSource of the dispatch (PARAM_SRC_GPIO for a panel control).
     var onCsAux: ((_ slot: UInt8, _ state: Bool, _ level: UInt16, _ source: UInt8) -> Void)?
 
-    private let usb: USBDevice
+    private let transport: any DeviceTransport
+    private var subscription: AnyCancellable?
 
-    /// One reader session per start(). The session owns its vendor-interface
-    /// handle and cancellation flag, so a superseded reader (device switch,
-    /// stop/start cycle) winds down on its own without touching the current
-    /// session's handle or the monitor's published state.
-    private final class ReaderSession {
-        let interface: USBDevice.InterfaceInterfacePtr
-        let pipeRef: UInt8
-        var thread: Thread?
-        // Written on main, read on the reader thread. Swift Bool reads are
-        // effectively atomic on the supported archs.
-        var cancelled = false
-
-        // Serializes interface teardown against stop()'s AbortPipe: on unplug
-        // the reader can see a device-gone read error and Release the handle
-        // on its own thread at the same moment the termination path calls
-        // stop() on main. Abort and close must never overlap or run after
-        // the Release.
-        private let interfaceLock = NSLock()
-        private var interfaceClosed = false
-
-        init(interface: USBDevice.InterfaceInterfacePtr, pipeRef: UInt8) {
-            self.interface = interface
-            self.pipeRef = pipeRef
-        }
-
-        /// Wake a blocking ReadPipeTO. Safe to call at any point in the
-        /// session's life; a no-op once the interface has been closed.
-        func abortPipe() {
-            interfaceLock.lock()
-            defer { interfaceLock.unlock() }
-            guard !interfaceClosed else { return }
-            _ = interface.pointee!.pointee.AbortPipe(interface, pipeRef)
-        }
-
-        /// Close and release the interface handle exactly once (reader thread,
-        /// on loop exit).
-        func closeInterface() {
-            interfaceLock.lock()
-            defer { interfaceLock.unlock() }
-            guard !interfaceClosed else { return }
-            interfaceClosed = true
-            _ = interface.pointee!.pointee.USBInterfaceClose(interface)
-            _ = interface.pointee!.pointee.Release(interface)
-        }
-    }
-    private var currentSession: ReaderSession?
-
-    init(usb: USBDevice) {
-        self.usb = usb
+    init(transport: any DeviceTransport) {
+        self.transport = transport
     }
 
     deinit {
@@ -673,83 +628,28 @@ class InterruptMonitor: ObservableObject {
 
     // MARK: - Lifecycle
 
-    /// Delays between attempts to claim the vendor interface.  Interfaces are
-    /// published a little after the device itself, so a start() issued the
-    /// instant we connect - especially on the re-enumeration after a firmware
-    /// flash - can find nothing to open.  Without retries the monitor would
-    /// stay silently dead until the next device switch.
-    private static let interfaceRetryDelays: [TimeInterval] = [0.1, 0.2, 0.4, 0.8]
-
+    /// Subscribe to the transport's notification stream.  Called on every
+    /// successful device open; the transport itself follows device switches,
+    /// so re-subscribing is only needed after stop().
     func start() {
-        start(attempt: 0)
-    }
-
-    private func start(attempt: Int) {
-        // Always (re)attach to the currently open device: the connect path
-        // calls start() on every successful device open, including a switch
-        // to a different device, and the reader must follow it. A plain
-        // guard-if-active here would leave the reader stuck on the previous
-        // device (a switch never publishes isConnected == false).
         stop()
         errorMessage = nil
-
-        let generation = usb.generation
-        guard let interface = usb.openVendorInterface() else {
-            if attempt < InterruptMonitor.interfaceRetryDelays.count {
-                DispatchQueue.main.asyncAfter(deadline: .now() + InterruptMonitor.interfaceRetryDelays[attempt]) { [weak self] in
-                    // Bail if the device changed or a later start() already
-                    // brought up a reader.
-                    guard let self = self,
-                          self.usb.generation == generation,
-                          self.currentSession == nil else { return }
-                    self.start(attempt: attempt + 1)
-                }
-                return
-            }
-            errorMessage = "Could not open vendor interface (is the device connected?)"
-            return
+        subscription = transport.addNotificationObserver { [weak self] notification in
+            self?.processEvent(notification)
         }
-
-        // Resolve the pipe reference for EP 0x83.  Pipe 0 is the control EP,
-        // real endpoints start at pipe 1.  Walk them until we find an
-        // interrupt IN pipe with direction=IN and matching EP number.
-        guard let pipeRef = findPipeRef(interface: interface, epAddress: NOTIFY_EP_ADDRESS) else {
-            errorMessage = "Notification EP 0x83 not found on vendor interface"
-            InterruptMonitor.closeInterface(interface)
-            return
-        }
-
-        let session = ReaderSession(interface: interface, pipeRef: pipeRef)
-        currentSession = session
         isActive = true
-
-        let thread = Thread { [weak self] in
-            self?.runReadLoop(session: session)
+        // The USB reader attaches asynchronously with retries; surface its
+        // last failure after they have had time to run.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self, self.isActive else { return }
+            self.errorMessage = (self.transport as? USBDevice)?.notificationReaderError
         }
-        thread.name = "DSPi Interrupt Monitor"
-        thread.qualityOfService = .userInitiated
-        session.thread = thread
-        thread.start()
     }
 
     func stop() {
         discardPending()
-        guard let session = currentSession else { return }
-        currentSession = nil
+        subscription = nil
         isActive = false
-        session.cancelled = true
-        // Wake the reader out of its (up to 500 ms) blocking read so its
-        // interface handle closes promptly, then give it a brief moment to
-        // finish - an immediate follow-up start() on the same device would
-        // otherwise race the old handle's close and fail with exclusive
-        // access. The session's interface is closed by its read loop on exit.
-        session.abortPipe()
-        if let thread = session.thread {
-            let deadline = Date().addingTimeInterval(0.1)
-            while !thread.isFinished && Date() < deadline {
-                usleep(2000)
-            }
-        }
     }
 
     func clear() {
@@ -761,83 +661,11 @@ class InterruptMonitor: ObservableObject {
         isPaused.toggle()
     }
 
-    // MARK: - Read Loop (background thread)
-
-    private func runReadLoop(session: ReaderSession) {
-        let interface = session.interface
-        let pipeRef = session.pipeRef
-        var buffer = [UInt8](repeating: 0, count: Int(NOTIFY_EP_MAX_PKT))
-
-        while !session.cancelled {
-            var size: UInt32 = NOTIFY_EP_MAX_PKT
-            // Note: ReadPipeTO timeouts are in MILLISECONDS.
-            let result = buffer.withUnsafeMutableBufferPointer { bufPtr -> IOReturn in
-                interface.pointee!.pointee.ReadPipeTO(
-                    interface,
-                    pipeRef,
-                    bufPtr.baseAddress,
-                    &size,
-                    /* noDataTimeout */ 500,
-                    /* completionTimeout */ 500
-                )
-            }
-
-            if session.cancelled { break }
-
-            switch result {
-            case kIOReturnSuccess:
-                if size == 0 { continue }
-                let bytes = Array(buffer.prefix(Int(size)))
-                enqueueEvent(bytes: bytes, session: session)
-            case kIOReturnTimeout:
-                // No data during the window — normal; loop and try again.
-                continue
-            case kIOReturnAborted, kIOReturnNotResponding, kIOReturnNoDevice:
-                // Device went away.
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.currentSession === session else { return }
-                    self.errorMessage = "Device disconnected"
-                    self.isActive = false
-                    self.currentSession = nil
-                }
-                session.cancelled = true
-            default:
-                // Recoverable stall — clear and continue.
-                _ = interface.pointee!.pointee.ClearPipeStall(interface, pipeRef)
-            }
-        }
-
-        session.closeInterface()
-        DispatchQueue.main.async { [weak self] in
-            // Only the current session may report itself stopped; a superseded
-            // reader must not clobber its replacement's state.
-            guard let self = self, self.currentSession === session else { return }
-            self.isActive = false
-            self.currentSession = nil
-        }
-    }
-
-    /// Build an InterruptEvent from the raw bytes and post to the main
-    /// thread for display.  Swallowed silently when paused.  Idle keep-alive
-    /// packets (single-byte 0x00) are dropped - the device sends one after
-    /// 100 ms without an event, only to keep the pipe active; they're not
-    /// user events.
-    private func enqueueEvent(bytes: [UInt8], session: ReaderSession) {
-        // Idle: single-byte 0x00 packet (kept version-neutral in firmware).
-        if bytes.count == 1 && bytes[0] == NOTIFY_EVT_IDLE { return }
-
-        // Hop to main and drop the event unless this reader is still the
-        // current session - a notification read from the previous device just
-        // before a switch must not update state that now describes the new one.
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.currentSession === session else { return }
-            self.processEvent(bytes: bytes)
-        }
-    }
-
     /// Parse a notification packet and fan it out to the registered handlers.
-    /// Runs on the main thread, only for the current reader session.
-    private func processEvent(bytes: [UInt8]) {
+    /// Runs on the main thread (the transport delivers there).
+    private func processEvent(_ notification: LinkNotification) {
+        let bytes = [UInt8](notification.packet)
+        let origin = notification.origin
 
         // Dispatch v2 PARAM_CHANGED to non-display consumers regardless of
         // pause state (pause is only meant to freeze the visible log).
@@ -850,7 +678,7 @@ class InterruptMonitor: ObservableObject {
             let source = bytes[8]
             let payloadEnd = min(bytes.count, 12 + Int(size))
             let payload = Data(bytes[12..<payloadEnd])
-            dispatchParam(offset: offset, size: size, source: source, payload: payload)
+            dispatchParam(offset: offset, size: size, source: source, origin: origin, payload: payload)
         }
 
         // Dispatch the preset-loaded event so the UI can follow a preset that
@@ -981,16 +809,16 @@ class InterruptMonitor: ObservableObject {
 
     /// Queue one parameter change for delivery, or deliver it now when the
     /// monitor has been quiet for a full interval.  Main thread only.
-    private func dispatchParam(offset: UInt16, size: UInt16, source: UInt8, payload: Data) {
+    private func dispatchParam(offset: UInt16, size: UInt16, source: UInt8, origin: LinkSessionID, payload: Data) {
         let now = ProcessInfo.processInfo.systemUptime
         if !flushScheduled && now - lastFlush >= Self.flushInterval {
             lastFlush = now
-            onParamChanged?(offset, size, source, payload)
+            onParamChanged?(offset, size, source, origin, payload)
             return
         }
         // Newest wins: an older value for the same offset no longer describes
         // the device, and replaying it would only make the UI flicker backwards.
-        if pendingParams.updateValue(PendingParam(size: size, source: source, payload: payload),
+        if pendingParams.updateValue(PendingParam(size: size, source: source, origin: origin, payload: payload),
                                      forKey: offset) == nil {
             pendingOrder.append(offset)
         }
@@ -1027,7 +855,7 @@ class InterruptMonitor: ObservableObject {
             pendingParams.removeAll(keepingCapacity: true)
             for offset in order {
                 guard let p = params[offset] else { continue }
-                onParamChanged?(offset, p.size, p.source, p.payload)
+                onParamChanged?(offset, p.size, p.source, p.origin, p.payload)
             }
         }
 
@@ -1047,50 +875,6 @@ class InterruptMonitor: ObservableObject {
         lastFlush = 0
     }
 
-    // MARK: - Interface Helpers
-
-    private func findPipeRef(interface: USBDevice.InterfaceInterfacePtr, epAddress: UInt8) -> UInt8? {
-        var numEndpoints: UInt8 = 0
-        let res = interface.pointee!.pointee.GetNumEndpoints(interface, &numEndpoints)
-        guard res == kIOReturnSuccess else { return nil }
-        guard numEndpoints > 0 else { return nil }  // 1...0 is a fatal range in Swift
-
-        // Pipe 0 is control; real pipes are 1..numEndpoints.
-        for pipeRef in 1...numEndpoints {
-            var direction: UInt8 = 0
-            var number: UInt8 = 0
-            var transferType: UInt8 = 0
-            var maxPacketSize: UInt16 = 0
-            var interval: UInt8 = 0
-
-            let r = interface.pointee!.pointee.GetPipeProperties(
-                interface,
-                pipeRef,
-                &direction,
-                &number,
-                &transferType,
-                &maxPacketSize,
-                &interval
-            )
-            if r != kIOReturnSuccess { continue }
-
-            // direction: 0 = OUT, 1 = IN, 2 = Control.  We want IN.
-            // number: endpoint number (7 bits of the address).
-            // transferType: 2 = bulk, 3 = interrupt.  Device moved from
-            // interrupt to bulk after a DCD crash on RP2040/2350 — accept
-            // either to keep the monitor forward-compatible.
-            let wantedEpNum = epAddress & 0x7F
-            if direction == 1 && number == wantedEpNum && (transferType == 2 || transferType == 3) {
-                return pipeRef
-            }
-        }
-        return nil
-    }
-
-    private static func closeInterface(_ interface: USBDevice.InterfaceInterfacePtr) {
-        _ = interface.pointee!.pointee.USBInterfaceClose(interface)
-        _ = interface.pointee!.pointee.Release(interface)
-    }
 }
 
 // MARK: - SwiftUI View

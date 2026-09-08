@@ -134,7 +134,7 @@ final class RtaWireTests: XCTestCase {
     /// 243 is 0 dBFS, each step is half a decibel, and 255 is the +6 dBFS
     /// ceiling that exists because upmix rows and hot EQ can exceed full scale.
     func testLevelEncodingAnchorPoints() {
-        let engine = RtaEngine(usb: AppState.shared.usb)
+        let engine = RtaEngine(transport: AppState.shared.usb)
         XCTAssertEqual(engine.levelDB(243), 0.0, accuracy: 0.0001)
         XCTAssertEqual(engine.levelDB(255), 6.0, accuracy: 0.0001)
         XCTAssertEqual(engine.levelDB(203), -20.0, accuracy: 0.0001)

@@ -614,8 +614,8 @@ enum PresetDocumentApply {
     private static func applyIO(_ doc: PresetDocument, vm: DSPViewModel,
                                 report: PresetApplyReport) {
         let io = doc.io
-        let generation = vm.usb.generation
-        func stillCurrent() -> Bool { vm.usb.generation == generation }
+        let generation = vm.transport.generation
+        func stillCurrent() -> Bool { vm.transport.generation == generation }
 
         func attempt(_ what: String, _ set: () -> UInt8) {
             let status = set()

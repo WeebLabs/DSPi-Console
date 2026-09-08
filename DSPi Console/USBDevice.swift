@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import IOKit
 import IOKit.usb
 import IOKit.serial
@@ -40,6 +41,11 @@ private func handleDeviceTerminated(refCon: UnsafeMutableRawPointer?, iterator: 
     device.onTerminated(iterator: iterator)
 }
 
+/// IOKit's USB-family error macros are not imported into Swift.  This is
+/// iokit_usb_err(0x2f), the STALL the firmware answers unknown or rejected
+/// commands with.
+private let kIOUSBPipeStalledValue: IOReturn = IOReturn(bitPattern: 0xe000402f)
+
 class USBDevice: ObservableObject {
     typealias DeviceInterface = IOUSBDeviceInterface500
     typealias DeviceInterfacePtr = UnsafeMutablePointer<UnsafeMutablePointer<DeviceInterface>?>?
@@ -60,6 +66,17 @@ class USBDevice: ObservableObject {
     @Published var errorMessage: String?
     @Published var availableDevices: [DSPiDevice] = []
     @Published var selectedDevice: DSPiDevice? = nil
+
+    /// The USB host is session 1 on its own link; a DSPi Link hub hands out
+    /// higher ids to its sessions.
+    let session: LinkSessionID = 1
+
+    /// Notification stream from EP 0x83, shared by every subscriber (view
+    /// model, monitor window, hub).  The reader starts on every successful
+    /// device open and stops when the device closes.
+    let notifications = NotificationFanout()
+    private lazy var notificationReader = USBNotificationReader(usb: self, fanout: notifications)
+    var notificationReaderError: String? { notificationReader.lastError }
 
     // UUID Constants
     private let kIOUSBDeviceUserClientTypeID_UUID = CFUUIDGetConstantUUIDWithBytes(nil,
@@ -203,6 +220,9 @@ class USBDevice: ObservableObject {
         if result == kIOReturnSuccess {
             IOObjectRelease(service)
             DispatchQueue.main.async {
+                // Attach the notification reader before publishing, so a
+                // subscriber reacting to isConnected already has a live stream.
+                self.notificationReader.start()
                 self.selectedDevice = device
                 self.isConnected = true
                 self.errorMessage = nil
@@ -240,6 +260,7 @@ class USBDevice: ObservableObject {
 
     /// Closes the current device interface without updating published state.
     private func closeDevice() {
+        notificationReader.stop()
         if let dev = self.deviceInterface {
             _ = dev.pointee!.pointee.USBDeviceClose(dev)
             _ = dev.pointee!.pointee.Release(dev)
@@ -580,13 +601,20 @@ class USBDevice: ObservableObject {
     }
 
     func getControlRequest(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Data? {
+        if case .success(let data) = getControlResult(request: request, value: value, index: index, length: length) {
+            return data
+        }
+        return nil
+    }
+
+    func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Result<Data, LinkStatus> {
         // Same device-binding as sendControlRequest: a read that was issued
-        // for the previously-open device fails (nil) instead of returning
-        // another device's data.
+        // for the previously-open device fails instead of returning another
+        // device's data.
         let expectedGeneration = generation
         return serialQueue.sync {
             guard expectedGeneration == self.generation,
-                  let dev = self.deviceInterface else { return nil }
+                  let dev = self.deviceInterface else { return .failure(.noDevice) }
 
             let buffer = UnsafeMutableRawPointer.allocate(byteCount: Int(length), alignment: 1)
             defer { buffer.deallocate() }
@@ -603,10 +631,20 @@ class USBDevice: ObservableObject {
 
             let result = dev.pointee!.pointee.DeviceRequest(dev, &requestPtr)
 
-            if result == kIOReturnSuccess {
-                return Data(bytes: buffer, count: Int(requestPtr.wLenDone))
+            switch result {
+            case kIOReturnSuccess:
+                return .success(Data(bytes: buffer, count: Int(requestPtr.wLenDone)))
+            case kIOUSBPipeStalledValue:
+                // The firmware STALLs an unknown command or a rejected
+                // parameter; that is the Link ERROR status, not a dead link.
+                return .failure(.error)
+            case kIOReturnTimeout:
+                return .failure(.timeout)
+            case kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnNotAttached:
+                return .failure(.noDevice)
+            default:
+                return .failure(.error)
             }
-            return nil
         }
     }
 
@@ -673,5 +711,22 @@ class USBDevice: ObservableObject {
             }
             return interfacePtr
         }
+    }
+}
+
+// MARK: - DeviceTransport
+
+extension USBDevice: DeviceTransport {
+    var isConnectedPublisher: AnyPublisher<Bool, Never> { $isConnected.eraseToAnyPublisher() }
+    var availableDevicesPublisher: AnyPublisher<[DSPiDevice], Never> { $availableDevices.eraseToAnyPublisher() }
+    var selectedDevicePublisher: AnyPublisher<DSPiDevice?, Never> { $selectedDevice.eraseToAnyPublisher() }
+    var errorMessagePublisher: AnyPublisher<String?, Never> { $errorMessage.eraseToAnyPublisher() }
+
+    func markDisconnected() {
+        DispatchQueue.main.async { self.isConnected = false }
+    }
+
+    func addNotificationObserver(_ handler: @escaping (LinkNotification) -> Void) -> AnyCancellable {
+        notifications.add(handler)
     }
 }

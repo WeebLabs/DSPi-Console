@@ -66,7 +66,7 @@ final class I2sClockPinModeWireTests: XCTestCase {
     /// i2s_clock_pin_claimed helper.
     @MainActor
     func testSlavePairReservedOnlyInSplit() {
-        let vm = DSPViewModel(usb: AppState.shared.usb)
+        let vm = DSPViewModel(transport: AppState.shared.usb)
         vm.platformName = "RP2350"
         vm.i2sInputSupported = true
         vm.i2sBckPinSlave = 26

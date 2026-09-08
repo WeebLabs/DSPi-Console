@@ -20,7 +20,7 @@ final class SaveCoordinationTests: XCTestCase {
     /// we save and restore it to avoid disturbing the app's live view model.
     private func makeIsolatedVM() -> DSPViewModel {
         let savedHandler = AppState.shared.interruptMonitor.onParamChanged
-        let vm = DSPViewModel(usb: AppState.shared.usb)
+        let vm = DSPViewModel(transport: AppState.shared.usb)
         AppState.shared.interruptMonitor.onParamChanged = savedHandler
         return vm
     }

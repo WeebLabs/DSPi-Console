@@ -16,7 +16,7 @@ extension DSPViewModel {
         // device's data and publish a mix of both devices' state - bail out
         // instead; the switch itself triggers a fresh fetchAll that does the
         // full refresh.
-        let generation = usb.generation
+        let generation = transport.generation
 
         // Fetch platform/version first so capability gates (notch filter,
         // per-band bypass, etc.) are populated before the UI reads them.
@@ -26,7 +26,7 @@ extension DSPViewModel {
         if afterConnect {
             guard waitForDeviceReady(generation: generation) else {
                 // Never answered - the link really is dead.
-                DispatchQueue.main.async { self.usb.isConnected = false }
+                self.transport.markDisconnected()
                 return
             }
         } else {
@@ -37,7 +37,7 @@ extension DSPViewModel {
             ? fetchAllParamsRetrying(generation: generation)
             : fetchAllParams()
         guard gotParams else { return }
-        guard usb.generation == generation else { return }
+        guard transport.generation == generation else { return }
 
         // Tier 1: only what the main window renders - source, rate, volume
         // and the preset picker.  The bulk read above already carried the
@@ -45,7 +45,7 @@ extension DSPViewModel {
         fetchInputSource()
         fetchSampleRate()
         fetchUserVolume()
-        guard usb.generation == generation else { return }
+        guard transport.generation == generation else { return }
 
         // Fetch preset state
         let occupied = fetchPresetDirectory()
@@ -59,7 +59,7 @@ extension DSPViewModel {
             }
         }
         fetchPresetActive()
-        guard usb.generation == generation else { return }
+        guard transport.generation == generation else { return }
 
         // The live UI fades in here, not on raw connection and not after the
         // whole fetch: everything the main window shows has published by now,
@@ -79,7 +79,7 @@ extension DSPViewModel {
         fetchDacHwMuteConfig()
         fetchControlInterfaces()
         fetchControlSurfaces()
-        guard usb.generation == generation else { return }
+        guard transport.generation == generation else { return }
 
         fetchSiggen()
         // The analyser's caps read is its whole feature gate: it is transient
@@ -89,7 +89,7 @@ extension DSPViewModel {
         rta.fetchCaps()
         fetchAdatConfig()
         fetchAdatInputConfig()
-        guard usb.generation == generation else { return }
+        guard transport.generation == generation else { return }
 
         // All fetches above have enqueued their main-thread state updates, so
         // this runs after the published values reflect the connected device.
@@ -118,7 +118,7 @@ extension DSPViewModel {
         let backoff: [TimeInterval] = [0, 0.1, 0.2, 0.4, 0.8, 1.0]
         for delay in backoff {
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
-            guard usb.generation == generation else { return false }
+            guard transport.generation == generation else { return false }
             if fetchPlatform() != nil { return true }
         }
         return false
@@ -135,9 +135,9 @@ extension DSPViewModel {
             // device is alive and the firmware simply incompatible; retrying
             // costs a few reads and the final call records the version.
             if fetchAllParams(markDisconnectedOnFailure: false) { return true }
-            guard usb.generation == generation else { return false }
+            guard transport.generation == generation else { return false }
             Thread.sleep(forTimeInterval: delay)
-            guard usb.generation == generation else { return false }
+            guard transport.generation == generation else { return false }
         }
         return fetchAllParams()
     }
@@ -147,7 +147,7 @@ extension DSPViewModel {
         // Decoding, including the short replies from older firmware and the
         // early 1.1.6 betas, lives in FirmwareVersion.fromPlatformReply.  See
         // the firmware's firmware_versioning_spec.md for the wire layout.
-        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+        guard let data = transport.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
               let reply = FirmwareVersion.fromPlatformReply([UInt8](data)) else { return nil }
         let platform = reply.platform
         let (major, minor, patch, beta) = (reply.version.major, reply.version.minor,
@@ -171,7 +171,7 @@ extension DSPViewModel {
         // clip_flags (u32) + active_input_channels (u8).
         let responseSize = numChannels * 2 + 2 + 4 + 1
 
-        guard let data = usb.getControlRequest(
+        guard let data = transport.getControlRequest(
             request: REQ_GET_STATUS, value: 9, index: 0,
             length: UInt16(responseSize)
         ), data.count >= responseSize else { return }
@@ -232,7 +232,7 @@ extension DSPViewModel {
     }
 
     func fetchSampleRate() {
-        guard let data = usb.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4),
+        guard let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4),
               data.count >= 4 else { return }
         let rate = data.withUnsafeBytes { $0.load(as: UInt32.self) }
         DispatchQueue.main.async {
@@ -246,7 +246,7 @@ extension DSPViewModel {
     }
 
     func clearClips() {
-        _ = usb.getControlRequest(request: REQ_CLEAR_CLIPS, value: 0, index: 0, length: 2)
+        _ = transport.getControlRequest(request: REQ_CLEAR_CLIPS, value: 0, index: 0, length: 2)
     }
 
     // MARK: - USB-only sends (no @Published update, for slider drag)
@@ -255,7 +255,7 @@ extension DSPViewModel {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
 
     func sendPreampChannelToDevice(channel: Int, db: Float) {
@@ -265,16 +265,16 @@ extension DSPViewModel {
         // A linked pair gets one per-channel write each; never the legacy
         // all-channel REQ_SET_PREAMP, which would clobber the trims of the
         // inputs outside this pair.
-        usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
         if let partner = linkedPartner(of: channel) {
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(partner), index: 0, data: data)
+            transport.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(partner), index: 0, data: data)
         }
     }
 
     func sendMasterVolumeToDevice(_ db: Float) {
         var val = Self.roundMasterVolume(db)
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
     }
 
     private static func roundMasterVolume(_ db: Float) -> Float {
@@ -302,14 +302,14 @@ extension DSPViewModel {
         guard outputGainPreview.gains[output] != val else { return }
         outputGainPreview.gains[output] = val
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }
 
     func sendOutputDelayToDevice(output: Int, ms: Float) {
         var val = ms.rounded()
         if val == -0.0 { val = 0.0 }
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
     }
 
     func setFilter(ch: Int, band: Int, p: FilterParams) {
@@ -341,7 +341,7 @@ extension DSPViewModel {
             var qp16 = p.qpEncoded; data.append(&qp16, length: 2)
         }
 
-        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
+        transport.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
         recomputeMagnitudes(for: ch)
     }
     
@@ -353,7 +353,7 @@ extension DSPViewModel {
         // to 10..19.
         func getVal<T>(_ param: Int, defaultVal: T) -> T {
             let wVal = UInt16((ch << 8) | (band << 3) | param)
-            if let d = usb.getControlRequest(request: REQ_GET_EQ_PARAM, value: wVal, index: 0, length: 4) {
+            if let d = transport.getControlRequest(request: REQ_GET_EQ_PARAM, value: wVal, index: 0, length: 4) {
                 return d.withUnsafeBytes { $0.load(as: T.self) }
             }
             return defaultVal
@@ -408,14 +408,14 @@ extension DSPViewModel {
 
         let wValue = UInt16((ch << 8) | band)
         let payload = Data([bypass ? 1 : 0])
-        usb.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
+        transport.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
     }
 
     /// Returns the current bypass state for a single band, or nil if the
     /// firmware STALLs (pre-1.1.4).  Always normalized to true/false.
     func fetchBandBypass(ch: Int, band: Int) -> Bool? {
         let wValue = UInt16((ch << 8) | band)
-        guard let data = usb.getControlRequest(request: REQ_GET_BAND_BYPASS, value: wValue, index: 0, length: 1),
+        guard let data = transport.getControlRequest(request: REQ_GET_BAND_BYPASS, value: wValue, index: 0, length: 1),
               data.count >= 1 else {
             return nil
         }
@@ -459,7 +459,7 @@ extension DSPViewModel {
         var q32 = p.q;    data.append(&q32, length: 4)
         var g32 = p.gain; data.append(&g32, length: 4)
 
-        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
+        transport.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
     }
 
     /// Toggle a single crossover band's bypass flag.  Uses REQ_SET_BAND_BYPASS
@@ -476,7 +476,7 @@ extension DSPViewModel {
         }
         let wValue = UInt16((ch << 8) | wireBand)
         let payload = Data([bypass ? 1 : 0])
-        usb.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
+        transport.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
     }
 
     /// Clear all crossover bands on an output channel by writing the default
@@ -506,11 +506,11 @@ extension DSPViewModel {
         if val == -0.0 { val = 0.0 }
         self.channelDelays[ch] = val
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
     }
 
     func fetchDelay(ch: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_DELAY, value: UInt16(ch), index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_DELAY, value: UInt16(ch), index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs((self.channelDelays[ch] ?? 0) - val) > 0.01 {
@@ -526,13 +526,13 @@ extension DSPViewModel {
         if val == -0.0 { val = 0.0 }
         self.preampDB = [val, val]
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
 
     /// Legacy global preamp GET — returns channel 0 only.
     @discardableResult
     func fetchPreamp() -> Bool {
-        if let d = usb.getControlRequest(request: REQ_GET_PREAMP, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_PREAMP, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.preampDB[0] - val) > 0.1 {
@@ -541,7 +541,7 @@ extension DSPViewModel {
             }
             return true
         } else {
-            DispatchQueue.main.async { self.usb.isConnected = false }
+            self.transport.markDisconnected()
             return false
         }
     }
@@ -556,15 +556,15 @@ extension DSPViewModel {
         // A linked pair gets one per-channel write each; never the legacy
         // all-channel REQ_SET_PREAMP, which would clobber the trims of the
         // inputs outside this pair.
-        usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(channel), index: 0, data: data)
         if let partner = linkedPartner(of: channel) {
             self.preampDB[partner] = val
-            usb.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(partner), index: 0, data: data)
+            transport.sendControlRequest(request: REQ_SET_PREAMP_CH, value: UInt16(partner), index: 0, data: data)
         }
     }
 
     func fetchPreampChannel(channel: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_PREAMP_CH, value: UInt16(channel), index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_PREAMP_CH, value: UInt16(channel), index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.preampDB[channel] - val) > 0.1 {
@@ -580,11 +580,11 @@ extension DSPViewModel {
         var val = Self.roundMasterVolume(db)
         self.masterVolumeDB = val
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
     }
 
     func fetchMasterVolume() {
-        if let d = usb.getControlRequest(request: REQ_GET_MASTER_VOLUME, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_MASTER_VOLUME, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.masterVolumeDB - val) > 0.01 {
@@ -602,7 +602,7 @@ extension DSPViewModel {
     func sendUserVolumeToDevice(_ db: Float) {
         var val = Self.clampUserVolume(db)
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_USER_VOLUME, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_USER_VOLUME, value: 0, index: 0, data: data)
     }
 
     /// Set user volume — publish locally + send to device.  Range is
@@ -611,11 +611,11 @@ extension DSPViewModel {
         var val = Self.clampUserVolume(db)
         self.userVolumeDB = val
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_USER_VOLUME, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_USER_VOLUME, value: 0, index: 0, data: data)
     }
 
     func fetchUserVolume() {
-        if let d = usb.getControlRequest(request: REQ_GET_USER_VOLUME, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_USER_VOLUME, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.userVolumeDB - val) > 0.01 {
@@ -633,7 +633,7 @@ extension DSPViewModel {
     /// for non-HOST sources, so other hosts' edits flow through automatically.
     func setLgSoundSyncEnabled(_ enabled: Bool) {
         DispatchQueue.main.async { self.lgSoundSyncEnabled = enabled }
-        usb.sendControlRequest(request: REQ_SET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0,
+        transport.sendControlRequest(request: REQ_SET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0,
                                data: Data([enabled ? 1 : 0]))
     }
 
@@ -651,7 +651,7 @@ extension DSPViewModel {
     /// than the optimistic guess. (Firmware contract: confirm via GET 0xEB.)
     func setDacHwMuteConfig(_ config: DacHwMuteConfig) {
         DispatchQueue.main.async { self.dacHwMuteConfig = config }
-        usb.sendControlRequest(request: REQ_SET_DAC_HW_MUTE_CONFIG,
+        transport.sendControlRequest(request: REQ_SET_DAC_HW_MUTE_CONFIG,
                                value: 0, index: 0, data: config.toData())
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15) {
             self.fetchDacHwMuteConfig()
@@ -662,7 +662,7 @@ extension DSPViewModel {
     /// than V10; if the call returns nil, `dacHwMuteSupported` stays false
     /// and the Settings section hides itself.
     func fetchDacHwMuteConfig() {
-        guard let d = usb.getControlRequest(request: REQ_GET_DAC_HW_MUTE_CONFIG,
+        guard let d = transport.getControlRequest(request: REQ_GET_DAC_HW_MUTE_CONFIG,
                                             value: 0, index: 0, length: 16),
               let cfg = DacHwMuteConfig.fromData(d) else { return }
         DispatchQueue.main.async {
@@ -678,7 +678,7 @@ extension DSPViewModel {
     /// the firmware's main loop after the status returns.
     @discardableResult
     func testDacHwMute() -> UInt8 {
-        guard let d = usb.getControlRequest(request: REQ_TEST_DAC_HW_MUTE,
+        guard let d = transport.getControlRequest(request: REQ_TEST_DAC_HW_MUTE,
                                             value: 0, index: 0, length: 1),
               d.count >= 1 else {
             return 0xFF
@@ -689,7 +689,7 @@ extension DSPViewModel {
     /// Probe the firmware for LG Sound Sync support and read the current
     /// enable flag.  STALLs on firmware older than V8.
     func fetchLgSoundSyncEnabled() {
-        if let d = usb.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0, length: 1),
+        if let d = transport.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_ENABLE, value: 0, index: 0, length: 1),
            d.count >= 1 {
             let en = d[0] != 0
             DispatchQueue.main.async {
@@ -715,11 +715,11 @@ extension DSPViewModel {
         let normalized = (Int(clamped) == MASTER_VOLUME_MODE_WITH_PRESET) ? MASTER_VOLUME_MODE_WITH_PRESET
                                                                           : MASTER_VOLUME_MODE_INDEPENDENT
         DispatchQueue.main.async { self.presetMasterVolumeMode = normalized }
-        usb.sendControlRequest(request: REQ_SET_MASTER_VOLUME_MODE, value: 0, index: 2, data: Data([clamped]))
+        transport.sendControlRequest(request: REQ_SET_MASTER_VOLUME_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
     func fetchMasterVolumeMode() {
-        guard let data = usb.getControlRequest(request: REQ_GET_MASTER_VOLUME_MODE, value: 0, index: 2, length: 1) else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_MASTER_VOLUME_MODE, value: 0, index: 2, length: 1) else { return }
         let val = Int(data[0])
         DispatchQueue.main.async {
             self.presetMasterVolumeMode = (val == MASTER_VOLUME_MODE_WITH_PRESET) ? MASTER_VOLUME_MODE_WITH_PRESET
@@ -734,7 +734,7 @@ extension DSPViewModel {
     /// transfer failed.
     @discardableResult
     func saveMasterVolume() -> Bool {
-        guard let data = usb.getControlRequest(request: REQ_SAVE_MASTER_VOLUME, value: 0, index: 2, length: 1) else {
+        guard let data = transport.getControlRequest(request: REQ_SAVE_MASTER_VOLUME, value: 0, index: 2, length: 1) else {
             return false
         }
         return data.first == 0  // PRESET_OK
@@ -744,7 +744,7 @@ extension DSPViewModel {
     /// boot in MASTER_VOLUME_MODE_INDEPENDENT). Independent of the current
     /// live value and the current mode. Returns nil if the transfer failed.
     func fetchSavedMasterVolume() -> Float? {
-        guard let data = usb.getControlRequest(request: REQ_GET_SAVED_MASTER_VOLUME, value: 0, index: 2, length: 4),
+        guard let data = transport.getControlRequest(request: REQ_GET_SAVED_MASTER_VOLUME, value: 0, index: 2, length: 4),
               data.count >= 4 else { return nil }
         return data.withUnsafeBytes { $0.load(as: Float.self) }
     }
@@ -753,14 +753,14 @@ extension DSPViewModel {
         self.bypass = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_BYPASS, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_BYPASS, value: 0, index: 0, data: data)
         recomputeMagnitudes(for: 0)
         recomputeMagnitudes(for: 1)
     }
     
     @discardableResult
     func fetchBypass() -> Bool {
-        if let d = usb.getControlRequest(request: REQ_GET_BYPASS, value: 0, index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_BYPASS, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async {
                 self.bypass = val
@@ -769,7 +769,7 @@ extension DSPViewModel {
             }
             return true
         } else {
-            DispatchQueue.main.async { self.usb.isConnected = false }
+            self.transport.markDisconnected()
             return false
         }
     }
@@ -801,11 +801,11 @@ extension DSPViewModel {
         self.loudnessEnabled = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_LOUDNESS, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LOUDNESS, value: 0, index: 0, data: data)
     }
 
     func fetchLoudness() {
-        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS, value: 0, index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async { self.loudnessEnabled = val }
         }
@@ -815,11 +815,11 @@ extension DSPViewModel {
         self.loudnessRefSPL = spl
         var val = spl
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_LOUDNESS_REF, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LOUDNESS_REF, value: 0, index: 0, data: data)
     }
 
     func fetchLoudnessRef() {
-        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS_REF, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_REF, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.loudnessRefSPL - val) > 0.01 {
@@ -833,11 +833,11 @@ extension DSPViewModel {
         self.loudnessIntensity = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_LOUDNESS_INTENSITY, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LOUDNESS_INTENSITY, value: 0, index: 0, data: data)
     }
 
     func fetchLoudnessIntensity() {
-        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS_INTENSITY, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_INTENSITY, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.loudnessIntensity - val) > 0.01 {
@@ -853,7 +853,7 @@ extension DSPViewModel {
     func setLoudnessMask(_ mask: UInt16) {
         self.loudnessOutputMask = mask
         let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
-        usb.sendControlRequest(request: REQ_SET_LOUDNESS_MASK, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LOUDNESS_MASK, value: 0, index: 0, data: data)
     }
 
     /// Toggles a single output channel's bit in the loudness mask and pushes it.
@@ -865,7 +865,7 @@ extension DSPViewModel {
     }
 
     func fetchLoudnessMask() {
-        if let d = usb.getControlRequest(request: REQ_GET_LOUDNESS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
+        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
             let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
             DispatchQueue.main.async { self.loudnessOutputMask = val }
         }
@@ -877,11 +877,11 @@ extension DSPViewModel {
         self.crossfeedEnabled = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_CROSSFEED, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_CROSSFEED, value: 0, index: 0, data: data)
     }
 
     func fetchCrossfeed() {
-        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED, value: 0, index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async { self.crossfeedEnabled = val }
         }
@@ -897,7 +897,7 @@ extension DSPViewModel {
         self.crossfeedPreset = preset
         var val = UInt8(preset)
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_CROSSFEED_PRESET, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_CROSSFEED_PRESET, value: 0, index: 0, data: data)
         // Apply known preset values locally so the graph updates immediately
         if preset < DSPViewModel.presetValues.count {
             self.crossfeedFreq = DSPViewModel.presetValues[preset].freq
@@ -906,7 +906,7 @@ extension DSPViewModel {
     }
 
     func fetchCrossfeedPreset() {
-        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_PRESET, value: 0, index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_PRESET, value: 0, index: 0, length: 1) {
             let val = Int(d[0])
             DispatchQueue.main.async { self.crossfeedPreset = val }
         }
@@ -916,11 +916,11 @@ extension DSPViewModel {
         self.crossfeedFreq = freq
         var val = freq
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_CROSSFEED_FREQ, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_CROSSFEED_FREQ, value: 0, index: 0, data: data)
     }
 
     func fetchCrossfeedFreq() {
-        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_FREQ, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_FREQ, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.crossfeedFreq - val) > 0.01 {
@@ -934,11 +934,11 @@ extension DSPViewModel {
         self.crossfeedFeed = feed
         var val = feed
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_CROSSFEED_FEED, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_CROSSFEED_FEED, value: 0, index: 0, data: data)
     }
 
     func fetchCrossfeedFeed() {
-        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_FEED, value: 0, index: 0, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_FEED, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.crossfeedFeed - val) > 0.01 {
@@ -952,11 +952,11 @@ extension DSPViewModel {
         self.crossfeedITD = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_CROSSFEED_ITD, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_CROSSFEED_ITD, value: 0, index: 0, data: data)
     }
 
     func fetchCrossfeedITD() {
-        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_ITD, value: 0, index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_ITD, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async { self.crossfeedITD = val }
         }
@@ -969,7 +969,7 @@ extension DSPViewModel {
         self.crossfeedOutputMask = mask
         var val = mask
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_CROSSFEED_OUTPUTS, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_CROSSFEED_OUTPUTS, value: 0, index: 0, data: data)
     }
 
     /// Toggles a single output pair's bit in the crossfeed mask and pushes it.
@@ -981,7 +981,7 @@ extension DSPViewModel {
     }
 
     func fetchCrossfeedMask() {
-        if let d = usb.getControlRequest(request: REQ_GET_CROSSFEED_OUTPUTS, value: 0, index: 0, length: 1), !d.isEmpty {
+        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_OUTPUTS, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0]
             DispatchQueue.main.async { self.crossfeedOutputMask = val }
         }
@@ -993,11 +993,11 @@ extension DSPViewModel {
         self.psybassEnabled = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_PSYBASS, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS, value: 0, index: 0, data: data)
     }
 
     func fetchPsybass() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS, value: 0, index: 0, length: 1), !d.isEmpty {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0] != 0
             DispatchQueue.main.async { self.psybassEnabled = val }
         }
@@ -1007,11 +1007,11 @@ extension DSPViewModel {
         self.psybassCutoffHz = hz
         var val = hz
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: data)
     }
 
     func fetchPsybassCutoff() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.psybassCutoffHz - val) > 0.01 { self.psybassCutoffHz = val }
@@ -1023,11 +1023,11 @@ extension DSPViewModel {
         self.psybassHarmonicsDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_HARMONICS, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS_HARMONICS, value: 0, index: 0, data: data)
     }
 
     func fetchPsybassHarmonics() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_HARMONICS, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_HARMONICS, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.psybassHarmonicsDB - val) > 0.01 { self.psybassHarmonicsDB = val }
@@ -1039,11 +1039,11 @@ extension DSPViewModel {
         self.psybassDriveDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_DRIVE, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS_DRIVE, value: 0, index: 0, data: data)
     }
 
     func fetchPsybassDrive() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_DRIVE, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_DRIVE, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.psybassDriveDB - val) > 0.01 { self.psybassDriveDB = val }
@@ -1055,11 +1055,11 @@ extension DSPViewModel {
         self.psybassCharacterPct = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_CHARACTER, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS_CHARACTER, value: 0, index: 0, data: data)
     }
 
     func fetchPsybassCharacter() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_CHARACTER, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_CHARACTER, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.psybassCharacterPct - val) > 0.01 { self.psybassCharacterPct = val }
@@ -1071,11 +1071,11 @@ extension DSPViewModel {
         self.psybassOriginalDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_ORIGINAL, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS_ORIGINAL, value: 0, index: 0, data: data)
     }
 
     func fetchPsybassOriginal() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_ORIGINAL, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_ORIGINAL, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.psybassOriginalDB - val) > 0.01 { self.psybassOriginalDB = val }
@@ -1089,7 +1089,7 @@ extension DSPViewModel {
     func setPsybassMask(_ mask: UInt16) {
         self.psybassOutputMask = mask
         let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_MASK, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_PSYBASS_MASK, value: 0, index: 0, data: data)
     }
 
     /// Toggles a single output channel's bit in the psybass mask and pushes it.
@@ -1101,7 +1101,7 @@ extension DSPViewModel {
     }
 
     func fetchPsybassMask() {
-        if let d = usb.getControlRequest(request: REQ_GET_PSYBASS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
+        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
             let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
             DispatchQueue.main.async { self.psybassOutputMask = val }
         }
@@ -1118,12 +1118,12 @@ extension DSPViewModel {
         self.subharmEnabled = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharm() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1), !d.isEmpty {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0] != 0
             DispatchQueue.main.async { self.subharmEnabled = val }
         }
@@ -1133,12 +1133,12 @@ extension DSPViewModel {
         self.subharmLowDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmLow() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmLowDB - val) > 0.01 { self.subharmLowDB = val }
@@ -1150,12 +1150,12 @@ extension DSPViewModel {
         self.subharmHighDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_HIGH, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_HIGH, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmHigh() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HIGH, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HIGH, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmHighDB - val) > 0.01 { self.subharmHighDB = val }
@@ -1167,12 +1167,12 @@ extension DSPViewModel {
         self.subharmTopDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_TOP, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_TOP, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmTop() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_TOP, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_TOP, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmTopDB - val) > 0.01 { self.subharmTopDB = val }
@@ -1184,12 +1184,12 @@ extension DSPViewModel {
         self.subharmBoostDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmBoost() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmBoostDB - val) > 0.01 { self.subharmBoostDB = val }
@@ -1205,7 +1205,7 @@ extension DSPViewModel {
     func setSubharmMask(_ mask: UInt16) {
         self.subharmOutputMask = mask
         let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_MASK, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_MASK, value: 0, index: 0, data: data)
     }
 
     /// Toggles a single output channel's bit in the subharm mask and pushes it.
@@ -1217,7 +1217,7 @@ extension DSPViewModel {
     }
 
     func fetchSubharmMask() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
             let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
             DispatchQueue.main.async { self.subharmOutputMask = val }
         }
@@ -1227,7 +1227,7 @@ extension DSPViewModel {
     /// Computed by the firmware on each GET, so it can never lag a coefficient
     /// recompute that a SET just triggered.
     func fetchSubharmHeadroom() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HEADROOM, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HEADROOM, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmHeadroomDB - val) > 0.001 { self.subharmHeadroomDB = val }
@@ -1255,12 +1255,12 @@ extension DSPViewModel {
         self.subharmSelectMode = clamped
         var val = UInt8(clamped)
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_SELECT, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_SELECT, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmSelectMode() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1), !d.isEmpty {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = min(Int(d[0]), SUBHARM_SELECT_SUSTAINED)
             DispatchQueue.main.async { self.subharmSelectMode = val }
         }
@@ -1270,12 +1270,12 @@ extension DSPViewModel {
         self.subharmSelectDepthPct = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_DEPTH, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_DEPTH, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmSelectDepth() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_DEPTH, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_DEPTH, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmSelectDepthPct - val) > 0.01 { self.subharmSelectDepthPct = val }
@@ -1287,12 +1287,12 @@ extension DSPViewModel {
         self.subharmSelectHoldMs = ms
         var val = ms
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_HOLD, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_HOLD, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmSelectHold() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HOLD, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HOLD, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmSelectHoldMs - val) > 0.01 { self.subharmSelectHoldMs = val }
@@ -1307,12 +1307,12 @@ extension DSPViewModel {
         self.subharmCeilingDB = dbfs
         var val = dbfs
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
     }
 
     func fetchSubharmCeiling() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4), d.count >= 4 {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.subharmCeilingDB - val) > 0.01 { self.subharmCeilingDB = val }
@@ -1327,11 +1327,11 @@ extension DSPViewModel {
         self.subharmLinkPairs = linked
         var val: UInt8 = linked ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_LINK, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_LINK, value: 0, index: 0, data: data)
     }
 
     func fetchSubharmLinkPairs() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_LINK, value: 0, index: 0, length: 1), !d.isEmpty {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_LINK, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0] != 0
             DispatchQueue.main.async { self.subharmLinkPairs = val }
         }
@@ -1345,11 +1345,11 @@ extension DSPViewModel {
         self.subharmSolo = solo
         var val: UInt8 = solo ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_SOLO, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_SUBHARM_SOLO, value: 0, index: 0, data: data)
     }
 
     func fetchSubharmSolo() {
-        if let d = usb.getControlRequest(request: REQ_GET_SUBHARM_SOLO, value: 0, index: 0, length: 1), !d.isEmpty {
+        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_SOLO, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0] != 0
             DispatchQueue.main.async { self.subharmSolo = val }
         }
@@ -1362,7 +1362,7 @@ extension DSPViewModel {
     func fetchSubharmMeter() {
         let want = numOutputChannels
         guard want > 0 else { return }
-        guard let d = usb.getControlRequest(request: REQ_GET_SUBHARM_METER, value: 0, index: 0,
+        guard let d = transport.getControlRequest(request: REQ_GET_SUBHARM_METER, value: 0, index: 0,
                                             length: UInt16(want * 2)), d.count >= 2 else { return }
         var levels: [Float] = []
         levels.reserveCapacity(min(want, d.count / 2))
@@ -1393,7 +1393,7 @@ extension DSPViewModel {
     private func sendUpmixParam(_ paramId: UInt16, _ value: Float) {
         var v = value
         let data = Data(bytes: &v, count: 4)
-        usb.sendControlRequest(request: REQ_UPMIX_SET_PARAM, value: paramId, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_UPMIX_SET_PARAM, value: paramId, index: 0, data: data)
     }
 
     func setUpmixEnabled(_ enabled: Bool) {
@@ -1472,7 +1472,7 @@ extension DSPViewModel {
     /// (spec §6.1).  Called after a preset load / bulk SET; the bulk parse also
     /// keeps these fields current.  On RP2040 the GET returns zeros (feature off).
     func fetchUpmixConfig() {
-        guard let d = usb.getControlRequest(request: REQ_UPMIX_GET_CONFIG, value: 0, index: 0,
+        guard let d = transport.getControlRequest(request: REQ_UPMIX_GET_CONFIG, value: 0, index: 0,
                                             length: UInt16(UPMIX_CONFIG_PACKET_SIZE)),
               d.count >= UPMIX_CONFIG_PACKET_SIZE else { return }
         let enabled = d[0] != 0
@@ -1504,7 +1504,7 @@ extension DSPViewModel {
     /// Polls the 16-byte UpmixStatus telemetry (spec §6.3).  Called from the
     /// shared poll timer only while the upmixer window is open.
     func fetchUpmixStatus() {
-        guard let d = usb.getControlRequest(request: REQ_UPMIX_GET_STATUS, value: 0, index: 0,
+        guard let d = transport.getControlRequest(request: REQ_UPMIX_GET_STATUS, value: 0, index: 0,
                                             length: UPMIX_STATUS_SIZE),
               d.count >= 16 else { return }
         let active = d[0] != 0
@@ -1531,42 +1531,42 @@ extension DSPViewModel {
         self.levellerEnabled = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_LEVELLER, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER, value: 0, index: 0, data: data)
     }
 
     func setLevellerAmount(_ amount: Float) {
         self.levellerAmount = amount
         var val = amount
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_LEVELLER_AMOUNT, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER_AMOUNT, value: 0, index: 0, data: data)
     }
 
     func setLevellerSpeed(_ speed: Int) {
         self.levellerSpeed = speed
         var val = UInt8(speed)
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_LEVELLER_SPEED, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER_SPEED, value: 0, index: 0, data: data)
     }
 
     func setLevellerMaxGain(_ db: Float) {
         self.levellerMaxGainDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_LEVELLER_MAXGAIN, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER_MAXGAIN, value: 0, index: 0, data: data)
     }
 
     func setLevellerLookahead(_ enabled: Bool) {
         self.levellerLookahead = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_LEVELLER_LOOKAHEAD, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER_LOOKAHEAD, value: 0, index: 0, data: data)
     }
 
     func setLevellerGate(_ db: Float) {
         self.levellerGateDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_LEVELLER_GATE, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER_GATE, value: 0, index: 0, data: data)
     }
 
     /// Sets both leveller channel masks (V18). `detector` selects which inputs
@@ -1577,7 +1577,7 @@ extension DSPViewModel {
         self.levellerDetectorMask = detector
         self.levellerApplyMask = apply
         let data = Data([detector, apply])
-        usb.sendControlRequest(request: REQ_SET_LEVELLER_MASKS, value: 0, index: 0, data: data)
+        transport.sendControlRequest(request: REQ_SET_LEVELLER_MASKS, value: 0, index: 0, data: data)
     }
 
     /// Toggles a single channel's bit in the detector mask and pushes both masks.
@@ -1611,12 +1611,12 @@ extension DSPViewModel {
         var g = gain
         withUnsafeBytes(of: &g) { packet.replaceSubrange(4..<8, with: $0) }
 
-        usb.sendControlRequest(request: REQ_SET_MATRIX_ROUTE, value: 0, index: 2, data: packet)
+        transport.sendControlRequest(request: REQ_SET_MATRIX_ROUTE, value: 0, index: 2, data: packet)
     }
 
     func fetchMatrixRoute(input: Int, output: Int) {
         let wValue = UInt16((input << 8) | output)
-        guard let data = usb.getControlRequest(request: REQ_GET_MATRIX_ROUTE, value: wValue, index: 2, length: 9) else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_MATRIX_ROUTE, value: wValue, index: 2, length: 9) else { return }
 
         let enabled = data[2] != 0
         let invert = data[3] != 0
@@ -1677,11 +1677,11 @@ extension DSPViewModel {
         }
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_ENABLE, value: UInt16(output), index: 2, data: data)
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_ENABLE, value: UInt16(output), index: 2, data: data)
     }
 
     func fetchOutputEnable(output: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_ENABLE, value: UInt16(output), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_ENABLE, value: UInt16(output), index: 2, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async { self.outputEnabled[output] = val }
         }
@@ -1697,11 +1697,11 @@ extension DSPViewModel {
         // so the curve does not flick back to the pre-drag gain.
         if outputGainPreview.gains[output] != nil { outputGainPreview.gains[output] = nil }
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }
 
     func fetchOutputGainDB(output: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_GAIN, value: UInt16(output), index: 2, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_GAIN, value: UInt16(output), index: 2, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.outputGainDB[output] - val) > 0.01 {
@@ -1717,11 +1717,11 @@ extension DSPViewModel {
         outputMuted[output] = muted
         var val: UInt8 = muted ? 1 : 0
         let data = Data(bytes: &val, count: 1)
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_MUTE, value: UInt16(output), index: 2, data: data)
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_MUTE, value: UInt16(output), index: 2, data: data)
     }
 
     func fetchOutputMute(output: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_MUTE, value: UInt16(output), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_MUTE, value: UInt16(output), index: 2, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async {
                 self.outputMuted[output] = val
@@ -1736,11 +1736,11 @@ extension DSPViewModel {
         if val == -0.0 { val = 0.0 }
         outputDelayMS[output] = val
         let data = Data(bytes: &val, count: 4)
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
     }
 
     func fetchOutputDelay(output: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_DELAY, value: UInt16(output), index: 2, length: 4) {
+        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_DELAY, value: UInt16(output), index: 2, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
                 if abs(self.outputDelayMS[output] - val) > 0.01 {
@@ -1753,14 +1753,14 @@ extension DSPViewModel {
     // MARK: - Core 1 Mode
 
     func fetchCore1Mode() {
-        if let d = usb.getControlRequest(request: REQ_GET_CORE1_MODE, value: 0, index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_CORE1_MODE, value: 0, index: 0, length: 1) {
             let val = Int(d[0])
             DispatchQueue.main.async { self.core1Mode = val }
         }
     }
 
     func checkCore1Conflict(output: Int) -> Bool {
-        if let d = usb.getControlRequest(request: REQ_GET_CORE1_CONFLICT, value: UInt16(output), index: 0, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_CORE1_CONFLICT, value: UInt16(output), index: 0, length: 1) {
             return d[0] != 0
         }
         return false
@@ -1793,7 +1793,7 @@ extension DSPViewModel {
     // MARK: - Pin Configuration
 
     func fetchOutputPin(output: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_PIN, value: UInt16(output), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_PIN, value: UInt16(output), index: 2, length: 1) {
             let pin = d[0]
             DispatchQueue.main.async {
                 self.outputPins[output] = pin
@@ -1806,7 +1806,7 @@ extension DSPViewModel {
     @discardableResult
     func setOutputPin(output: Int, pin: UInt8) -> UInt8 {
         let wValue = (UInt16(pin) << 8) | UInt16(output)
-        if let d = usb.getControlRequest(request: REQ_SET_OUTPUT_PIN, value: wValue, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_OUTPUT_PIN, value: wValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async {
@@ -1839,7 +1839,7 @@ extension DSPViewModel {
     @discardableResult
     func setOutputSlotType(slot: Int, type: UInt8) -> UInt8 {
         let wValue = (UInt16(type) << 8) | UInt16(slot)
-        if let d = usb.getControlRequest(request: REQ_SET_OUTPUT_TYPE, value: wValue, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_OUTPUT_TYPE, value: wValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.outputSlotTypes[slot] = type }
@@ -1850,7 +1850,7 @@ extension DSPViewModel {
     }
 
     func fetchOutputSlotType(slot: Int) {
-        if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_TYPE, value: UInt16(slot), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_TYPE, value: UInt16(slot), index: 2, length: 1) {
             let type = d[0]
             DispatchQueue.main.async { self.outputSlotTypes[slot] = type }
         }
@@ -1864,7 +1864,7 @@ extension DSPViewModel {
     @discardableResult
     func setI2SBckPin(_ pin: UInt8, role: UInt8 = I2S_BCK_ROLE_MASTER) -> UInt8 {
         let wValue = (UInt16(role) << 8) | UInt16(pin)
-        if let d = usb.getControlRequest(request: REQ_SET_I2S_BCK_PIN, value: wValue, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_I2S_BCK_PIN, value: wValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async {
@@ -1878,7 +1878,7 @@ extension DSPViewModel {
     }
 
     func fetchI2SBckPin(role: UInt8 = I2S_BCK_ROLE_MASTER) {
-        if let d = usb.getControlRequest(request: REQ_GET_I2S_BCK_PIN, value: UInt16(role), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_I2S_BCK_PIN, value: UInt16(role), index: 2, length: 1) {
             let pin = d[0]
             DispatchQueue.main.async {
                 if role == I2S_BCK_ROLE_SLAVE { self.i2sBckPinSlave = pin }
@@ -1890,7 +1890,7 @@ extension DSPViewModel {
     /// Enable or disable the master clock output.
     @discardableResult
     func setMckEnable(_ enabled: Bool) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_MCK_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_MCK_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.mckEnabled = enabled }
@@ -1901,7 +1901,7 @@ extension DSPViewModel {
     }
 
     func fetchMckEnable() {
-        if let d = usb.getControlRequest(request: REQ_GET_MCK_ENABLE, value: 0, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_MCK_ENABLE, value: 0, index: 2, length: 1) {
             let val = d[0] != 0
             DispatchQueue.main.async { self.mckEnabled = val }
         }
@@ -1910,7 +1910,7 @@ extension DSPViewModel {
     /// Set MCK GPIO pin. MCK must be disabled first.
     @discardableResult
     func setMckPin(_ pin: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_MCK_PIN, value: UInt16(pin), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_MCK_PIN, value: UInt16(pin), index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.mckPin = pin }
@@ -1921,7 +1921,7 @@ extension DSPViewModel {
     }
 
     func fetchMckPin() {
-        if let d = usb.getControlRequest(request: REQ_GET_MCK_PIN, value: 0, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_MCK_PIN, value: 0, index: 2, length: 1) {
             DispatchQueue.main.async { self.mckPin = d[0] }
         }
     }
@@ -1931,7 +1931,7 @@ extension DSPViewModel {
     @discardableResult
     func setMckMultiplier(_ multiplier: Int) -> UInt8 {
         let wireValue: UInt16 = (multiplier == 256) ? 1 : 0
-        if let d = usb.getControlRequest(request: REQ_SET_MCK_MULTIPLIER, value: wireValue, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_MCK_MULTIPLIER, value: wireValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.mckMultiplier = multiplier }
@@ -1942,7 +1942,7 @@ extension DSPViewModel {
     }
 
     func fetchMckMultiplier() {
-        if let d = usb.getControlRequest(request: REQ_GET_MCK_MULTIPLIER, value: 0, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_GET_MCK_MULTIPLIER, value: 0, index: 2, length: 1) {
             let raw = d[0]
             let value = raw == 1 ? 256 : 128  // V5 encoding: 0 = 128x, 1 = 256x
             DispatchQueue.main.async { self.mckMultiplier = value }
@@ -1960,7 +1960,7 @@ extension DSPViewModel {
     /// means the firmware predates ADAT; combined with the RP2350 gate this sets
     /// `adatSupported`.  Called from `fetchAll` after the bulk fetch.
     func fetchAdatStatus() {
-        guard let data = usb.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+        guard let data = transport.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
               let status = AdatStatus.fromData(data) else {
             DispatchQueue.main.async { self.adatSupported = false }
             return
@@ -1984,7 +1984,7 @@ extension DSPViewModel {
     /// failure).
     @discardableResult
     func setAdatEnable(_ enabled: Bool) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_ADAT_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_ADAT_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2003,7 +2003,7 @@ extension DSPViewModel {
     /// under a muted restart.  Returns the firmware status byte.
     @discardableResult
     func setAdatPin(_ pin: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_ADAT_PIN, value: UInt16(pin), index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_ADAT_PIN, value: UInt16(pin), index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2029,7 +2029,7 @@ extension DSPViewModel {
     /// A STALL (nil) means the firmware predates ADAT input; combined with the
     /// RP2350 gate this sets `adatInputSupported`.  Called from `fetchAll`.
     func fetchAdatInputConfig() {
-        guard let data = usb.getControlRequest(request: REQ_GET_ADAT_INPUT_STATUS, value: 0, index: 2, length: 20),
+        guard let data = transport.getControlRequest(request: REQ_GET_ADAT_INPUT_STATUS, value: 0, index: 2, length: 20),
               let status = AdatInputStatus.fromData(data) else {
             DispatchQueue.main.async { self.adatInputSupported = false }
             return
@@ -2049,7 +2049,7 @@ extension DSPViewModel {
     /// detected/measured rate) for the settings lock indicator.  Also re-syncs the
     /// configured enable / pin / clock mode the packet carries.
     func fetchAdatInputStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_ADAT_INPUT_STATUS, value: 0, index: 2, length: 20),
+        guard let d = transport.getControlRequest(request: REQ_GET_ADAT_INPUT_STATUS, value: 0, index: 2, length: 20),
               let status = AdatInputStatus.fromData(d) else { return }
         DispatchQueue.main.async {
             self.adatInputStatus = status
@@ -2065,7 +2065,7 @@ extension DSPViewModel {
     /// firmware PIN_CONFIG_* status byte (0xFF on transfer failure).
     @discardableResult
     func setAdatInputEnable(_ enabled: Bool) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_ADAT_INPUT_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_ADAT_INPUT_ENABLE, value: enabled ? 1 : 0, index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2085,7 +2085,7 @@ extension DSPViewModel {
     /// Returns the firmware PIN_CONFIG_* status byte.
     @discardableResult
     func setAdatInputPin(_ pin: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_ADAT_INPUT_PIN, value: UInt16(pin), index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_ADAT_INPUT_PIN, value: UInt16(pin), index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2108,7 +2108,7 @@ extension DSPViewModel {
     @discardableResult
     func setAdatInputClockMode(_ mode: UInt8) -> UInt8 {
         let clamped: UInt8 = mode == ADAT_INPUT_CLOCK_MODE_SLAVE ? ADAT_INPUT_CLOCK_MODE_SLAVE : ADAT_INPUT_CLOCK_MODE_MASTER
-        if let d = usb.getControlRequest(request: REQ_SET_ADAT_INPUT_CLOCK_MODE, value: UInt16(clamped), index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_ADAT_INPUT_CLOCK_MODE, value: UInt16(clamped), index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2126,7 +2126,7 @@ extension DSPViewModel {
 
     /// Probes GET_INPUT_SOURCE. If the device STALLs (nil), the feature is unsupported.
     func fetchInputSource() {
-        let data = usb.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1)
+        let data = transport.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1)
         DispatchQueue.main.async {
             if let data = data, data.count >= 1 {
                 self.inputSourceSupported = true
@@ -2151,7 +2151,7 @@ extension DSPViewModel {
         // about; a three-input firmware answers short, which is why the pin list
         // is sized from the returned count rather than a fixed length.
         let maxLen = UInt16(2 + SPDIF_RX_NUM_INPUTS)
-        guard let d = usb.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0, index: 2, length: maxLen),
+        guard let d = transport.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0, index: 2, length: maxLen),
               d.count >= 3 else {
             DispatchQueue.main.async {
                 self.multiSpdifSupported = false
@@ -2188,7 +2188,7 @@ extension DSPViewModel {
             self.inputSource = source
         }
 
-        usb.sendControlRequest(request: REQ_SET_INPUT_SOURCE, value: 0, index: 2, data: byte)
+        transport.sendControlRequest(request: REQ_SET_INPUT_SOURCE, value: 0, index: 2, data: byte)
 
         // No follow-up fetch here — the firmware emits an
         // `input_config.input_source` notification at the end of its
@@ -2199,7 +2199,7 @@ extension DSPViewModel {
 
     /// Reads a single S/PDIF input's GPIO pin (default index 0 = input 1).
     func fetchSpdifRxPin(index: Int = 0) {
-        if let data = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(index), index: 2, length: 1),
+        if let data = transport.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(index), index: 2, length: 1),
            data.count >= 1 {
             let pin = data[0]
             DispatchQueue.main.async {
@@ -2217,7 +2217,7 @@ extension DSPViewModel {
     @discardableResult
     func setSpdifRxPin(index: Int = 0, _ pin: UInt8) -> UInt8 {
         let wValue = UInt16((index << 8) | Int(pin))
-        if let d = usb.getControlRequest(request: REQ_SET_SPDIF_RX_PIN, value: wValue, index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_SPDIF_RX_PIN, value: wValue, index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async {
@@ -2237,7 +2237,7 @@ extension DSPViewModel {
     @discardableResult
     func setSpdifInputEnable(index: Int, _ enable: Bool) -> UInt8 {
         let wValue = UInt16((index << 8) | (enable ? 1 : 0))
-        if let d = usb.getControlRequest(request: REQ_SET_SPDIF_INPUT_ENABLE, value: wValue, index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_SPDIF_INPUT_ENABLE, value: wValue, index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS, index >= 1, self.spdifExtEnabled.indices.contains(index - 1) {
@@ -2255,7 +2255,7 @@ extension DSPViewModel {
     /// older firmware; on success we read every stereo pair's data pin, the
     /// active channel count, the shared BCK pin, and the selected input rate.
     func fetchI2SInputConfig() {
-        guard let data = usb.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: 0, index: 2, length: 1),
+        guard let data = transport.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: 0, index: 2, length: 1),
               data.count >= 1 else {
             DispatchQueue.main.async { self.i2sInputSupported = false }
             return
@@ -2267,7 +2267,7 @@ extension DSPViewModel {
         // Extra stereo pairs (RP2350).  Older/stereo firmware returns 0 for
         // pairs it doesn't have; keep the default in that case.
         for pair in 1..<I2S_RX_MAX_PAIRS_RP2350 {
-            if let d = usb.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: UInt16(pair), index: 2, length: 1),
+            if let d = transport.getControlRequest(request: REQ_GET_I2S_RX_PIN, value: UInt16(pair), index: 2, length: 1),
                d.count >= 1, d[0] != 0 {
                 let p = d[0]
                 DispatchQueue.main.async { self.i2sRxPins[pair] = p }
@@ -2282,7 +2282,7 @@ extension DSPViewModel {
     /// Reads the active I2S input channel count (2/4/6/8).  STALLs on firmware
     /// that predates multichannel I2S; leaves the default (2) in that case.
     func fetchI2SInputChannels() {
-        guard let d = usb.getControlRequest(request: REQ_GET_I2S_INPUT_CHANNELS, value: 0, index: 2, length: 1),
+        guard let d = transport.getControlRequest(request: REQ_GET_I2S_INPUT_CHANNELS, value: 0, index: 2, length: 1),
               d.count >= 1, d[0] != 0 else { return }
         let count = Int(d[0])
         DispatchQueue.main.async { self.i2sInputChannels = count }
@@ -2296,7 +2296,7 @@ extension DSPViewModel {
     /// pushes NOTIFY_EVT_INPUT_FORMAT so the channel strips relayout.
     @discardableResult
     func setI2SInputChannels(_ count: Int) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_I2S_INPUT_CHANNELS, value: UInt16(count), index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_I2S_INPUT_CHANNELS, value: UInt16(count), index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2311,7 +2311,7 @@ extension DSPViewModel {
     /// Only the selected I2S rate drives the picker; the current rate is valid
     /// for all sources but we already track it via REQ_GET_STATUS.
     func fetchInputRate() {
-        guard let data = usb.getControlRequest(request: REQ_GET_INPUT_RATE, value: 0, index: 2, length: 8),
+        guard let data = transport.getControlRequest(request: REQ_GET_INPUT_RATE, value: 0, index: 2, length: 8),
               data.count >= 8 else { return }
         let selected: UInt32 = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
         DispatchQueue.main.async { self.i2sInputRateHz = selected }
@@ -2329,7 +2329,7 @@ extension DSPViewModel {
         DispatchQueue.main.async { self.i2sInputRateHz = hz }
         var le = hz.littleEndian
         let payload = withUnsafeBytes(of: &le) { Data($0) }
-        usb.sendControlRequest(request: REQ_SET_INPUT_RATE, value: 0, index: 2, data: payload)
+        transport.sendControlRequest(request: REQ_SET_INPUT_RATE, value: 0, index: 2, data: payload)
     }
 
     /// Sets the GPIO data pin for an I2S RX stereo pair (0..3).  Single IN
@@ -2339,7 +2339,7 @@ extension DSPViewModel {
     @discardableResult
     func setI2SRxPin(pair: Int = 0, _ pin: UInt8) -> UInt8 {
         let wValue = UInt16((pair << 8) | Int(pin))
-        if let d = usb.getControlRequest(request: REQ_SET_I2S_RX_PIN, value: wValue, index: 2, length: 1),
+        if let d = transport.getControlRequest(request: REQ_SET_I2S_RX_PIN, value: wValue, index: 2, length: 1),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -2361,7 +2361,7 @@ extension DSPViewModel {
     /// leaves `i2sClockModeSupported` false so the mode picker hides itself.
     /// On success it also fetches the current slave-lock status.
     func fetchI2SClockMode() {
-        guard let d = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_MODE, value: 0, index: 2, length: 1),
+        guard let d = transport.getControlRequest(request: REQ_GET_I2S_CLOCK_MODE, value: 0, index: 2, length: 1),
               d.count >= 1 else {
             DispatchQueue.main.async { self.i2sClockModeSupported = false }
             return
@@ -2385,7 +2385,7 @@ extension DSPViewModel {
     func setI2SClockMode(_ mode: UInt8) {
         let clamped: UInt8 = mode == I2S_CLOCK_MODE_SLAVE ? I2S_CLOCK_MODE_SLAVE : I2S_CLOCK_MODE_MASTER
         DispatchQueue.main.async { self.i2sClockMode = clamped }
-        usb.sendControlRequest(request: REQ_SET_I2S_CLOCK_MODE, value: 0, index: 2, data: Data([clamped]))
+        transport.sendControlRequest(request: REQ_SET_I2S_CLOCK_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
     /// Reads the 16-byte I2sSlaveStatusPacket via REQ_GET_I2S_SLAVE_STATUS (0x8A)
@@ -2393,7 +2393,7 @@ extension DSPViewModel {
     /// + measured rates).  STALLs on firmware that predates the feature; the live
     /// mode byte it carries also refreshes `i2sClockMode`.
     func fetchI2SSlaveStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+        guard let d = transport.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
               let status = I2sSlaveStatus.fromData(d) else { return }
         DispatchQueue.main.async {
             self.i2sClockModeSupported = true
@@ -2410,7 +2410,7 @@ extension DSPViewModel {
     /// itself.  On success it also reads the stored slave-pair BCK pin (role 1)
     /// so the picker and pin-conflict checks reflect it even while dormant.
     func fetchI2SClockPinMode() {
-        guard let d = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
+        guard let d = transport.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
               d.count >= 1 else {
             DispatchQueue.main.async { self.i2sClockPinModeSupported = false }
             return
@@ -2431,7 +2431,7 @@ extension DSPViewModel {
     /// (beginOutputEdit) for the save flow to pick it up.
     @discardableResult
     func setI2SClockPinMode(_ mode: UInt8) -> UInt8 {
-        if let d = usb.getControlRequest(request: REQ_SET_I2S_CLOCK_PIN_MODE, value: UInt16(mode), index: 2, length: 1) {
+        if let d = transport.getControlRequest(request: REQ_SET_I2S_CLOCK_PIN_MODE, value: UInt16(mode), index: 2, length: 1) {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
                 DispatchQueue.main.async { self.i2sClockPinMode = mode }
@@ -2448,7 +2448,7 @@ extension DSPViewModel {
     /// on firmware that predates this feature; if it returns nil,
     /// `controlInterfacesSupported` stays false and the Settings page hides itself.
     func fetchControlInterfaces() {
-        guard let s = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+        guard let s = transport.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
               let status = CtrlIfaceStatus.fromData(s) else {
             DispatchQueue.main.async { self.controlInterfacesSupported = false }
             return
@@ -2463,14 +2463,14 @@ extension DSPViewModel {
 
     /// Read the live 8-byte UART control-interface config.
     func fetchUartCtrlConfig() {
-        guard let d = usb.getControlRequest(request: REQ_GET_UART_CONFIG, value: 0, index: 2, length: 8),
+        guard let d = transport.getControlRequest(request: REQ_GET_UART_CONFIG, value: 0, index: 2, length: 8),
               let cfg = UartCtrlConfig.fromData(d) else { return }
         DispatchQueue.main.async { self.uartCtrlConfig = cfg }
     }
 
     /// Read the live 8-byte I2C control-interface config.
     func fetchI2cCtrlConfig() {
-        guard let d = usb.getControlRequest(request: REQ_GET_I2C_CONFIG, value: 0, index: 2, length: 8),
+        guard let d = transport.getControlRequest(request: REQ_GET_I2C_CONFIG, value: 0, index: 2, length: 8),
               let cfg = I2cCtrlConfig.fromData(d) else { return }
         DispatchQueue.main.async { self.i2cCtrlConfig = cfg }
     }
@@ -2478,7 +2478,7 @@ extension DSPViewModel {
     /// Read just the interface status (last-apply outcome + live flags).  Cheap
     /// enough to poll after a SET to learn whether the peripheral came up.
     func fetchCtrlIfaceStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+        guard let d = transport.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
               let status = CtrlIfaceStatus.fromData(d) else { return }
         DispatchQueue.main.async { self.ctrlIfaceStatus = status }
     }
@@ -2492,16 +2492,16 @@ extension DSPViewModel {
     /// USB-only command; must be called off the main thread (it blocks).
     @discardableResult
     func setUartCtrlConfig(_ config: UartCtrlConfig) -> UInt8 {
-        let generation = usb.generation
-        usb.sendControlRequest(request: REQ_SET_UART_CONFIG, value: 0, index: 2, data: config.toData())
+        let generation = transport.generation
+        transport.sendControlRequest(request: REQ_SET_UART_CONFIG, value: 0, index: 2, data: config.toData())
         // Deferred apply + ~45 ms flash blackout on the device; wait before reading.
         Thread.sleep(forTimeInterval: 0.25)
         // A device switch during the wait means the SET was dropped (or went
         // to the old device) - don't report the new device's status as ours.
-        guard usb.generation == generation else { return 0xFF }
+        guard transport.generation == generation else { return 0xFF }
         fetchCtrlIfaceStatus()
         fetchUartCtrlConfig()
-        if let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+        if let d = transport.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
            let status = CtrlIfaceStatus.fromData(d) {
             return status.uartLastStatus
         }
@@ -2513,14 +2513,14 @@ extension DSPViewModel {
     /// byte from REQ_GET_CTRL_IFACE_STATUS.  USB-only; call off the main thread.
     @discardableResult
     func setI2cCtrlConfig(_ config: I2cCtrlConfig) -> UInt8 {
-        let generation = usb.generation
-        usb.sendControlRequest(request: REQ_SET_I2C_CONFIG, value: 0, index: 2, data: config.toData())
+        let generation = transport.generation
+        transport.sendControlRequest(request: REQ_SET_I2C_CONFIG, value: 0, index: 2, data: config.toData())
         Thread.sleep(forTimeInterval: 0.25)
         // Same device-scoping as setUartCtrlConfig.
-        guard usb.generation == generation else { return 0xFF }
+        guard transport.generation == generation else { return 0xFF }
         fetchCtrlIfaceStatus()
         fetchI2cCtrlConfig()
-        if let d = usb.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
+        if let d = transport.getControlRequest(request: REQ_GET_CTRL_IFACE_STATUS, value: 0, index: 2, length: 8),
            let status = CtrlIfaceStatus.fromData(d) {
             return status.i2cLastStatus
         }
@@ -2542,7 +2542,7 @@ extension DSPViewModel {
         // truncates the tail that carries the IR, group and macro counts - so
         // those features would read as absent on newer firmware.  The parser
         // locates that tail from `type_count`, never a fixed offset.
-        guard let h = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 64),
+        guard let h = transport.getControlRequest(request: REQ_GET_CS_CAPS, value: CS_CAPS_ALL, index: 2, length: 64),
               let caps = CsCapsHeader.fromData(h) else {
             DispatchQueue.main.async { self.controlSurfacesSupported = false }
             return
@@ -2557,7 +2557,7 @@ extension DSPViewModel {
         // so the noun simply drops out of the menus.
         var nouns: [CsNounDesc] = []
         for n in 0..<Int(caps.nounCount) {
-            let d = usb.getControlRequest(request: REQ_GET_CS_CAPS, value: UInt16(n), index: 2, length: 12)
+            let d = transport.getControlRequest(request: REQ_GET_CS_CAPS, value: UInt16(n), index: 2, length: 12)
             nouns.append(d.flatMap(CsNounDesc.fromData) ?? CsNounDesc())
         }
         DispatchQueue.main.async {
@@ -2605,7 +2605,7 @@ extension DSPViewModel {
     /// Read the live 24-byte binding for one slot into `csBindings[slot]`.
     func fetchCsBinding(slot: Int) {
         guard slot >= 0, slot < CS_MAX_BINDINGS,
-              let d = usb.getControlRequest(request: REQ_GET_CS_BINDING, value: UInt16(slot), index: 2, length: 24),
+              let d = transport.getControlRequest(request: REQ_GET_CS_BINDING, value: UInt16(slot), index: 2, length: 24),
               let bind = CsBinding.fromData(d) else { return }
         DispatchQueue.main.async {
             if slot < self.csBindings.count { self.csBindings[slot] = bind }
@@ -2617,7 +2617,7 @@ extension DSPViewModel {
     /// bytes, NUL-terminated.  Empty when the slot is unnamed.
     func fetchCsName(slot: Int) {
         guard slot >= 0, slot < CS_MAX_BINDINGS,
-              let d = usb.getControlRequest(request: REQ_GET_CS_NAME, value: UInt16(slot), index: 2, length: UInt16(CS_NAME_LEN)) else { return }
+              let d = transport.getControlRequest(request: REQ_GET_CS_NAME, value: UInt16(slot), index: 2, length: UInt16(CS_NAME_LEN)) else { return }
         let name = String(decoding: d.prefix { $0 != 0 }, as: UTF8.self)
         DispatchQueue.main.async {
             if slot < self.csNames.count { self.csNames[slot] = name }
@@ -2627,7 +2627,7 @@ extension DSPViewModel {
     /// Read one live 16-byte IR command sub-slot into `csIrCommands[sub]`.
     func fetchCsIrCommand(sub: Int) {
         guard sub >= 0, sub < CS_MAX_IR_COMMANDS,
-              let d = usb.getControlRequest(request: REQ_GET_CS_IR_CMD, value: UInt16(sub), index: 2, length: 16),
+              let d = transport.getControlRequest(request: REQ_GET_CS_IR_CMD, value: UInt16(sub), index: 2, length: 16),
               let cmd = IrCommand.fromData(d) else { return }
         DispatchQueue.main.async {
             if sub < self.csIrCommands.count { self.csIrCommands[sub] = cmd }
@@ -2639,7 +2639,7 @@ extension DSPViewModel {
     /// ask for the v6 length; older firmware short-reads and CsStatusPacket
     /// parses whichever layout comes back.
     func fetchCsStatus() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: CS_STATUS_LEN),
+        guard let d = transport.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: CS_STATUS_LEN),
               let st = CsStatusPacket.fromData(d) else { return }
         DispatchQueue.main.async { self.csStatus = st }
     }
@@ -2649,14 +2649,14 @@ extension DSPViewModel {
     /// ~500 ms budget (25 x 20 ms) runs out.  Returns the final status code
     /// (0xFF if no readback ever succeeded).  USB-only; blocks - call off-main.
     private func pollCsDeferred(expectedSlot: UInt8) -> UInt8 {
-        let generation = usb.generation
+        let generation = transport.generation
         var result: UInt8 = CS_STATUS_PENDING
         for _ in 0..<25 {
             Thread.sleep(forTimeInterval: 0.02)
             // Stop polling if a device switch lands mid-wait - the new
             // device's status says nothing about our deferred apply.
-            guard usb.generation == generation else { return 0xFF }
-            guard let d = usb.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: CS_STATUS_LEN),
+            guard transport.generation == generation else { return 0xFF }
+            guard let d = transport.getControlRequest(request: REQ_GET_CS_STATUS, value: 0, index: 2, length: CS_STATUS_LEN),
                   let st = CsStatusPacket.fromData(d) else { continue }
             if st.lastSlot == expectedSlot && st.lastStatus != CS_STATUS_PENDING {
                 result = st.lastStatus
@@ -2676,7 +2676,7 @@ extension DSPViewModel {
     /// readback failed).  USB-only; must be called off the main thread (blocks).
     @discardableResult
     func setCsBinding(slot: Int, binding: CsBinding) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_BINDING, value: UInt16(slot), index: 2, data: binding.toData())
+        transport.sendControlRequest(request: REQ_SET_CS_BINDING, value: UInt16(slot), index: 2, data: binding.toData())
         let result = pollCsDeferred(expectedSlot: UInt8(slot))
         fetchCsBinding(slot: slot)
         // An aux slot that appeared, changed kind or went away moves its live
@@ -2697,7 +2697,7 @@ extension DSPViewModel {
         // Truncate to 31 characters + implicit NUL (the firmware truncates too).
         var bytes = Array(name.utf8.prefix(CS_NAME_LEN - 1))
         if bytes.isEmpty { bytes = [0] }   // empty payload is INVALID_VALUE; one NUL clears
-        usb.sendControlRequest(request: REQ_SET_CS_NAME, value: UInt16(slot), index: 2, data: Data(bytes))
+        transport.sendControlRequest(request: REQ_SET_CS_NAME, value: UInt16(slot), index: 2, data: Data(bytes))
         let result = pollCsDeferred(expectedSlot: UInt8(slot))
         fetchCsName(slot: slot)
         fetchCsStatus()
@@ -2710,7 +2710,7 @@ extension DSPViewModel {
     /// status code.  USB-only; must be called off the main thread (blocks).
     @discardableResult
     func setCsIrCommand(sub: Int, command: IrCommand) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_IR_CMD, value: UInt16(sub), index: 2, data: command.toData())
+        transport.sendControlRequest(request: REQ_SET_CS_IR_CMD, value: UInt16(sub), index: 2, data: command.toData())
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_IR_FLAG | UInt8(sub))
         fetchCsIrCommand(sub: sub)
         fetchCsStatus()
@@ -2723,7 +2723,7 @@ extension DSPViewModel {
     /// code.  USB-only; must be called off the main thread (blocks).
     @discardableResult
     func csSave() -> UInt8 {
-        _ = usb.getControlRequest(request: REQ_CS_SAVE, value: 0, index: 2, length: 1)
+        _ = transport.getControlRequest(request: REQ_CS_SAVE, value: 0, index: 2, length: 1)
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_SAVE)
         fetchCsStatus()
         // The live config is now the saved config: rebase the clean baseline so
@@ -2746,7 +2746,7 @@ extension DSPViewModel {
     /// must be called off the main thread (blocks).
     @discardableResult
     func csRevert() -> UInt8 {
-        _ = usb.getControlRequest(request: REQ_CS_REVERT, value: 0, index: 2, length: 1)
+        _ = transport.getControlRequest(request: REQ_CS_REVERT, value: 0, index: 2, length: 1)
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_SAVE)
         for slot in 0..<CS_MAX_BINDINGS {
             fetchCsBinding(slot: slot)
@@ -2788,7 +2788,7 @@ extension DSPViewModel {
     /// Slots that are not an up aux output read zero (aux spec 3.3).  A
     /// pre-v18 device STALLs and the arrays keep their zeros.
     func fetchCsAuxValues() {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_AUX_STATE, value: CS_AUX_STATE_ALL, index: 2, length: 48),
+        guard let d = transport.getControlRequest(request: REQ_GET_CS_AUX_STATE, value: CS_AUX_STATE_ALL, index: 2, length: 48),
               d.count >= 48 else { return }
         let b = d.startIndex
         let states = (0..<CS_MAX_BINDINGS).map { d[b + $0] != 0 }
@@ -2809,7 +2809,7 @@ extension DSPViewModel {
         guard slot >= 0, slot < CS_MAX_BINDINGS else { return }
         self.csAuxState[slot] = on
         guard csAuxSupported else { return }
-        usb.sendControlRequest(request: REQ_SET_CS_AUX_STATE, value: UInt16(slot), index: 2,
+        transport.sendControlRequest(request: REQ_SET_CS_AUX_STATE, value: UInt16(slot), index: 2,
                                data: Data([on ? 1 : 0]))
     }
 
@@ -2820,7 +2820,7 @@ extension DSPViewModel {
         let q8 = UInt16(min(Float(CS_AUX_LEVEL_MAX_Q8), max(0, (percent * 256).rounded())))
         self.csAuxLevel[slot] = q8
         guard csAuxSupported else { return }
-        usb.sendControlRequest(request: REQ_SET_CS_AUX_LEVEL, value: UInt16(slot), index: 2,
+        transport.sendControlRequest(request: REQ_SET_CS_AUX_LEVEL, value: UInt16(slot), index: 2,
                                data: Data([UInt8(q8 & 0xFF), UInt8(q8 >> 8)]))
     }
 
@@ -2829,7 +2829,7 @@ extension DSPViewModel {
     /// Read one live 40-byte group record into `csGroups[index]`.
     func fetchCsGroup(_ index: Int) {
         guard index >= 0, index < CS_MAX_GROUPS,
-              let d = usb.getControlRequest(request: REQ_GET_CS_GROUP, value: UInt16(index), index: 2, length: CS_GROUP_LEN),
+              let d = transport.getControlRequest(request: REQ_GET_CS_GROUP, value: UInt16(index), index: 2, length: CS_GROUP_LEN),
               let group = CsGroup.fromData(d) else { return }
         DispatchQueue.main.async {
             if index < self.csGroups.count { self.csGroups[index] = group }
@@ -2841,7 +2841,7 @@ extension DSPViewModel {
     /// has to be split into a header plus one write per step.
     func fetchCsMacro(_ index: Int) {
         guard index >= 0, index < CS_MAX_MACROS,
-              let d = usb.getControlRequest(request: REQ_GET_CS_MACRO, value: UInt16(index), index: 2, length: CS_MACRO_LEN),
+              let d = transport.getControlRequest(request: REQ_GET_CS_MACRO, value: UInt16(index), index: 2, length: CS_MACRO_LEN),
               let macro = CsMacro.fromData(d) else { return }
         DispatchQueue.main.async {
             if index < self.csMacros.count { self.csMacros[index] = macro }
@@ -2855,7 +2855,7 @@ extension DSPViewModel {
     /// @Published copy it just scheduled onto the main thread.
     @discardableResult
     func fetchCsExtStatus() -> CsExtStatusPacket? {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_EXT_STATUS, value: 0, index: 2, length: CS_EXT_STATUS_LEN),
+        guard let d = transport.getControlRequest(request: REQ_GET_CS_EXT_STATUS, value: 0, index: 2, length: CS_EXT_STATUS_LEN),
               let st = CsExtStatusPacket.fromData(d) else { return nil }
         DispatchQueue.main.async { self.csExtStatus = st }
         return st
@@ -2869,7 +2869,7 @@ extension DSPViewModel {
     /// Returns the status code.  USB-only; must be called off the main thread.
     @discardableResult
     func setCsGroup(_ index: Int, group: CsGroup) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_GROUP, value: UInt16(index), index: 2, data: group.toData())
+        transport.sendControlRequest(request: REQ_SET_CS_GROUP, value: UInt16(index), index: 2, data: group.toData())
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_GROUP_FLAG | UInt8(index))
         fetchCsGroup(index)
         for slot in 0..<CS_MAX_BINDINGS { fetchCsBinding(slot: slot) }
@@ -2884,14 +2884,14 @@ extension DSPViewModel {
     @discardableResult
     func setCsMacroStep(macro: Int, step: Int, value: CsMacroStep) -> UInt8 {
         let wValue = UInt16(step << 8) | UInt16(macro)
-        usb.sendControlRequest(request: REQ_SET_CS_MACRO_STEP, value: wValue, index: 2, data: value.toData())
+        transport.sendControlRequest(request: REQ_SET_CS_MACRO_STEP, value: wValue, index: 2, data: value.toData())
         return pollCsDeferred(expectedSlot: CS_LAST_SLOT_MACRO_FLAG | UInt8(macro))
     }
 
     /// Apply one macro's name and step count (the 36-byte header).
     @discardableResult
     func setCsMacroHeader(_ index: Int, macro: CsMacro) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_MACRO, value: UInt16(index), index: 2, data: macro.headerData())
+        transport.sendControlRequest(request: REQ_SET_CS_MACRO, value: UInt16(index), index: 2, data: macro.headerData())
         return pollCsDeferred(expectedSlot: CS_LAST_SLOT_MACRO_FLAG | UInt8(index))
     }
 
@@ -2921,7 +2921,7 @@ extension DSPViewModel {
     /// while another macro runs cancels that one at its current step boundary.
     @discardableResult
     func csMacroFire(_ index: UInt16) -> UInt8 {
-        let r = usb.getControlRequest(request: REQ_CS_MACRO_FIRE, value: index, index: 2, length: 1)
+        let r = transport.getControlRequest(request: REQ_CS_MACRO_FIRE, value: index, index: 2, length: 1)
         fetchCsExtStatus()
         return r?.first ?? CS_STATUS_INVALID_MACRO
     }
@@ -2933,7 +2933,7 @@ extension DSPViewModel {
     /// header followed by the 12-byte config.
     @discardableResult
     func fetchCsDisplayCfg() -> UInt8 {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_CFG, value: 0, index: 2,
+        guard let d = transport.getControlRequest(request: REQ_GET_CS_DISPLAY_CFG, value: 0, index: 2,
                                             length: CS_DISPLAY_CFG_GET_LEN),
               d.count >= Int(CS_DISPLAY_CFG_GET_LEN),
               let cfg = CsDisplayCfg.fromData(d, offset: 4) else { return 0 }
@@ -2950,7 +2950,7 @@ extension DSPViewModel {
     /// Read one 4-byte page record into `csDisplayPages[index]`.
     func fetchCsDisplayPage(_ index: Int) {
         guard index >= 0, index < CS_MAX_DISPLAY_PAGES,
-              let d = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_PAGE, value: UInt16(index),
+              let d = transport.getControlRequest(request: REQ_GET_CS_DISPLAY_PAGE, value: UInt16(index),
                                             index: 2, length: CS_DISPLAY_PAGE_LEN),
               let page = CsDisplayPage.fromData(d) else { return }
         DispatchQueue.main.async {
@@ -2962,7 +2962,7 @@ extension DSPViewModel {
     /// and the running I2C abort count.
     @discardableResult
     func fetchCsDisplayStatus() -> CsDisplayStatus? {
-        guard let d = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_STATUS, value: 0, index: 2,
+        guard let d = transport.getControlRequest(request: REQ_GET_CS_DISPLAY_STATUS, value: 0, index: 2,
                                             length: CS_DISPLAY_STATUS_LEN),
               let st = CsDisplayStatus.fromData(d) else { return nil }
         DispatchQueue.main.async { self.csDisplayStatus = st }
@@ -2985,7 +2985,7 @@ extension DSPViewModel {
     /// The write itself.  Assumes the caller already holds `displaySetQueue`;
     /// `setCsDisplayCfg` takes it, and `queueDisplayCfg` runs on it.
     private func performDisplayCfgSet(_ cfg: CsDisplayCfg) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_DISPLAY_CFG, value: 0, index: 2, data: cfg.toData())
+        transport.sendControlRequest(request: REQ_SET_CS_DISPLAY_CFG, value: 0, index: 2, data: cfg.toData())
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_DISPLAY_FLAG)
         fetchCsDisplayCfg()
         fetchCsStatus()
@@ -3033,7 +3033,7 @@ extension DSPViewModel {
     }
 
     private func performDisplayPageSet(_ index: Int, page: CsDisplayPage) -> UInt8 {
-        usb.sendControlRequest(request: REQ_SET_CS_DISPLAY_PAGE, value: UInt16(index), index: 2,
+        transport.sendControlRequest(request: REQ_SET_CS_DISPLAY_PAGE, value: UInt16(index), index: 2,
                                data: page.toData())
         let result = pollCsDeferred(expectedSlot: CS_LAST_SLOT_DISPLAY_FLAG | UInt8(index))
         fetchCsDisplayPage(index)
@@ -3048,19 +3048,19 @@ extension DSPViewModel {
     /// if it STALLs (no live IR component -> CS_STATUS_NO_IR).  USB-only.
     @discardableResult
     func csIrLearnArm() -> Bool {
-        usb.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_ARM, index: 2, length: 1) != nil
+        transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_ARM, index: 2, length: 1) != nil
     }
 
     /// Cancel an armed IR learn (REQ_CS_IR_LEARN wValue=0); state returns to idle.
     func csIrLearnCancel() {
-        _ = usb.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_CANCEL, index: 2, length: 1)
+        _ = transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_CANCEL, index: 2, length: 1)
     }
 
     /// Read the current IR learn result (REQ_CS_IR_LEARN wValue=2 -> 8 bytes;
     /// spec §3.6.1): the state and, when done, the captured protocol + code.
     /// USB-only; safe to poll while armed.
     func csIrLearnRead() -> CsIrLearnResult? {
-        guard let d = usb.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_READ, index: 2, length: 8) else { return nil }
+        guard let d = transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_READ, index: 2, length: 8) else { return nil }
         return CsIrLearnResult.fromData(d)
     }
 
@@ -3073,20 +3073,20 @@ extension DSPViewModel {
     /// (the authoritative parameter ranges/defaults, spec §3.4) plus the
     /// applied config and status, and seed the editing draft.
     func fetchSiggen() {
-        guard let h = usb.getControlRequest(request: REQ_SIGGEN_GET_CAPS, value: SIGGEN_CAPS_HEADER, index: 2, length: 8),
+        guard let h = transport.getControlRequest(request: REQ_SIGGEN_GET_CAPS, value: SIGGEN_CAPS_HEADER, index: 2, length: 8),
               let caps = SiggenCapsHeader.fromData(h) else {
             DispatchQueue.main.async { self.siggenSupported = false }
             return
         }
         var descs: [SiggenTypeDesc] = []
         for t in 0..<Int(caps.typeCount) {
-            guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_CAPS, value: UInt16(t), index: 2, length: 62),
+            guard let d = transport.getControlRequest(request: REQ_SIGGEN_GET_CAPS, value: UInt16(t), index: 2, length: 62),
                   let desc = SiggenTypeDesc.fromData(d) else { continue }
             descs.append(desc)
         }
         // The applied config: a zeroed struct (channelMask == 0) means
         // nothing was ever staged - keep the local draft in that case.
-        let applied = usb.getControlRequest(request: REQ_SIGGEN_GET_CONFIG, value: 0, index: 2, length: 36)
+        let applied = transport.getControlRequest(request: REQ_SIGGEN_GET_CONFIG, value: 0, index: 2, length: 36)
             .flatMap(SiggenConfig.fromData)
         DispatchQueue.main.async {
             self.siggenSupported = true
@@ -3106,7 +3106,7 @@ extension DSPViewModel {
     /// Read the 16-byte live status (state, elapsed, cycles, sweep freq)
     /// into `siggenStatus`.  Cheap enough to poll while running.
     func fetchSiggenStatus() {
-        guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_STATUS, value: 0, index: 2, length: 16),
+        guard let d = transport.getControlRequest(request: REQ_SIGGEN_GET_STATUS, value: 0, index: 2, length: 16),
               let st = SiggenStatus.fromData(d) else { return }
         DispatchQueue.main.async { self.siggenStatus = st }
     }
@@ -3115,7 +3115,7 @@ extension DSPViewModel {
     /// is already running the firmware restarts it with a fade
     /// (stop_reason = RECONFIG), which is what makes live editing safe.
     func siggenSetConfig(_ cfg: SiggenConfig) {
-        usb.sendControlRequest(request: REQ_SIGGEN_SET_CONFIG, value: 0, index: 2, data: cfg.toData())
+        transport.sendControlRequest(request: REQ_SIGGEN_SET_CONFIG, value: 0, index: 2, data: cfg.toData())
     }
 
     /// Issue a parameterless transport action (write-as-read: an IN transfer
@@ -3124,7 +3124,7 @@ extension DSPViewModel {
     /// config).  Blocks; call off the main thread.
     @discardableResult
     func siggenControl(_ action: UInt16) -> Bool {
-        guard let d = usb.getControlRequest(request: REQ_SIGGEN_CONTROL, value: action, index: 2, length: 1),
+        guard let d = transport.getControlRequest(request: REQ_SIGGEN_CONTROL, value: action, index: 2, length: 1),
               d.first == 1 else { return false }
         return true
     }
@@ -3184,9 +3184,9 @@ extension DSPViewModel {
     /// true on a valid V16 payload, false otherwise.
     @discardableResult
     func fetchAllParams(markDisconnectedOnFailure: Bool = true) -> Bool {
-        guard let data = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE) else {
+        guard let data = transport.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE) else {
             if markDisconnectedOnFailure {
-                DispatchQueue.main.async { self.usb.isConnected = false }
+                self.transport.markDisconnected()
             }
             return false
         }
@@ -3642,7 +3642,7 @@ extension DSPViewModel {
 
     @discardableResult
     func fetchPresetDirectory() -> UInt16 {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 7),
+        guard let data = transport.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 7),
               data.count >= 6 else { return 0 }
         let occupied = data.withUnsafeBytes { $0.load(as: UInt16.self) }
         let startupMode = Int(data[2])
@@ -3675,7 +3675,7 @@ extension DSPViewModel {
     }
 
     func fetchPresetName(slot: Int) {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_NAME, value: UInt16(slot), index: 2, length: 32) else {
+        guard let data = transport.getControlRequest(request: REQ_PRESET_GET_NAME, value: UInt16(slot), index: 2, length: 32) else {
             DispatchQueue.main.async {
                 self.presetNames[slot] = ""
             }
@@ -3693,7 +3693,7 @@ extension DSPViewModel {
     }
 
     func fetchPresetActive() {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_ACTIVE, value: 0, index: 2, length: 1) else { return }
+        guard let data = transport.getControlRequest(request: REQ_PRESET_GET_ACTIVE, value: 0, index: 2, length: 1) else { return }
         DispatchQueue.main.async {
             self.activePresetSlot = Int(data[0])
         }
@@ -3701,7 +3701,7 @@ extension DSPViewModel {
 
     @discardableResult
     func savePreset(slot: Int) -> UInt8 {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_SAVE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
+        guard let data = transport.getControlRequest(request: REQ_PRESET_SAVE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
         let status = data[0]
         if status == PRESET_OK {
             DispatchQueue.main.async {
@@ -3733,14 +3733,14 @@ extension DSPViewModel {
     /// Returns PRESET_OK on success, an error code on failure.
     @discardableResult
     func copyPreset(from sourceSlot: Int, to destinationSlot: Int) -> UInt8 {
-        let generation = usb.generation
+        let generation = transport.generation
         let dstStatus = savePreset(slot: destinationSlot)
         guard dstStatus == PRESET_OK else { return dstStatus }
         guard waitForPresetActivation(slot: destinationSlot) else { return 0xFF }
 
         // A device switch during the deferred wait must not let the source
         // re-save (which also moves last_active) run against the new device.
-        guard usb.generation == generation else { return 0xFF }
+        guard transport.generation == generation else { return 0xFF }
 
         let srcStatus = savePreset(slot: sourceSlot)
         guard srcStatus == PRESET_OK else { return srcStatus }
@@ -3757,7 +3757,7 @@ extension DSPViewModel {
         // a second bulk read of the state we are already fetching.  Armed
         // before the request so the notification can never beat it.
         suppressDeviceResync()
-        guard let status = usb.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1)?.first else {
+        guard let status = transport.getControlRequest(request: REQ_PRESET_LOAD, value: UInt16(slot), index: 2, length: 1)?.first else {
             // nil = USB request failed; empty Data = device returned no status
             // byte (e.g. it reset/disconnected mid-transfer).  Treat both as a
             // failure rather than indexing [0] on an empty buffer (which traps).
@@ -3805,7 +3805,7 @@ extension DSPViewModel {
     private func waitForPresetActivation(slot: Int, timeout: TimeInterval = 1.5) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let data = usb.getControlRequest(request: REQ_PRESET_GET_ACTIVE, value: 0, index: 2, length: 1),
+            if let data = transport.getControlRequest(request: REQ_PRESET_GET_ACTIVE, value: 0, index: 2, length: 1),
                data.count >= 1,
                Int(data[0]) == slot {
                 return true
@@ -3817,7 +3817,7 @@ extension DSPViewModel {
 
     @discardableResult
     func deletePreset(slot: Int) -> UInt8 {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_DELETE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
+        guard let data = transport.getControlRequest(request: REQ_PRESET_DELETE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
         let status = data[0]
         if status == PRESET_OK {
             DispatchQueue.main.async {
@@ -3844,7 +3844,7 @@ extension DSPViewModel {
     func waitForPresetDeletion(slot: Int, timeout: TimeInterval = 1.5) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let data = usb.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 7),
+            if let data = transport.getControlRequest(request: REQ_PRESET_GET_DIR, value: 0, index: 2, length: 7),
                data.count >= 2 {
                 let occupied = UInt16(data[0]) | (UInt16(data[1]) << 8)
                 if (occupied & UInt16(1 << slot)) == 0 {
@@ -3859,7 +3859,7 @@ extension DSPViewModel {
     func setPresetName(slot: Int, name: String) {
         var nameData = Data(name.prefix(31).utf8)
         nameData.append(0) // NUL terminator
-        usb.sendControlRequest(request: REQ_PRESET_SET_NAME, value: UInt16(slot), index: 2, data: nameData)
+        transport.sendControlRequest(request: REQ_PRESET_SET_NAME, value: UInt16(slot), index: 2, data: nameData)
         DispatchQueue.main.async {
             self.presetNames[slot] = String(name.prefix(31))
         }
@@ -3871,11 +3871,11 @@ extension DSPViewModel {
             self.presetStartupMode = mode
             self.presetDefaultSlot = defaultSlot
         }
-        usb.sendControlRequest(request: REQ_PRESET_SET_STARTUP, value: 0, index: 2, data: data)
+        transport.sendControlRequest(request: REQ_PRESET_SET_STARTUP, value: 0, index: 2, data: data)
     }
 
     func fetchPresetStartup() {
-        guard let data = usb.getControlRequest(request: REQ_PRESET_GET_STARTUP, value: 0, index: 2, length: 3),
+        guard let data = transport.getControlRequest(request: REQ_PRESET_GET_STARTUP, value: 0, index: 2, length: 3),
               data.count >= 3 else { return }
         DispatchQueue.main.async {
             self.presetStartupMode = Int(data[0])
@@ -3896,11 +3896,11 @@ extension DSPViewModel {
         let normalized = (Int(clamped) == OUTPUT_CONFIG_MODE_WITH_PRESET) ? OUTPUT_CONFIG_MODE_WITH_PRESET
                                                                           : OUTPUT_CONFIG_MODE_INDEPENDENT
         DispatchQueue.main.async { self.presetOutputConfigMode = normalized }
-        usb.sendControlRequest(request: REQ_SET_OUTPUT_CONFIG_MODE, value: 0, index: 2, data: Data([clamped]))
+        transport.sendControlRequest(request: REQ_SET_OUTPUT_CONFIG_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
     func fetchOutputConfigMode() {
-        guard let data = usb.getControlRequest(request: REQ_GET_OUTPUT_CONFIG_MODE, value: 0, index: 2, length: 1) else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_OUTPUT_CONFIG_MODE, value: 0, index: 2, length: 1) else { return }
         let val = Int(data[0])
         DispatchQueue.main.async {
             self.presetOutputConfigMode = (val == OUTPUT_CONFIG_MODE_WITH_PRESET) ? OUTPUT_CONFIG_MODE_WITH_PRESET
@@ -3917,7 +3917,7 @@ extension DSPViewModel {
     /// true on success, false if the device disconnected or the transfer failed.
     @discardableResult
     func saveOutputConfig() -> Bool {
-        guard let data = usb.getControlRequest(request: REQ_SAVE_OUTPUT_CONFIG, value: 0, index: 2, length: 1) else {
+        guard let data = transport.getControlRequest(request: REQ_SAVE_OUTPUT_CONFIG, value: 0, index: 2, length: 1) else {
             return false
         }
         return data.first == 0  // PRESET_OK
@@ -3929,14 +3929,14 @@ extension DSPViewModel {
         var nameData = Data(count: 32)  // Always send full 32-byte buffer, zero-padded
         let utf8 = Data(name.prefix(31).utf8)
         nameData.replaceSubrange(0..<utf8.count, with: utf8)
-        usb.sendControlRequest(request: REQ_SET_CHANNEL_NAME, value: UInt16(channel), index: 2, data: nameData)
+        transport.sendControlRequest(request: REQ_SET_CHANNEL_NAME, value: UInt16(channel), index: 2, data: nameData)
         DispatchQueue.main.async {
             self.channelNames[channel] = String(name.prefix(31))
         }
     }
 
     func fetchChannelName(channel: Int) {
-        guard let data = usb.getControlRequest(request: REQ_GET_CHANNEL_NAME, value: UInt16(channel), index: 2, length: 32) else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_CHANNEL_NAME, value: UInt16(channel), index: 2, length: 32) else { return }
         let name: String
         if let nulIndex = data.firstIndex(of: 0) {
             name = String(data: data[0..<nulIndex], encoding: .ascii) ?? ""
@@ -4271,7 +4271,7 @@ extension DSPViewModel {
 
     func saveParams() -> UInt8 {
         guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        if let data = usb.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1) {
+        if let data = transport.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1) {
             return data[0]
         }
         return FLASH_ERR_WRITE
@@ -4304,7 +4304,7 @@ extension DSPViewModel {
         // fetchAll() below covers the rewrite; drop the device's own
         // BULK_INVALIDATED(source=FACTORY) so it doesn't duplicate that work.
         suppressDeviceResync()
-        if let data = usb.getControlRequest(request: REQ_FACTORY_RESET, value: 0, index: 0, length: 1) {
+        if let data = transport.getControlRequest(request: REQ_FACTORY_RESET, value: 0, index: 0, length: 1) {
             let result = data[0]
             if result == FLASH_OK {
                 // Re-fetch all params to update UI

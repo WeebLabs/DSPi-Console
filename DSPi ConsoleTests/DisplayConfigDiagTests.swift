@@ -21,7 +21,7 @@ final class DisplayConfigDiagTests: XCTestCase {
 
     func testOverlayAnyFlagRoundTripsThroughTheDevice() throws {
         let usb = try HardwareTest.requireDevice()
-        let vm = DSPViewModel(usb: usb)
+        let vm = DSPViewModel(transport: usb)
         vm.fetchControlSurfaces()
         settle(1.0)
 

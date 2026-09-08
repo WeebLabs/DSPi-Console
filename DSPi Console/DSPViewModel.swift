@@ -2403,7 +2403,7 @@ class DSPViewModel: ObservableObject {
     var pendingDisplayCfg: CsDisplayCfg?
     var pendingDisplayPages: [Int: CsDisplayPage] = [:]
 
-    let usb: USBDevice
+    let transport: any DeviceTransport
     private var cancellables = Set<AnyCancellable>()
     private var pollTimer: DispatchSourceTimer?
     private let pollQueue = DispatchQueue(label: "com.foxdac.poll", qos: .userInteractive)
@@ -2467,11 +2467,11 @@ class DSPViewModel: ObservableObject {
 
         // A device switch mid-flight must not apply the old unit's parameters
         // to the new one's UI.
-        let generation = usb.generation
+        let generation = transport.generation
         pollQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self else { return }
             var fetched = false
-            if self.usb.generation == generation, self.isDeviceConnected,
+            if self.transport.generation == generation, self.isDeviceConnected,
                self.fetchAllParams(markDisconnectedOnFailure: false) {
                 _ = self.fetchPresetDirectory()
                 self.fetchPresetActive()
@@ -2483,7 +2483,7 @@ class DSPViewModel: ObservableObject {
             // guarantees it, same as the preset-load path.
             DispatchQueue.main.async {
                 self.resyncInFlight = false
-                guard self.usb.generation == generation else {
+                guard self.transport.generation == generation else {
                     self.resyncQueuedAgain = false
                     self.resyncRebasesSnapshot = false
                     return
@@ -2506,9 +2506,9 @@ class DSPViewModel: ObservableObject {
     /// survives the device idling to USB alt 0.  Drives `hostConfiguredInputChannels`.
     private let hostAudioFormatMonitor = HostAudioFormatMonitor()
 
-    init(usb: USBDevice = AppState.shared.usb) {
-        self.usb = usb
-        self.rta = RtaEngine(usb: usb)
+    init(transport: any DeviceTransport = AppState.shared.usb) {
+        self.transport = transport
+        self.rta = RtaEngine(transport: transport)
 
         // Initialize Default Data (V16 unified model: inputs 0..chOut1-1 are
         // first-class EQ channels; outputs chOut1..numChannels-1 add crossover).
@@ -2532,18 +2532,17 @@ class DSPViewModel: ObservableObject {
 
         recomputeAllMagnitudes()
 
-        // Mirror non-host change notifications back into UI.  Host-
-        // originated edits (PARAM_SRC_HOST_SET == 1, our own EP0
-        // REQ_SET_* writes) already update local state synchronously at
-        // the setter call site (e.g. setChannelName, setUserVolume), so
-        // we ignore source==HOST to avoid clobbering an in-flight edit
-        // with its own stale notification echo.  Every other source is
-        // the real payload we care about — in particular
-        // PARAM_SRC_UAC1 (7), the OS volume slider writing user_volume
-        // over UAC1, plus BULK / PRESET / FACTORY / GPIO / INTERNAL.
-        AppState.shared.interruptMonitor.onParamChanged = { [weak self] offset, size, source, payload in
-            guard source != 1 /* PARAM_SRC_HOST_SET */ else { return }
-            self?.applyNotifiedParamChange(offset: offset, size: size, payload: payload)
+        // Mirror change notifications back into UI, except the echoes of our
+        // own writes: those already updated local state synchronously at the
+        // setter call site (e.g. setChannelName, setUserVolume), and applying
+        // the stale echo would clobber an in-flight edit.  "Ours" is decided
+        // by the session the transport attributes the change to, not by the
+        // firmware's source byte: on USB every HOST_SET is ours, but through
+        // a DSPi Link hub a HOST_SET may be another client's write, which we
+        // must apply like a knob turn or the OS volume slider (PARAM_SRC_UAC1).
+        AppState.shared.interruptMonitor.onParamChanged = { [weak self] offset, size, source, origin, payload in
+            guard let self = self, origin != self.transport.session else { return }
+            self.applyNotifiedParamChange(offset: offset, size: size, payload: payload)
         }
 
         // The host switched USB input format — update the live active input
@@ -2659,7 +2658,7 @@ class DSPViewModel: ObservableObject {
         }
 
         // 1. Subscribe to USB connection changes AND Trigger Fetch
-        usb.$isConnected
+        transport.isConnectedPublisher
             .receive(on: RunLoop.main)
             .sink { [weak self] connected in
                 // One animated transaction for the whole connection change:
@@ -2701,21 +2700,21 @@ class DSPViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Forward device list and selection from USBDevice
-        usb.$availableDevices
+        transport.availableDevicesPublisher
             .receive(on: RunLoop.main)
             .assign(to: &$availableDevices)
 
-        usb.$selectedDevice
+        transport.selectedDevicePublisher
             .receive(on: RunLoop.main)
             .assign(to: &$selectedDevice)
 
-        usb.$errorMessage
+        transport.errorMessagePublisher
             .receive(on: RunLoop.main)
             .assign(to: &$connectionError)
 
         // Keep the CoreAudio format monitor pinned to the selected unit so a
         // multi-device setup doesn't report another DSPi's host format.
-        usb.$selectedDevice
+        transport.selectedDevicePublisher
             .receive(on: RunLoop.main)
             .sink { [weak self] device in
                 self?.hostAudioFormatMonitor.setPreferredSerial(device?.serial)
@@ -2747,7 +2746,7 @@ class DSPViewModel: ObservableObject {
         pollTimer = timer
 
         // Initial Connect attempt
-        usb.reconnect()
+        transport.reconnect()
     }
 
     /// Pill states as they were on the dashboard, stashed when a channel page
@@ -3018,17 +3017,17 @@ class DSPViewModel: ObservableObject {
                         return
                     }
                     self.savedSnapshot = nil
-                    self.usb.selectDevice(device)
+                    self.transport.selectDevice(device)
                 }
             case .discard:
                 savedSnapshot = nil
-                usb.selectDevice(device)
+                transport.selectDevice(device)
             case .cancel:
                 return
             }
         } else {
             savedSnapshot = nil
-            usb.selectDevice(device)
+            transport.selectDevice(device)
         }
     }
 

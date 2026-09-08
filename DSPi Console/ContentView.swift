@@ -98,9 +98,9 @@ struct ContentView: View {
             // Bind to the device the rename was typed against: a switch
             // landing before the block runs must not rename the new device's
             // channel.
-            let generation = vm.usb.generation
+            let generation = vm.transport.generation
             DispatchQueue.global(qos: .userInitiated).async {
-                guard vm.usb.generation == generation else { return }
+                guard vm.transport.generation == generation else { return }
                 vm.setChannelName(channel: idx, name: trimmed)
             }
         }
@@ -209,7 +209,7 @@ struct ContentView: View {
 
         // Scope the whole flow to the device it started on - the deferred
         // flash saves give a device switch time to land mid-flow.
-        let generation = vm.usb.generation
+        let generation = vm.transport.generation
         DispatchQueue.global(qos: .userInitiated).async {
             // Pre-op: align live state to source-slot semantics if needed.
             switch preOp {
@@ -224,7 +224,7 @@ struct ContentView: View {
                 break
             }
 
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
 
             // Default the destination's name if it has none yet, so the
             // dropdown stops showing "Empty" for it post-copy.  We don't
@@ -239,7 +239,7 @@ struct ContentView: View {
             // writes instead of the second one overwriting the first's
             // pending slot before main-loop dispatch.
             let status = vm.copyPreset(from: sourceSlot, to: destinationSlot)
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
             guard status == PRESET_OK else {
                 DispatchQueue.main.async {
                     let alert = NSAlert()
@@ -268,7 +268,7 @@ struct ContentView: View {
             // Scope the whole flow to the device it started on: the flash
             // wait is long enough for a device switch to land mid-flow, and
             // the follow-up reload must never run against the new device.
-            let generation = vm.usb.generation
+            let generation = vm.transport.generation
             let status = vm.deletePreset(slot: slot)
             if status == PRESET_OK {
                 // Wait for the firmware's deferred delete to complete before
@@ -279,7 +279,7 @@ struct ContentView: View {
                 // slot name during preset_delete itself, so we don't need a
                 // separate setPresetName(slot, "") call.
                 _ = vm.waitForPresetDeletion(slot: slot)
-                if vm.usb.generation == generation {
+                if vm.transport.generation == generation {
                     vm.fetchPresetDirectory()
                     // If we cleared the active slot, reload it to apply factory defaults
                     if vm.activePresetSlot == slot {
@@ -314,7 +314,7 @@ struct ContentView: View {
             // Scope the whole flow to the device it started on (see the
             // single-slot clear above) - with up to 10 slots to drain, this
             // is the longest window for a mid-flow device switch.
-            let generation = vm.usb.generation
+            let generation = vm.transport.generation
             // Enqueue a delete for every occupied slot — firmware accumulates
             // them all into preset_delete_mask and processes them in a single
             // main-loop pass.  Wait once for everything to drain by polling
@@ -327,7 +327,7 @@ struct ContentView: View {
             for slot in toDelete {
                 _ = vm.waitForPresetDeletion(slot: slot)
             }
-            guard vm.usb.generation == generation else { return }
+            guard vm.transport.generation == generation else { return }
             vm.fetchPresetDirectory()
             // Reload active slot to apply factory defaults.
             _ = vm.loadPreset(slot: vm.activePresetSlot)
@@ -509,7 +509,7 @@ struct ContentView: View {
                             icon: "info.circle",
                             isActive: statsController.isVisible,
                             tooltip: "Stats for Nerbs",
-                            action: { statsController.toggle(usb: vm.usb) }
+                            action: { statsController.toggle(transport: vm.transport) }
                         )
 
                         SidebarIconButton(
@@ -1016,7 +1016,7 @@ struct ContentView: View {
 extension DSPViewModel {
     /// Creates a preview-safe view model with mock data (no USB connection)
     static var preview: DSPViewModel {
-        let vm = DSPViewModel(usb: USBDevice())
+        let vm = DSPViewModel(transport: USBDevice())
         vm.isDeviceConnected = true
         vm.preampDB = [-3.0, -3.0]
         vm.meters.status = SystemStatus(peaks: [0.6, 0.55, 0.4, 0.35, 0.25], cpu0: 42, cpu1: 38)
