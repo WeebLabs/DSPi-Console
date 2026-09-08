@@ -364,11 +364,13 @@ final class LinkSessionHandler {
 
     private func idOf(_ message: LinkMessage) -> Int? { message.id }
 
-    private static let capabilities: [String] = [
-        LinkCapability.cmd.rawValue, LinkCapability.notify.rawValue,
-        LinkCapability.poll.rawValue, LinkCapability.snapshot.rawValue,
-        LinkCapability.lock.rawValue, LinkCapability.rename.rawValue
-    ]
+    private static var capabilities: [String] {
+        var caps = [LinkCapability.cmd.rawValue, LinkCapability.notify.rawValue,
+                    LinkCapability.poll.rawValue, LinkCapability.snapshot.rawValue,
+                    LinkCapability.lock.rawValue, LinkCapability.rename.rawValue]
+        if LinkWebBundle.isPresent { caps.append(LinkCapability.web.rawValue) }
+        return caps
+    }
 
     private static var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"

@@ -205,6 +205,9 @@ private final class LinkHTTPHandler: ChannelInboundHandler, RemovableChannelHand
                                    ("Access-Control-Allow-Origin", "*")])
         } else if path == "/dspi/v1" {
             respond(context: context, status: .badRequest, body: nil)
+        } else if head.method == .GET, let (body, type) = LinkWebBundle.file(for: path) {
+            respond(context: context, status: .ok, body: body,
+                    extraHeaders: [("Content-Type", type), ("Cache-Control", "no-cache")])
         } else {
             respond(context: context, status: .notFound, body: nil)
         }
@@ -221,6 +224,7 @@ private final class LinkHTTPHandler: ChannelInboundHandler, RemovableChannelHand
             "auth": auth.authMode.rawValue,
             "tls": false,
             "ws": "/dspi/v1",
+            "web": LinkWebBundle.isPresent,
             "devices": devices,
         ]
         return (try? JSONSerialization.data(withJSONObject: info)) ?? Data("{}".utf8)
@@ -429,3 +433,42 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
 // The network service starts and stops this server; the protocol lets the
 // service build and test without NIO present.
 extension LinkServer: LinkServing {}
+
+
+// MARK: - Web bundle
+
+/// The browser UI the hub serves at `/`: the built `dspi-link-js` web app,
+/// shipped inside the app bundle as a `Web` folder.  Files are looked up by
+/// name within that folder only, and only for the types a static site is
+/// made of, so nothing else in the app bundle is reachable over HTTP.
+enum LinkWebBundle {
+    private static let allowedTypes: [String: String] = [
+        "html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8",
+        "css": "text/css; charset=utf-8", "json": "application/json",
+        "svg": "image/svg+xml", "png": "image/png", "ico": "image/x-icon",
+        "woff2": "font/woff2", "map": "application/json", "webmanifest": "application/manifest+json",
+    ]
+
+    static var isPresent: Bool { file(for: "/") != nil }
+
+    /// Resolve a request path to a bundled file and its content type.  `/`
+    /// and any path without an extension serve index.html (the app routes on
+    /// the client).  Path components are validated so `..` cannot escape.
+    /// `bundle` is injectable for tests.
+    static func file(for path: String, in bundle: Bundle = .main) -> (Data, String)? {
+        var name = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        if name.isEmpty || !name.contains(".") { name = "index.html" }
+        let parts = name.split(separator: "/").map(String.init)
+        guard !parts.contains(".."), !parts.contains(where: { $0.hasPrefix(".") }) else { return nil }
+        let ext = (name as NSString).pathExtension.lowercased()
+        guard let type = allowedTypes[ext] else { return nil }
+        let base = (name as NSString).deletingPathExtension
+        // Folder reference layout first (Web/assets/x.js), then the flattened
+        // layout a synchronized group produces (x.js at the resource root).
+        let sub = parts.count > 1 ? "Web/" + parts.dropLast().joined(separator: "/") : "Web"
+        let url = bundle.url(forResource: (base as NSString).lastPathComponent, withExtension: ext, subdirectory: sub)
+            ?? bundle.url(forResource: (base as NSString).lastPathComponent, withExtension: ext)
+        guard let url = url, let data = try? Data(contentsOf: url) else { return nil }
+        return (data, type)
+    }
+}

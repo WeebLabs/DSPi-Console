@@ -127,7 +127,8 @@ final class LinkService: ObservableObject {
         LinkAdvertisement(hubID: auth.hubID.uuidString.lowercased(),
                           auth: authMode.rawValue,
                           deviceCount: hub.sharedDeviceSerials.count,
-                          serials: hub.sharedDeviceSerials)
+                          serials: hub.sharedDeviceSerials,
+                          web: LinkWebBundle.isPresent)
     }
 
     // MARK: - Pairing and clients
