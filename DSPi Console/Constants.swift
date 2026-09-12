@@ -106,14 +106,16 @@ let RTA_BIN_HEADER_SIZE: Int  = 16
 /// slots and says how many are valid at the current rate.
 let RTA_MAX_BANDS: Int = 36
 /// Largest bin frame the device will ever publish: the 16-byte header, the
-/// 1024 bins of a 2048-point transform and the repeated sequence byte.  The
+/// 512 bins of a 1024-point transform and the repeated sequence byte.  The
 /// caps carry the real figure; this is the ceiling used to size a single read.
-let RTA_BIN_FRAME_MAX: Int = 16 + 1024 + 1
+let RTA_BIN_FRAME_MAX: Int = 16 + 512 + 1
 
-/// Transform sizes on the wire, as FFT orders: 256 to 2048 points.  The caps
-/// report the device's own range; these bound the app's own pickers.
+/// Transform sizes on the wire, as FFT orders: 256 to 1024 points.  1024 is the
+/// ceiling because the capture buffer is sized for the largest order whatever
+/// the applied config.  The caps report the device's own range; these bound the
+/// app's own pickers.
 let RTA_ORDER_MIN: Int = 8
-let RTA_ORDER_MAX: Int = 11
+let RTA_ORDER_MAX: Int = 10
 
 /// How often the engine re-reads each product, in seconds of elapsed time
 /// rather than in ticks of the shared poll timer, so the cadence follows the

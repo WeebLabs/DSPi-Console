@@ -39,8 +39,8 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(RTA_STATUS_SIZE, 24)
         XCTAssertEqual(RTA_BIN_HEADER_SIZE, 16)
         XCTAssertEqual(RTA_MAX_BANDS, 36)
-        // Header + 1024 bins (2048 points) + the repeated sequence byte.
-        XCTAssertEqual(RTA_BIN_FRAME_MAX, 1041)
+        // Header + 512 bins (1024 points) + the repeated sequence byte.
+        XCTAssertEqual(RTA_BIN_FRAME_MAX, 529)
     }
 
     // MARK: - RtaConfig (spec §5.2)
@@ -65,7 +65,7 @@ final class RtaWireTests: XCTestCase {
     }
 
     func testConfigRoundTrips() {
-        let cfg = RtaConfig(tap: RTA_TAP_INPUT, channelMask: 0x00FF, fftOrder: 11,
+        let cfg = RtaConfig(tap: RTA_TAP_INPUT, channelMask: 0x00FF, fftOrder: 9,
                             avgMs: 1000, peakDecayDBs: 30, flags: RTA_FLAG_MANUAL)
         XCTAssertEqual(RtaConfig.fromData(cfg.toData()), cfg)
     }
@@ -83,12 +83,11 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(RtaConfig(fftOrder: 8).points, 256)
         XCTAssertEqual(RtaConfig(fftOrder: 9).points, 512)
         XCTAssertEqual(RtaConfig(fftOrder: 10).points, 1024)
-        XCTAssertEqual(RtaConfig(fftOrder: 11).points, 2048)
     }
 
     // MARK: - RtaCaps
 
-    private func capsBytes(version: UInt8 = RTA_CFG_VERSION, orderMin: UInt8 = 8, orderMax: UInt8 = 11,
+    private func capsBytes(version: UInt8 = RTA_CFG_VERSION, orderMin: UInt8 = 8, orderMax: UInt8 = 10,
                            orderDefault: UInt8 = 10,
                            dynamicRange: UInt8 = 120) -> Data {
         var d = Data(count: RTA_CAPS_SIZE)
@@ -103,7 +102,7 @@ final class RtaWireTests: XCTestCase {
         d[8] = RTA_LEVEL_ZERO_DBFS
         d[9] = dynamicRange
         d[10] = 0x88; d[11] = 0x13  // idle_timeout_ms = 5000
-        d[12] = 0x11; d[13] = 0x04  // max_bin_frame = 1041
+        d[12] = 0x11; d[13] = 0x02  // max_bin_frame = 529
         return d
     }
 
@@ -111,11 +110,11 @@ final class RtaWireTests: XCTestCase {
         let caps = RtaCaps.fromData(capsBytes())
         XCTAssertEqual(caps?.inputChannels, 8)
         XCTAssertEqual(caps?.outputChannels, 9)
-        XCTAssertEqual(caps?.fftOrderMax, 11)
+        XCTAssertEqual(caps?.fftOrderMax, 10)
         XCTAssertEqual(caps?.levelZero, RTA_LEVEL_ZERO_DBFS)
         XCTAssertEqual(caps?.dynamicRangeDB, 120)
         XCTAssertEqual(caps?.idleTimeoutMs, 5000)
-        XCTAssertEqual(caps?.maxBinFrame, 1041)
+        XCTAssertEqual(caps?.maxBinFrame, 529)
         XCTAssertEqual(Int(caps?.maxBinFrame ?? 0), RTA_BIN_FRAME_MAX)
     }
 
@@ -247,14 +246,15 @@ final class RtaWireTests: XCTestCase {
 
     /// Bin k of an N-point transform is centred at k * rate / N.
     func testBinFrequencies() {
-        let f = RtaBinFrame.fromData(binFrameBytes(nBins: 512))!
+        let f = RtaBinFrame.fromData(binFrameBytes(nBins: 256, order: 9))!
         XCTAssertEqual(f.frequency(ofBin: 0), 0, accuracy: 0.001)
-        XCTAssertEqual(f.frequency(ofBin: 1), 48000.0 / 1024.0, accuracy: 0.001)
-        XCTAssertEqual(f.frequency(ofBin: 512), 24000, accuracy: 0.001)
-        // The largest frame the device can publish: 2048 points, 1041 bytes.
-        let big = RtaBinFrame.fromData(binFrameBytes(nBins: 1024, order: 11))!
-        XCTAssertEqual(big.bins.count, 1024)
-        XCTAssertEqual(big.frequency(ofBin: 1), 48000.0 / 2048.0, accuracy: 0.001)
+        XCTAssertEqual(f.frequency(ofBin: 1), 48000.0 / 512.0, accuracy: 0.001)
+        XCTAssertEqual(f.frequency(ofBin: 256), 24000, accuracy: 0.001)
+        // The largest frame the device can publish: 1024 points, 529 bytes.
+        let big = RtaBinFrame.fromData(binFrameBytes(nBins: 512, order: 10))!
+        XCTAssertEqual(big.bins.count, 512)
+        XCTAssertEqual(big.frequency(ofBin: 1), 48000.0 / 1024.0, accuracy: 0.001)
+        XCTAssertEqual(RTA_BIN_HEADER_SIZE + big.bins.count + 1, RTA_BIN_FRAME_MAX)
     }
 
     // MARK: - RtaStatus
@@ -352,22 +352,24 @@ final class RtaWireTests: XCTestCase {
     }
 
     /// The full-rate transform resolves a band once a bin centre falls inside
-    /// its edges: at 48 kHz, 2048 points reach the 25 Hz band and 1024 points
-    /// the 50 Hz band.  The firmware's generated table is the authority; this
-    /// heuristic only explains a band that already reads the floor.
+    /// its edges: at 48 kHz, 1024 points reach the 50 Hz band and 512 points
+    /// the 100 Hz band.  1024 is the ceiling, so 25 Hz is out of reach at any
+    /// size the device offers.  The firmware's generated table is the
+    /// authority; this heuristic only explains a band that reads the floor.
     func testBandHasBinFollowsTheTransformSize() {
-        XCTAssertTrue(rtaBandHasBin(centreHz: 25, sampleRateHz: 48000, fftOrder: 11))
         XCTAssertTrue(rtaBandHasBin(centreHz: 50, sampleRateHz: 48000, fftOrder: 10))
+        XCTAssertTrue(rtaBandHasBin(centreHz: 100, sampleRateHz: 48000, fftOrder: 9))
         XCTAssertFalse(rtaBandHasBin(centreHz: 40, sampleRateHz: 48000, fftOrder: 10))
-        XCTAssertFalse(rtaBandHasBin(centreHz: 20, sampleRateHz: 48000, fftOrder: 11))
+        XCTAssertFalse(rtaBandHasBin(centreHz: 25, sampleRateHz: 48000, fftOrder: 10))
     }
 
     /// Exact population per band, matching scripts/gen_rta_tables.py in the
     /// firmware repo: at 48 kHz, 1024 points populate 50 and 100 Hz but not 63
-    /// or 80 Hz; 2048 points start at 25 Hz; 512 points start at 100 Hz.
+    /// or 80 Hz; 512 points start at 100 Hz; 256 points start at 200 Hz.
     func testBandIsPopulatedMatchesFirmwareTables() {
-        XCTAssertFalse(rtaBandIsPopulated(band: 0, sampleRateHz: 48000, fftOrder: 11))   // 20 Hz
-        XCTAssertTrue(rtaBandIsPopulated(band: 1, sampleRateHz: 48000, fftOrder: 11))    // 25 Hz
+        XCTAssertFalse(rtaBandIsPopulated(band: 4, sampleRateHz: 48000, fftOrder: 9))    // 50 Hz
+        XCTAssertFalse(rtaBandIsPopulated(band: 7, sampleRateHz: 48000, fftOrder: 8))    // 100 Hz
+        XCTAssertTrue(rtaBandIsPopulated(band: 10, sampleRateHz: 48000, fftOrder: 8))    // 200 Hz
         XCTAssertTrue(rtaBandIsPopulated(band: 4, sampleRateHz: 48000, fftOrder: 10))    // 50 Hz
         XCTAssertFalse(rtaBandIsPopulated(band: 5, sampleRateHz: 48000, fftOrder: 10))   // 63 Hz
         XCTAssertFalse(rtaBandIsPopulated(band: 6, sampleRateHz: 48000, fftOrder: 10))   // 80 Hz

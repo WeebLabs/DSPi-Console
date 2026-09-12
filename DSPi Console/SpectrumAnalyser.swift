@@ -24,7 +24,7 @@ struct RtaConfig: Equatable {
     var peakDecayDBs: UInt8 = 12
     var flags: UInt8 = 0
 
-    /// Points in the transform: 256, 512, 1024 or 2048.
+    /// Points in the transform: 256, 512 or 1024.
     var points: Int { 1 << Int(fftOrder) }
 
     func toData() -> Data {
@@ -314,7 +314,7 @@ final class RtaEngine: ObservableObject {
     /// The poll queue's copy of `options`, kept in step by `setOptions`.
     private var pollOptions = RtaOptions()
     /// How long the device takes to publish one frame, as last measured from
-    /// the status.  The bin cadence follows it, so a 2048-point transform is
+    /// the status.  The bin cadence follows it, so a 1024-point transform is
     /// not read four times per frame the way a 256-point one is read once.
     private var pollFrameInterval: TimeInterval = 1024.0 / 48000.0
     private var lastBinRead: Date = .distantPast
@@ -531,7 +531,7 @@ final class RtaEngine: ObservableObject {
         }
         let now = Date()
         // Read the bins no faster than the device publishes them, which is a
-        // frame time apart: at 2048 points that is 43 ms, at 256 points 5 ms,
+        // frame time apart: at 1024 points that is 21 ms, at 256 points 5 ms,
         // and the poll timer is slower than both.
         let readBins = wantsBins
             && now.timeIntervalSince(lastBinRead) >= max(pollFrameInterval, RTA_MIN_BIN_INTERVAL)

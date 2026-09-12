@@ -73,10 +73,11 @@ class AppSettings: ObservableObject {
 
     /// The device-side half of the analyser settings, in the shape the engine
     /// pushes over the wire.  Clamped on the way out so a preference carried
-    /// over from another platform can never become a STALLed configuration.
+    /// over from another platform, or from a build with a larger ceiling, can
+    /// never become a STALLed configuration.
     var rtaOptions: RtaOptions {
         RtaOptions(
-            fftOrder: UInt8(clamping: rtaFftOrder),
+            fftOrder: UInt8(clamping: min(max(rtaFftOrder, RTA_ORDER_MIN), RTA_ORDER_MAX)),
             avgMs: UInt16(clamping: rtaAvgMs),
             peakDecayDBs: UInt8(clamping: rtaPeakDecayDBs))
     }
@@ -1493,6 +1494,14 @@ struct SpectrumSettingsTab: View {
         return Array(lo...hi)
     }
 
+    /// The offered size nearest the stored preference, so a preference left
+    /// behind by a device or a build with a larger ceiling still selects
+    /// something in the picker instead of showing a blank.
+    private var selectedOrder: Int {
+        guard let lo = availableOrders.first, let hi = availableOrders.last else { return settings.rtaFftOrder }
+        return min(max(settings.rtaFftOrder, lo), hi)
+    }
+
     var body: some View {
         Form {
             Section {
@@ -1583,13 +1592,12 @@ struct SpectrumSettingsTab: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Transform Size").font(.body)
                         Picker("", selection: Binding(
-                            get: { settings.rtaFftOrder },
+                            get: { selectedOrder },
                             set: { settings.rtaFftOrder = $0; push() }
                         )) {
-                            Text("256 points").tag(8)
-                            Text("512 points").tag(9)
-                            Text("1024 points").tag(10)
-                            Text("2048 points").tag(11)
+                            ForEach(availableOrders, id: \.self) { o in
+                                Text("\(1 << o) points").tag(o)
+                            }
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()

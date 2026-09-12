@@ -69,7 +69,7 @@ extension View {
 /// has no implicit animation to attach to, and the analyser steps harder than
 /// the meters do anyway - the device refreshes one channel every rotation
 /// interval, which runs from a few milliseconds with one channel at 256 points
-/// to several hundred with nine at 2048.  Without interpolation most polls
+/// to a couple of hundred with nine at 1024.  Without interpolation most polls
 /// redraw the identical picture and then it jumps.
 ///
 /// One pole per band, stepped by real elapsed time so a dropped display frame
@@ -132,7 +132,7 @@ private let rtaFrameInterval: TimeInterval = 1.0 / 30.0
 /// Roughly one rotation interval to travel most of the way, so a bar is still
 /// moving when the next frame for that channel lands.  Clamped at both ends: a
 /// single channel at 96 kHz would otherwise be back to a step, and nine
-/// channels at 2048 points would turn to syrup.
+/// channels at 1024 points would turn to syrup.
 func rtaFallTau(refreshInterval: TimeInterval, amount: Double) -> TimeInterval {
     guard amount > 0 else { return 0 }
     return min(0.40, max(0.035, refreshInterval * amount))
@@ -363,7 +363,7 @@ struct RtaBandsView: View {
 ///
 /// The frame belongs to whichever channel was transformed last, so the views
 /// that show it ask for a single channel; bin k is centred at
-/// k * sample rate / N, which is 23 Hz apart at 2048 points and 48 kHz.
+/// k * sample rate / N, which is 47 Hz apart at 1024 points and 48 kHz.
 struct RtaBinsView: View {
     @ObservedObject var engine: RtaEngine
     let binFrame: RtaBinFrame?
@@ -866,6 +866,13 @@ struct SpectrumAnalyserView: View {
         return Array(lo...hi)
     }
 
+    /// The offered size nearest the stored preference, so a preference left
+    /// behind by a device with a larger ceiling still selects something.
+    private var selectedOrder: Int {
+        guard let lo = availableOrders.first, let hi = availableOrders.last else { return settings.rtaFftOrder }
+        return min(max(settings.rtaFftOrder, lo), hi)
+    }
+
     // MARK: Body
 
     var body: some View {
@@ -1025,7 +1032,7 @@ struct SpectrumAnalyserView: View {
         HStack(alignment: .center, spacing: 16) {
             labelled("Size") {
                 Picker("", selection: Binding(
-                    get: { settings.rtaFftOrder },
+                    get: { selectedOrder },
                     set: { settings.rtaFftOrder = $0; pushOptions() }
                 )) {
                     ForEach(availableOrders, id: \.self) { o in
