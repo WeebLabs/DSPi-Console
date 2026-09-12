@@ -939,10 +939,15 @@ struct ContentView: View {
             }
         }
         // Across the whole window rather than inside a pane: a device on the
-        // wrong firmware is a broken state, not a per-page detail.  The banner
-        // draws nothing when the versions agree, so this costs no space in the
-        // ordinary case.
-        .safeAreaInset(edge: .top, spacing: 0) {
+        // wrong firmware is a broken state, not a per-page detail.
+        //
+        // An overlay, not a safe-area inset: an inset raises the view's minimum
+        // height, and since the window is fixed-size AppKit grows it to suit -
+        // the window jumped from 813pt to 928pt the moment the banner appeared.
+        // An overlay contributes no size at all, so the banner draws over the
+        // top of the pane and the window never moves.  That does mean it covers
+        // the graph header while shown, which is what its Hide button is for.
+        .overlay(alignment: .top) {
             FirmwareMismatchBanner(vm: vm) {
                 firmwareUpdateController.show(vm: vm)
             }

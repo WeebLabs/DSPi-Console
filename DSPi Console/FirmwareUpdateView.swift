@@ -436,19 +436,32 @@ private enum UpdateStep: Int, CaseIterable {
 
 // MARK: - Mismatch Banner
 
+/// Per-launch dismissal of the mismatch banner, driven by its "Hide" button.
+///
+/// Deliberately not persisted: a mismatch is a broken state, so hiding it is a
+/// way to get on with the session rather than a preference.  The next launch
+/// says so again.
+final class FirmwareMismatchBannerState: ObservableObject {
+    static let shared = FirmwareMismatchBannerState()
+    @Published var hiddenForThisLaunch = false
+    private init() {}
+}
+
 /// Shown across the top of the main window only when the connected device's
 /// firmware differs from what this Console expects.
 ///
 /// A mismatch is a genuinely broken state rather than a nag: feature gating
 /// reads the device's version, so the wrong firmware means controls that do
 /// nothing or are missing entirely.  It stays hidden whenever the versions
-/// agree, or whenever we know too little to be sure.
+/// agree, whenever we know too little to be sure, and once hidden for the
+/// remainder of this launch.
 struct FirmwareMismatchBanner: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var dismissal = FirmwareMismatchBannerState.shared
     let onUpdate: () -> Void
 
     var body: some View {
-        if let match = vm.firmwareMatch, match != .match {
+        if let match = vm.firmwareMatch, match != .match, !dismissal.hiddenForThisLaunch {
             HStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
@@ -458,11 +471,35 @@ struct FirmwareMismatchBanner: View {
                 Spacer(minLength: 8)
                 Button(match == .deviceNewer ? "Details..." : "Update...", action: onUpdate)
                     .controlSize(.small)
+                Button("Hide") {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        dismissal.hiddenForThisLaunch = true
+                    }
+                }
+                    .controlSize(.small)
+                    .help("Hide this warning until DSPi Console is next started")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background(Color.orange.opacity(0.12))
+            // Opaque, not a 12% tint: the banner is drawn over the split view's
+            // panes rather than above them, so anything translucent lets the
+            // graph header and the device name read through the warning text.
+            //
+            // The backdrop ignores the top safe area so it reaches the window's
+            // own edge.  Bounded by the safe area it stops level with the text,
+            // leaving the title-bar strip above it clear and the sidebar and
+            // the split divider showing through the top of the banner.
+            .background(
+                Color(nsColor: .windowBackgroundColor)
+                    .overlay(Color.orange.opacity(0.12))
+                    .ignoresSafeArea(edges: .top)
+            )
             .overlay(Divider(), alignment: .bottom)
+            // Slides up out of the window on Hide.  Paired with opacity because
+            // the backdrop reaches above the banner's own frame: a plain move
+            // travels one frame height and would leave that overhang behind for
+            // an instant.
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
