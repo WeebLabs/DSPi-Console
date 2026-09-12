@@ -140,14 +140,10 @@ struct BodePlotView: View {
         return height - (CGFloat(normalized) * height)
     }
 
-    // Color for a given EQ channel index
+    // Color for a given EQ channel index.  Shared with the spectrum drawn
+    // behind the curves, so a channel is one colour in both pictures.
     func colorForEQChannel(_ eqCh: Int) -> Color {
-        if eqCh < vm.chOut1 {
-            return MatrixInput.color(for: eqCh)   // input channel
-        } else {
-            let outIdx = eqCh - vm.chOut1
-            return MatrixOutput.all.indices.contains(outIdx) ? MatrixOutput.all[outIdx].color : .accentColor
-        }
+        eqCurveColor(eqCh: eqCh, chOut1: vm.chOut1)
     }
 
     struct ChannelEntry {
@@ -194,6 +190,16 @@ struct BodePlotView: View {
             }
         }
         return groups
+    }
+
+    /// The EQ channels this instance is drawing, in the graph's own numbering.
+    /// The spectrum overlay follows the same set, so turning a curve off takes
+    /// its spectrum with it.
+    private var visibleEqChannels: [Int] {
+        guard vm.isDeviceReady else { return [] }
+        return (0..<vm.numChannels).filter { eqCh in
+            useOverride ? (visibilityOverride[eqCh] ?? false) : (vm.channelVisibility[eqCh] == true)
+        }
     }
 
     var body: some View {
@@ -261,6 +267,14 @@ struct BodePlotView: View {
                     }
                 }
 
+            }
+
+            // Live spectrum, behind the curves and above the grid.
+            if settings.rtaPlacement == .graph {
+                GraphSpectrumOverlay(vm: vm, engine: vm.rta,
+                                     visibleEqChannels: visibleEqChannels,
+                                     activeEqChannel: vm.activeEqChannel,
+                                     minFreq: minFreq, maxFreq: maxFreq)
             }
 
             // Animated Lines - grouped by identical curves

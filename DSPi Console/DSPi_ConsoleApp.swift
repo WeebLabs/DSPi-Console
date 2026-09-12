@@ -24,6 +24,28 @@ class AppState: ObservableObject {
 }
 
 // MARK: - App Settings
+/// Where the live spectrum for the selected channel is drawn.  One picture in
+/// one place: the graph overlay and the channel-page strip show the same
+/// channel, so offering both at once would only ask the device for the same
+/// numbers twice.
+enum RtaSpectrumPlacement: String, CaseIterable, Identifiable {
+    case off
+    /// Behind the response curves, on the analyser's own dBFS scale.
+    case graph
+    /// A strip of its own above the filter table, with third-octave bars.
+    case strip
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .graph:  return "Response Graph"
+        case .strip:  return "Separate Strip"
+        case .off:    return "Off"
+        }
+    }
+}
+
 class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
@@ -58,7 +80,14 @@ class AppSettings: ObservableObject {
     // firmware forgets them at every power cycle, so the Console is the only
     // place they can live.  See `AppSettings.rtaOptions`.
     @AppStorage("rtaShowOnDashboard") var rtaShowOnDashboard: Bool = true
-    @AppStorage("rtaShowOnChannelPages") var rtaShowOnChannelPages: Bool = true
+    /// Where the selected channel's spectrum is drawn: inside the filter
+    /// response graph, in a strip of its own above the filter table, or
+    /// nowhere.  String-backed because @AppStorage doesn't support raw enums;
+    /// read it through `rtaPlacement`.
+    @AppStorage("rtaSpectrumPlacement") var rtaSpectrumPlacement: String = RtaSpectrumPlacement.graph.rawValue
+    /// How present the fill in the graph is, 0.3 to 1.  Low values leave it as
+    /// a hint behind the curves; high values make it the loudest thing there.
+    @AppStorage("rtaGraphOpacity") var rtaGraphOpacity: Double = 1.0
     @AppStorage("rtaFloorDB") var rtaFloorDB: Double = -90.0
     @AppStorage("rtaCeilingDB") var rtaCeilingDB: Double = 6.0
     @AppStorage("rtaShowPeakHold") var rtaShowPeakHold: Bool = true
@@ -70,6 +99,12 @@ class AppSettings: ObservableObject {
     @AppStorage("rtaFftOrder") var rtaFftOrder: Int = 10
     @AppStorage("rtaAvgMs") var rtaAvgMs: Int = 300
     @AppStorage("rtaPeakDecayDBs") var rtaPeakDecayDBs: Int = 12
+
+    /// `rtaSpectrumPlacement` as the enum, falling back to the graph for a
+    /// stored value this build does not know.
+    var rtaPlacement: RtaSpectrumPlacement {
+        RtaSpectrumPlacement(rawValue: rtaSpectrumPlacement) ?? .graph
+    }
 
     /// The device-side half of the analyser settings, in the shape the engine
     /// pushes over the wire.  Clamped on the way out so a preference carried
@@ -87,7 +122,18 @@ class AppSettings: ObservableObject {
     // String-backed because @AppStorage doesn't support raw enums.
     @AppStorage("sidebarVolumeMode") var sidebarVolumeMode: String = "auto"
 
-    private init() {}
+    private init() {
+        // The spectrum used to have a channel-page strip and nothing else.
+        // On the first run with a placement to choose, carry that preference
+        // over: someone who had the strip switched off is left with nothing
+        // drawn rather than having the graph overlay appear unasked.
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: "rtaSpectrumPlacement") == nil {
+            let hadStrip = defaults.object(forKey: "rtaShowOnChannelPages") as? Bool ?? true
+            defaults.set((hadStrip ? RtaSpectrumPlacement.graph : .off).rawValue,
+                         forKey: "rtaSpectrumPlacement")
+        }
+    }
 }
 
 // MARK: - Settings View
@@ -1485,6 +1531,18 @@ struct SpectrumSettingsTab: View {
 
     private func push() { engine.setOptions(settings.rtaOptions) }
 
+    /// What the chosen placement means, in one line under the picker.
+    private var placementExplanation: String {
+        switch settings.rtaPlacement {
+        case .graph:
+            return "Drawn behind the response curves on the analyser's own dBFS scale, as a fine FFT curve for the selected channel and third-octave bands when several are shown at once."
+        case .strip:
+            return "A strip of third-octave bars above the filter table, for the selected channel alone, leaving the response graph to the filter curves."
+        case .off:
+            return "Neither is drawn. The Dashboard thumbnails and the analyser window are unaffected, and with those closed too the device stops the analyser."
+        }
+    }
+
     /// Sizes this device offers, from the caps where they have been read and
     /// from the protocol's own range before that, so the picker never offers a
     /// size the device would STALL.
@@ -1505,20 +1563,35 @@ struct SpectrumSettingsTab: View {
     var body: some View {
         Form {
             Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Live Spectrum").font(.body)
+                    Picker("", selection: $settings.rtaSpectrumPlacement) {
+                        ForEach(RtaSpectrumPlacement.allCases) { placement in
+                            Text(placement.label).tag(placement.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(placementExplanation)
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .padding(.vertical, 4)
+
+                if settings.rtaPlacement == .graph {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Spectrum Strength: \(Int(settings.rtaGraphOpacity * 100))%")
+                            .font(.body)
+                        Slider(value: $settings.rtaGraphOpacity, in: 0.3...1.0, step: 0.05)
+                        Text("How far the fill comes forward behind the curves.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Toggle(isOn: $settings.rtaShowOnDashboard) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Show on the Dashboard").font(.body)
                         Text("A thumbnail per enabled output above the channel cards")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
-                .padding(.vertical, 4)
-
-                Toggle(isOn: $settings.rtaShowOnChannelPages) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Show on Channel Pages").font(.body)
-                        Text("A strip for the selected channel alone, above its filter table")
                             .font(.caption).foregroundColor(.secondary)
                     }
                 }
@@ -1552,7 +1625,7 @@ struct SpectrumSettingsTab: View {
             } header: {
                 Label("Where It Appears", systemImage: "rectangle.3.group")
             } footer: {
-                Text("The analyser only runs while something is watching it. With every strip switched off and the analyser window closed, the device stops it and spends nothing.")
+                Text("The analyser only runs while something is watching it. With nothing switched on here and the analyser window closed, the device stops it and spends nothing.")
                     .font(.caption).foregroundColor(.secondary)
             }
 

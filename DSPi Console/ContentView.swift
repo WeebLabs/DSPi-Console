@@ -848,8 +848,10 @@ struct ContentView: View {
                         VStack(spacing: 16) {
                             // The analyser taps inputs after their own PEQ, so
                             // this strip shows the effect of the filters in the
-                            // table below it rather than the raw source.
-                            if settings.rtaShowOnChannelPages {
+                            // table below it rather than the raw source.  The
+                            // graph overlay shows the same channel, so the two
+                            // placements are one choice rather than two.
+                            if settings.rtaPlacement == .strip {
                                 ChannelSpectrumStrip(
                                     vm: vm, engine: vm.rta,
                                     title: vm.channelNames[ch],
@@ -895,7 +897,7 @@ struct ContentView: View {
                             // The output tap sits after gain and delay and
                             // before encoding, so this is exactly what the slot
                             // transmits.
-                            if settings.rtaShowOnChannelPages {
+                            if settings.rtaPlacement == .strip {
                                 ChannelSpectrumStrip(
                                     vm: vm, engine: vm.rta,
                                     title: vm.channelNames[vm.eqChannel(forOutput: idx)],

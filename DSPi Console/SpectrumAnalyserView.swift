@@ -123,7 +123,7 @@ final class RtaSmoothingState {
 /// Display-frame cadence for the analyser views.  Thirty a second is past the
 /// point where more looks any smoother, and it bounds the cost of redrawing a
 /// dashboard full of thumbnails.
-private let rtaFrameInterval: TimeInterval = 1.0 / 30.0
+let rtaFrameInterval: TimeInterval = 1.0 / 30.0
 
 /// Turns the smoothing preference into a fall time constant for a given
 /// rotation interval.  Zero means the preference is off and the views draw the
