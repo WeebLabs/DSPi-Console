@@ -101,7 +101,7 @@ struct FirmwareUpdateView: View {
 
     private var deviceVersion: String? {
         guard let v = vm.firmwareVersion else { return nil }
-        return FirmwareVersion(v.major, v.minor, v.patch).description
+        return FirmwareVersion(v.major, v.minor, v.patch, v.beta).description
     }
 
     var body: some View {
@@ -468,7 +468,7 @@ struct FirmwareMismatchBanner: View {
 
     private var message: String {
         let expected = FirmwareVersion.expected?.description ?? "unknown"
-        let device = vm.firmwareVersion.map { FirmwareVersion($0.major, $0.minor, $0.patch).description } ?? "unknown"
+        let device = vm.firmwareVersion.map { FirmwareVersion($0.major, $0.minor, $0.patch, $0.beta).description } ?? "unknown"
         switch vm.firmwareMatch {
         case .deviceNewer:
             return "This device runs firmware \(device), which is newer than DSPi Console \(expected). Some of its features may not be shown."

@@ -227,7 +227,7 @@ struct GettingStartedView: View {
 
     private var deviceVersion: String? {
         guard let v = vm.firmwareVersion else { return nil }
-        return FirmwareVersion(v.major, v.minor, v.patch).description
+        return FirmwareVersion(v.major, v.minor, v.patch, v.beta).description
     }
 
     @ViewBuilder

@@ -144,17 +144,19 @@ extension DSPViewModel {
 
     @discardableResult
     func fetchPlatform() -> String? {
-        // Ask for 6: firmware 1.1.7+ appends full-width minor and patch at
-        // bytes 4-5, because the legacy byte 2 packs them into a nibble each
-        // and so caps both at 15.  Older firmware answers short with the
-        // original 4 bytes and we fall back to the nibbles; never mix the two
-        // decodes.  See the firmware's firmware_versioning_spec.md.
-        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 6),
+        // Ask for 7.  Bytes 4-5 are full-width minor and patch, because the
+        // legacy byte 2 packs them into a nibble each and so caps both at 15;
+        // byte 6 is the beta ordinal.  Older firmware answers short with 6 or 4
+        // bytes and we fall back to the nibbles; never mix the two decodes.
+        // Every build predating byte 6 was a final release, so a short reply
+        // reads as beta 0.  See the firmware's firmware_versioning_spec.md.
+        guard let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
               data.count >= 4 else { return nil }
         let platform = data[0]
         let major = Int(data[1])
         let minor = data.count >= 6 ? Int(data[4]) : Int(data[2] >> 4)
         let patch = data.count >= 6 ? Int(data[5]) : Int(data[2] & 0x0F)
+        let beta  = data.count >= 7 ? Int(data[6]) : 0
         let name: String
         switch platform {
         case 1:  name = "RP2350"
@@ -163,7 +165,7 @@ extension DSPViewModel {
         }
         DispatchQueue.main.async {
             self.platformName = name
-            self.firmwareVersion = (major: major, minor: minor, patch: patch)
+            self.firmwareVersion = (major: major, minor: minor, patch: patch, beta: beta)
         }
         return name
     }

@@ -1983,9 +1983,10 @@ class DSPViewModel: ObservableObject {
     }
 
     // Firmware version tuple parsed from REQ_GET_PLATFORM: bytes 4-5 when the
-    // device answers with 6 bytes, else the legacy nibble pair in byte 2.
+    // device answers with 6 bytes, else the legacy nibble pair in byte 2; beta
+    // from byte 6, or 0 from firmware predating it.
     // nil before the first successful fetchPlatform().
-    @Published var firmwareVersion: (major: Int, minor: Int, patch: Int)? = nil
+    @Published var firmwareVersion: (major: Int, minor: Int, patch: Int, beta: Int)? = nil
 
     /// How the connected device's firmware compares with the version this
     /// Console build expects.  nil while disconnected, before the first
@@ -1996,7 +1997,7 @@ class DSPViewModel: ObservableObject {
         guard isDeviceConnected,
               let v = firmwareVersion,
               let expected = FirmwareVersion.expected else { return nil }
-        let device = FirmwareVersion(v.major, v.minor, v.patch)
+        let device = FirmwareVersion(v.major, v.minor, v.patch, v.beta)
         if device == expected { return .match }
         return device < expected ? .deviceOlder : .deviceNewer
     }

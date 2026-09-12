@@ -542,12 +542,15 @@ class StatsViewModel: ObservableObject {
             DispatchQueue.main.async { self.serialNumber = serial.isEmpty ? "—" : serial }
         }
 
-        // REQ_GET_PLATFORM (0x7F): 4-byte platform info
-        if let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 4) {
+        // REQ_GET_PLATFORM (0x7F): 7 bytes, short-reply fallbacks as in
+        // DSPViewModel.fetchPlatform().
+        if let data = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+           data.count >= 4 {
             let platform = data[0]
             let major = Int(data[1])
-            let minor = Int(data[2] >> 4)
-            let patch = Int(data[2] & 0x0F)
+            let minor = data.count >= 6 ? Int(data[4]) : Int(data[2] >> 4)
+            let patch = data.count >= 6 ? Int(data[5]) : Int(data[2] & 0x0F)
+            let beta  = data.count >= 7 ? Int(data[6]) : 0
             let outputs = Int(data[3])
 
             let platformStr: String
@@ -556,7 +559,7 @@ class StatsViewModel: ObservableObject {
             case 2:  platformStr = "STM32H723"
             default: platformStr = "RP2040"
             }
-            let versionStr = "v\(major).\(minor).\(patch)"
+            let versionStr = "v" + FirmwareVersion(major, minor, patch, beta).description
 
             DispatchQueue.main.async {
                 self.platformName = platformStr

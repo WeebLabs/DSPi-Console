@@ -25,7 +25,8 @@ extension PresetDocument {
         doc.meta.savedUtc = ISO8601DateFormatter().string(from: Date())
         doc.meta.appVersion = GeneralSettingsTab.appVersion
         doc.meta.platform = platform.isEmpty ? nil : platform
-        doc.meta.firmwareVersion = vm.firmwareVersion.map { "\($0.major).\($0.minor).\($0.patch)" }
+        doc.meta.firmwareVersion = vm.firmwareVersion
+            .map { FirmwareVersion($0.major, $0.minor, $0.patch, $0.beta).description }
         doc.meta.wireFormatVersion = vm.firmwareWireFormatVersion
         doc.meta.inputChannelCount = vm.chOut1
         doc.meta.outputChannelCount = vm.numOutputChannels

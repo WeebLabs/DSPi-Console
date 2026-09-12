@@ -106,7 +106,7 @@ struct ViewModelFirmwareVerifier: FirmwareVerifying {
         while Date() < deadline {
             let version: FirmwareVersion? = DispatchQueue.main.sync {
                 guard vm.isDeviceConnected, let v = vm.firmwareVersion else { return nil }
-                return FirmwareVersion(v.major, v.minor, v.patch)
+                return FirmwareVersion(v.major, v.minor, v.patch, v.beta)
             }
             if let version { return version }
             Thread.sleep(forTimeInterval: 0.25)
