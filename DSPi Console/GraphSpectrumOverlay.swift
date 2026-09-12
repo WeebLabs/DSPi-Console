@@ -22,11 +22,11 @@ func eqCurveColor(eqCh: Int, chOut1: Int) -> Color {
 /// plot, its ceiling at the top) and is drawn as a translucent fill under the
 /// curves rather than as another line competing with them.
 ///
-/// One channel selected gets the raw FFT bins, which is the finer picture; more
-/// than one falls back to the third-octave bands, because the device publishes
-/// bins for whichever channel it transformed last and a multichannel selection
-/// would make them rotate.  The peak-hold contour always comes from the bands,
-/// which carry it at every selection size.
+/// One channel selected gets the bands in the bass and the raw FFT bins above
+/// it, which is the finer picture; more than one uses the bands throughout,
+/// because the device publishes bins for whichever channel it transformed last
+/// and a multichannel selection would make them rotate.  The peak-hold contour
+/// always comes from the bands, which carry it at every selection size.
 struct GraphSpectrumOverlay: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
@@ -143,22 +143,26 @@ struct GraphSpectrumOverlay: View {
                 let colour = eqCurveColor(eqCh: channel.eq, chOut1: vm.chOut1)
                 let band = snapshot.frames[UInt8(clamping: channel.rta)]
 
-                // The fine picture where it is available, the bands otherwise.
-                var curve: [CGPoint] = []
-                if plan.wantsBins, let bins = snapshot.bins, Int(bins.channel) == channel.rta {
-                    curve = binPoints(bins, plot: plot, scale: scale,
-                                      now: now, tau: tau, channel: channel.rta)
-                } else if let band, band.hasData {
-                    curve = bandPoints(band, plot: plot, scale: scale, peak: false,
-                                       now: now, tau: tau, channel: channel.rta)
+                let bands = (band?.hasData ?? false)
+                    ? bandPoints(band!, plot: plot, scale: scale, peak: false,
+                                 now: now, tau: tau, channel: channel.rta)
+                    : []
+                var curve = bands
+                var dense = false
+                if plan.wantsBins {
+                    let bins = snapshot.bins.flatMap { Int($0.channel) == channel.rta ? $0 : nil }
+                        .map { binPoints($0, plot: plot, scale: scale,
+                                         now: now, tau: tau, channel: channel.rta) } ?? []
+                    curve = blend(bands: bands, bins: bins, plot: plot)
+                    dense = true
                 }
                 if curve.count > 1 {
-                    // The bins are already one point per pixel: smoothing them
-                    // only adds overshoot around a tone.  The thirty-odd band
-                    // points need it, or they read as a chain of facets beside
-                    // the response curves.
+                    // The blended series is already one point per pixel:
+                    // smoothing it only adds overshoot around a tone.  The
+                    // thirty-odd band points need it, or they read as a chain
+                    // of facets beside the response curves.
                     draw(curve, in: ctx, plot: plot, colour: colour,
-                         opacity: opacity, glow: glow, smooth: !plan.wantsBins)
+                         opacity: opacity, glow: glow, smooth: !dense)
                 }
 
                 // Peak hold rides on top as a thin contour, from the bands in
@@ -186,6 +190,8 @@ struct GraphSpectrumOverlay: View {
     /// that frequency, and sloping the curve down to the floor instead would
     /// draw a roll-off that was never measured.
     private func fading(_ ctx: GraphicsContext, plot: CGRect, from x0: CGFloat) -> GraphicsContext {
+        // Data that starts off the left edge has no wall to hide.
+        guard x0 > plot.minX + 1 else { return ctx }
         var faded = ctx
         faded.clipToLayer { layer in
             layer.fill(Path(plot), with: .linearGradient(
@@ -260,15 +266,91 @@ struct GraphSpectrumOverlay: View {
         let order = Int(engine.options.fftOrder)
         let first = engine.snapshot.status.firstResolvedBand
 
+        // One band either side of the visible range is kept, so the curve runs
+        // off the plot edges instead of stopping (and fading) just inside them.
         var points: [CGPoint] = []
+        var below: CGPoint?
         for i in 0..<slots where i >= first && i < centres.count {
-            guard rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order) else { continue }
+            guard rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order,
+                                    bassBands: Int(engine.caps.bassBands)) else { continue }
             let hz = centres[i]
-            guard hz >= Double(minFreq), hz <= Double(maxFreq) else { continue }
-            points.append(CGPoint(x: plot.minX + xPos(hz, width: plot.width),
-                                  y: yPos(levels[i], plot: plot, scale: scale)))
+            let point = CGPoint(x: plot.minX + xPos(hz, width: plot.width),
+                                y: yPos(levels[i], plot: plot, scale: scale))
+            if hz < Double(minFreq) { below = point; continue }
+            if let b = below { points.append(b); below = nil }
+            points.append(point)
+            if hz > Double(maxFreq) { break }
         }
         return points
+    }
+
+    /// One channel's picture from both products: the bands below the top of
+    /// the bass bank, where they are continuous and the bins are too coarse
+    /// (47 Hz apart at 1024 points) to resolve a third-octave, and the finer
+    /// bins above it, crossfaded over one octave so there is no step.
+    ///
+    /// Returns one point per pixel column.  Where only one product has data
+    /// (below the first bin, or before a bin frame arrives) it is used alone.
+    private func blend(bands: [CGPoint], bins: [CGPoint], plot: CGRect) -> [CGPoint] {
+        guard bins.count > 1 else { return bands }
+        let columns = max(Int(plot.width.rounded()), 2)
+
+        var binY = [CGFloat?](repeating: nil, count: columns)
+        for p in bins {
+            let c = Int((p.x - plot.minX).rounded())
+            if c >= 0, c < columns { binY[c] = p.y }
+        }
+        let bandY = columnSamples(of: bands, columns: columns, plot: plot)
+
+        let centres = engine.bandCentresHz
+        let bass = Int(engine.caps.bassBands)
+        var loX = -CGFloat.infinity, hiX = -CGFloat.infinity
+        if bass > 0, bass <= centres.count {
+            loX = plot.minX + xPos(centres[bass - 1], width: plot.width)
+            hiX = plot.minX + xPos(centres[min(bass + 2, centres.count - 1)], width: plot.width)
+        }
+
+        var points: [CGPoint] = []
+        for c in 0..<columns {
+            let x = plot.minX + CGFloat(c)
+            let y: CGFloat
+            switch (bandY[c], binY[c]) {
+            case let (a?, b?):
+                let w = hiX > loX ? min(max((x - loX) / (hiX - loX), 0), 1) : 1
+                y = a + (b - a) * w
+            case let (a?, nil): y = a
+            case let (nil, b?): y = b
+            default: continue
+            }
+            points.append(CGPoint(x: x, y: y))
+        }
+        return points
+    }
+
+    /// The Catmull-Rom curve through `points` sampled at every pixel column it
+    /// spans, so the band picture can be mixed with the per-column bins while
+    /// looking the same as the smoothed multichannel curve.
+    private func columnSamples(of points: [CGPoint], columns: Int, plot: CGRect) -> [CGFloat?] {
+        var out = [CGFloat?](repeating: nil, count: columns)
+        guard points.count > 1 else { return out }
+        func slope(_ i: Int) -> CGFloat {
+            let a = points[max(i - 1, 0)], b = points[min(i + 1, points.count - 1)]
+            return b.x > a.x ? (b.y - a.y) / (b.x - a.x) : 0
+        }
+        var seg = 0
+        for c in 0..<columns {
+            let x = plot.minX + CGFloat(c)
+            guard x >= points[0].x, x <= points[points.count - 1].x else { continue }
+            while seg < points.count - 2, x > points[seg + 1].x { seg += 1 }
+            let p0 = points[seg], p1 = points[seg + 1]
+            let h = p1.x - p0.x
+            guard h > 0 else { out[c] = p0.y; continue }
+            let t = (x - p0.x) / h, t2 = t * t, t3 = t2 * t
+            let y = (2 * t3 - 3 * t2 + 1) * p0.y + (t3 - 2 * t2 + t) * h * slope(seg)
+                  + (-2 * t3 + 3 * t2) * p1.y + (t3 - t2) * h * slope(seg + 1)
+            out[c] = min(max(y, plot.minY), plot.maxY)
+        }
+        return out
     }
 
     /// The raw bins as one point per pixel column, taking the loudest bin that

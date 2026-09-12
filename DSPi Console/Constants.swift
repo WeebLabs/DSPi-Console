@@ -87,24 +87,25 @@ let PSYBASS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
 let REQ_RTA_SET_CONFIG: UInt8    = 0x08   // OUT: 12-byte RtaConfig; STALL on invalid
 let REQ_RTA_GET_CONFIG: UInt8    = 0x09   // IN 12 bytes: the applied RtaConfig
 let REQ_RTA_GET_CAPS: UInt8      = 0x0A   // IN: wValue 0 = RtaCaps (16 B), 1.. = band centres
-let REQ_RTA_GET_BANDS: UInt8     = 0x0B   // IN 80 bytes: wValue = channel at the applied tap
+let REQ_RTA_GET_BANDS: UInt8     = 0x0B   // IN 82 bytes: wValue = channel at the applied tap
 let REQ_RTA_GET_BINS: UInt8      = 0x0C   // IN: wValue = byte offset into the bin frame
 let REQ_RTA_GET_STATUS: UInt8    = 0x0D   // IN 24 bytes: RtaStatus
 let REQ_RTA_CONTROL: UInt8       = 0x0E   // IN 1 byte: wValue = RTA_CTL_*
 let REQ_RTA_GET_BANDS_ALL: UInt8 = 0x0F   // IN: every live channel's band frame, USB only
 
-let RTA_CFG_VERSION: UInt8 = 2
+let RTA_CFG_VERSION: UInt8 = 3
 /// Wire sizes.  Fixed for the life of the config version; a short read means
 /// firmware that predates the analyser and is treated as "unsupported".
 let RTA_CONFIG_SIZE: Int      = 12
 let RTA_CAPS_SIZE: Int        = 16
-let RTA_BAND_FRAME_SIZE: Int  = 80
+let RTA_BAND_FRAME_SIZE: Int  = 82
 let RTA_STATUS_SIZE: Int      = 24
 let RTA_BIN_HEADER_SIZE: Int  = 16
-/// Third-octave bands with IEC 61260 nominal centres from 20 Hz up: 31 of them
-/// at 44.1/48 kHz, 34 at 96 kHz.  The frame always carries `RTA_MAX_BANDS`
+/// Third-octave bands with IEC 61260 nominal centres from 10 Hz up: 34 of them
+/// at 44.1/48 kHz, 37 at 96 kHz.  The frame always carries `RTA_MAX_BANDS`
 /// slots and says how many are valid at the current rate.
-let RTA_MAX_BANDS: Int = 36
+let RTA_MAX_BANDS: Int = 37
+let RTA_BASS_BANDS: Int = 14
 /// Largest bin frame the device will ever publish: the 16-byte header, the
 /// 512 bins of a 1024-point transform and the repeated sequence byte.  The
 /// caps carry the real figure; this is the ceiling used to size a single read.

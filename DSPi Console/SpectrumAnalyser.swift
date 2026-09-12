@@ -64,6 +64,7 @@ struct RtaCaps: Equatable {
     var fftOrderMin: UInt8 = UInt8(RTA_ORDER_MIN)
     var fftOrderMax: UInt8 = UInt8(RTA_ORDER_MAX)
     var fftOrderDefault: UInt8 = 10
+    var bassBands: UInt8 = 0
     var maxBands: UInt8 = UInt8(RTA_MAX_BANDS)
     var levelZero: UInt8 = RTA_LEVEL_ZERO_DBFS
     /// Measured, not theoretical: 78 dB for the RP2040 Q15 kernel, 120 for the
@@ -72,13 +73,18 @@ struct RtaCaps: Equatable {
     var dynamicRangeDB: UInt8 = 0
     var idleTimeoutMs: UInt16 = 0
     var maxBinFrame: UInt16 = 0
+    /// Bass detection has a separate usable range from the FFT arithmetic.
+    var bassDynamicRangeDB: UInt16 = 0
+    var bandFrameSize: Int { 8 + 2 * Int(maxBands) }
 
     static func fromData(_ d: Data) -> RtaCaps? {
         guard d.count >= RTA_CAPS_SIZE else { return nil }
         let b = [UInt8](d)
-        // Version 0 would mean a device answering with a zeroed buffer rather
-        // than a real caps block; treat that as no analyser.
-        guard b[0] != 0 else { return nil }
+        // Band indices and strides changed in V3. Never send V3 config to
+        // an older/newer protocol or interpret its frames with this layout.
+        guard b[0] == RTA_CFG_VERSION,
+              Int(b[3]) >= RTA_ORDER_MIN, Int(b[4]) <= RTA_ORDER_MAX, b[3] <= b[5], b[5] <= b[4],
+              b[7] > 0, Int(b[7]) <= RTA_MAX_BANDS, b[6] <= b[7] else { return nil }
         return RtaCaps(
             version: b[0],
             inputChannels: b[1],
@@ -86,20 +92,22 @@ struct RtaCaps: Equatable {
             fftOrderMin: b[3],
             fftOrderMax: b[4],
             fftOrderDefault: b[5],
+            bassBands: b[6],
             maxBands: b[7],
             levelZero: b[8],
             dynamicRangeDB: b[9],
             idleTimeoutMs: UInt16(b[10]) | (UInt16(b[11]) << 8),
-            maxBinFrame: UInt16(b[12]) | (UInt16(b[13]) << 8))
+            maxBinFrame: UInt16(b[12]) | (UInt16(b[13]) << 8),
+            bassDynamicRangeDB: UInt16(b[14]) | (UInt16(b[15]) << 8))
     }
 }
 
-/// One channel's third-octave picture (REQ_RTA_GET_BANDS, 80 bytes).
+/// One channel's third-octave picture (REQ_RTA_GET_BANDS, 82 bytes).
 ///
 /// `avg` and `peak` always carry `RTA_MAX_BANDS` slots; only the first
-/// `nBands` are meaningful at the current sample rate.  A band that contains no
-/// FFT bin at the current size reads the floor and is never faked from a
-/// neighbour, which is what `RtaStatus.firstBand` lets a display grey out.
+/// `nBands` are meaningful at the current sample rate. The first `bassBands`
+/// are continuous filter-bank readings; FFT population rules apply only above
+/// them. Raw FFT bins remain a separate product.
 struct RtaBandFrame: Equatable {
     var channel: UInt8 = 0
     var seq: UInt8 = 0
@@ -112,17 +120,21 @@ struct RtaBandFrame: Equatable {
     /// True once the channel has produced at least one frame.
     var hasData: Bool { ageMs != 0xFFFF }
 
-    static func fromData(_ d: Data, at offset: Int = 0) -> RtaBandFrame? {
-        guard d.count >= offset + RTA_BAND_FRAME_SIZE else { return nil }
-        let b = [UInt8](d[(d.startIndex + offset)..<(d.startIndex + offset + RTA_BAND_FRAME_SIZE)])
-        guard b[0] == RTA_CFG_VERSION else { return nil }
+    static func fromData(_ d: Data, at offset: Int = 0,
+                         maxBands: Int = RTA_MAX_BANDS) -> RtaBandFrame? {
+        guard maxBands > 0, maxBands <= RTA_MAX_BANDS,
+              offset >= 0, offset <= d.count else { return nil }
+        let size = 8 + 2 * maxBands
+        guard d.count - offset >= size else { return nil }
+        let b = [UInt8](d[(d.startIndex + offset)..<(d.startIndex + offset + size)])
+        guard b[0] == RTA_CFG_VERSION, Int(b[3]) <= maxBands else { return nil }
         return RtaBandFrame(
             channel: b[1],
             seq: b[2],
             nBands: b[3],
             ageMs: UInt16(b[4]) | (UInt16(b[5]) << 8),
-            avg: Array(b[8..<(8 + RTA_MAX_BANDS)]),
-            peak: Array(b[(8 + RTA_MAX_BANDS)..<(8 + 2 * RTA_MAX_BANDS)]))
+            avg: Array(b[8..<(8 + maxBands)]),
+            peak: Array(b[(8 + maxBands)..<(8 + 2 * maxBands)]))
     }
 }
 
@@ -191,9 +203,16 @@ struct RtaStatus: Equatable {
     var lastFrameUs: UInt16 = 0
     var idleMs: UInt16 = 0xFFFF
     var sampleRateHz: UInt32 = 0
-    /// The lowest band this size and rate resolve; everything below it reads
-    /// the floor because no bin lands in it, and 0xFF means none of them do.
+    /// V3 reports zero for a supported bass layout; FFT gaps above 200 Hz
+    /// can still be empty. 0xFF means an unsupported layout.
     var firstBand: UInt8 = 0
+    /// Summed bass tap time on both cores, already included in audio CPU load.
+    /// 65535 is saturation, so it represents a lower bound rather than 6.6%.
+    var bassBusyUsPerSecond: UInt16 = 0
+    var bassLoadDescription: String {
+        let prefix = bassBusyUsPerSecond == .max ? "≥" : ""
+        return String(format: "bass %@%.2f%%", prefix, Double(bassBusyUsPerSecond) / 10000.0)
+    }
 
     var isRunning: Bool { state != RTA_STATE_IDLE }
 
@@ -218,7 +237,8 @@ struct RtaStatus: Equatable {
             lastFrameUs: UInt16(b[12]) | (UInt16(b[13]) << 8),
             idleMs: UInt16(b[14]) | (UInt16(b[15]) << 8),
             sampleRateHz: UInt32(b[16]) | (UInt32(b[17]) << 8) | (UInt32(b[18]) << 16) | (UInt32(b[19]) << 24),
-            firstBand: b[20])
+            firstBand: b[20],
+            bassBusyUsPerSecond: UInt16(b[22]) | (UInt16(b[23]) << 8))
     }
 }
 
@@ -256,7 +276,7 @@ struct RtaSnapshot: Equatable {
 /// pushes them whenever it starts watching.
 struct RtaOptions: Equatable {
     var fftOrder: UInt8 = 10
-    /// Power-domain averaging time constant; 0 turns averaging off.
+    /// Power-domain averaging; bass retains its minimum detector smoothing at 0.
     var avgMs: UInt16 = 300
     /// Peak-hold decay in dB per second; 0 turns the peak hold off.
     var peakDecayDBs: UInt8 = 12
@@ -443,11 +463,12 @@ final class RtaEngine: ObservableObject {
             chunk += 1
         }
 
+        let complete = centres.count >= Int(caps.maxBands)
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, usb.generation == generation else { return }
             self.caps = caps
-            self.bandCentresHz = centres
-            self.supported = true
+            self.bandCentresHz = Array(centres.prefix(Int(caps.maxBands)))
+            self.supported = complete
             // Fold this device's limits into the options: a size outside the
             // range this device reports would be STALLed on every push.
             var o = self.options
@@ -538,6 +559,8 @@ final class RtaEngine: ObservableObject {
         let readStatus = now.timeIntervalSince(lastStatusRead) >= RTA_STATUS_INTERVAL
         if readBins { lastBinRead = now }
         if readStatus { lastStatusRead = now }
+        let bandSlots = Int(caps.maxBands)
+        let bandFrameSize = caps.bandFrameSize
         let binFrameLength = caps.maxBinFrame > 0 ? Int(caps.maxBinFrame) : RTA_BIN_FRAME_MAX
         lock.unlock()
 
@@ -552,18 +575,18 @@ final class RtaEngine: ObservableObject {
         if want.channelMask.nonzeroBitCount > 1 {
             let maxFrames = 16
             if let d = usb.getControlRequest(request: REQ_RTA_GET_BANDS_ALL, value: 0, index: 2,
-                                             length: UInt16(RTA_BAND_FRAME_SIZE * maxFrames)) {
+                                             length: UInt16(bandFrameSize * maxFrames)) {
                 var off = 0
-                while off + RTA_BAND_FRAME_SIZE <= d.count {
-                    if let f = RtaBandFrame.fromData(d, at: off) { frames[f.channel] = f }
-                    off += RTA_BAND_FRAME_SIZE
+                while off + bandFrameSize <= d.count {
+                    if let f = RtaBandFrame.fromData(d, at: off, maxBands: bandSlots) { frames[f.channel] = f }
+                    off += bandFrameSize
                 }
             }
         } else {
             let ch = want.channelMask.trailingZeroBitCount   // exactly one bit set here
             if let d = usb.getControlRequest(request: REQ_RTA_GET_BANDS, value: UInt16(ch), index: 2,
-                                             length: UInt16(RTA_BAND_FRAME_SIZE)),
-               let f = RtaBandFrame.fromData(d) {
+                                             length: UInt16(bandFrameSize)),
+               let f = RtaBandFrame.fromData(d, maxBands: bandSlots) {
                 frames[f.channel] = f
             }
         }

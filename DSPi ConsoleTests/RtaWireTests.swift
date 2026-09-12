@@ -35,10 +35,10 @@ final class RtaWireTests: XCTestCase {
     func testWireSizes() {
         XCTAssertEqual(RTA_CONFIG_SIZE, 12)
         XCTAssertEqual(RTA_CAPS_SIZE, 16)
-        XCTAssertEqual(RTA_BAND_FRAME_SIZE, 80)
+        XCTAssertEqual(RTA_BAND_FRAME_SIZE, 82)
         XCTAssertEqual(RTA_STATUS_SIZE, 24)
         XCTAssertEqual(RTA_BIN_HEADER_SIZE, 16)
-        XCTAssertEqual(RTA_MAX_BANDS, 36)
+        XCTAssertEqual(RTA_MAX_BANDS, 37)
         // Header + 512 bins (1024 points) + the repeated sequence byte.
         XCTAssertEqual(RTA_BIN_FRAME_MAX, 529)
     }
@@ -97,12 +97,13 @@ final class RtaWireTests: XCTestCase {
         d[3] = orderMin
         d[4] = orderMax
         d[5] = orderDefault
-        d[6] = 0                    // reserved0
+        d[6] = 14                   // bass_bands
         d[7] = UInt8(RTA_MAX_BANDS)
         d[8] = RTA_LEVEL_ZERO_DBFS
         d[9] = dynamicRange
         d[10] = 0x88; d[11] = 0x13  // idle_timeout_ms = 5000
         d[12] = 0x11; d[13] = 0x02  // max_bin_frame = 529
+        d[14] = 70; d[15] = 0       // bass dynamic range
         return d
     }
 
@@ -113,6 +114,9 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(caps?.fftOrderMax, 10)
         XCTAssertEqual(caps?.levelZero, RTA_LEVEL_ZERO_DBFS)
         XCTAssertEqual(caps?.dynamicRangeDB, 120)
+        XCTAssertEqual(caps?.bassBands, 14)
+        XCTAssertEqual(caps?.bassDynamicRangeDB, 70)
+        XCTAssertEqual(caps?.bandFrameSize, 82)
         XCTAssertEqual(caps?.idleTimeoutMs, 5000)
         XCTAssertEqual(caps?.maxBinFrame, 529)
         XCTAssertEqual(Int(caps?.maxBinFrame ?? 0), RTA_BIN_FRAME_MAX)
@@ -140,7 +144,7 @@ final class RtaWireTests: XCTestCase {
 
     // MARK: - RtaBandFrame
 
-    private func bandFrameBytes(channel: UInt8 = 3, seq: UInt8 = 7, nBands: UInt8 = 31,
+    private func bandFrameBytes(channel: UInt8 = 3, seq: UInt8 = 7, nBands: UInt8 = 34,
                                 ageMs: UInt16 = 42) -> Data {
         var d = Data(count: RTA_BAND_FRAME_SIZE)
         d[0] = RTA_CFG_VERSION
@@ -160,7 +164,7 @@ final class RtaWireTests: XCTestCase {
         let f = RtaBandFrame.fromData(bandFrameBytes())
         XCTAssertEqual(f?.channel, 3)
         XCTAssertEqual(f?.seq, 7)
-        XCTAssertEqual(f?.nBands, 31)
+        XCTAssertEqual(f?.nBands, 34)
         XCTAssertEqual(f?.ageMs, 42)
         XCTAssertEqual(f?.avg.count, RTA_MAX_BANDS)
         XCTAssertEqual(f?.peak.count, RTA_MAX_BANDS)
@@ -194,7 +198,7 @@ final class RtaWireTests: XCTestCase {
     }
 
     func testBandFrameRejectsShortRead() {
-        XCTAssertNil(RtaBandFrame.fromData(Data(repeating: 1, count: 79)))
+        XCTAssertNil(RtaBandFrame.fromData(Data(repeating: 1, count: 81)))
         XCTAssertNil(RtaBandFrame.fromData(bandFrameBytes(), at: 8))
     }
 
@@ -274,6 +278,7 @@ final class RtaWireTests: XCTestCase {
         d[12] = 0x70; d[13] = 0x01      // last_frame_us = 368
         d[14] = 0x0A; d[15] = 0x00      // idle_ms
         d[16] = 0x80; d[17] = 0xBB; d[18] = 0x00; d[19] = 0x00   // 48000
+        d[22] = 0xD2; d[23] = 0x04 // bass = 1234 us/s
         d[20] = firstBand
         return d
     }
@@ -287,6 +292,7 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(s?.liveMask, 0x000F)
         XCTAssertEqual(s?.framesPerSecond, 46)
         XCTAssertEqual(s?.busyUsPerSecond, 10000)
+        XCTAssertEqual(s?.bassBusyUsPerSecond, 1234)
         XCTAssertEqual(s?.lastFrameUs, 368)
         XCTAssertEqual(s?.sampleRateHz, 48000)
         XCTAssertEqual(s?.isRunning, true)
@@ -363,20 +369,57 @@ final class RtaWireTests: XCTestCase {
         XCTAssertFalse(rtaBandHasBin(centreHz: 25, sampleRateHz: 48000, fftOrder: 10))
     }
 
-    /// Exact population per band, matching scripts/gen_rta_tables.py in the
-    /// firmware repo: at 48 kHz, 1024 points populate 50 and 100 Hz but not 63
-    /// or 80 Hz; 512 points start at 100 Hz; 256 points start at 200 Hz.
+    /// Continuous 10–200 Hz coverage survives every FFT setting, while the
+    /// higher-band gaps follow the firmware's V3 FFT table indices.
     func testBandIsPopulatedMatchesFirmwareTables() {
-        XCTAssertFalse(rtaBandIsPopulated(band: 4, sampleRateHz: 48000, fftOrder: 9))    // 50 Hz
-        XCTAssertFalse(rtaBandIsPopulated(band: 7, sampleRateHz: 48000, fftOrder: 8))    // 100 Hz
-        XCTAssertTrue(rtaBandIsPopulated(band: 10, sampleRateHz: 48000, fftOrder: 8))    // 200 Hz
-        XCTAssertTrue(rtaBandIsPopulated(band: 4, sampleRateHz: 48000, fftOrder: 10))    // 50 Hz
-        XCTAssertFalse(rtaBandIsPopulated(band: 5, sampleRateHz: 48000, fftOrder: 10))   // 63 Hz
-        XCTAssertFalse(rtaBandIsPopulated(band: 6, sampleRateHz: 48000, fftOrder: 10))   // 80 Hz
-        XCTAssertTrue(rtaBandIsPopulated(band: 7, sampleRateHz: 48000, fftOrder: 10))    // 100 Hz
-        XCTAssertFalse(rtaBandIsPopulated(band: 6, sampleRateHz: 48000, fftOrder: 9))    // 80 Hz
-        XCTAssertTrue(rtaBandIsPopulated(band: 7, sampleRateHz: 48000, fftOrder: 9))     // 100 Hz
-        XCTAssertTrue(rtaBandIsPopulated(band: 30, sampleRateHz: 48000, fftOrder: 10))   // 20 kHz
+        for rate in [44100.0, 48000.0, 96000.0] {
+            for order in 8...10 {
+                for band in 0..<14 {
+                    XCTAssertTrue(rtaBandIsPopulated(band: band, sampleRateHz: rate, fftOrder: order))
+                }
+            }
+        }
+        XCTAssertFalse(rtaBandIsPopulated(band: 14, sampleRateHz: 48000, fftOrder: 8)) // 250 Hz
+        XCTAssertFalse(rtaBandIsPopulated(band: 15, sampleRateHz: 48000, fftOrder: 8)) // 315 Hz
+        XCTAssertTrue(rtaBandIsPopulated(band: 16, sampleRateHz: 48000, fftOrder: 8))  // 400 Hz
+        XCTAssertTrue(rtaBandIsPopulated(band: 33, sampleRateHz: 48000, fftOrder: 10)) // 20 kHz
+        // With no bass capability, raw FFT geometry still uses the V3 index.
+        XCTAssertFalse(rtaBandIsPopulated(band: 0, sampleRateHz: 48000, fftOrder: 10, bassBands: 0))
+        XCTAssertTrue(rtaBandIsPopulated(band: 7, sampleRateHz: 48000, fftOrder: 10, bassBands: 0))
+    }
+
+    func testV3RejectsOtherVersionsAndInvalidFrames() {
+        XCTAssertNil(RtaCaps.fromData(capsBytes(version: 2)))
+        XCTAssertNil(RtaCaps.fromData(capsBytes(version: 4)))
+        var old = bandFrameBytes(); old[0] = 2
+        XCTAssertNil(RtaBandFrame.fromData(old))
+        XCTAssertNil(RtaBandFrame.fromData(bandFrameBytes(), at: -1))
+        XCTAssertNil(RtaBandFrame.fromData(bandFrameBytes(), at: Int.max))
+        XCTAssertNil(RtaBandFrame.fromData(bandFrameBytes(nBands: 38)))
+        var caps = capsBytes(); caps[6] = 38
+        XCTAssertNil(RtaCaps.fromData(caps))
+    }
+
+    func testBandStrideComesFromCapability() {
+        let slots = 34, stride = 8 + 2 * slots
+        var bytes = Data(repeating: 0, count: stride * 2)
+        for offset in [0, stride] {
+            bytes[offset] = 3; bytes[offset + 3] = UInt8(slots)
+            bytes[offset + 8] = 201; bytes[offset + 8 + slots] = 211
+        }
+        bytes[stride + 1] = 8
+        let last = RtaBandFrame.fromData(bytes, at: stride, maxBands: slots)
+        XCTAssertEqual(last?.channel, 8)
+        XCTAssertEqual(last?.avg.count, slots)
+        XCTAssertEqual(last?.avg.first, 201)
+        XCTAssertEqual(last?.peak.first, 211)
+    }
+
+    func testBassTimingSaturationIsALowerBound() {
+        var bytes = statusBytes(); bytes[22] = 255; bytes[23] = 255
+        let status = RtaStatus.fromData(bytes)!
+        XCTAssertEqual(status.bassBusyUsPerSecond, .max)
+        XCTAssertTrue(status.bassLoadDescription.contains("≥"))
     }
 
     /// Nonsense in, "assume it is measurable" out - the heuristic is only ever
@@ -506,7 +549,7 @@ final class RtaWireTests: XCTestCase {
 
     /// The band-centre table is the single source of truth for where a band
     /// sits, so the app's axis labels come from it rather than a table of ours.
-    func testLiveBandCentresAreThirdOctaveFrom20Hz() throws {
+    func testLiveBandCentresAreThirdOctaveFrom10Hz() throws {
         let usb = try HardwareTest.requireDevice()
         guard let c = usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: 1, index: 2,
                                             length: UInt16(RTA_CENTRES_PER_CHUNK * 2)),
@@ -518,7 +561,7 @@ final class RtaWireTests: XCTestCase {
         for i in stride(from: 0, to: b.count - 1, by: 2) {
             centres.append(Double(UInt16(b[i]) | (UInt16(b[i + 1]) << 8)))
         }
-        XCTAssertEqual(centres.first ?? 0, 20, accuracy: 0.5)
+        XCTAssertEqual(centres.first ?? 0, 10, accuracy: 0.5)
         // Third-octave spacing: each centre is 2^(1/3) times the one below it.
         let ratio = pow(2.0, 1.0 / 3.0)
         for i in 1..<min(centres.count, 12) {

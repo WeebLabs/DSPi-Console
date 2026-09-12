@@ -16,7 +16,7 @@ struct RtaScale: Equatable {
 
 /// Frequencies worth labelling on a third-octave axis: the 1-2-5 sequence, so
 /// the labels stay readable at the widths these views actually get.
-private let rtaLabelledCentres: [Double] = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
+private let rtaLabelledCentres: [Double] = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
 
 private func rtaShortHz(_ hz: Double) -> String {
     hz >= 1000 ? "\(Int((hz / 1000).rounded()))k" : "\(Int(hz.rounded()))"
@@ -160,13 +160,14 @@ func rtaBandHasBin(centreHz: Double, sampleRateHz: Double, fftOrder: Int) -> Boo
     return firstBin * binHz <= hi
 }
 
-/// Whether band `i` holds at least one FFT bin, computed the way the firmware's
-/// table generator does it: exact base-10 centre 1000 * 10^((i - 17) / 10),
-/// edges at 10^(+/-0.05), DC excluded, Nyquist excluded.  Exact rather than a
-/// heuristic, so a band this says is empty really is empty on the device.
-func rtaBandIsPopulated(band i: Int, sampleRateHz: Double, fftOrder: Int) -> Bool {
+/// Bass bands are continuously populated. Higher bands follow the firmware's
+/// exact FFT geometry: base-10 centre 1000 * 10^((i - 20) / 10), edges at
+/// 10^(+/-0.05), DC and Nyquist excluded.
+func rtaBandIsPopulated(band i: Int, sampleRateHz: Double, fftOrder: Int,
+                        bassBands: Int = RTA_BASS_BANDS) -> Bool {
+    if i >= 0 && i < bassBands { return true }
     guard i >= 0, sampleRateHz > 0, fftOrder > 0 else { return true }
-    let fc = 1000.0 * pow(10.0, Double(i - 17) / 10.0)
+    let fc = 1000.0 * pow(10.0, Double(i - 20) / 10.0)
     let lo = fc * pow(10.0, -0.05), hi = fc * pow(10.0, 0.05)
     let n = Double(1 << fftOrder)
     let binHz = sampleRateHz / n
@@ -195,23 +196,22 @@ struct RtaBandsView: View {
 
     private var bandCount: Int {
         let n = Int(frame?.nBands ?? 0)
-        return n > 0 ? min(n, RTA_MAX_BANDS) : max(engine.bandCentresHz.count, 31)
+        return n > 0 ? min(n, RTA_MAX_BANDS) : max(engine.bandCentresHz.count, 34)
     }
 
     /// The lowest band this size and rate resolve, as the device reports it.
     private var firstResolved: Int { engine.snapshot.status.firstResolvedBand }
 
-    /// The bands this size and rate actually populate, in order.  Bands with no
-    /// bin (below `first_band`, or the patchy gaps just above it, such as 63 and
-    /// 80 Hz at 48 kHz and 1024 points) are left out entirely rather than drawn
-    /// as empty slots, so the bars always fill the width with real data.
+    /// Continuous bass bands plus populated FFT bands, in frequency order.
+    /// Empty FFT bands above the bass bank are omitted from the bars.
     private var visibleBands: [Int] {
         let rate = engine.snapshot.status.sampleRateHz > 0
             ? Double(engine.snapshot.status.sampleRateHz) : 48000
         let order = Int(engine.options.fftOrder)
         let first = firstResolved
         return (0..<bandCount).filter { i in
-            i >= first && rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order)
+            i >= first && rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order,
+                                            bassBands: Int(engine.caps.bassBands))
         }
     }
 
@@ -505,8 +505,8 @@ struct RtaBinsView: View {
 /// a third-octave band down there is narrower than one FFT bin, so nothing
 /// lands in it and it can only read the floor.
 let rtaShadedBandHelp = """
-Shaded bands hold no FFT bin at the current transform size, so they cannot be \
-measured - they are not reading silence. Raise the transform size to fill more \
+Bass bands from 10–200 Hz are measured continuously. Shaded higher bands hold no \
+FFT bin at the current transform size. Raise the transform size to fill more \
 of them in.
 """
 
@@ -532,22 +532,13 @@ extension RtaEngine {
         return "\(channels), each refreshed every \(ms) ms"
     }
 
-    /// Whether the transform has any bin inside band `i`.
-    ///
-    /// A third-octave band near the bottom is narrower than one FFT bin: at
-    /// 48 kHz and 1024 points a bin is 46.9 Hz wide, while the 40 Hz band spans
-    /// only 35.6 to 44.9 Hz.  Such a band contains no bin, and the firmware
-    /// reports it at the floor rather than faking it from a neighbour.
-    ///
-    /// Band edges are derived from the nominal centre rather than read from the
-    /// device, so this is a display heuristic and callers only apply it to a
-    /// band that is already reading the floor.  It can therefore explain an
-    /// empty band but never hide a live one.
+    /// Whether this RTA band is measured by the continuous bank or FFT.
+    /// Kept separate from raw-bin geometry so quiet bass remains measurable.
     func transformHasBin(inBand i: Int) -> Bool {
         guard i >= 0, i < bandCentresHz.count else { return true }
         let rate = snapshot.status.sampleRateHz > 0 ? Double(snapshot.status.sampleRateHz) : 48000
-        return rtaBandHasBin(centreHz: bandCentresHz[i], sampleRateHz: rate,
-                             fftOrder: Int(options.fftOrder))
+        return rtaBandIsPopulated(band: i, sampleRateHz: rate,
+                                  fftOrder: Int(options.fftOrder), bassBands: Int(caps.bassBands))
     }
 
     /// The centre of the lowest band this configuration can measure at all, for
@@ -908,10 +899,10 @@ struct SpectrumAnalyserView: View {
             Image(systemName: "waveform.badge.exclamationmark")
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
-            Text("No spectrum analyser on this device")
+            Text("Spectrum analyser unavailable")
                 .font(.headline)
             Text(vm.isDeviceConnected
-                 ? "The connected firmware does not carry the analyser. Update the firmware to use it."
+                 ? "The connected firmware does not provide a compatible analyser. Update the firmware to use it."
                  : "Connect a DSPi to use the analyser.")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -1042,7 +1033,7 @@ struct SpectrumAnalyserView: View {
                 .labelsHidden()
                 .frame(width: 80)
             }
-            .help("Points in the transform. More points resolve lower frequencies but take longer to fill, so each channel refreshes less often.")
+            .help("Points in the FFT. More points improve FFT resolution but refresh less often. The RTA bass bands from 10–200 Hz are measured continuously at every size.")
 
             labelled("Averaging") {
                 Picker("", selection: Binding(
@@ -1140,6 +1131,10 @@ struct SpectrumAnalyserView: View {
                 // cannot see; 10,000 microseconds per second is one percent.
                 Text(String(format: "main loop %.1f%%", Double(s.busyUsPerSecond) / 10000.0))
             }
+            if s.bassBusyUsPerSecond > 0 {
+                Text(s.bassLoadDescription)
+                    .help("Bass processing time summed across both cores. Already included in the audio CPU meters; ≥ means the counter is saturated.")
+            }
             Spacer()
             if engine.configRejected {
                 Label("Device refused this configuration", systemImage: "exclamationmark.triangle.fill")
@@ -1151,7 +1146,9 @@ struct SpectrumAnalyserView: View {
                 Text("shaded bands below \(rtaShortHz(lowest)) Hz need a larger transform")
                     .foregroundColor(.orange)
             } else if engine.caps.dynamicRangeDB > 0 {
-                Text("\(engine.caps.dynamicRangeDB) dB range")
+                Text(mode == .bins ? "\(engine.caps.dynamicRangeDB) dB FFT range"
+                     : "\(engine.caps.dynamicRangeDB)/\(engine.caps.bassDynamicRangeDB) dB range")
+                    .help("FFT / bass usable dynamic range. Bass bands use overlapping filters calibrated for tones.")
             }
         }
         .font(.system(size: 10, design: .monospaced))

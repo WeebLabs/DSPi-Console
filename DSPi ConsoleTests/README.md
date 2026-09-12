@@ -71,3 +71,18 @@ is cached so the rest are instant, and a device-less run skips after one probe.
    `DSPViewModel` setter, read back with a raw `getControlRequest`, assert, and
    restore the original in a `defer`. The serial queue guarantees a sync read
    right after an async set observes the new value.
+
+
+## RTA V3 (2026-09-12)
+
+`RtaWireTests` covers the 82-byte/37-slot band frames, capability-derived strides,
+10 Hz band indices, continuous bass visibility across all FFT sizes, separate
+bass dynamic range and CPU timing, saturation, and rejection of incompatible
+protocols. The raw FFT geometry tests remain separate: V3 adds bass RTA bands,
+not low-frequency FFT bins. Live tests need matching V3 firmware.
+
+The focused V3 run excludes the four `testLive…` methods. If the existing
+`ControlSurfacesWireTests.swift` references removed auxiliary constants, add
+`EXCLUDED_SOURCE_FILE_NAMES=ControlSurfacesWireTests.swift` to the focused
+xcodebuild command; this bypasses that unrelated compile failure without
+changing the Control Surfaces tests.
