@@ -58,6 +58,11 @@ class AppSettings: ObservableObject {
     @AppStorage("graphMinFreq") var graphMinFreq: Double = 15.0
     @AppStorage("graphMaxFreq") var graphMaxFreq: Double = 20000.0
 
+    // Dashboard
+    /// Filter-list cards per row on the dashboard: 0 fits as many as the
+    /// window's width allows, 1 to 3 fixes the count.
+    @AppStorage("dashboardCardsPerRow") var dashboardCardsPerRow: Int = 0
+
     // Pop-out Graph
     @AppStorage("popoutGraphFollowsSelection") var popoutGraphFollowsSelection: Bool = true
 

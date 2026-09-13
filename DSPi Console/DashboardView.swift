@@ -15,42 +15,71 @@ private func formatTrimmed(_ value: Double, decimals: Int, signed: Bool = false)
 struct DashboardOverview: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject private var settings = AppSettings.shared
+    /// The grid's measured width, for the Auto layout.
+    @State private var availableWidth: CGFloat = 0
+
+    private static let spacing: CGFloat = 18
+    /// Narrowest a stereo pair's two filter lists stay readable side by side.
+    private static let autoMinCardWidth: CGFloat = 440
+
+    /// One card on the dashboard, in display order.
+    private enum CardItem: Hashable {
+        case input
+        case outputPair(Int, Int)
+        case output(Int)
+    }
+
+    private var cards: [CardItem] {
+        var items: [CardItem] = [.input]
+        // SPDIF stereo pairs (RP2040: 2 pairs, RP2350: 4 pairs); a pair with
+        // one side disabled shows the other side alone.
+        let spdifPairs = (vm.numOutputChannels - 1) / 2
+        for pairIdx in 0..<spdifPairs {
+            let leftIdx = pairIdx * 2
+            let rightIdx = leftIdx + 1
+            switch (vm.outputEnabled[leftIdx], vm.outputEnabled[rightIdx]) {
+            case (true, true):  items.append(.outputPair(leftIdx, rightIdx))
+            case (true, false): items.append(.output(leftIdx))
+            case (false, true): items.append(.output(rightIdx))
+            case (false, false): break
+            }
+        }
+        // PDM (always mono)
+        if vm.outputEnabled[vm.pdmOutputIndex] { items.append(.output(vm.pdmOutputIndex)) }
+        return items
+    }
+
+    /// Cards per row: as many as fit for Auto, otherwise the user's choice.
+    /// Never more columns than cards, so a short list fills the width.
+    private func columnCount(for count: Int) -> Int {
+        let chosen = settings.dashboardCardsPerRow
+        let wanted = chosen > 0
+            ? chosen
+            : Int((availableWidth + Self.spacing) / (Self.autoMinCardWidth + Self.spacing))
+        return max(1, min(wanted, count))
+    }
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: Self.spacing) {
             // The channels checked in the graph's gear menu, when the
-            // dashboard has bars switched on.
+            // dashboard has bars switched on.  Always the full width.
             SpectrumBarStrip(vm: vm, engine: vm.rta)
 
-            StereoDashboardCard(
-                title: "STEREO INPUT (USB)",
-                left: .masterLeft,
-                right: .masterRight,
-                showDelay: false,
-                vm: vm
-            )
-
-            // SPDIF stereo pairs (RP2040: 2 pairs, RP2350: 4 pairs)
-            let spdifPairs = (vm.numOutputChannels - 1) / 2
-            ForEach(0..<spdifPairs, id: \.self) { pairIdx in
-                let leftIdx = pairIdx * 2
-                let rightIdx = pairIdx * 2 + 1
-                let leftEnabled = vm.outputEnabled[leftIdx]
-                let rightEnabled = vm.outputEnabled[rightIdx]
-
-                if leftEnabled && rightEnabled {
-                    StereoOutputDashboardCard(leftIndex: leftIdx, rightIndex: rightIdx, vm: vm)
-                } else if leftEnabled {
-                    OutputDashboardCard(outputIndex: leftIdx, vm: vm)
-                } else if rightEnabled {
-                    OutputDashboardCard(outputIndex: rightIdx, vm: vm)
+            let items = cards
+            // Every card is a header and ten rows, so a row of the grid lines
+            // up without any help.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Self.spacing, alignment: .top),
+                                     count: columnCount(for: items.count)),
+                      spacing: Self.spacing) {
+                ForEach(items, id: \.self) { item in
+                    DashboardCardFrame { card(item) }
                 }
             }
-
-            // PDM (always mono)
-            if vm.outputEnabled[vm.pdmOutputIndex] {
-                OutputDashboardCard(outputIndex: vm.pdmOutputIndex, vm: vm)
-            }
+            .background(GeometryReader { geometry in
+                Color.clear
+                    .onAppear { availableWidth = geometry.size.width }
+                    .onChange(of: geometry.size.width) { _, width in availableWidth = width }
+            })
         }
         .padding(.horizontal)
         .padding(.top, 4)
@@ -104,6 +133,7 @@ struct StereoDashboardCard: View {
                     }
                 }
                 .padding(8)
+                .padding(.trailing, dashboardGearSlot)
                 .frame(maxWidth: .infinity)
                 // Color the right table header
                 .background(Color.white.opacity(0.01))
@@ -231,6 +261,7 @@ struct StereoOutputDashboardCard: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(8)
+                .padding(.trailing, dashboardGearSlot)
                 .frame(maxWidth: .infinity)
                 .background(Color.white.opacity(0.01))
             }
@@ -303,6 +334,7 @@ struct OutputDashboardCard: View {
                     .foregroundColor(.secondary)
             }
             .padding(8)
+            .padding(.trailing, dashboardGearSlot)
             .background(Color.white.opacity(0.01))
             .frame(height: 32)
 
@@ -393,5 +425,136 @@ struct DashboardRow: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 24)
+    }
+}
+
+// MARK: - Layout
+
+/// Kept clear at the end of each card's right-most header so the hover gear
+/// never covers the delay readout.
+private let dashboardGearSlot: CGFloat = 18
+
+extension DashboardOverview {
+    @ViewBuilder
+    private func card(_ item: CardItem) -> some View {
+        switch item {
+        case .input:
+            StereoDashboardCard(title: "STEREO INPUT (USB)", left: .masterLeft, right: .masterRight,
+                                showDelay: false, vm: vm)
+        case .outputPair(let left, let right):
+            StereoOutputDashboardCard(leftIndex: left, rightIndex: right, vm: vm)
+        case .output(let index):
+            OutputDashboardCard(outputIndex: index, vm: vm)
+        }
+    }
+}
+
+/// Wraps a dashboard card with the layout gear, shown while the pointer is over
+/// that card.  Every card's gear edits the same dashboard-wide setting, so the
+/// control is wherever the user already is rather than in a header of its own.
+private struct DashboardCardFrame<Content: View>: View {
+    @ViewBuilder let content: Content
+    @State private var isHovered = false
+    @State private var optionsOpen = false
+
+    var body: some View {
+        content
+            .overlay(alignment: .topTrailing) {
+                Button { optionsOpen.toggle() } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(optionsOpen ? .primary : .secondary)
+                        .frame(width: 16, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Dashboard layout")
+                // Faded rather than removed, so the popover keeps its anchor.
+                .opacity(isHovered || optionsOpen ? 1 : 0)
+                .allowsHitTesting(isHovered || optionsOpen)
+                .popover(isPresented: $optionsOpen, arrowEdge: .bottom) {
+                    DashboardLayoutPanel()
+                }
+                // Centred in the 32 pt header, in its reserved slot.
+                .padding(.top, 9)
+                .padding(.trailing, 6)
+            }
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.15)) { isHovered = hovering }
+            }
+    }
+}
+
+/// The dashboard layout popover: Auto, or a fixed number of cards per row.
+private struct DashboardLayoutPanel: View {
+    @ObservedObject private var settings = AppSettings.shared
+
+    private var chosen: Int { min(max(settings.dashboardCardsPerRow, 0), 3) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("DASHBOARD LAYOUT")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+            HStack(spacing: 6) {
+                ForEach(0...3, id: \.self) { n in tile(n) }
+            }
+            .padding(.horizontal, 12)
+            Text(chosen == 0 ? "Fits as many cards per row as the window allows."
+                             : "Up to \(chosen) \(chosen == 1 ? "card" : "cards") per row.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+        }
+        .frame(width: 220)
+    }
+
+    private func tile(_ n: Int) -> some View {
+        let on = chosen == n
+        let shape = RoundedRectangle(cornerRadius: 6)
+        return Button { settings.dashboardCardsPerRow = n } label: {
+            VStack(spacing: 4) {
+                if n == 0 {
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 22, height: 13)
+                } else {
+                    DashboardLayoutGlyph(columns: n)
+                }
+                Text(n == 0 ? "Auto" : "\(n)")
+                    .font(.system(size: 9, weight: on ? .semibold : .regular))
+            }
+            .foregroundColor(on ? .accentColor : .secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .background(shape.fill(on ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.05)))
+            .overlay(shape.stroke(on ? Color.accentColor.opacity(0.7) : .clear, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .help(n == 0 ? "Fit cards to the window width" : "\(n) \(n == 1 ? "card" : "cards") per row")
+    }
+}
+
+/// Two rows of rounded cells in the given number of columns: a picture of a
+/// cards-per-row layout, drawn in the current foreground colour.
+private struct DashboardLayoutGlyph: View {
+    let columns: Int
+
+    var body: some View {
+        VStack(spacing: 2) {
+            ForEach(0..<2, id: \.self) { _ in
+                HStack(spacing: 2) {
+                    ForEach(0..<columns, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 2)
+                    }
+                }
+            }
+        }
+        .frame(width: 22, height: 13)
     }
 }
