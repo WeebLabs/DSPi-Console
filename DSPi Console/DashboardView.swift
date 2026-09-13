@@ -18,18 +18,9 @@ struct DashboardOverview: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            // The one channel picked as "Dashboard FFT" in the sidebar.  In
-            // graph placement the response graph draws it instead.
-            if settings.rtaDashboardPlacement == .strip {
-                let source = vm.dashboardRtaSource
-                let eqCh = vm.eqChannel(for: source)
-                ChannelSpectrumStrip(
-                    vm: vm, engine: vm.rta,
-                    title: eqCh < vm.channelNames.count ? vm.channelNames[eqCh] : "",
-                    channel: source.index,
-                    tap: source.tap,
-                    color: eqCurveColor(eqCh: eqCh, chOut1: vm.chOut1))
-            }
+            // The channels checked in the graph's gear menu, when the
+            // dashboard has bars switched on.
+            SpectrumBarStrip(vm: vm, engine: vm.rta)
 
             StereoDashboardCard(
                 title: "STEREO INPUT (USB)",

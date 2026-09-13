@@ -2229,7 +2229,13 @@ class DSPViewModel: ObservableObject {
     var numOutputSlots: Int { platformName == "RP2040" ? 2 : 4 }
     var anySlotIsI2S: Bool { outputSlotTypes.prefix(numOutputSlots).contains(1) }
     private(set) var isOverviewMode: Bool = true
-    @Published var activeEqChannel: Int? = nil
+    @Published var activeEqChannel: Int? = nil {
+        // Opening a channel page starts its spectrum on its own channel.
+        // Re-selecting the same channel (a link refresh) keeps what was checked.
+        didSet {
+            if let ch = activeEqChannel, ch != oldValue { resetRtaPageSelection(for: ch) }
+        }
+    }
 
     // Live Data
     let meters = DSPMeterModel()
@@ -2239,6 +2245,10 @@ class DSPViewModel: ObservableObject {
     /// would otherwise redraw with it.  Nothing is polled until a view
     /// subscribes; see `RtaEngine`.
     let rta: RtaEngine
+
+    /// The spectrum channels on the open channel page.  Read through
+    /// `rtaSelection`, which also covers the dashboard's stored choice.
+    @Published var rtaPageSelection = RtaChannelSelection.none
 
     /// Returns true if the matrix output is disabled or muted.
     func isOutputInactive(_ outputIndex: Int) -> Bool {

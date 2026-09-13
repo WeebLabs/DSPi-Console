@@ -192,16 +192,6 @@ struct BodePlotView: View {
         return groups
     }
 
-    /// The EQ channels this instance is drawing, in the graph's own numbering.
-    /// On a channel page the spectrum overlay checks this set, so turning the
-    /// edited channel's curve off takes its spectrum with it.
-    private var visibleEqChannels: [Int] {
-        guard vm.isDeviceReady else { return [] }
-        return (0..<vm.numChannels).filter { eqCh in
-            useOverride ? (visibilityOverride[eqCh] ?? false) : (vm.channelVisibility[eqCh] == true)
-        }
-    }
-
     var body: some View {
         let groups = groupedChannels()
 
@@ -270,10 +260,8 @@ struct BodePlotView: View {
             }
 
             // Live spectrum, behind the curves and above the grid.
-            if settings.rtaPlacement(onDashboard: vm.activeEqChannel == nil) == .graph {
+            if settings.rtaShows(.graph, onDashboard: vm.activeEqChannel == nil) {
                 GraphSpectrumOverlay(vm: vm, engine: vm.rta,
-                                     visibleEqChannels: visibleEqChannels,
-                                     activeEqChannel: vm.activeEqChannel,
                                      minFreq: minFreq, maxFreq: maxFreq)
             }
 
@@ -400,17 +388,13 @@ struct BodePlotView: View {
             GraphVerticalZoomHandler(settings: settings)
         )
         .overlay(alignment: .topTrailing) {
-            if isHovered && !graphWindowController.isVisible {
-                Button(action: {
-                    graphWindowController.show(vm: vm)
-                }) {
-                    Image(systemName: "arrow.down.backward.and.arrow.up.forward")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-                .padding(6)
-                .transition(.opacity)
+            // The pop-out window gets the gear too, without the pop-out item:
+            // with the graph popped out it is the only place the menu can live.
+            if isHovered && (isPopOut || !graphWindowController.isVisible) {
+                GraphOptionsMenu(vm: vm, engine: vm.rta,
+                                 onPopOut: isPopOut ? nil : { graphWindowController.show(vm: vm) })
+                    .padding(6)
+                    .transition(.opacity)
             }
         }
         .onHover { hovering in

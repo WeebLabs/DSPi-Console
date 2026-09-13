@@ -627,135 +627,305 @@ extension RtaEngine {
     }
 }
 
-// MARK: - Inline strips
+// MARK: - Channel selection
 
-/// The one channel the dashboard's spectrum shows, picked with "Dashboard FFT"
-/// in the sidebar's context menu.  Held as a tap and an index rather than an
-/// EQ channel, because the EQ numbering of outputs moves with the input count.
-enum RtaDashboardSource: Equatable {
-    case input(Int)
-    case output(Int)
+/// The channels a page's spectrum shows: any number of channels, all at one tap.
+/// Inputs and outputs are never mixed, because the device has one FFT engine
+/// and it listens at one tap at a time.
+struct RtaChannelSelection: Equatable {
+    var tap: UInt8
+    /// Channels at `tap` (input row, or matrix output index), ascending.
+    private(set) var channels: [Int]
 
+    init(tap: UInt8, channels: [Int]) {
+        self.tap = tap
+        self.channels = Array(Set(channels)).sorted()
+    }
+
+    static let none = RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: [])
+
+    var isEmpty: Bool { channels.isEmpty }
+
+    var mask: UInt16 {
+        channels.reduce(UInt16(0)) { $0 | (UInt16(1) << UInt16($1)) }
+    }
+
+    /// "in:0,2" or "out:1".  An empty list ("out:") is a deliberate choice of
+    /// nothing.  A single channel is spelled the way the one-channel dashboard
+    /// setting stored it, so that preference carries over unchanged.
     var storageKey: String {
-        switch self {
-        case .input(let n):  return "in:\(n)"
-        case .output(let n): return "out:\(n)"
-        }
+        (tap == RTA_TAP_INPUT ? "in:" : "out:") + channels.map(String.init).joined(separator: ",")
     }
 
     init?(storageKey: String) {
-        let parts = storageKey.split(separator: ":")
-        guard parts.count == 2, let n = Int(parts[1]), n >= 0 else { return nil }
-        switch parts[0] {
-        case "in":  self = .input(n)
-        case "out": self = .output(n)
+        guard let colon = storageKey.firstIndex(of: ":") else { return nil }
+        let tap: UInt8
+        switch storageKey[..<colon] {
+        case "in":  tap = RTA_TAP_INPUT
+        case "out": tap = RTA_TAP_OUTPUT
         default:    return nil
         }
+        var channels: [Int] = []
+        for item in storageKey[storageKey.index(after: colon)...].split(separator: ",") {
+            guard let n = Int(item), n >= 0, n < 16 else { return nil }
+            channels.append(n)
+        }
+        self.init(tap: tap, channels: channels)
     }
 
-    var tap: UInt8 {
-        switch self {
-        case .input:  return RTA_TAP_INPUT
-        case .output: return RTA_TAP_OUTPUT
-        }
+    func contains(tap: UInt8, channel: Int) -> Bool {
+        self.tap == tap && channels.contains(channel)
     }
 
-    /// The analyser's channel at `tap`: the input row, or the matrix output.
-    var index: Int {
-        switch self {
-        case .input(let n), .output(let n): return n
-        }
+    /// Whether a channel at `tap` can be checked without mixing taps.
+    func accepts(tap: UInt8) -> Bool { isEmpty || self.tap == tap }
+
+    /// This selection with one channel checked or unchecked.  A channel at the
+    /// other tap is ignored rather than replacing the selection: the menu
+    /// disables those items, so reaching here with one is a caller bug.
+    func toggling(tap: UInt8, channel: Int) -> RtaChannelSelection {
+        guard accepts(tap: tap) else { return self }
+        let next = channels.contains(channel) && self.tap == tap
+            ? channels.filter { $0 != channel }
+            : (self.tap == tap ? channels : []) + [channel]
+        return RtaChannelSelection(tap: tap, channels: next)
+    }
+
+    /// Only the channels in `live`, keeping the tap.
+    func restricted(to live: [Int]) -> RtaChannelSelection {
+        RtaChannelSelection(tap: tap, channels: channels.filter(live.contains))
     }
 }
 
 extension DSPViewModel {
-    /// The dashboard's spectrum channel: the stored choice while it is live on
-    /// this device, otherwise the first enabled output, otherwise input 1.
-    var dashboardRtaSource: RtaDashboardSource {
-        if let stored = RtaDashboardSource(storageKey: AppSettings.shared.rtaDashboardSourceKey),
-           isLiveRtaSource(stored) {
-            return stored
-        }
-        if let first = (0..<numOutputChannels).first(where: { $0 < outputEnabled.count && outputEnabled[$0] }) {
-            return .output(first)
-        }
-        return .input(0)
+    /// Channels the analyser can show at `tap`: every live input row, or every
+    /// enabled output in sidebar order.  Clamped to what the caps report,
+    /// because a mask bit for a channel the device lacks is a rejected config.
+    func rtaChannels(tap: UInt8) -> [Int] {
+        let reported = Int(tap == RTA_TAP_INPUT ? rta.caps.inputChannels : rta.caps.outputChannels)
+        let limit = min(reported > 0 ? reported : 16, 16)
+        if tap == RTA_TAP_INPUT { return Array(0..<min(numMatrixInputs, limit)) }
+        return MatrixOutput.visible(for: platformName, slotTypes: outputSlotTypes)
+            .map(\.index)
+            .filter { $0 < limit && $0 < outputEnabled.count && outputEnabled[$0] }
     }
 
-    func setDashboardRtaSource(_ source: RtaDashboardSource) {
-        AppSettings.shared.rtaDashboardSourceKey = source.storageKey
+    /// The graph's EQ channel for a channel at `tap`.
+    func rtaEqChannel(tap: UInt8, channel: Int) -> Int {
+        tap == RTA_TAP_INPUT ? channel : eqChannel(forOutput: channel)
     }
 
-    private func isLiveRtaSource(_ source: RtaDashboardSource) -> Bool {
-        switch source {
-        case .input(let n):  return n < numMatrixInputs
-        case .output(let n): return n < numOutputChannels && n < outputEnabled.count && outputEnabled[n]
+    func rtaChannelName(tap: UInt8, channel: Int) -> String {
+        let eqCh = rtaEqChannel(tap: tap, channel: channel)
+        return eqCh < channelNames.count ? channelNames[eqCh] : "Ch \(channel + 1)"
+    }
+
+    /// The dashboard's selection, as stored, limited to channels live on this
+    /// device.  Never chosen, or every chosen channel gone (an output since
+    /// disabled, say), falls back to the first enabled output, then input 1.
+    /// A stored empty selection stays empty: the user hid the spectrum.
+    var dashboardRtaSelection: RtaChannelSelection {
+        if let stored = RtaChannelSelection(storageKey: AppSettings.shared.rtaDashboardSelectionKey) {
+            if stored.isEmpty { return stored }
+            let live = stored.restricted(to: rtaChannels(tap: stored.tap))
+            if !live.isEmpty { return live }
+        }
+        if let first = rtaChannels(tap: RTA_TAP_OUTPUT).first {
+            return RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: [first])
+        }
+        return RtaChannelSelection(tap: RTA_TAP_INPUT, channels: [0])
+    }
+
+    /// The selection for whichever page is showing.  The dashboard's is
+    /// remembered; a channel page's starts as its own channel each time one
+    /// opens (see `resetRtaPageSelection`), so leaving a page returns the
+    /// dashboard to exactly what it showed before.
+    var rtaSelection: RtaChannelSelection {
+        guard activeEqChannel != nil else { return dashboardRtaSelection }
+        return rtaPageSelection.restricted(to: rtaChannels(tap: rtaPageSelection.tap))
+    }
+
+    func setRtaSelection(_ selection: RtaChannelSelection) {
+        if activeEqChannel == nil {
+            AppSettings.shared.rtaDashboardSelectionKey = selection.storageKey
+        } else {
+            rtaPageSelection = selection
+            // Hiding the spectrum on one channel page keeps it hidden on the
+            // next, rather than bringing it back every time a page opens.
+            AppSettings.shared.rtaChannelPagesShowSpectrum = !selection.isEmpty
         }
     }
 
-    func eqChannel(for source: RtaDashboardSource) -> Int {
-        switch source {
-        case .input(let n):  return n
-        case .output(let n): return eqChannel(forOutput: n)
+    /// Start a newly opened channel page on its own channel, or on nothing if
+    /// the user hid the spectrum on channel pages.
+    func resetRtaPageSelection(for eqCh: Int) {
+        let tap = eqCh < chOut1 ? RTA_TAP_INPUT : RTA_TAP_OUTPUT
+        let channel = eqCh < chOut1 ? eqCh : eqCh - chOut1
+        rtaPageSelection = AppSettings.shared.rtaChannelPagesShowSpectrum
+            ? RtaChannelSelection(tap: tap, channels: [channel])
+            : RtaChannelSelection(tap: tap, channels: [])
+    }
+}
+
+// MARK: - Graph options menu
+
+/// The gear at the graph's top-right corner: which channels the spectrum shows,
+/// how it is drawn, and the pop-out.  It edits whichever page is showing, so the
+/// same menu serves the dashboard and the channel pages.
+struct GraphOptionsMenu: View {
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject var engine: RtaEngine
+    @ObservedObject private var settings = AppSettings.shared
+    /// Nil in the pop-out window, which has nowhere further to pop out to.
+    let onPopOut: (() -> Void)?
+
+    private var onDashboard: Bool { vm.activeEqChannel == nil }
+
+    var body: some View {
+        Menu {
+            if engine.supported && vm.isDeviceReady {
+                let selection = vm.rtaSelection
+                channelSection("Input Spectrum", tap: RTA_TAP_INPUT, selection: selection)
+                channelSection("Output Spectrum", tap: RTA_TAP_OUTPUT, selection: selection)
+
+                Button("Hide Spectrum") { vm.setRtaSelection(.none) }
+                    .disabled(selection.isEmpty)
+
+                Section("Show Spectrum") {
+                    Toggle("On Response Graph", isOn: showBinding(.graph))
+                    Toggle("As Bars", isOn: showBinding(.bars))
+                }
+
+                if onPopOut != nil { Divider() }
+            }
+            if let onPopOut {
+                Button("Pop Out Graph", action: onPopOut)
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white.opacity(0.7))
+        }
+        // Plain rather than borderless, so the label keeps the same size and
+        // tint the pop-out arrow had.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(onDashboard ? "Graph options for the dashboard" : "Graph options for this channel page")
+    }
+
+    private func showBinding(_ view: RtaSpectrumView) -> Binding<Bool> {
+        Binding(get: { settings.rtaShows(view, onDashboard: onDashboard) },
+                set: { settings.setRtaShows(view, onDashboard: onDashboard, $0) })
+    }
+
+    /// One tap's channels as checkboxes.  While the other tap has anything
+    /// checked they are disabled, and the header says why.
+    @ViewBuilder
+    private func channelSection(_ title: String, tap: UInt8, selection: RtaChannelSelection) -> some View {
+        let channels = vm.rtaChannels(tap: tap)
+        if !channels.isEmpty {
+            let open = selection.accepts(tap: tap)
+            Section(open ? title : "\(title) (hide the other side first)") {
+                ForEach(channels, id: \.self) { ch in
+                    Toggle(vm.rtaChannelName(tap: tap, channel: ch), isOn: Binding(
+                        get: { selection.contains(tap: tap, channel: ch) },
+                        set: { _ in vm.setRtaSelection(vm.rtaSelection.toggling(tap: tap, channel: ch)) }))
+                        .disabled(!open)
+                }
+            }
         }
     }
 }
 
-/// The strip a channel page carries above its filter table: the one channel
-/// being edited, at the tap it lives on.
-struct ChannelSpectrumStrip: View {
+// MARK: - Bar strip
+
+/// Third-octave bars for the selected channels, above the dashboard's cards or
+/// a channel page's filter table, when the page has bars switched on.  One card with a row per channel, so a larger
+/// selection grows the card instead of stacking more cards.
+struct SpectrumBarStrip: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
     @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject var analyserController: SpectrumAnalyserWindowController
-    let title: String
-    let channel: Int
-    let tap: UInt8
-    let color: Color
 
     private var scale: RtaScale {
         RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB)
     }
 
+    private func color(_ selection: RtaChannelSelection, _ ch: Int) -> Color {
+        eqCurveColor(eqCh: vm.rtaEqChannel(tap: selection.tap, channel: ch), chOut1: vm.chOut1)
+    }
+
     var body: some View {
-        if engine.supported {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Circle().fill(color).frame(width: 6, height: 6)
-                    Text("SPECTRUM - \(title.uppercased())")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    if let f = engine.frame(channel: channel, tap: tap), !f.hasData {
-                        Text("waiting for audio")
-                            .font(.system(size: 9))
-                            .foregroundColor(.secondary)
+        let selection = vm.rtaSelection
+        if engine.supported, vm.isDeviceReady, !selection.isEmpty,
+           settings.rtaShows(.bars, onDashboard: vm.activeEqChannel == nil) {
+            let single = selection.channels.count == 1
+            VStack(alignment: .leading, spacing: 6) {
+                header(selection, single: single)
+                ForEach(Array(selection.channels.enumerated()), id: \.element) { pos, ch in
+                    let last = pos == selection.channels.count - 1
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !single {
+                            HStack(spacing: 5) {
+                                Circle().fill(color(selection, ch)).frame(width: 5, height: 5)
+                                Text(vm.rtaChannelName(tap: selection.tap, channel: ch))
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        // Frequency labels only under the last row, where they
+                        // read for every row above it.
+                        RtaBandsView(engine: engine,
+                                     frame: engine.frame(channel: ch, tap: selection.tap),
+                                     color: color(selection, ch),
+                                     scale: scale,
+                                     showPeakHold: settings.rtaShowPeakHold,
+                                     showLabels: last).equatable()
+                            .frame(height: single ? 96 : (last ? 56 : 44))
                     }
-                    Button {
-                        analyserController.show(vm: vm)
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 9, weight: .medium))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
-                    .help("Open the Spectrum Analyser window")
                 }
-                RtaBandsView(engine: engine,
-                             frame: engine.frame(channel: channel, tap: tap),
-                             color: color,
-                             scale: scale,
-                             showPeakHold: settings.rtaShowPeakHold,
-                             showLabels: true).equatable()
-                    .frame(height: 96)
-                    .help(rtaShadedBandHelp)
             }
+            .help(rtaShadedBandHelp)
             .padding(10)
             .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
             .cornerRadius(10)
             .overlay(RoundedRectangle(cornerRadius: 10)
-                        .stroke(color.opacity(0.3), lineWidth: 1))
-            .rtaWatching(engine, RtaRequest(tap: tap, mask: UInt16(1) << UInt16(channel)))
+                        .stroke(single ? color(selection, selection.channels[0]).opacity(0.3)
+                                       : Color.secondary.opacity(0.2), lineWidth: 1))
+            .rtaWatching(engine, RtaRequest(tap: selection.tap, mask: selection.mask))
+        }
+    }
+
+    private func header(_ selection: RtaChannelSelection, single: Bool) -> some View {
+        HStack(spacing: 6) {
+            if single {
+                Circle().fill(color(selection, selection.channels[0])).frame(width: 6, height: 6)
+                Text("SPECTRUM - \(vm.rtaChannelName(tap: selection.tap, channel: selection.channels[0]).uppercased())")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+            } else {
+                Text(selection.tap == RTA_TAP_INPUT ? "INPUT SPECTRUM" : "OUTPUT SPECTRUM")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            if selection.channels.allSatisfy({ engine.frame(channel: $0, tap: selection.tap).map { !$0.hasData } ?? false }) {
+                Text("waiting for audio")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            Button {
+                analyserController.show(vm: vm)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 9, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+            .help("Open the Spectrum Analyser window")
         }
     }
 }

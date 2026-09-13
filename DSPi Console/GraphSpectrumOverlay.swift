@@ -22,18 +22,15 @@ func eqCurveColor(eqCh: Int, chOut1: Int) -> Color {
 /// plot, its ceiling at the top) and is drawn as a translucent fill under the
 /// curves rather than as another line competing with them.
 ///
-/// It always shows one channel: the one being edited on a channel page, or the
-/// one picked as "Dashboard FFT" on the dashboard.  That channel gets the bands
-/// in the bass and the raw FFT bins above them, with the peak-hold contour from
-/// the bands.
+/// It shows the channels checked in the graph's gear menu for the current page
+/// (see `DSPViewModel.rtaSelection`).  A single channel gets the bands in the
+/// bass and the raw FFT bins above them.  Several channels get band curves only:
+/// the device keeps just the last transformed channel's bins, so a rotation
+/// cannot give every channel a fine picture.
 struct GraphSpectrumOverlay: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
     @ObservedObject private var settings = AppSettings.shared
-    /// EQ channels the graph is currently drawing, in its own numbering.
-    let visibleEqChannels: [Int]
-    /// The channel being edited, if any: it gets the fine picture to itself.
-    let activeEqChannel: Int?
     let minFreq: Float
     let maxFreq: Float
 
@@ -76,38 +73,17 @@ struct GraphSpectrumOverlay: View {
         }
     }
 
-    /// How many channels this device's analyser has at a tap.  A mask bit for a
-    /// channel the device does not have is a rejected configuration, so the
-    /// selection is clamped to what the caps report.
-    private func channelCount(tap: UInt8) -> Int {
-        let n = tap == RTA_TAP_INPUT ? Int(engine.caps.inputChannels) : Int(engine.caps.outputChannels)
-        return n > 0 ? n : (tap == RTA_TAP_INPUT ? vm.numMatrixInputs : vm.numOutputChannels)
-    }
-
-    private func channel(forEq eqCh: Int) -> Channel? {
-        let tap: UInt8 = eqCh < vm.chOut1 ? RTA_TAP_INPUT : RTA_TAP_OUTPUT
-        let rta = eqCh < vm.chOut1 ? eqCh : eqCh - vm.chOut1
-        guard rta >= 0, rta < channelCount(tap: tap), rta < 16 else { return nil }
-        return Channel(eq: eqCh, rta: rta)
-    }
-
-    /// The analyser configuration for the one channel the graph shows.
-    ///
-    /// On a channel page that is the edited channel, and hiding its curve hides
-    /// its spectrum too.  The dashboard's channel is an explicit choice, so it
-    /// is drawn whether or not its curve is visible.
+    /// The analyser configuration for the page's selection.  The selection is
+    /// an explicit choice, so a channel is drawn whether or not its response
+    /// curve is visible.  It is already limited to channels the caps report.
     private var plan: Plan? {
         guard vm.isDeviceReady else { return nil }
-        let eqCh: Int
-        if let active = activeEqChannel {
-            guard visibleEqChannels.contains(active) else { return nil }
-            eqCh = active
-        } else {
-            eqCh = vm.eqChannel(for: vm.dashboardRtaSource)
+        let selection = vm.rtaSelection
+        let channels = selection.channels.map {
+            Channel(eq: vm.rtaEqChannel(tap: selection.tap, channel: $0), rta: $0)
         }
-        guard let ch = channel(forEq: eqCh) else { return nil }
-        return Plan(tap: eqCh < vm.chOut1 ? RTA_TAP_INPUT : RTA_TAP_OUTPUT,
-                    channels: [ch], wantsBins: true)
+        guard !channels.isEmpty else { return nil }
+        return Plan(tap: selection.tap, channels: channels, wantsBins: channels.count == 1)
     }
 
 }
