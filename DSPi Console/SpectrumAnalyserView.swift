@@ -262,7 +262,9 @@ struct RtaBandsView: View {
         let t = targets()
         let identity = seriesIdentity
         let tau = fallTau
-        return Canvas(rendersAsynchronously: false) { ctx, size in
+        // Rasterised off the main thread so a dashboard of these does not
+        // compete with scrolling; the closure still runs on the main thread.
+        return Canvas(rendersAsynchronously: true) { ctx, size in
             let labelHeight: CGFloat = showLabels ? 12 : 0
             let plot = CGRect(x: 0, y: 0, width: size.width, height: max(0, size.height - labelHeight))
             guard plot.height > 2, bandCount > 0 else { return }
@@ -367,28 +369,28 @@ struct RtaBandsView: View {
 struct RtaBinsView: View {
     @ObservedObject var engine: RtaEngine
     let binFrame: RtaBinFrame?
+    /// The same channel's band frame.  Its bass bands carry the picture below
+    /// the bins' reach, exactly as the graph overlay does.
+    let bandFrame: RtaBandFrame?
+    /// The channel being drawn; a bin frame from any other channel is ignored.
+    let channel: Int
     let color: Color
     let scale: RtaScale
-    var minHz: Double = 20
+    var showPeakHold: Bool = true
     var showLabels: Bool = true
 
+    /// The lowest band the device reports, which the bass bank measures
+    /// continuously, so the axis starts where the measurement does.
+    private var minHz: Double { max(engine.bandCentresHz.first ?? 10, 1) }
+
     private var maxHz: Double {
-        guard let f = binFrame, f.sampleRateHz > 0 else { return 20000 }
-        return Double(f.sampleRateHz) / 2
+        if let f = binFrame, f.sampleRateHz > 0 { return Double(f.sampleRateHz) / 2 }
+        let rate = engine.snapshot.status.sampleRateHz
+        return rate > 0 ? Double(rate) / 2 : 20000
     }
 
-    /// (frequency, dBFS) pairs in ascending frequency.  DC belongs to no band
-    /// and is not drawn, so the series starts at bin 1.
-    private var points: [(hz: Double, db: Double)] {
-        guard let f = binFrame, f.bins.count > 1 else { return [] }
-        return (1..<f.bins.count).map {
-            (hz: f.frequency(ofBin: $0), db: engine.levelDB(f.bins[$0]))
-        }
-    }
-
-    /// One pole per pixel column; see `RtaBarSmoother`.  The bin frame turns
-    /// over at the frame rate too, so the curve steps exactly as the bars do.
-    @State private var smoothing = RtaBarSmoother()
+    /// Band, peak and bin filters for the one channel; see `RtaBarSmoother`.
+    @State private var smoothing = RtaCurveSmoothing()
 
     private var fallTau: TimeInterval { rtaFallTau(engine, AppSettings.shared.rtaSmoothing) }
 
@@ -404,65 +406,49 @@ struct RtaBinsView: View {
 
     private func canvas(now: Date?) -> some View {
         let tau = fallTau
-        return Canvas(rendersAsynchronously: false) { ctx, size in
+        // Rasterised off the main thread so a dashboard of these does not
+        // compete with scrolling; the closure still runs on the main thread.
+        return Canvas(rendersAsynchronously: true) { ctx, size in
             let labelHeight: CGFloat = showLabels ? 12 : 0
             let plot = CGRect(x: 0, y: 0, width: size.width, height: max(0, size.height - labelHeight))
             guard plot.width > 4, plot.height > 4 else { return }
 
             drawGrid(ctx, plot, labelY: size.height - labelHeight + 1)
+            guard maxHz > minHz else { return }
 
-            let pts = points
-            guard pts.count > 1, maxHz > minHz else { return }
-            let logMin = log10(minHz), logMax = log10(maxHz)
-            func x(_ hz: Double) -> CGFloat {
-                CGFloat((log10(max(hz, minHz)) - logMin) / (logMax - logMin)) * plot.width
+            // The same picture the graph overlay draws for one channel: bass
+            // bands crossfading into bins, one point per pixel column.
+            let curves = RtaCurveBuilder(engine: engine, smoothing: smoothing,
+                                         minFreq: minHz, maxFreq: maxHz,
+                                         plot: plot, scale: scale, now: now, tau: tau)
+            let bands = bandFrame.flatMap { $0.hasData ? curves.bandPoints($0, peak: false, channel: channel) : nil } ?? []
+            let bins = binFrame.flatMap { Int($0.channel) == channel ? curves.binPoints($0, channel: channel) : nil } ?? []
+            let curve = curves.blend(bands: bands, bins: bins)
+
+            if curve.count > 1 {
+                // Until a bin frame arrives the curve is the thirty-odd bands,
+                // which need smoothing; the blended series is already dense.
+                let path = bins.count > 1 ? polyline(through: curve)
+                                          : smoothPath(through: curve, clampedTo: plot)
+                var fill = path
+                fill.addLine(to: CGPoint(x: curve[curve.count - 1].x, y: plot.maxY))
+                fill.addLine(to: CGPoint(x: curve[0].x, y: plot.maxY))
+                fill.closeSubpath()
+                ctx.fill(fill, with: .linearGradient(
+                    Gradient(colors: [color.opacity(0.45), color.opacity(0.04)]),
+                    startPoint: CGPoint(x: 0, y: plot.minY),
+                    endPoint: CGPoint(x: 0, y: plot.maxY)))
+                ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
             }
 
-            // One point per pixel column, taking the loudest bin that lands in
-            // it: below a few hundred hertz that is one bin per column, above it
-            // several, and a maximum is the only summary that keeps a tone from
-            // disappearing between columns.
-            let columns = Int(plot.width.rounded())
-            var peak = [Double](repeating: -Double.infinity, count: max(columns, 1))
-            for p in pts where p.hz >= minHz && p.hz <= maxHz {
-                let c = min(max(Int(x(p.hz)), 0), peak.count - 1)
-                peak[c] = max(peak[c], p.db)
+            if showPeakHold, let bandFrame, bandFrame.hasData {
+                let peak = curves.bandPoints(bandFrame, peak: true, channel: channel)
+                if peak.count > 1 {
+                    ctx.stroke(smoothPath(through: peak, clampedTo: plot),
+                               with: .color(color.opacity(0.5)),
+                               style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                }
             }
-            // Columns with no bin in them inherit the one to their left, so the
-            // filter below sees a full-width series rather than gaps that would
-            // decay on their own.
-            var lastFilled = scale.floorDB
-            for c in peak.indices {
-                if peak[c].isFinite { lastFilled = peak[c] } else { peak[c] = lastFilled }
-            }
-
-            // Interpolated per column.  A resize or a channel change replaces
-            // the series outright rather than sliding the old curve into the
-            // new one.
-            if let now {
-                peak = smoothing.step(now: now, target: peak,
-                                      identity: Int(binFrame?.channel ?? 0xFF) << 16 | peak.count,
-                                      riseTau: tau * 0.4, fallTau: tau)
-            }
-
-            var path = Path()
-            var started = false
-            for c in 0..<peak.count {
-                let y = plot.maxY - plot.height * CGFloat(scale.norm(peak[c]))
-                let pt = CGPoint(x: plot.minX + CGFloat(c), y: y)
-                if started { path.addLine(to: pt) } else { path.move(to: pt); started = true }
-            }
-            guard started else { return }
-
-            var fill = path
-            fill.addLine(to: CGPoint(x: plot.minX + CGFloat(peak.count - 1), y: plot.maxY))
-            fill.addLine(to: CGPoint(x: plot.minX, y: plot.maxY))
-            fill.closeSubpath()
-            ctx.fill(fill, with: .linearGradient(
-                Gradient(colors: [color.opacity(0.45), color.opacity(0.04)]),
-                startPoint: CGPoint(x: 0, y: plot.minY),
-                endPoint: CGPoint(x: 0, y: plot.maxY)))
-            ctx.stroke(path, with: .color(color), lineWidth: 1.2)
         }
 
     }
@@ -922,7 +908,7 @@ struct SpectrumAnalyserView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: 110)
-            .help("Third-octave bands, or the raw FFT bins of the latest frame")
+            .help("Third-octave bands, or one channel's FFT bins with the continuous bass bands beneath them")
 
             Picker("", selection: $tap) {
                 Text("Inputs").tag(RTA_TAP_INPUT)
@@ -986,10 +972,17 @@ struct SpectrumAnalyserView: View {
         ZStack {
             Color.black.opacity(0.20)
             if mode == .bins {
+                // The channel the request asked for, not whichever channel the
+                // last bin frame happens to name, so a stale frame is never
+                // drawn in the new channel's colour.
+                let ch = channels.contains(binChannel) ? binChannel : (channels.first ?? 0)
                 RtaBinsView(engine: engine,
-                            binFrame: engine.snapshot.bins,
-                            color: channelColor(engine.snapshot.bins.map { Int($0.channel) } ?? binChannel),
-                            scale: scale)
+                            binFrame: engine.snapshot.tap == tap ? engine.snapshot.bins : nil,
+                            bandFrame: engine.frame(channel: ch, tap: tap),
+                            channel: ch,
+                            color: channelColor(ch),
+                            scale: scale,
+                            showPeakHold: settings.rtaShowPeakHold)
                     .padding(10)
             } else {
                 VStack(spacing: 6) {

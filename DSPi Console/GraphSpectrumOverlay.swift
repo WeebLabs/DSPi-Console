@@ -40,7 +40,7 @@ struct GraphSpectrumOverlay: View {
 
     /// One filter per channel, carried across redraws.  A reference type in
     /// `@State` so stepping it cannot invalidate the view that stepped it.
-    @State private var smoothing = GraphSpectrumSmoothing()
+    @State private var smoothing = RtaCurveSmoothing()
 
     var body: some View {
         if engine.supported, let plan = plan {
@@ -135,50 +135,75 @@ struct GraphSpectrumOverlay: View {
         let glow = settings.showGraphGlow
         let opacity = settings.rtaGraphOpacity
 
-        return Canvas(rendersAsynchronously: false) { ctx, size in
+        // Asynchronous presentation moves rasterising off the main thread, so
+        // the fills, fade and blur no longer compete with scrolling.  The
+        // closure itself still runs on the main thread.
+        return Canvas(rendersAsynchronously: true) { ctx, size in
             let plot = CGRect(origin: .zero, size: size)
             guard plot.width > 4, plot.height > 4, snapshot.tap == plan.tap else { return }
 
+            let curves = RtaCurveBuilder(engine: engine, smoothing: smoothing,
+                                         minFreq: Double(minFreq), maxFreq: Double(maxFreq),
+                                         plot: plot, scale: scale, now: now, tau: tau)
+            var traces: [Trace] = []
             for channel in plan.channels {
                 let colour = eqCurveColor(eqCh: channel.eq, chOut1: vm.chOut1)
                 let band = snapshot.frames[UInt8(clamping: channel.rta)]
 
                 let bands = (band?.hasData ?? false)
-                    ? bandPoints(band!, plot: plot, scale: scale, peak: false,
-                                 now: now, tau: tau, channel: channel.rta)
+                    ? curves.bandPoints(band!, peak: false, channel: channel.rta)
                     : []
                 var curve = bands
                 var dense = false
                 if plan.wantsBins {
                     let bins = snapshot.bins.flatMap { Int($0.channel) == channel.rta ? $0 : nil }
-                        .map { binPoints($0, plot: plot, scale: scale,
-                                         now: now, tau: tau, channel: channel.rta) } ?? []
-                    curve = blend(bands: bands, bins: bins, plot: plot)
-                    dense = true
+                        .map { curves.binPoints($0, channel: channel.rta) } ?? []
+                    curve = curves.blend(bands: bands, bins: bins)
+                    // Until a bin frame arrives the blend is just the bands.
+                    dense = bins.count > 1
                 }
+                var trace = Trace(colour: colour)
                 if curve.count > 1 {
                     // The blended series is already one point per pixel:
                     // smoothing it only adds overshoot around a tone.  The
                     // thirty-odd band points need it, or they read as a chain
                     // of facets beside the response curves.
-                    draw(curve, in: ctx, plot: plot, colour: colour,
-                         opacity: opacity, glow: glow, smooth: !dense)
+                    let path = dense ? polyline(through: curve)
+                                     : smoothPath(through: curve, clampedTo: plot)
+                    var fill = path
+                    fill.addLine(to: CGPoint(x: curve[curve.count - 1].x, y: plot.maxY))
+                    fill.addLine(to: CGPoint(x: curve[0].x, y: plot.maxY))
+                    fill.closeSubpath()
+                    trace.curve = path
+                    trace.fill = fill
+                    trace.start = curve[0].x
                 }
 
                 // Peak hold rides on top as a thin contour, from the bands in
                 // both modes: they carry a peak at every selection size.
                 if showPeak, let band, band.hasData {
-                    let peak = bandPoints(band, plot: plot, scale: scale, peak: true,
-                                          now: now, tau: tau, channel: channel.rta)
+                    let peak = curves.bandPoints(band, peak: true, channel: channel.rta)
                     if peak.count > 1 {
-                        fading(ctx, plot: plot, from: peak[0].x)
-                            .stroke(smoothPath(through: peak, clampedTo: plot),
-                                    with: .color(colour.opacity(0.35 * opacity)),
-                                    style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                        trace.peak = smoothPath(through: peak, clampedTo: plot)
+                        trace.start = min(trace.start, peak[0].x)
                     }
                 }
+                if trace.curve != nil || trace.peak != nil { traces.append(trace) }
             }
+
+            draw(traces, in: ctx, plot: plot, opacity: opacity, glow: glow)
         }
+    }
+
+    /// One channel's finished paths, collected before anything is drawn so that
+    /// every channel can share the same offscreen layers.
+    private struct Trace {
+        let colour: Color
+        var curve: Path?
+        var fill: Path?
+        var peak: Path?
+        /// Left end of the data, where the fade begins.
+        var start: CGFloat = .infinity
     }
 
     /// A context in which everything fades in across the first 30 points to
@@ -203,40 +228,85 @@ struct GraphSpectrumOverlay: View {
         return faded
     }
 
-    /// Fill, edge and glow for one channel's spectrum.
-    private func draw(_ points: [CGPoint], in context: GraphicsContext, plot: CGRect,
-                      colour: Color, opacity: Double, glow: Bool, smooth: Bool) {
-        let ctx = fading(context, plot: plot, from: points[0].x)
-        let path = smooth ? smoothPath(through: points, clampedTo: plot)
-                          : polyline(through: points)
-        var fill = path
-        fill.addLine(to: CGPoint(x: points[points.count - 1].x, y: plot.maxY))
-        fill.addLine(to: CGPoint(x: points[0].x, y: plot.maxY))
-        fill.closeSubpath()
+    /// Fill, glow, edge and peak contour for every channel.
+    ///
+    /// Each fade and each blur is a full-plot offscreen layer, and redrawing
+    /// one per channel thirty times a second is what made scrolling stutter.
+    /// Channels whose data starts at the same place (every band picture does)
+    /// share one fade layer, and all their glows share one blur.  Within a
+    /// group every fill is drawn before any line, so no channel's fill washes
+    /// over another's edge.
+    private func draw(_ traces: [Trace], in context: GraphicsContext, plot: CGRect,
+                      opacity: Double, glow: Bool) {
+        let groups = Dictionary(grouping: traces) { Int($0.start.rounded()) }
+        for key in groups.keys.sorted() {
+            let group = groups[key]!
+            let ctx = fading(context, plot: plot, from: group.map(\.start).min()!)
 
-        ctx.fill(fill, with: .linearGradient(
-            Gradient(colors: [colour.opacity(0.34 * opacity), colour.opacity(0.02 * opacity)]),
-            startPoint: CGPoint(x: 0, y: plot.minY),
-            endPoint: CGPoint(x: 0, y: plot.maxY)))
+            for trace in group {
+                guard let fill = trace.fill else { continue }
+                ctx.fill(fill, with: .linearGradient(
+                    Gradient(colors: [trace.colour.opacity(0.34 * opacity),
+                                      trace.colour.opacity(0.02 * opacity)]),
+                    startPoint: CGPoint(x: 0, y: plot.minY),
+                    endPoint: CGPoint(x: 0, y: plot.maxY)))
+            }
 
-        if glow {
-            var soft = ctx
-            soft.addFilter(.blur(radius: 4))
-            soft.stroke(path, with: .color(colour.opacity(0.35 * opacity)), lineWidth: 2)
+            if glow {
+                // The filter applies to the one layer draw, so the blur runs
+                // once for the whole group rather than once per stroke.
+                var soft = ctx
+                soft.addFilter(.blur(radius: 4))
+                soft.drawLayer { layer in
+                    for trace in group {
+                        guard let curve = trace.curve else { continue }
+                        layer.stroke(curve, with: .color(trace.colour.opacity(0.35 * opacity)),
+                                     lineWidth: 2)
+                    }
+                }
+            }
+
+            for trace in group {
+                if let curve = trace.curve {
+                    ctx.stroke(curve, with: .color(trace.colour.opacity(0.55 * opacity)),
+                               style: StrokeStyle(lineWidth: 1, lineJoin: .round))
+                }
+                if let peak = trace.peak {
+                    ctx.stroke(peak, with: .color(trace.colour.opacity(0.35 * opacity)),
+                               style: StrokeStyle(lineWidth: 1, lineCap: .round))
+                }
+            }
         }
-        ctx.stroke(path, with: .color(colour.opacity(0.55 * opacity)),
-                   style: StrokeStyle(lineWidth: 1, lineJoin: .round))
     }
 
-    // MARK: Series
+}
 
-    private func xPos(_ hz: Double, width: CGFloat) -> CGFloat {
-        let logMin = log10(Double(minFreq)), logMax = log10(Double(maxFreq))
-        guard logMax > logMin else { return 0 }
-        return CGFloat((log10(max(hz, 1)) - logMin) / (logMax - logMin)) * width
+// MARK: - Curve building
+
+/// Turns the analyser's frames into points on a logarithmic frequency axis.
+///
+/// Shared by the graph overlay and the analyser window's FFT view, so both draw
+/// the same picture at the same resolution: the bass bank's bands where the
+/// bins are too coarse, the bins above them, one point per pixel column.
+struct RtaCurveBuilder {
+    let engine: RtaEngine
+    let smoothing: RtaCurveSmoothing
+    let minFreq: Double
+    let maxFreq: Double
+    let plot: CGRect
+    let scale: RtaScale
+    /// The display frame being drawn, or nil to draw the device's numbers
+    /// without interpolation.
+    let now: Date?
+    let tau: TimeInterval
+
+    func x(_ hz: Double) -> CGFloat {
+        guard minFreq > 0, maxFreq > minFreq else { return plot.minX }
+        let logMin = log10(minFreq), logMax = log10(maxFreq)
+        return plot.minX + CGFloat((log10(max(hz, 1)) - logMin) / (logMax - logMin)) * plot.width
     }
 
-    private func yPos(_ db: Double, plot: CGRect, scale: RtaScale) -> CGFloat {
+    func y(_ db: Double) -> CGFloat {
         plot.maxY - plot.height * CGFloat(scale.norm(db))
     }
 
@@ -244,9 +314,7 @@ struct GraphSpectrumOverlay: View {
     /// bin at the current size are left out rather than drawn at the floor, so
     /// the curve starts where the measurement does instead of climbing out of
     /// the bottom-left corner.
-    private func bandPoints(_ frame: RtaBandFrame, plot: CGRect, scale: RtaScale,
-                            peak: Bool, now: Date?, tau: TimeInterval,
-                            channel: Int) -> [CGPoint] {
+    func bandPoints(_ frame: RtaBandFrame, peak: Bool, channel: Int) -> [CGPoint] {
         let centres = engine.bandCentresHz
         guard !centres.isEmpty else { return [] }
         let slots = min(Int(frame.nBands) > 0 ? Int(frame.nBands) : centres.count, RTA_MAX_BANDS)
@@ -274,12 +342,11 @@ struct GraphSpectrumOverlay: View {
             guard rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order,
                                     bassBands: Int(engine.caps.bassBands)) else { continue }
             let hz = centres[i]
-            let point = CGPoint(x: plot.minX + xPos(hz, width: plot.width),
-                                y: yPos(levels[i], plot: plot, scale: scale))
-            if hz < Double(minFreq) { below = point; continue }
+            let point = CGPoint(x: x(hz), y: y(levels[i]))
+            if hz < minFreq { below = point; continue }
             if let b = below { points.append(b); below = nil }
             points.append(point)
-            if hz > Double(maxFreq) { break }
+            if hz > maxFreq { break }
         }
         return points
     }
@@ -291,7 +358,7 @@ struct GraphSpectrumOverlay: View {
     ///
     /// Returns one point per pixel column.  Where only one product has data
     /// (below the first bin, or before a bin frame arrives) it is used alone.
-    private func blend(bands: [CGPoint], bins: [CGPoint], plot: CGRect) -> [CGPoint] {
+    func blend(bands: [CGPoint], bins: [CGPoint]) -> [CGPoint] {
         guard bins.count > 1 else { return bands }
         let columns = max(Int(plot.width.rounded()), 2)
 
@@ -300,14 +367,14 @@ struct GraphSpectrumOverlay: View {
             let c = Int((p.x - plot.minX).rounded())
             if c >= 0, c < columns { binY[c] = p.y }
         }
-        let bandY = columnSamples(of: bands, columns: columns, plot: plot)
+        let bandY = columnSamples(of: bands, columns: columns)
 
         let centres = engine.bandCentresHz
         let bass = Int(engine.caps.bassBands)
         var loX = -CGFloat.infinity, hiX = -CGFloat.infinity
         if bass > 0, bass <= centres.count {
-            loX = plot.minX + xPos(centres[bass - 1], width: plot.width)
-            hiX = plot.minX + xPos(centres[min(bass + 2, centres.count - 1)], width: plot.width)
+            loX = x(centres[bass - 1])
+            hiX = x(centres[min(bass + 2, centres.count - 1)])
         }
 
         var points: [CGPoint] = []
@@ -330,7 +397,7 @@ struct GraphSpectrumOverlay: View {
     /// The Catmull-Rom curve through `points` sampled at every pixel column it
     /// spans, so the band picture can be mixed with the per-column bins while
     /// looking the same as the smoothed multichannel curve.
-    private func columnSamples(of points: [CGPoint], columns: Int, plot: CGRect) -> [CGFloat?] {
+    private func columnSamples(of points: [CGPoint], columns: Int) -> [CGFloat?] {
         var out = [CGFloat?](repeating: nil, count: columns)
         guard points.count > 1 else { return out }
         func slope(_ i: Int) -> CGFloat {
@@ -359,15 +426,14 @@ struct GraphSpectrumOverlay: View {
     /// between columns.  Columns between two bins - which is most of them at
     /// the bottom of a log axis - are interpolated rather than carried
     /// forward, so the low end is a slope and not a staircase.
-    private func binPoints(_ frame: RtaBinFrame, plot: CGRect, scale: RtaScale,
-                           now: Date?, tau: TimeInterval, channel: Int) -> [CGPoint] {
+    func binPoints(_ frame: RtaBinFrame, channel: Int) -> [CGPoint] {
         guard frame.bins.count > 1 else { return [] }
         let columns = max(Int(plot.width.rounded()), 2)
         var level = [Double](repeating: -.infinity, count: columns)
         for k in 1..<frame.bins.count {
             let hz = frame.frequency(ofBin: k)
-            guard hz >= Double(minFreq), hz <= Double(maxFreq) else { continue }
-            let c = min(max(Int(xPos(hz, width: plot.width).rounded()), 0), columns - 1)
+            guard hz >= minFreq, hz <= maxFreq else { continue }
+            let c = min(max(Int((x(hz) - plot.minX).rounded()), 0), columns - 1)
             level[c] = max(level[c], engine.levelDB(frame.bins[k]))
         }
 
@@ -395,18 +461,17 @@ struct GraphSpectrumOverlay: View {
         }
 
         return span.enumerated().map { offset, db in
-            CGPoint(x: plot.minX + CGFloat(firstFilled + offset),
-                    y: yPos(db, plot: plot, scale: scale))
+            CGPoint(x: plot.minX + CGFloat(firstFilled + offset), y: y(db))
         }
     }
 }
 
 // MARK: - Smoothing state
 
-/// The per-channel filters one overlay needs: an average and a peak contour for
-/// the band picture, and one for the bin picture.  Held together so a single
-/// `@State` carries the lot across redraws.
-final class GraphSpectrumSmoothing {
+/// The per-channel filters a curve view needs: an average and a peak contour
+/// for the band picture, and one for the bin picture.  Held together so a
+/// single `@State` carries the lot across redraws.
+final class RtaCurveSmoothing {
     private var filters: [Int: RtaBarSmoother] = [:]
 
     /// `kind` separates the series a channel can have: 0 average bands,
