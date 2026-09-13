@@ -38,13 +38,18 @@ struct GraphSpectrumOverlay: View {
     let minFreq: Float
     let maxFreq: Float
 
-    /// One filter per channel, carried across redraws.  A reference type in
-    /// `@State` so stepping it cannot invalidate the view that stepped it.
-    @State private var smoothing = RtaCurveSmoothing()
-
     var body: some View {
         if engine.supported, let plan = plan {
-            spectrum(plan)
+            GraphSpectrumCanvas(
+                plan: plan, configuration: RtaDisplayConfiguration(engine: engine),
+                frames: engine.snapshot.frames.filter { key, _ in plan.channels.contains { $0.rta == Int(key) } }
+                    .mapValues { $0.displayFrame },
+                bins: plan.wantsBins ? engine.snapshot.bins?.displayFrame : nil,
+                chOut1: vm.chOut1, minFreq: minFreq, maxFreq: maxFreq,
+                scale: RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB),
+                tau: rtaFallTau(engine, settings.rtaSmoothing), showPeak: settings.rtaShowPeakHold,
+                glow: settings.showGraphGlow, opacity: settings.rtaGraphOpacity)
+                .equatable()
                 .allowsHitTesting(false)
                 .rtaWatching(engine, plan.request)
                 .transition(.opacity)
@@ -108,47 +113,57 @@ struct GraphSpectrumOverlay: View {
         return Plan(tap: tap, channels: channels, wantsBins: channels.count == 1)
     }
 
-    // MARK: Drawing
+}
 
-    private var scale: RtaScale {
-        RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB)
+/// A value-only boundary keeps unrelated meter and analyser telemetry updates
+/// out of the animated canvas. Only the selected channels enter this view.
+private struct GraphSpectrumCanvas: View, Equatable {
+    @Environment(\.rtaRenderingActive) private var renderingActive
+    let plan: GraphSpectrumOverlay.Plan
+    let configuration: RtaDisplayConfiguration
+    let frames: [UInt8: RtaBandFrame]
+    let bins: RtaBinFrame?
+    let chOut1: Int
+    let minFreq: Float
+    let maxFreq: Float
+    let scale: RtaScale
+    let tau: TimeInterval
+    let showPeak: Bool
+    let glow: Bool
+    let opacity: Double
+    @State private var smoothing = RtaCurveSmoothing()
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.plan == rhs.plan && lhs.configuration == rhs.configuration
+            && lhs.frames == rhs.frames && lhs.bins == rhs.bins && lhs.chOut1 == rhs.chOut1
+            && lhs.minFreq == rhs.minFreq && lhs.maxFreq == rhs.maxFreq && lhs.scale == rhs.scale
+            && lhs.tau == rhs.tau && lhs.showPeak == rhs.showPeak
+            && lhs.glow == rhs.glow && lhs.opacity == rhs.opacity
     }
 
-    @ViewBuilder
-    private func spectrum(_ plan: Plan) -> some View {
-        let tau = rtaFallTau(engine, settings.rtaSmoothing)
+    var body: some View {
         if tau > 0 {
-            TimelineView(.animation(minimumInterval: rtaFrameInterval)) { timeline in
-                canvas(plan, now: timeline.date, tau: tau)
+            TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !renderingActive)) { timeline in
+                canvas(now: timeline.date)
             }
         } else {
-            canvas(plan, now: nil, tau: 0)
+            canvas(now: nil)
         }
     }
 
-    private func canvas(_ plan: Plan, now: Date?, tau: TimeInterval) -> some View {
-        // Read outside the renderer so a new frame invalidates the view; the
-        // closure itself only draws.
-        let snapshot = engine.snapshot
-        let scale = self.scale
-        let showPeak = settings.rtaShowPeakHold
-        let glow = settings.showGraphGlow
-        let opacity = settings.rtaGraphOpacity
-
-        // Asynchronous presentation moves rasterising off the main thread, so
-        // the fills, fade and blur no longer compete with scrolling.  The
-        // closure itself still runs on the main thread.
+    private func canvas(now: Date?) -> some View {
+        // Allow asynchronous presentation; data preparation is cached separately.
         return Canvas(rendersAsynchronously: true) { ctx, size in
             let plot = CGRect(origin: .zero, size: size)
-            guard plot.width > 4, plot.height > 4, snapshot.tap == plan.tap else { return }
+            guard plot.width > 4, plot.height > 4, configuration.tap == plan.tap else { return }
 
-            let curves = RtaCurveBuilder(engine: engine, smoothing: smoothing,
+            let curves = RtaCurveBuilder(configuration: configuration, smoothing: smoothing,
                                          minFreq: Double(minFreq), maxFreq: Double(maxFreq),
                                          plot: plot, scale: scale, now: now, tau: tau)
             var traces: [Trace] = []
             for channel in plan.channels {
-                let colour = eqCurveColor(eqCh: channel.eq, chOut1: vm.chOut1)
-                let band = snapshot.frames[UInt8(clamping: channel.rta)]
+                let colour = eqCurveColor(eqCh: channel.eq, chOut1: chOut1)
+                let band = frames[UInt8(clamping: channel.rta)]
 
                 let bands = (band?.hasData ?? false)
                     ? curves.bandPoints(band!, peak: false, channel: channel.rta)
@@ -156,7 +171,7 @@ struct GraphSpectrumOverlay: View {
                 var curve = bands
                 var dense = false
                 if plan.wantsBins {
-                    let bins = snapshot.bins.flatMap { Int($0.channel) == channel.rta ? $0 : nil }
+                    let bins = self.bins.flatMap { Int($0.channel) == channel.rta ? $0 : nil }
                         .map { curves.binPoints($0, channel: channel.rta) } ?? []
                     curve = curves.blend(bands: bands, bins: bins)
                     // Until a bin frame arrives the blend is just the bands.
@@ -289,7 +304,7 @@ struct GraphSpectrumOverlay: View {
 /// the same picture at the same resolution: the bass bank's bands where the
 /// bins are too coarse, the bins above them, one point per pixel column.
 struct RtaCurveBuilder {
-    let engine: RtaEngine
+    let configuration: RtaDisplayConfiguration
     let smoothing: RtaCurveSmoothing
     let minFreq: Double
     let maxFreq: Double
@@ -315,12 +330,12 @@ struct RtaCurveBuilder {
     /// the curve starts where the measurement does instead of climbing out of
     /// the bottom-left corner.
     func bandPoints(_ frame: RtaBandFrame, peak: Bool, channel: Int) -> [CGPoint] {
-        let centres = engine.bandCentresHz
+        let centres = configuration.centres
         guard !centres.isEmpty else { return [] }
         let slots = min(Int(frame.nBands) > 0 ? Int(frame.nBands) : centres.count, RTA_MAX_BANDS)
         let source = peak ? frame.peak : frame.avg
         var levels = [Double](repeating: scale.floorDB, count: slots)
-        for i in 0..<slots where i < source.count { levels[i] = engine.levelDB(source[i]) }
+        for i in 0..<slots where i < source.count { levels[i] = configuration.levelDB(source[i]) }
 
         if let now {
             // A peak cap that eased upward would stop being a peak.
@@ -329,20 +344,18 @@ struct RtaCurveBuilder {
                       riseTau: peak ? 0 : tau * 0.4, fallTau: tau)
         }
 
-        let rate = engine.snapshot.status.sampleRateHz > 0
-            ? Double(engine.snapshot.status.sampleRateHz) : 48000
-        let order = Int(engine.options.fftOrder)
-        let first = engine.snapshot.status.firstResolvedBand
+        let visible = smoothing.cache.visibleBands(configuration: configuration, count: slots)
+        let positions = smoothing.cache.bandPositions(centres: centres, minFreq: minFreq,
+                                                       maxFreq: maxFreq, width: plot.width)
 
         // One band either side of the visible range is kept, so the curve runs
         // off the plot edges instead of stopping (and fading) just inside them.
         var points: [CGPoint] = []
+        points.reserveCapacity(visible.count)
         var below: CGPoint?
-        for i in 0..<slots where i >= first && i < centres.count {
-            guard rtaBandIsPopulated(band: i, sampleRateHz: rate, fftOrder: order,
-                                    bassBands: Int(engine.caps.bassBands)) else { continue }
+        for i in visible where i < centres.count {
             let hz = centres[i]
-            let point = CGPoint(x: x(hz), y: y(levels[i]))
+            let point = CGPoint(x: plot.minX + positions[i], y: y(levels[i]))
             if hz < minFreq { below = point; continue }
             if let b = below { points.append(b); below = nil }
             points.append(point)
@@ -362,15 +375,13 @@ struct RtaCurveBuilder {
         guard bins.count > 1 else { return bands }
         let columns = max(Int(plot.width.rounded()), 2)
 
-        var binY = [CGFloat?](repeating: nil, count: columns)
-        for p in bins {
-            let c = Int((p.x - plot.minX).rounded())
-            if c >= 0, c < columns { binY[c] = p.y }
-        }
+        // binPoints supplies a contiguous span of columns. Index it directly
+        // instead of allocating and filling a second full-width array per draw.
+        let firstBinColumn = Int((bins[0].x - plot.minX).rounded())
         let bandY = columnSamples(of: bands, columns: columns)
 
-        let centres = engine.bandCentresHz
-        let bass = Int(engine.caps.bassBands)
+        let centres = configuration.centres
+        let bass = configuration.bassBands
         var loX = -CGFloat.infinity, hiX = -CGFloat.infinity
         if bass > 0, bass <= centres.count {
             loX = x(centres[bass - 1])
@@ -378,10 +389,13 @@ struct RtaCurveBuilder {
         }
 
         var points: [CGPoint] = []
+        points.reserveCapacity(columns)
         for c in 0..<columns {
             let x = plot.minX + CGFloat(c)
             let y: CGFloat
-            switch (bandY[c], binY[c]) {
+            let binIndex = c - firstBinColumn
+            let binY: CGFloat? = bins.indices.contains(binIndex) ? bins[binIndex].y : nil
+            switch (bandY[c], binY) {
             case let (a?, b?):
                 let w = hiX > loX ? min(max((x - loX) / (hiX - loX), 0), 1) : 1
                 y = a + (b - a) * w
@@ -398,26 +412,7 @@ struct RtaCurveBuilder {
     /// spans, so the band picture can be mixed with the per-column bins while
     /// looking the same as the smoothed multichannel curve.
     private func columnSamples(of points: [CGPoint], columns: Int) -> [CGFloat?] {
-        var out = [CGFloat?](repeating: nil, count: columns)
-        guard points.count > 1 else { return out }
-        func slope(_ i: Int) -> CGFloat {
-            let a = points[max(i - 1, 0)], b = points[min(i + 1, points.count - 1)]
-            return b.x > a.x ? (b.y - a.y) / (b.x - a.x) : 0
-        }
-        var seg = 0
-        for c in 0..<columns {
-            let x = plot.minX + CGFloat(c)
-            guard x >= points[0].x, x <= points[points.count - 1].x else { continue }
-            while seg < points.count - 2, x > points[seg + 1].x { seg += 1 }
-            let p0 = points[seg], p1 = points[seg + 1]
-            let h = p1.x - p0.x
-            guard h > 0 else { out[c] = p0.y; continue }
-            let t = (x - p0.x) / h, t2 = t * t, t3 = t2 * t
-            let y = (2 * t3 - 3 * t2 + 1) * p0.y + (t3 - 2 * t2 + t) * h * slope(seg)
-                  + (-2 * t3 + 3 * t2) * p1.y + (t3 - t2) * h * slope(seg + 1)
-            out[c] = min(max(y, plot.minY), plot.maxY)
-        }
-        return out
+        smoothing.cache.sampleBands(points, plot: plot, columns: columns)
     }
 
     /// The bins, averaged over time (see `RtaBinAverage`) and smoothed across
@@ -429,34 +424,15 @@ struct RtaCurveBuilder {
     /// forward, so the low end is a slope and not a staircase.
     func binPoints(_ frame: RtaBinFrame, channel: Int) -> [CGPoint] {
         guard frame.bins.count > 1 else { return [] }
-        let columns = max(Int(plot.width.rounded()), 2)
-        var level = [Double](repeating: -.infinity, count: columns)
-        let smoothed = rtaSmoothBins(frame.levelsDB ?? frame.bins.map { engine.levelDB($0) },
-                                     octaves: rtaBinSmoothingOctaves)
-        for k in 1..<frame.bins.count {
-            let hz = frame.frequency(ofBin: k)
-            guard hz >= minFreq, hz <= maxFreq else { continue }
-            let c = min(max(Int((x(hz) - plot.minX).rounded()), 0), columns - 1)
-            level[c] = max(level[c], smoothed[k])
-        }
-
-        guard let firstFilled = level.firstIndex(where: { $0.isFinite }),
-              let lastFilled = level.lastIndex(where: { $0.isFinite }),
-              lastFilled > firstFilled else { return [] }
-
-        var previous = firstFilled
-        for c in (firstFilled + 1)...lastFilled where level[c].isFinite {
-            let gap = c - previous
-            if gap > 1 {
-                let a = level[previous], b = level[c]
-                for g in 1..<gap {
-                    level[previous + g] = a + (b - a) * Double(g) / Double(gap)
-                }
-            }
-            previous = c
-        }
-
-        var span = Array(level[firstFilled...lastFilled])
+        let smoothed = frame.smoothedLevelsDB ?? rtaSmoothBins(
+            frame.levelsDB ?? frame.bins.map { configuration.levelDB($0) },
+            octaves: rtaBinSmoothingOctaves)
+        let projection = smoothing.cache.projectBins(smoothed, geometry: .init(
+            count: frame.bins.count, sampleRateHz: frame.sampleRateHz,
+            minFreq: minFreq, maxFreq: maxFreq, width: plot.width))
+        let firstFilled = projection.firstColumn
+        var span = projection.levels
+        guard span.count > 1 else { return [] }
         if let now {
             span = smoothing.smoother(channel: channel, kind: 2)
                 .step(now: now, target: span, identity: channel << 16 | span.count,
@@ -502,6 +478,7 @@ func rtaSmoothBins(_ levelsDB: [Double], octaves: Double) -> [Double] {
 /// for the band picture, and one for the bin picture.  Held together so a
 /// single `@State` carries the lot across redraws.
 final class RtaCurveSmoothing {
+    let cache = RtaRenderCache()
     private var filters: [Int: RtaBarSmoother] = [:]
 
     /// `kind` separates the series a channel can have: 0 average bands,

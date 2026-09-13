@@ -155,6 +155,9 @@ struct RtaBinFrame: Equatable {
     /// dBFS per bin after the engine's time average; nil for a frame straight
     /// off the wire.
     var levelsDB: [Double]? = nil
+    /// Frequency-smoothed levels, prepared once when the time average changes
+    /// and shared by all displays. Wire frames leave this nil.
+    var smoothedLevelsDB: [Double]? = nil
 
     /// Hz of bin `k`.
     func frequency(ofBin k: Int) -> Double {
@@ -273,6 +276,7 @@ struct RtaBinAverage {
     private var time = Date.distantPast
     private var power: [Double] = []
     private(set) var levels: [Double] = []
+    private(set) var smoothedLevels: [Double] = []
 
     mutating func reset() { series = nil }
 
@@ -296,6 +300,7 @@ struct RtaBinAverage {
         seq = Int(frame.seq)
         time = now
         levels = power.map { 10 * log10(max($0, 1e-30)) }
+        smoothedLevels = rtaSmoothBins(levels, octaves: rtaBinSmoothingOctaves)
         return levels
     }
 }
@@ -429,10 +434,14 @@ final class RtaEngine: ObservableObject {
         // anyway; stopping it explicitly hands the CPU back at once.
         let usb = self.usb
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self, !self.isWatching else { return }
             _ = usb?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
-            DispatchQueue.main.async {
-                self?.snapshot = RtaSnapshot()
-                self?.binAverage.reset()
+            DispatchQueue.main.async { [weak self] in
+                // A hidden window can be shown again before STOP completes.
+                // Never clear data belonging to that new subscription.
+                guard let self, !self.isWatching else { return }
+                self.snapshot = RtaSnapshot()
+                self.binAverage.reset()
             }
         }
     }
@@ -703,6 +712,7 @@ final class RtaEngine: ObservableObject {
             if var bins {
                 bins.levelsDB = self.binAverage.add(bins, tap: tap, at: binsReadAt,
                                                     avgMs: avgMs, levelDB: self.levelDB)
+                bins.smoothedLevelsDB = self.binAverage.smoothedLevels
                 s.bins = bins
             }
             if let status { s.status = status }
