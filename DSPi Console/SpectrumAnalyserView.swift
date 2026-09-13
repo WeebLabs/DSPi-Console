@@ -35,6 +35,22 @@ extension EnvironmentValues {
     }
 }
 
+/// Hands `rtaRenderingActive` to its content from a view that is not equatable.
+///
+/// The analyser views are `.equatable()` so telemetry that does not change the
+/// picture cannot redraw them, and SwiftUI then skips a view whose stored values
+/// compare equal even when an environment value it reads has changed.  Read
+/// inside such a view, the flag can go false while a window closes and never
+/// come back when it reopens, leaving the bars paused until an unrelated frame
+/// happens to differ.  Read here instead, the change still reaches the timeline
+/// or Metal surface below.
+struct RtaRenderingActiveReader<Content: View>: View {
+    @Environment(\.rtaRenderingActive) private var active
+    @ViewBuilder let content: (Bool) -> Content
+
+    var body: some View { content(active) }
+}
+
 /// Watches the analyser for as long as the view is on screen.
 ///
 /// The device has one FFT engine, so a view cannot simply ask for a picture -
@@ -205,7 +221,6 @@ func rtaBandIsPopulated(band i: Int, sampleRateHz: Double, fftOrder: Int,
 /// own band-centre table rather than a table of our own, so the picture and the
 /// labels can never disagree about where a band sits.
 struct RtaBandsView: View, Equatable {
-    @Environment(\.rtaRenderingActive) private var renderingActive
     let configuration: RtaDisplayConfiguration
     let fallTau: TimeInterval
     let frame: RtaBandFrame?
@@ -287,22 +302,26 @@ struct RtaBandsView: View, Equatable {
                 RtaBandGrid(scale: scale, centres: configuration.centres, visible: visibleBands,
                             showLevelLabels: showLevelLabels).equatable()
             }
-            if drawsBars, RtaMetalBarResources.shared != nil {
-                GeometryReader { geometry in
-                    RtaMetalBars(panels: [RtaMetalBarPanel(
-                        configuration: configuration, frame: frame, color: color, scale: scale,
-                        fallTau: fallTau, showPeakHold: showPeakHold,
-                        rect: CGRect(x: 0, y: 0, width: geometry.size.width,
-                                     height: max(0, geometry.size.height - (showLabels ? 12 : 0))),
-                        cache: smoothing.cache)], active: renderingActive)
+            // The active flag is read below the equatable boundary: see
+            // `RtaRenderingActiveReader` for why reading it here would miss changes.
+            RtaRenderingActiveReader { active in
+                if drawsBars, RtaMetalBarResources.shared != nil {
+                    GeometryReader { geometry in
+                        RtaMetalBars(panels: [RtaMetalBarPanel(
+                            configuration: configuration, frame: frame, color: color, scale: scale,
+                            fallTau: fallTau, showPeakHold: showPeakHold,
+                            rect: CGRect(x: 0, y: 0, width: geometry.size.width,
+                                         height: max(0, geometry.size.height - (showLabels ? 12 : 0))),
+                            cache: smoothing.cache)], active: active)
+                    }
+                } else if drawsBars, fallTau > 0 {
+                    let target = targets()
+                    TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
+                        canvas(now: timeline.date, target: target)
+                    }
+                } else if drawsBars {
+                    canvas(now: nil, target: targets())
                 }
-            } else if drawsBars, fallTau > 0 {
-                let target = targets()
-                TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !renderingActive)) { timeline in
-                    canvas(now: timeline.date, target: target)
-                }
-            } else if drawsBars {
-                canvas(now: nil, target: targets())
             }
         }
     }
@@ -446,124 +465,10 @@ private struct RtaBandGrid: View, Equatable {
     }
 }
 
-// MARK: - Raw FFT bins
+// MARK: - Log-frequency grid
 
-/// The most recent frame's raw magnitude bins on a logarithmic frequency axis.
-///
-/// The frame belongs to whichever channel was transformed last, so the views
-/// that show it ask for a single channel; bin k is centred at
-/// k * sample rate / N, which is 47 Hz apart at 1024 points and 48 kHz.
-struct RtaBinsView: View, Equatable {
-    @Environment(\.rtaRenderingActive) private var renderingActive
-    let configuration: RtaDisplayConfiguration
-    let fallTau: TimeInterval
-    let binFrame: RtaBinFrame?
-    /// The same channel's band frame.  Its bass bands carry the picture below
-    /// the bins' reach, exactly as the graph overlay does.
-    let bandFrame: RtaBandFrame?
-    /// The channel being drawn; a bin frame from any other channel is ignored.
-    let channel: Int
-    let color: Color
-    let scale: RtaScale
-    var showPeakHold: Bool = true
-    var showLabels: Bool = true
-
-    /// The lowest band the device reports, which the bass bank measures
-    /// continuously, so the axis starts where the measurement does.
-    private var minHz: Double { max(configuration.centres.first ?? 10, 1) }
-
-    private var maxHz: Double {
-        if let f = binFrame, f.sampleRateHz > 0 { return Double(f.sampleRateHz) / 2 }
-        let rate = configuration.sampleRateHz
-        return rate > 0 ? Double(rate) / 2 : 20000
-    }
-
-    /// Band, peak and bin filters for the one channel; see `RtaBarSmoother`.
-    @State private var smoothing = RtaCurveSmoothing()
-
-    init(engine: RtaEngine, binFrame: RtaBinFrame?, bandFrame: RtaBandFrame?,
-         channel: Int, color: Color, scale: RtaScale,
-         showPeakHold: Bool = true, showLabels: Bool = true) {
-        configuration = RtaDisplayConfiguration(engine: engine)
-        fallTau = rtaFallTau(engine, AppSettings.shared.rtaSmoothing)
-        self.binFrame = binFrame?.displayFrame
-        self.bandFrame = bandFrame?.displayFrame
-        self.channel = channel
-        self.color = color
-        self.scale = scale
-        self.showPeakHold = showPeakHold
-        self.showLabels = showLabels
-    }
-
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.configuration == rhs.configuration && lhs.fallTau == rhs.fallTau
-            && lhs.binFrame == rhs.binFrame && lhs.bandFrame == rhs.bandFrame
-            && lhs.channel == rhs.channel && lhs.color == rhs.color && lhs.scale == rhs.scale
-            && lhs.showPeakHold == rhs.showPeakHold && lhs.showLabels == rhs.showLabels
-    }
-
-    var body: some View {
-        ZStack {
-            RtaBinGrid(scale: scale, minHz: minHz, maxHz: maxHz, showLabels: showLabels).equatable()
-            if fallTau > 0 {
-                TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !renderingActive)) { timeline in
-                    canvas(now: timeline.date)
-                }
-            } else {
-                canvas(now: nil)
-            }
-        }
-    }
-
-    private func canvas(now: Date?) -> some View {
-        let tau = fallTau
-        // Allow asynchronous presentation; data preparation is cached separately.
-        return Canvas(rendersAsynchronously: true) { ctx, size in
-            let labelHeight: CGFloat = showLabels ? 12 : 0
-            let plot = CGRect(x: 0, y: 0, width: size.width, height: max(0, size.height - labelHeight))
-            guard plot.width > 4, plot.height > 4 else { return }
-
-            guard maxHz > minHz else { return }
-
-            // The same picture the graph overlay draws for one channel: bass
-            // bands crossfading into bins, one point per pixel column.
-            let curves = RtaCurveBuilder(configuration: configuration, smoothing: smoothing,
-                                         minFreq: minHz, maxFreq: maxHz,
-                                         plot: plot, scale: scale, now: now, tau: tau)
-            let bands = bandFrame.flatMap { $0.hasData ? curves.bandPoints($0, peak: false, channel: channel) : nil } ?? []
-            let bins = binFrame.flatMap { Int($0.channel) == channel ? curves.binPoints($0, channel: channel) : nil } ?? []
-            let curve = curves.blend(bands: bands, bins: bins)
-
-            if curve.count > 1 {
-                // Until a bin frame arrives the curve is the thirty-odd bands,
-                // which need smoothing; the blended series is already dense.
-                let path = bins.count > 1 ? polyline(through: curve)
-                                          : smoothPath(through: curve, clampedTo: plot)
-                var fill = path
-                fill.addLine(to: CGPoint(x: curve[curve.count - 1].x, y: plot.maxY))
-                fill.addLine(to: CGPoint(x: curve[0].x, y: plot.maxY))
-                fill.closeSubpath()
-                ctx.fill(fill, with: .linearGradient(
-                    Gradient(colors: [color.opacity(0.45), color.opacity(0.04)]),
-                    startPoint: CGPoint(x: 0, y: plot.minY),
-                    endPoint: CGPoint(x: 0, y: plot.maxY)))
-                ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.2, lineJoin: .round))
-            }
-
-            if showPeakHold, let bandFrame, bandFrame.hasData {
-                let peak = curves.bandPoints(bandFrame, peak: true, channel: channel)
-                if peak.count > 1 {
-                    ctx.stroke(smoothPath(through: peak, clampedTo: plot),
-                               with: .color(color.opacity(0.5)),
-                               style: StrokeStyle(lineWidth: 1, lineCap: .round))
-                }
-            }
-        }
-
-    }
-
-}
-
+/// The dB lines and the 1-2-5 frequency lines on a logarithmic axis, with
+/// optional labels, behind the analyser window's spectrum curves.
 private struct RtaBinGrid: View, Equatable {
     let scale: RtaScale
     let minHz: Double
@@ -612,15 +517,6 @@ private struct RtaBinGrid: View, Equatable {
         }
     }
 }
-
-/// Explains the shaded slots wherever bars are drawn.  They are not silence:
-/// a third-octave band down there is narrower than one FFT bin, so nothing
-/// lands in it and it can only read the floor.
-let rtaShadedBandHelp = """
-Bass bands from 10–200 Hz are measured continuously. Shaded higher bands hold no \
-FFT bin at the current transform size. Raise the transform size to fill more \
-of them in.
-"""
 
 // MARK: - Reading helpers
 
@@ -1569,6 +1465,15 @@ class SpectrumAnalyserWindowController: NSObject, ObservableObject {
 }
 
 extension SpectrumAnalyserWindowController: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // This controller reuses its window and Metal views. An actual close
+        // tears down MTKView's draw loop; ordering that same window front again
+        // can leave it unpaused but without draw callbacks. Hide it instead,
+        // just as toggle() does, so the retained renderers can resume.
+        hide()
+        return false
+    }
+
     private func updateRenderingVisibility() {
         let active = isVisible && window?.isMiniaturized == false
             && window?.occlusionState.contains(.visible) == true
@@ -1587,122 +1492,250 @@ extension SpectrumAnalyserWindowController: NSWindowDelegate {
 
 // MARK: - Analyser window
 
-/// The full-size analyser: the same engine as the inline strips, with the
-/// channel selection, the two products (third-octave bands and raw bins) and
-/// every option the device owns exposed in one place.
+/// A larger, separate view of the spectrum data the main window has asked for.
+///
+/// The main window decides what the engine does: the tap, the channels, and
+/// whether there is a spectrum at all.  This window's registration always
+/// matches the current page's selection, so it can never change that.  Within
+/// that data it draws whatever the user likes: curves, bars or both, with any
+/// of the page's channels hidden here only.  The engine options live in Settings.
 struct SpectrumAnalyserView: View {
     @EnvironmentObject private var windowController: SpectrumAnalyserWindowController
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
     @ObservedObject private var settings = AppSettings.shared
 
-    enum Mode: String, CaseIterable, Identifiable {
-        case bands = "RTA"
-        case bins = "FFT"
+    enum DisplayMode: String, CaseIterable, Identifiable {
+        case curves = "Curves"
+        case bars = "Bars"
+        case both = "Both"
         var id: Self { self }
     }
 
-    @State private var mode: Mode = .bands
-    @State private var tap: UInt8 = RTA_TAP_OUTPUT
-    @State private var selected: Set<Int> = []
-    @State private var binChannel: Int = 0
-
-    // MARK: Channel model at the current tap
-
-    /// Channels the analyser can be pointed at, in wire order.  The input tap
-    /// counts live input rows, the output tap counts enabled outputs: the
-    /// device drops anything that is not live from the rotation anyway, so
-    /// offering a dead channel would only ever produce an empty graph.
-    private var channels: [Int] {
-        tap == RTA_TAP_INPUT
-            ? Array(0..<vm.numMatrixInputs)
-            : (0..<vm.numOutputChannels).filter { vm.outputEnabled[$0] }
+    private struct ChannelKey: Hashable {
+        let tap: UInt8
+        let channel: Int
     }
 
-    private func channelName(_ ch: Int) -> String {
-        let eqCh = tap == RTA_TAP_INPUT ? ch : vm.eqChannel(forOutput: ch)
-        guard eqCh < vm.channelNames.count else { return "Ch \(ch + 1)" }
-        return vm.channelNames[eqCh]
-    }
+    @State private var mode: DisplayMode = .bars
+    /// Channels hidden in this window only.  Drawing alone: nothing here ever
+    /// reaches the engine.
+    @State private var hidden: Set<ChannelKey> = []
 
-    private func channelColor(_ ch: Int) -> Color {
-        if tap == RTA_TAP_INPUT { return ChannelPalette.input(ch) }
-        return ch == vm.pdmOutputIndex ? ChannelPalette.pdm : ChannelPalette.output(ch)
-    }
+    private var onDashboard: Bool { vm.activeEqChannel == nil }
 
-    private var effectiveSelection: [Int] {
-        let live = channels
-        let picked = live.filter { selected.contains($0) }
-        return picked.isEmpty ? live : picked
-    }
-
-    private var request: RtaRequest {
-        if mode == .bins {
-            let ch = channels.contains(binChannel) ? binChannel : (channels.first ?? 0)
-            return RtaRequest(tap: tap, mask: UInt16(1) << UInt16(ch), wantsBins: true)
-        }
-        let mask = effectiveSelection.reduce(UInt16(0)) { $0 | (UInt16(1) << UInt16($1)) }
-        return RtaRequest(tap: tap, mask: mask)
-    }
+    /// The window is kept rather than destroyed when closed, so its views never
+    /// disappear; watching only while it is actually on screen is what lets the
+    /// device stop the analyser when nothing else is looking.
+    private var active: Bool { windowController.isRendering }
 
     private var scale: RtaScale {
         RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB)
     }
 
-    /// Transform sizes this device offers.  Built as a range rather than taken
-    /// from the caps directly so a device reporting a nonsensical pair cannot
-    /// crash the picker.
-    private var availableOrders: [Int] {
-        let lo = Int(engine.caps.fftOrderMin), hi = Int(engine.caps.fftOrderMax)
-        guard hi >= lo else { return [Int(engine.caps.fftOrderDefault)] }
-        return Array(lo...hi)
+    private var pageShowsSpectrum: Bool {
+        settings.rtaShows(.graph, onDashboard: onDashboard) || settings.rtaShows(.bars, onDashboard: onDashboard)
     }
 
-    /// The offered size nearest the stored preference, so a preference left
-    /// behind by a device with a larger ceiling still selects something.
-    private var selectedOrder: Int {
-        guard let lo = availableOrders.first, let hi = availableOrders.last else { return settings.rtaFftOrder }
-        return min(max(settings.rtaFftOrder, lo), hi)
+    private func color(_ tap: UInt8, _ ch: Int) -> Color {
+        eqCurveColor(eqCh: vm.rtaEqChannel(tap: tap, channel: ch), chOut1: vm.chOut1)
     }
 
-    // MARK: Body
+    private func isHidden(_ tap: UInt8, _ ch: Int) -> Bool {
+        hidden.contains(ChannelKey(tap: tap, channel: ch))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !engine.supported {
-                unsupportedNotice
+            if !vm.isDeviceReady || !engine.supported {
+                unavailableNotice
             } else {
-                controlBar
+                let selection = vm.rtaSelection
+                // With nothing shown on the page, the main window is asking the
+                // engine for nothing, so there is no data here to present.
+                let available = pageShowsSpectrum && !selection.isEmpty
+                header(selection, available: available)
                 Divider()
-                display
+                if !available {
+                    hiddenNotice(selection)
+                } else {
+                    let visible = selection.channels.filter { !isHidden(selection.tap, $0) }
+                    Group {
+                        if visible.isEmpty {
+                            allHiddenNotice
+                        } else {
+                            VStack(spacing: 12) {
+                                if mode != .bars { curves(selection) }
+                                if mode != .curves { bars(selection, visible: visible) }
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxHeight: .infinity)
+                    .background(Color.black.opacity(0.20))
+                }
                 Divider()
-                optionsBar
-                Divider()
-                statusBar
+                statusBar(showsBars: available && mode != .curves)
             }
         }
         .frame(minWidth: 620, minHeight: 420)
-        .rtaWatching(engine, request, active: windowController.isRendering)
-        .onAppear {
-            // Everything at this tap by default: watching them all costs the
-            // device no more than watching one.
-            if selected.isEmpty { selected = Set(channels) }
-            if !channels.contains(binChannel) { binChannel = channels.first ?? 0 }
+        .onAppear { startFromPage() }
+        .onChange(of: windowController.isVisible) { _, visible in
+            if visible { startFromPage() }
         }
-        .onChange(of: tap) { _ in
-            selected = Set(channels)
-            binChannel = channels.first ?? 0
+        // A channel that leaves the page's selection forgets it was hidden,
+        // so it comes back visible if it is selected again.
+        .onChange(of: vm.rtaSelection) { _, selection in
+            hidden = hidden.filter { $0.tap == selection.tap && selection.channels.contains($0.channel) }
         }
     }
 
-    private var unsupportedNotice: some View {
+    /// Each time the window opens it starts out drawing what the page draws.
+    private func startFromPage() {
+        let graph = settings.rtaShows(.graph, onDashboard: onDashboard)
+        let bars = settings.rtaShows(.bars, onDashboard: onDashboard)
+        mode = graph && bars ? .both : (bars ? .bars : .curves)
+    }
+
+    // MARK: Header
+
+    private var pageTitle: String {
+        guard let eqCh = vm.activeEqChannel else { return "Dashboard" }
+        return eqCh < vm.channelNames.count ? vm.channelNames[eqCh] : "Channel"
+    }
+
+    /// Which page is being mirrored, its channels as show/hide toggles (which
+    /// are also the curves' legend), and how this window draws them.
+    private func header(_ selection: RtaChannelSelection, available: Bool) -> some View {
+        HStack(spacing: 10) {
+            Text(pageTitle)
+                .font(.system(size: 11, weight: .semibold))
+            if available {
+                Text(selection.tap == RTA_TAP_INPUT ? "Inputs" : "Outputs")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Divider().frame(height: 12)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(selection.channels, id: \.self) { ch in
+                            channelToggle(tap: selection.tap, channel: ch)
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            Picker("", selection: $mode) {
+                ForEach(DisplayMode.allCases) { m in Text(m.rawValue).tag(m) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            .disabled(!available)
+            .help("How this window draws the page's spectrum. It does not change the main window.")
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+    }
+
+    private func channelToggle(tap: UInt8, channel ch: Int) -> some View {
+        let shown = !isHidden(tap, ch)
+        return Button {
+            let key = ChannelKey(tap: tap, channel: ch)
+            if shown { hidden.insert(key) } else { hidden.remove(key) }
+        } label: {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(color(tap, ch).opacity(shown ? 1 : 0.25))
+                    .frame(width: 6, height: 6)
+                Text(vm.rtaChannelName(tap: tap, channel: ch))
+                    .font(.system(size: 10))
+                    .foregroundColor(shown ? .secondary : .secondary.opacity(0.4))
+                    .strikethrough(!shown)
+                    .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(shown ? "Hide in this window" : "Show in this window")
+    }
+
+    // MARK: Display
+
+    /// The response graph's spectrum without the filter curves: the same
+    /// overlay the graph draws, over the analyser's dB grid, across the graph's
+    /// frequency range so Graph Setup applies here too.  The overlay registers
+    /// for the page's whole selection whatever is hidden here.
+    private func curves(_ selection: RtaChannelSelection) -> some View {
+        let minHz = settings.graphMinFreq
+        let maxHz = settings.graphMaxFreq
+        let hiddenHere = Set(selection.channels.filter { isHidden(selection.tap, $0) })
+        return ZStack {
+            RtaBinGrid(scale: scale, minHz: minHz, maxHz: maxHz, showLabels: true).equatable()
+            // The grid keeps a 12 pt label row at the bottom; the overlay's plot
+            // stops above it so both map the same dB scale to the same height.
+            GraphSpectrumOverlay(vm: vm, engine: engine,
+                                 minFreq: Float(minHz), maxFreq: Float(maxHz),
+                                 active: active, hiddenChannels: hiddenHere)
+                .padding(.bottom, 12)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// The strip's bars for the visible channels, in its column layout, grown
+    /// to fill the window.  Registered for the page's whole selection.
+    private func bars(_ selection: RtaChannelSelection, visible: [Int]) -> some View {
+        let count = visible.count
+        let columns = min(max(count, 1), min(max(settings.rtaBarColumns, 1), 4))
+        let rows = stride(from: 0, to: count, by: columns).map {
+            Array(visible[$0..<min($0 + columns, count)])
+        }
+        return VStack(spacing: 12) {
+            ForEach(rows, id: \.self) { row in
+                HStack(spacing: 12) {
+                    ForEach(row, id: \.self) { ch in
+                        barCell(tap: selection.tap, channel: ch)
+                    }
+                    // Keeps a short last row's cells as wide as the rows above.
+                    ForEach(0..<(columns - row.count), id: \.self) { _ in
+                        Color.clear.frame(maxWidth: .infinity)
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: .infinity)
+        .rtaWatching(engine, RtaRequest(tap: selection.tap, mask: selection.mask), active: active)
+    }
+
+    private func barCell(tap: UInt8, channel ch: Int) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Circle().fill(color(tap, ch)).frame(width: 6, height: 6)
+                Text(vm.rtaChannelName(tap: tap, channel: ch))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            RtaBandsView(engine: engine,
+                         frame: engine.frame(channel: ch, tap: tap),
+                         color: color(tap, ch),
+                         scale: scale,
+                         showPeakHold: settings.rtaShowPeakHold,
+                         showLabels: true).equatable()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: Notices
+
+    private var unavailableNotice: some View {
         VStack(spacing: 10) {
             Image(systemName: "waveform.badge.exclamationmark")
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
             Text("Spectrum analyser unavailable")
                 .font(.headline)
-            Text(vm.isDeviceConnected
+            Text(vm.isDeviceReady
                  ? "The connected firmware does not provide a compatible analyser. Update the firmware to use it."
                  : "Connect a DSPi to use the analyser.")
                 .font(.caption)
@@ -1713,214 +1746,43 @@ struct SpectrumAnalyserView: View {
         .padding(40)
     }
 
-    // MARK: Controls
-
-    private var controlBar: some View {
-        HStack(spacing: 12) {
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases) { m in Text(m.rawValue).tag(m) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 110)
-            .help("Third-octave bands, or one channel's FFT bins with the continuous bass bands beneath them")
-
-            Picker("", selection: $tap) {
-                Text("Inputs").tag(RTA_TAP_INPUT)
-                Text("Outputs").tag(RTA_TAP_OUTPUT)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 150)
-            .help("Inputs are tapped after the per-input EQ; outputs after gain and delay, which is exactly what the slot transmits")
-
-            Divider().frame(height: 18)
-
-            if mode == .bins {
-                Picker("", selection: $binChannel) {
-                    ForEach(channels, id: \.self) { ch in Text(channelName(ch)).tag(ch) }
-                }
-                .labelsHidden()
-                .frame(width: 160)
-            } else {
-                channelChips
-            }
-
-            Spacer()
-
-            Button("Reset Averaging") { engine.resetAveraging() }
-                .controlSize(.small)
-                .help("Clear the running average and the peak hold without disturbing the frame in flight")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
-    private var channelChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) {
-                ForEach(channels, id: \.self) { ch in
-                    let on = selected.contains(ch)
-                    Button {
-                        if on { selected.remove(ch) } else { selected.insert(ch) }
-                    } label: {
-                        Text(channelName(ch))
-                            .font(.system(size: 10, weight: .medium))
-                            .lineLimit(1)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(on ? channelColor(ch).opacity(0.28) : Color.secondary.opacity(0.10))
-                            .overlay(RoundedRectangle(cornerRadius: 4)
-                                        .stroke(on ? channelColor(ch).opacity(0.8) : Color.clear, lineWidth: 1))
-                            .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    // MARK: Display
-
-    @ViewBuilder
-    private var display: some View {
-        ZStack {
-            Color.black.opacity(0.20)
-            if mode == .bins {
-                // The channel the request asked for, not whichever channel the
-                // last bin frame happens to name, so a stale frame is never
-                // drawn in the new channel's colour.
-                let ch = channels.contains(binChannel) ? binChannel : (channels.first ?? 0)
-                RtaBinsView(engine: engine,
-                            binFrame: engine.snapshot.tap == tap ? engine.snapshot.bins : nil,
-                            bandFrame: engine.frame(channel: ch, tap: tap),
-                            channel: ch,
-                            color: channelColor(ch),
-                            scale: scale,
-                            showPeakHold: settings.rtaShowPeakHold).equatable()
-                    .padding(10)
-            } else {
-                VStack(spacing: 6) {
-                    ForEach(effectiveSelection, id: \.self) { ch in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 5) {
-                                Circle().fill(channelColor(ch)).frame(width: 5, height: 5)
-                                Text(channelName(ch))
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                            }
-                            RtaBandsView(engine: engine,
-                                         frame: engine.frame(channel: ch, tap: tap),
-                                         color: channelColor(ch),
-                                         scale: scale,
-                                         showPeakHold: settings.rtaShowPeakHold,
-                                         showLabels: effectiveSelection.count <= 2).equatable()
-                        }
-                    }
-                }
-                .padding(10)
-            }
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    // MARK: Options
-
-    private var optionsBar: some View {
-        HStack(alignment: .center, spacing: 16) {
-            labelled("Size") {
-                Picker("", selection: Binding(
-                    get: { selectedOrder },
-                    set: { settings.rtaFftOrder = $0; pushOptions() }
-                )) {
-                    ForEach(availableOrders, id: \.self) { o in
-                        Text("\(1 << o)").tag(o)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 80)
-            }
-            .help("Points in the FFT. More points improve FFT resolution but refresh less often. The RTA bass bands from 10–200 Hz are measured continuously at every size.")
-
-            labelled("Averaging") {
-                Picker("", selection: Binding(
-                    get: { settings.rtaAvgMs },
-                    set: { settings.rtaAvgMs = $0; pushOptions() }
-                )) {
-                    Text("Off").tag(0)
-                    Text("50 ms").tag(50)
-                    Text("125 ms").tag(125)
-                    Text("300 ms").tag(300)
-                    Text("1 s").tag(1000)
-                    Text("3 s").tag(3000)
-                }
-                .labelsHidden()
-                .frame(width: 90)
-            }
-
-            labelled("Peak hold") {
-                Picker("", selection: Binding(
-                    get: { settings.rtaPeakDecayDBs },
-                    set: { settings.rtaPeakDecayDBs = $0; pushOptions() }
-                )) {
-                    Text("Off").tag(0)
-                    Text("Slow").tag(4)
-                    Text("Medium").tag(12)
-                    Text("Fast").tag(30)
-                }
-                .labelsHidden()
-                .frame(width: 90)
-            }
-            .disabled(!settings.rtaShowPeakHold)
-
-            labelled("Floor") {
-                Picker("", selection: $settings.rtaFloorDB) {
-                    Text("-60 dB").tag(-60.0)
-                    Text("-90 dB").tag(-90.0)
-                    Text("-120 dB").tag(-120.0)
-                }
-                .labelsHidden()
-                .frame(width: 90)
-            }
-
-            Toggle("Peaks", isOn: $settings.rtaShowPeakHold)
-                .toggleStyle(.checkbox)
-                .font(.system(size: 10))
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-    }
-
-    private func labelled<Content: View>(_ title: String,
-                                         @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(.system(size: 8, weight: .bold))
+    private func hiddenNotice(_ selection: RtaChannelSelection) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 26))
                 .foregroundColor(.secondary)
-            content()
+            Text(selection.isEmpty ? "No channels selected" : "Spectrum switched off")
+                .font(.headline)
+            Text("This window shows the spectrum of the \(onDashboard ? "dashboard" : "open channel page"). Choose channels and switch the spectrum on from the gear on the response graph.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
     }
 
-    private func pushOptions() {
-        engine.setOptions(settings.rtaOptions)
+    private var allHiddenNotice: some View {
+        VStack(spacing: 6) {
+            Text("Every channel is hidden in this window")
+                .font(.headline)
+            Text("Click a channel name above to show it again.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: Status
 
-    /// The lowest band this size resolves, when there is something below it
-    /// that a larger transform would reach.
-    private var lowBandHint: Double? {
-        guard mode == .bands, engine.snapshot.status.isRunning,
-              settings.rtaFftOrder < Int(engine.caps.fftOrderMax),
-              let lowest = engine.lowestMeasurableCentreHz else { return nil }
-        return lowest
-    }
-
-    private var statusBar: some View {
+    private func statusBar(showsBars: Bool) -> some View {
         let s = engine.snapshot.status
+        // The shaded bars low in the scale have a remedy in Settings, so name
+        // it rather than leave the user to conclude the analyser is broken.
+        let lowBandHint: Double? = showsBars && s.isRunning
+            && settings.rtaFftOrder < Int(engine.caps.fftOrderMax)
+            ? engine.lowestMeasurableCentreHz : nil
         return HStack(spacing: 14) {
             HStack(spacing: 5) {
                 Circle()
@@ -1949,14 +1811,10 @@ struct SpectrumAnalyserView: View {
                 Label("Device refused this configuration", systemImage: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
             } else if let lowest = lowBandHint {
-                // The shaded slots at the bottom of the scale have a remedy,
-                // and it is one control away, so name it rather than leaving
-                // the user to conclude the analyser is broken down there.
-                Text("shaded bands below \(rtaShortHz(lowest)) Hz need a larger transform")
+                Text("shaded bands below \(rtaShortHz(lowest)) Hz need a larger transform size in Settings")
                     .foregroundColor(.orange)
             } else if engine.caps.dynamicRangeDB > 0 {
-                Text(mode == .bins ? "\(engine.caps.dynamicRangeDB) dB FFT range"
-                     : "\(engine.caps.dynamicRangeDB)/\(engine.caps.bassDynamicRangeDB) dB range")
+                Text("\(engine.caps.dynamicRangeDB)/\(engine.caps.bassDynamicRangeDB) dB range")
                     .help("FFT / bass usable dynamic range. Bass bands use overlapping filters calibrated for tones.")
             }
         }

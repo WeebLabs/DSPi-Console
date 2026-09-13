@@ -33,6 +33,13 @@ struct GraphSpectrumOverlay: View {
     @ObservedObject private var settings = AppSettings.shared
     let minFreq: Float
     let maxFreq: Float
+    /// False while the view is kept alive but not on screen, as the analyser
+    /// window's content is when the window is closed or occluded.
+    var active: Bool = true
+    /// Channels at the selection's tap to leave out of the drawing.  Drawing
+    /// only: the registration is always the whole selection, so a view that
+    /// hides channels never narrows what the engine analyses for anyone else.
+    var hiddenChannels: Set<Int> = []
 
     var body: some View {
         if engine.supported, let plan = plan {
@@ -47,7 +54,7 @@ struct GraphSpectrumOverlay: View {
                 glow: settings.showGraphGlow, opacity: settings.rtaGraphOpacity)
                 .equatable()
                 .allowsHitTesting(false)
-                .rtaWatching(engine, plan.request)
+                .rtaWatching(engine, request, active: active)
                 .transition(.opacity)
         }
     }
@@ -65,12 +72,16 @@ struct GraphSpectrumOverlay: View {
         let tap: UInt8
         let channels: [Channel]
         let wantsBins: Bool
+    }
 
-        var request: RtaRequest {
-            RtaRequest(tap: tap,
-                       mask: channels.reduce(UInt16(0)) { $0 | (UInt16(1) << UInt16($1.rta)) },
-                       wantsBins: wantsBins)
-        }
+    /// What this view registers for: the page's whole selection, with the bins
+    /// only when that selection is a single channel, since the device keeps
+    /// bins for just the channel it transformed last.  Hidden channels do not
+    /// enter into it.
+    private var request: RtaRequest {
+        let selection = vm.rtaSelection
+        return RtaRequest(tap: selection.tap, mask: selection.mask,
+                          wantsBins: selection.channels.count == 1)
     }
 
     /// The analyser configuration for the page's selection.  The selection is
@@ -79,11 +90,13 @@ struct GraphSpectrumOverlay: View {
     private var plan: Plan? {
         guard vm.isDeviceReady else { return nil }
         let selection = vm.rtaSelection
-        let channels = selection.channels.map {
-            Channel(eq: vm.rtaEqChannel(tap: selection.tap, channel: $0), rta: $0)
-        }
+        let channels = selection.channels
+            .filter { !hiddenChannels.contains($0) }
+            .map { Channel(eq: vm.rtaEqChannel(tap: selection.tap, channel: $0), rta: $0) }
         guard !channels.isEmpty else { return nil }
-        return Plan(tap: selection.tap, channels: channels, wantsBins: channels.count == 1)
+        // The fine curve needs the whole selection to be one channel: one
+        // channel left visible out of several is still rotating with the rest.
+        return Plan(tap: selection.tap, channels: channels, wantsBins: selection.channels.count == 1)
     }
 
 }
@@ -91,7 +104,6 @@ struct GraphSpectrumOverlay: View {
 /// A value-only boundary keeps unrelated meter and analyser telemetry updates
 /// out of the animated canvas. Only the selected channels enter this view.
 private struct GraphSpectrumCanvas: View, Equatable {
-    @Environment(\.rtaRenderingActive) private var renderingActive
     let plan: GraphSpectrumOverlay.Plan
     let configuration: RtaDisplayConfiguration
     let frames: [UInt8: RtaBandFrame]
@@ -115,12 +127,16 @@ private struct GraphSpectrumCanvas: View, Equatable {
     }
 
     var body: some View {
-        if tau > 0 {
-            TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !renderingActive)) { timeline in
-                canvas(now: timeline.date)
+        // The active flag is read below the equatable boundary: see
+        // `RtaRenderingActiveReader` for why reading it here would miss changes.
+        RtaRenderingActiveReader { active in
+            if tau > 0 {
+                TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
+                    canvas(now: timeline.date)
+                }
+            } else {
+                canvas(now: nil)
             }
-        } else {
-            canvas(now: nil)
         }
     }
 
