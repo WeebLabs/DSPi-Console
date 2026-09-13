@@ -122,8 +122,8 @@ final class RtaBarSmoother {
             return values
         }
         let dt = lastTime.map { now.timeIntervalSince($0) } ?? 0
-        lastTime = now
         guard dt > 0 else { return values }
+        lastTime = now
         let riseK = riseTau > 0 ? 1 - exp(-dt / riseTau) : 1
         let fallK = fallTau > 0 ? 1 - exp(-dt / fallTau) : 1
         for i in values.indices {
@@ -218,6 +218,8 @@ struct RtaBandsView: View, Equatable {
     /// The dB numbers beside the grid lines, when `showLabels` is on.  The
     /// inline strip leaves them out: the frequency axis is what it needs.
     var showLevelLabels: Bool = true
+    /// The strip supplies one shared Metal surface above all its static grids.
+    var drawsBars: Bool = true
 
     private var bandCount: Int {
         let n = Int(frame?.nBands ?? 0)
@@ -229,7 +231,8 @@ struct RtaBandsView: View, Equatable {
     }
 
     init(engine: RtaEngine, frame: RtaBandFrame?, color: Color, scale: RtaScale,
-         showPeakHold: Bool = true, showLabels: Bool = false, showLevelLabels: Bool = true) {
+         showPeakHold: Bool = true, showLabels: Bool = false, showLevelLabels: Bool = true,
+         drawsBars: Bool = true) {
         configuration = RtaDisplayConfiguration(engine: engine)
         fallTau = rtaFallTau(engine, AppSettings.shared.rtaSmoothing)
         self.frame = frame?.displayFrame
@@ -238,6 +241,7 @@ struct RtaBandsView: View, Equatable {
         self.showPeakHold = showPeakHold
         self.showLabels = showLabels
         self.showLevelLabels = showLevelLabels
+        self.drawsBars = drawsBars
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -245,6 +249,7 @@ struct RtaBandsView: View, Equatable {
             && lhs.frame == rhs.frame && lhs.color == rhs.color && lhs.scale == rhs.scale
             && lhs.showPeakHold == rhs.showPeakHold && lhs.showLabels == rhs.showLabels
             && lhs.showLevelLabels == rhs.showLevelLabels
+            && lhs.drawsBars == rhs.drawsBars
     }
 
     /// One pole per band, carried across redraws.  A reference type in
@@ -259,34 +264,45 @@ struct RtaBandsView: View, Equatable {
         let n = bandCount
         guard let frame else {
             return (Array(repeating: scale.floorDB, count: n),
-                    Array(repeating: scale.floorDB, count: n))
+                    showPeakHold ? Array(repeating: scale.floorDB, count: n) : [])
         }
         var avg = [Double](repeating: scale.floorDB, count: n)
-        var peak = avg
+        var peak = showPeakHold ? avg : []
         for i in 0..<n {
             if i < frame.avg.count { avg[i] = configuration.levelDB(frame.avg[i]) }
-            if i < frame.peak.count { peak[i] = configuration.levelDB(frame.peak[i]) }
+            if showPeakHold, i < frame.peak.count { peak[i] = configuration.levelDB(frame.peak[i]) }
         }
         return (avg, peak)
     }
 
     /// Distinguishes one channel's numbers from another's, so a channel change
     /// snaps instead of sliding over from the channel before it.
-    private var seriesIdentity: Int { Int(frame?.channel ?? 0xFF) << 8 | visibleBands.count }
+    private var seriesIdentity: Int {
+        Int(configuration.tap) << 24 | Int(frame?.channel ?? 0xFF) << 8 | bandCount
+    }
 
     var body: some View {
-        let target = targets()
         ZStack {
             if showLabels {
                 RtaBandGrid(scale: scale, centres: configuration.centres, visible: visibleBands,
                             showLevelLabels: showLevelLabels).equatable()
             }
-            if fallTau > 0 {
+            if drawsBars, RtaMetalBarResources.shared != nil {
+                GeometryReader { geometry in
+                    RtaMetalBars(panels: [RtaMetalBarPanel(
+                        configuration: configuration, frame: frame, color: color, scale: scale,
+                        fallTau: fallTau, showPeakHold: showPeakHold,
+                        rect: CGRect(x: 0, y: 0, width: geometry.size.width,
+                                     height: max(0, geometry.size.height - (showLabels ? 12 : 0))),
+                        cache: smoothing.cache)], active: renderingActive)
+                }
+            } else if drawsBars, fallTau > 0 {
+                let target = targets()
                 TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !renderingActive)) { timeline in
                     canvas(now: timeline.date, target: target)
                 }
-            } else {
-                canvas(now: nil, target: target)
+            } else if drawsBars {
+                canvas(now: nil, target: targets())
             }
         }
     }
@@ -311,8 +327,8 @@ struct RtaBandsView: View, Equatable {
                 // A peak cap that eased upward would stop being a peak; only
                 // its fall is interpolated, and the device is already decaying
                 // it at the rate the user chose.
-                peak = smoothing.caps.step(now: now, target: t.peak, identity: identity,
-                                           riseTau: 0, fallTau: tau)
+                peak = showPeakHold ? smoothing.caps.step(now: now, target: t.peak, identity: identity,
+                                                          riseTau: 0, fallTau: tau) : []
             } else {
                 avg = t.avg
                 peak = t.peak
@@ -1332,6 +1348,39 @@ private struct BarStripOptionsPanel: View {
 
 // MARK: - Bar strip
 
+extension RtaMetalBarPanel {
+    init(configuration: RtaDisplayConfiguration, frame: RtaBandFrame?, color: Color,
+         scale: RtaScale, fallTau: TimeInterval, showPeakHold: Bool, rect: CGRect,
+         cache: RtaRenderCache) {
+        let count = (frame?.nBands ?? 0) > 0
+            ? min(Int(frame!.nBands), RTA_MAX_BANDS) : max(configuration.centres.count, 34)
+        var levels = [Double](repeating: scale.floorDB, count: count)
+        var peaks = showPeakHold ? levels : []
+        if let frame {
+            for i in levels.indices {
+                if i < frame.avg.count { levels[i] = configuration.levelDB(frame.avg[i]) }
+                if showPeakHold, i < frame.peak.count { peaks[i] = configuration.levelDB(frame.peak[i]) }
+            }
+        }
+        self.init(identity: Int(configuration.tap) << 24 | Int(frame?.channel ?? 0xFF) << 8 | count,
+                  rect: rect, levels: levels, peaks: peaks,
+                  visible: cache.visibleBands(configuration: configuration, count: count),
+                  color: Self.rgba(color), floorDB: scale.floorDB, ceilingDB: scale.ceilingDB,
+                  fallTau: fallTau, showPeakHold: showPeakHold)
+    }
+}
+
+/// Shared with the static grid: padding 10, column gap 12, row gap 8,
+/// name row 14 + spacing 2, and a 12-point frequency-label row below each plot.
+func rtaBarStripPlot(index: Int, count: Int, columns: Int, width: CGFloat) -> CGRect {
+    let columns = max(1, columns)
+    let cellWidth = max(0, (width - 20 - CGFloat(columns - 1) * 12) / CGFloat(columns))
+    let graphHeight: CGFloat = count == 1 ? 96 : 72
+    return CGRect(x: 10 + CGFloat(index % columns) * (cellWidth + 12),
+                  y: 10 + CGFloat(index / columns) * (14 + 2 + graphHeight + 8) + 14 + 2,
+                  width: cellWidth, height: graphHeight - 12)
+}
+
 /// Third-octave bars for the selected channels, above the dashboard's cards or
 /// a channel page's filter table, when the page has bars switched on.  One card
 /// with a cell per channel, laid side by side before wrapping, so a larger
@@ -1348,6 +1397,7 @@ struct SpectrumBarStrip: View {
 
     @State private var optionsOpen = false
     @State private var isHovered = false
+    @State private var barCache = RtaRenderCache()
 
     /// Tall enough for the gear, and kept in every cell so rows line up.
     private let nameRowHeight: CGFloat = 14
@@ -1405,7 +1455,8 @@ struct SpectrumBarStrip: View {
                                      scale: scale,
                                      showPeakHold: settings.rtaShowPeakHold,
                                      showLabels: true,
-                                     showLevelLabels: false).equatable()
+                                     showLevelLabels: false,
+                                     drawsBars: RtaMetalBarResources.shared == nil).equatable()
                             .frame(height: single ? 96 : 72)
                     }
                 }
@@ -1416,6 +1467,24 @@ struct SpectrumBarStrip: View {
             .overlay(RoundedRectangle(cornerRadius: 10)
                         .stroke(single ? color(selection, selection.channels[0]).opacity(0.3)
                                        : Color.secondary.opacity(0.2), lineWidth: 1))
+            .overlay {
+                if RtaMetalBarResources.shared != nil {
+                    GeometryReader { geometry in
+                        let configuration = RtaDisplayConfiguration(engine: engine)
+                        let tau = rtaFallTau(engine, settings.rtaSmoothing)
+                        RtaMetalBars(panels: selection.channels.enumerated().map { index, ch in
+                            RtaMetalBarPanel(
+                                configuration: configuration,
+                                frame: engine.frame(channel: ch, tap: selection.tap),
+                                color: color(selection, ch), scale: scale, fallTau: tau,
+                                showPeakHold: settings.rtaShowPeakHold,
+                                rect: rtaBarStripPlot(index: index, count: count, columns: columns,
+                                                     width: geometry.size.width), cache: barCache)
+                        })
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
             // Tucked into the card's corner, inside the rounded edge.  Its span
             // still falls within the slot every name row keeps clear, so a long
             // name in the top-right cell stops short of it.  A single overlay
