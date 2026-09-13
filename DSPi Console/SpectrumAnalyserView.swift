@@ -695,6 +695,17 @@ struct RtaChannelSelection: Equatable {
     func restricted(to live: [Int]) -> RtaChannelSelection {
         RtaChannelSelection(tap: tap, channels: channels.filter(live.contains))
     }
+
+    /// Moving to the other side: the side being left becomes the remembered
+    /// one, and the side being entered comes back as it was left, or empty if
+    /// it was never used.  Asking for the side already showing changes nothing.
+    static func switchingSides(active: RtaChannelSelection, remembered: RtaChannelSelection?,
+                               to tap: UInt8) -> (active: RtaChannelSelection, remembered: RtaChannelSelection?) {
+        guard tap != active.tap else { return (active, remembered) }
+        let restored = remembered.flatMap { $0.tap == tap ? $0 : nil }
+            ?? RtaChannelSelection(tap: tap, channels: [])
+        return (restored, active)
+    }
 }
 
 extension DSPViewModel {
@@ -756,11 +767,36 @@ extension DSPViewModel {
         }
     }
 
+    /// Show the other side's channels, bringing back whatever was checked
+    /// there when the user last left it.  This is not a hide, so it leaves the
+    /// channel pages' show-spectrum preference alone.
+    func switchRtaSide(to tap: UInt8) {
+        if activeEqChannel == nil {
+            let settings = AppSettings.shared
+            // The stored form rather than the live one, so an output that is
+            // disabled for now is still remembered for when it comes back.
+            let active = RtaChannelSelection(storageKey: settings.rtaDashboardSelectionKey) ?? dashboardRtaSelection
+            let next = RtaChannelSelection.switchingSides(
+                active: active,
+                remembered: RtaChannelSelection(storageKey: settings.rtaDashboardOtherSideKey),
+                to: tap)
+            settings.rtaDashboardSelectionKey = next.active.storageKey
+            settings.rtaDashboardOtherSideKey = next.remembered?.storageKey ?? ""
+        } else {
+            let next = RtaChannelSelection.switchingSides(
+                active: rtaPageSelection, remembered: rtaPageOtherSide, to: tap)
+            rtaPageSelection = next.active
+            rtaPageOtherSide = next.remembered
+        }
+    }
+
     /// Start a newly opened channel page on its own channel, or on nothing if
-    /// the user hid the spectrum on channel pages.
+    /// the user hid the spectrum on channel pages.  Nothing is remembered for
+    /// the other side yet.
     func resetRtaPageSelection(for eqCh: Int) {
         let tap = eqCh < chOut1 ? RTA_TAP_INPUT : RTA_TAP_OUTPUT
         let channel = eqCh < chOut1 ? eqCh : eqCh - chOut1
+        rtaPageOtherSide = nil
         rtaPageSelection = AppSettings.shared.rtaChannelPagesShowSpectrum
             ? RtaChannelSelection(tap: tap, channels: [channel])
             : RtaChannelSelection(tap: tap, channels: [])
@@ -806,15 +842,41 @@ private struct GraphOptionsPanel: View {
 
     private var onDashboard: Bool { vm.activeEqChannel == nil }
 
+    /// The panel's two pages.  Reopening the popover builds a fresh panel, so
+    /// it always opens on the main page.
+    private enum Page { case main, setup }
+    @State private var page = Page.main
+
+    private func go(to next: Page) {
+        withAnimation(.easeInOut(duration: 0.2)) { page = next }
+    }
+
     var body: some View {
+        ZStack(alignment: .topLeading) {
+            switch page {
+            case .main:
+                mainPage
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            case .setup:
+                GraphSetupPage(inPopOutWindow: onPopOut == nil, onBack: { go(to: .main) })
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .frame(width: 280)
+        .clipped()
+    }
+
+    private var mainPage: some View {
         VStack(alignment: .leading, spacing: 0) {
             if engine.supported && vm.isDeviceReady {
                 channelSection
                     .padding(12)
                 Divider()
                 VStack(spacing: 0) {
-                    switchRow(icon: "waveform.path", title: "On Response Graph", view: .graph)
-                    switchRow(icon: "chart.bar.fill", title: "As Bars", view: .bars)
+                    GraphOptionsToggleRow(icon: "waveform.path", title: "On Response Graph",
+                                          isOn: showBinding(.graph))
+                    GraphOptionsToggleRow(icon: "chart.bar.fill", title: "As Bars",
+                                          isOn: showBinding(.bars))
                 }
                 .padding(.vertical, 6)
             } else {
@@ -824,26 +886,26 @@ private struct GraphOptionsPanel: View {
                     .foregroundColor(.secondary)
                     .padding(12)
             }
-            if let onPopOut {
-                Divider()
-                GraphOptionsActionRow(icon: "arrow.down.backward.and.arrow.up.forward",
-                                      title: "Pop Out Graph", action: onPopOut)
-                    .padding(.vertical, 6)
+            Divider()
+            VStack(spacing: 0) {
+                GraphOptionsActionRow(icon: "slider.horizontal.3", title: "Graph Setup",
+                                      trailingIcon: "chevron.right") { go(to: .setup) }
+                if let onPopOut {
+                    GraphOptionsActionRow(icon: "arrow.down.backward.and.arrow.up.forward",
+                                          title: "Pop Out Graph", action: onPopOut)
+                }
             }
+            .padding(.vertical, 6)
         }
-        .frame(width: 280)
     }
 
     // MARK: Channels
 
     /// Choosing a side is what keeps inputs and outputs apart: only one side's
-    /// chips are ever on screen, and switching sides starts an empty selection.
+    /// chips are ever on screen.  Each side keeps its own checked channels.
     private var tapBinding: Binding<UInt8> {
         Binding(get: { vm.rtaSelection.tap },
-                set: { tap in
-                    guard tap != vm.rtaSelection.tap else { return }
-                    vm.setRtaSelection(RtaChannelSelection(tap: tap, channels: []))
-                })
+                set: { vm.switchRtaSide(to: $0) })
     }
 
     private var channelSection: some View {
@@ -934,24 +996,9 @@ private struct GraphOptionsPanel: View {
 
     // MARK: Drawing
 
-    private func switchRow(icon: String, title: String, view: RtaSpectrumView) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .frame(width: 18)
-            Text(title)
-                .font(.system(size: 12))
-            Spacer()
-            Toggle("", isOn: Binding(
-                get: { settings.rtaShows(view, onDashboard: onDashboard) },
-                set: { settings.setRtaShows(view, onDashboard: onDashboard, $0) }))
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .labelsHidden()
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 28)
+    private func showBinding(_ view: RtaSpectrumView) -> Binding<Bool> {
+        Binding(get: { settings.rtaShows(view, onDashboard: onDashboard) },
+                set: { settings.setRtaShows(view, onDashboard: onDashboard, $0) })
     }
 }
 
@@ -960,6 +1007,8 @@ private struct GraphOptionsPanel: View {
 private struct GraphOptionsActionRow: View {
     let icon: String
     let title: String
+    /// A chevron for a row that opens another page rather than acting.
+    var trailingIcon: String? = nil
     let action: () -> Void
     @State private var hovered = false
 
@@ -972,6 +1021,11 @@ private struct GraphOptionsActionRow: View {
                 Text(title)
                     .font(.system(size: 12))
                 Spacer()
+                if let trailingIcon {
+                    Image(systemName: trailingIcon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .opacity(hovered ? 1 : 0.5)
+                }
             }
             .padding(.horizontal, 8)
             .frame(height: 26)
@@ -982,6 +1036,192 @@ private struct GraphOptionsActionRow: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 4)
         .onHover { hovered = $0 }
+    }
+}
+
+/// A labelled switch row, shared by both pages of the graph options panel.
+private struct GraphOptionsToggleRow: View {
+    var icon: String? = nil
+    let title: String
+    @Binding var isOn: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(width: 18)
+            }
+            Text(title)
+                .font(.system(size: 12))
+                // Text does not dim with its disabled switch on its own.
+                .foregroundColor(isEnabled ? .primary : .secondary)
+            Spacer()
+            Toggle("", isOn: $isOn)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 26)
+    }
+}
+
+/// The panel's second page: the graph's scale, grids and curve style, the same
+/// preferences as the Graphing settings tab, adjustable while looking at the
+/// graph they change.
+private struct GraphSetupPage: View {
+    @ObservedObject private var settings = AppSettings.shared
+    /// Offers the pop-out window's own follow-selection switch, which means
+    /// nothing in the main window.
+    let inPopOutWindow: Bool
+    let onBack: () -> Void
+
+    /// Fixed so slider rows line up whatever their labels and values say.
+    private let labelWidth: CGFloat = 64
+    private let valueWidth: CGFloat = 46
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                Text("Graph Setup")
+                    .font(.system(size: 12, weight: .semibold))
+                HStack {
+                    Button(action: onBack) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Back")
+                                .font(.system(size: 12))
+                        }
+                        .foregroundColor(.accentColor)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+
+            Divider()
+
+            sectionHeader("SCALE") {
+                Button("Reset", action: resetScale)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.accentColor)
+                    .help("Restore the default frequency and dB range")
+            }
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    rowLabel("Frequency")
+                    Picker("", selection: $settings.graphMinFreq) {
+                        Text("10 Hz").tag(10.0)
+                        Text("15 Hz").tag(15.0)
+                        Text("20 Hz").tag(20.0)
+                        Text("50 Hz").tag(50.0)
+                        Text("100 Hz").tag(100.0)
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 80)
+                    Text("to")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $settings.graphMaxFreq) {
+                        Text("5 kHz").tag(5000.0)
+                        Text("10 kHz").tag(10000.0)
+                        Text("20 kHz").tag(20000.0)
+                    }
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 80)
+                    Spacer(minLength: 0)
+                }
+                sliderRow("Range", value: "\(Int(settings.graphDBRange)) dB",
+                          binding: Binding(get: { settings.graphDBRange },
+                                           set: { settings.graphDBRange = $0.rounded() }),
+                          in: 10...100)
+                sliderRow("Center", value: String(format: "%+.0f dB", settings.graphDBCenter),
+                          binding: Binding(get: { settings.graphDBCenter },
+                                           set: { settings.graphDBCenter = $0.rounded() }),
+                          in: -40...20)
+            }
+            .padding(.horizontal, 12)
+
+            sectionHeader("GRID & LABELS")
+            GraphOptionsToggleRow(title: "Frequency Grid", isOn: $settings.showFrequencyGrid)
+            GraphOptionsToggleRow(title: "Frequency Labels", isOn: $settings.showFrequencyLabels)
+            GraphOptionsToggleRow(title: "dB Grid", isOn: $settings.showDBGrid)
+            GraphOptionsToggleRow(title: "dB Labels", isOn: $settings.showDBLabels)
+
+            sectionHeader("CURVES")
+            sliderRow("Line Width", value: String(format: "%.1f pt", settings.graphLineWidth),
+                      binding: $settings.graphLineWidth, in: 1...4, step: 0.5)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 2)
+            GraphOptionsToggleRow(title: "Glow", isOn: $settings.showGraphGlow)
+            GraphOptionsToggleRow(title: "Phase Response", isOn: $settings.showPhase)
+            GraphOptionsToggleRow(title: "Unwrap Phase", isOn: $settings.phaseUnwrapped)
+                .disabled(!settings.showPhase)
+            if inPopOutWindow {
+                GraphOptionsToggleRow(title: "Follow Channel Selection",
+                                      isOn: $settings.popoutGraphFollowsSelection)
+            }
+
+            Spacer().frame(height: 8)
+        }
+    }
+
+    private func sectionHeader<Trailing: View>(_ title: String,
+                                               @ViewBuilder trailing: () -> Trailing = { EmptyView() }) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+            Spacer()
+            trailing()
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 6)
+    }
+
+    private func rowLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 12))
+            .frame(width: labelWidth, alignment: .leading)
+    }
+
+    private func sliderRow(_ title: String, value: String, binding: Binding<Double>,
+                           in range: ClosedRange<Double>, step: Double? = nil) -> some View {
+        HStack(spacing: 6) {
+            rowLabel(title)
+            Group {
+                if let step {
+                    Slider(value: binding, in: range, step: step)
+                } else {
+                    Slider(value: binding, in: range)
+                }
+            }
+            .controlSize(.small)
+            Text(value)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(width: valueWidth, alignment: .trailing)
+        }
+    }
+
+    /// The scale's @AppStorage defaults.  Grids and curve style are left alone:
+    /// a reset of the axes should not also switch the phase trace off.
+    private func resetScale() {
+        settings.graphMinFreq = 15
+        settings.graphMaxFreq = 20000
+        settings.graphDBRange = 50
+        settings.graphDBCenter = 0
     }
 }
 

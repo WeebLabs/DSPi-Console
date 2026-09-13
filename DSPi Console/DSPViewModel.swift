@@ -2249,6 +2249,9 @@ class DSPViewModel: ObservableObject {
     /// The spectrum channels on the open channel page.  Read through
     /// `rtaSelection`, which also covers the dashboard's stored choice.
     @Published var rtaPageSelection = RtaChannelSelection.none
+    /// The open channel page's selection on the side not showing, for when the
+    /// user switches back.  Nothing draws it, so it is not published.
+    var rtaPageOtherSide: RtaChannelSelection?
 
     /// Returns true if the matrix output is disabled or muted.
     func isOutputInactive(_ outputIndex: Int) -> Bool {

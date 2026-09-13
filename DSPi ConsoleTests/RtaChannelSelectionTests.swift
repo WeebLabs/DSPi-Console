@@ -55,6 +55,36 @@ final class RtaChannelSelectionTests: XCTestCase {
                        RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: [4]))
     }
 
+    func testSwitchingSidesRemembersEachSide() {
+        let inputs = RtaChannelSelection(tap: RTA_TAP_INPUT, channels: [0, 1])
+
+        // First visit to outputs: nothing to restore, inputs remembered.
+        var next = RtaChannelSelection.switchingSides(active: inputs, remembered: nil, to: RTA_TAP_OUTPUT)
+        XCTAssertEqual(next.active, RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: []))
+        XCTAssertEqual(next.remembered, inputs)
+
+        // Pick an output, go back: the inputs return and the output is kept.
+        let outputs = next.active.toggling(tap: RTA_TAP_OUTPUT, channel: 3)
+        next = RtaChannelSelection.switchingSides(active: outputs, remembered: next.remembered, to: RTA_TAP_INPUT)
+        XCTAssertEqual(next.active, inputs)
+        XCTAssertEqual(next.remembered, outputs)
+    }
+
+    func testSwitchingToTheSideAlreadyShowingChangesNothing() {
+        let inputs = RtaChannelSelection(tap: RTA_TAP_INPUT, channels: [2])
+        let outputs = RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: [0])
+        let next = RtaChannelSelection.switchingSides(active: inputs, remembered: outputs, to: RTA_TAP_INPUT)
+        XCTAssertEqual(next.active, inputs)
+        XCTAssertEqual(next.remembered, outputs)
+    }
+
+    func testARememberedSelectionFromTheWrongSideIsIgnored() {
+        let inputs = RtaChannelSelection(tap: RTA_TAP_INPUT, channels: [0])
+        let staleInputs = RtaChannelSelection(tap: RTA_TAP_INPUT, channels: [5])
+        let next = RtaChannelSelection.switchingSides(active: inputs, remembered: staleInputs, to: RTA_TAP_OUTPUT)
+        XCTAssertEqual(next.active, RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: []))
+    }
+
     func testRestrictingDropsDeadChannelsAndKeepsTheTap() {
         let s = RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: [0, 3, 8])
         XCTAssertEqual(s.restricted(to: [0, 1, 8]),

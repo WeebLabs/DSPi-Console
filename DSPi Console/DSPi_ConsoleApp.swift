@@ -78,6 +78,9 @@ class AppSettings: ObservableObject {
     /// which falls back when no stored channel is live on this device.  The key
     /// is the old single "Dashboard FFT" channel's, whose values still parse.
     @AppStorage("rtaDashboardSource") var rtaDashboardSelectionKey: String = ""
+    /// The dashboard's selection on the side not showing, in the same form, or
+    /// empty when that side has never been used.
+    @AppStorage("rtaDashboardOtherSide") var rtaDashboardOtherSideKey: String = ""
     /// Whether a channel page opens with its own channel's spectrum showing.
     /// Cleared by hiding the spectrum on a channel page, set by checking one.
     @AppStorage("rtaChannelPagesShowSpectrum") var rtaChannelPagesShowSpectrum: Bool = true
