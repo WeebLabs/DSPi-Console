@@ -1333,14 +1333,27 @@ private struct BarStripOptionsPanel: View {
 // MARK: - Bar strip
 
 /// Third-octave bars for the selected channels, above the dashboard's cards or
-/// a channel page's filter table, when the page has bars switched on.  One card with a cell per channel, laid side by side
-/// before wrapping, so a larger selection grows the card instead of stacking
-/// more cards.
+/// a channel page's filter table, when the page has bars switched on.  One card
+/// with a cell per channel, laid side by side before wrapping, so a larger
+/// selection grows the card instead of stacking more cards.
+///
+/// There is no header row.  Each cell names its channel, which already says
+/// whether these are inputs or outputs, and the options gear sits at the end of
+/// the top-right cell's name row, so it costs no height and never covers bars.
 struct SpectrumBarStrip: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
     @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject var analyserController: SpectrumAnalyserWindowController
+
+    @State private var optionsOpen = false
+    @State private var isHovered = false
+
+    /// Tall enough for the gear, and kept in every cell so rows line up.
+    private let nameRowHeight: CGFloat = 14
+    /// Kept clear at the end of every name row, so names truncate at the same
+    /// point across a row whether or not the gear is in that cell.
+    private let gearWidth: CGFloat = 16
 
     private var scale: RtaScale {
         RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB)
@@ -1350,40 +1363,50 @@ struct SpectrumBarStrip: View {
         eqCurveColor(eqCh: vm.rtaEqChannel(tap: selection.tap, channel: ch), chOut1: vm.chOut1)
     }
 
+    private var chosenColumns: Int { min(max(settings.rtaBarColumns, 1), 4) }
+
+    /// Side by side up to the user's chosen column count, then wrapping.  A
+    /// selection smaller than that fills the width rather than leaving gaps.
+    private func columnCount(_ n: Int) -> Int {
+        min(max(n, 1), chosenColumns)
+    }
+
     var body: some View {
         let selection = vm.rtaSelection
         if engine.supported, vm.isDeviceReady, !selection.isEmpty,
            settings.rtaShows(.bars, onDashboard: vm.activeEqChannel == nil) {
-            let single = selection.channels.count == 1
-            VStack(alignment: .leading, spacing: 6) {
-                header(selection, single: single)
-                // Equal flexible columns and one fixed cell height, so cells
-                // line up across rows whatever the channel names.
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12),
-                                         count: columnCount(selection.channels.count)),
-                          alignment: .leading, spacing: 8) {
-                    ForEach(selection.channels, id: \.self) { ch in
-                        VStack(alignment: .leading, spacing: 2) {
-                            if !single {
-                                HStack(spacing: 5) {
-                                    Circle().fill(color(selection, ch)).frame(width: 5, height: 5)
-                                    Text(vm.rtaChannelName(tap: selection.tap, channel: ch))
-                                        .font(.system(size: 9, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                }
-                            }
-                            // Every cell carries its own frequency axis, since
-                            // side-by-side cells share no row below them.
-                            RtaBandsView(engine: engine,
-                                         frame: engine.frame(channel: ch, tap: selection.tap),
-                                         color: color(selection, ch),
-                                         scale: scale,
-                                         showPeakHold: settings.rtaShowPeakHold,
-                                         showLabels: true,
-                                         showLevelLabels: false).equatable()
-                                .frame(height: single ? 96 : 72)
+            let count = selection.channels.count
+            let single = count == 1
+            let columns = columnCount(count)
+            // Equal flexible columns and one fixed cell height, so cells line
+            // up across rows whatever the channel names.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: columns),
+                      alignment: .leading, spacing: 8) {
+                ForEach(selection.channels, id: \.self) { ch in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 5) {
+                            Circle().fill(color(selection, ch)).frame(width: 5, height: 5)
+                            Text(vm.rtaChannelName(tap: selection.tap, channel: ch))
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer(minLength: 0)
+                            // The slot the gear overlay lands on in the
+                            // top-right cell.
+                            Color.clear.frame(width: gearWidth, height: nameRowHeight)
                         }
+                        .frame(height: nameRowHeight)
+                        // Every cell carries its own frequency axis, since
+                        // side-by-side cells share no row below them.
+                        RtaBandsView(engine: engine,
+                                     frame: engine.frame(channel: ch, tap: selection.tap),
+                                     color: color(selection, ch),
+                                     scale: scale,
+                                     showPeakHold: settings.rtaShowPeakHold,
+                                     showLabels: true,
+                                     showLevelLabels: false).equatable()
+                            .frame(height: single ? 96 : 72)
                     }
                 }
             }
@@ -1393,6 +1416,15 @@ struct SpectrumBarStrip: View {
             .overlay(RoundedRectangle(cornerRadius: 10)
                         .stroke(single ? color(selection, selection.channels[0]).opacity(0.3)
                                        : Color.secondary.opacity(0.2), lineWidth: 1))
+            // Tucked into the card's corner, inside the rounded edge.  Its span
+            // still falls within the slot every name row keeps clear, so a long
+            // name in the top-right cell stops short of it.  A single overlay
+            // rather than a view inside that cell, so changing the layout from
+            // the popover cannot move its anchor and close it.
+            .overlay(alignment: .topTrailing) {
+                gearButton(single: single)
+                    .padding(6)
+            }
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.15)) { isHovered = hovering }
             }
@@ -1400,55 +1432,29 @@ struct SpectrumBarStrip: View {
         }
     }
 
-    /// Side by side up to the user's chosen column count, then wrapping.  A
-    /// selection smaller than that fills the width rather than leaving gaps.
-    @State private var optionsOpen = false
-    @State private var isHovered = false
-
-    private var chosenColumns: Int { min(max(settings.rtaBarColumns, 1), 4) }
-
-    private func columnCount(_ n: Int) -> Int {
-        min(max(n, 1), chosenColumns)
-    }
-
-
-    private func header(_ selection: RtaChannelSelection, single: Bool) -> some View {
-        HStack(spacing: 6) {
-            if single {
-                Circle().fill(color(selection, selection.channels[0])).frame(width: 6, height: 6)
-                Text("SPECTRUM - \(vm.rtaChannelName(tap: selection.tap, channel: selection.channels[0]).uppercased())")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-            } else {
-                Text(selection.tap == RTA_TAP_INPUT ? "INPUT SPECTRUM" : "OUTPUT SPECTRUM")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-            }
-            Spacer()
-            // One control, on the right like the graph's gear: the layout and
-            // the analyser window are occasional choices, not live ones.
-            Button { optionsOpen.toggle() } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(optionsOpen ? .primary : .secondary)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Spectrum strip options")
-            // Shown on hover like the graph's gear, and held while its popover
-            // is open.  Faded rather than removed, so the header keeps its
-            // height and the popover keeps its anchor.
-            .opacity(isHovered || optionsOpen ? 1 : 0)
-            .allowsHitTesting(isHovered || optionsOpen)
-            .popover(isPresented: $optionsOpen, arrowEdge: .bottom) {
-                BarStripOptionsPanel(
-                    columns: Binding(get: { chosenColumns }, set: { settings.rtaBarColumns = $0 }),
-                    showsLayout: !single,
-                    onOpenWindow: {
-                        optionsOpen = false
-                        analyserController.show(vm: vm)
-                    })
-            }
+    /// The layout and the analyser window are occasional choices, so the gear
+    /// shows only on hover like the graph's, and holds while its popover is
+    /// open.  Faded rather than removed, so the popover keeps its anchor.
+    private func gearButton(single: Bool) -> some View {
+        Button { optionsOpen.toggle() } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(optionsOpen ? .primary : .secondary)
+                .frame(width: gearWidth, height: nameRowHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Spectrum strip options")
+        .opacity(isHovered || optionsOpen ? 1 : 0)
+        .allowsHitTesting(isHovered || optionsOpen)
+        .popover(isPresented: $optionsOpen, arrowEdge: .bottom) {
+            BarStripOptionsPanel(
+                columns: Binding(get: { chosenColumns }, set: { settings.rtaBarColumns = $0 }),
+                showsLayout: !single,
+                onOpenWindow: {
+                    optionsOpen = false
+                    analyserController.show(vm: vm)
+                })
         }
     }
 }
