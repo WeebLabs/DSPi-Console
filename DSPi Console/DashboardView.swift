@@ -101,6 +101,7 @@ struct StereoDashboardCard: View {
     let right: Channel
     let showDelay: Bool
     @ObservedObject var vm: DSPViewModel
+    @Environment(\.dashboardGearVisible) private var gearVisible
 
     var body: some View {
         VStack(spacing: 0) {
@@ -133,7 +134,7 @@ struct StereoDashboardCard: View {
                     }
                 }
                 .padding(8)
-                .padding(.trailing, dashboardGearSlot)
+                .padding(.trailing, gearVisible ? dashboardGearSlot : 0)
                 .frame(maxWidth: .infinity)
                 // Color the right table header
                 .background(Color.white.opacity(0.01))
@@ -229,6 +230,7 @@ struct StereoOutputDashboardCard: View {
     let leftIndex: Int
     let rightIndex: Int
     @ObservedObject var vm: DSPViewModel
+    @Environment(\.dashboardGearVisible) private var gearVisible
 
     private var left: MatrixOutput { MatrixOutput.all[leftIndex] }
     private var right: MatrixOutput { MatrixOutput.all[rightIndex] }
@@ -261,7 +263,7 @@ struct StereoOutputDashboardCard: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(8)
-                .padding(.trailing, dashboardGearSlot)
+                .padding(.trailing, gearVisible ? dashboardGearSlot : 0)
                 .frame(maxWidth: .infinity)
                 .background(Color.white.opacity(0.01))
             }
@@ -316,6 +318,7 @@ struct StereoOutputDashboardCard: View {
 struct OutputDashboardCard: View {
     let outputIndex: Int
     @ObservedObject var vm: DSPViewModel
+    @Environment(\.dashboardGearVisible) private var gearVisible
 
     private var output: MatrixOutput {
         MatrixOutput.visible(for: vm.platformName, slotTypes: vm.outputSlotTypes).first(where: { $0.index == outputIndex })
@@ -334,7 +337,7 @@ struct OutputDashboardCard: View {
                     .foregroundColor(.secondary)
             }
             .padding(8)
-            .padding(.trailing, dashboardGearSlot)
+            .padding(.trailing, gearVisible ? dashboardGearSlot : 0)
             .background(Color.white.opacity(0.01))
             .frame(height: 32)
 
@@ -430,9 +433,21 @@ struct DashboardRow: View {
 
 // MARK: - Layout
 
-/// Kept clear at the end of each card's right-most header so the hover gear
-/// never covers the delay readout.
+/// Opened at the end of each card's right-most header while the hover gear is
+/// showing, so the delay readout slides aside instead of sitting under it.
 private let dashboardGearSlot: CGFloat = 18
+
+private struct DashboardGearVisibleKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// Whether the enclosing dashboard card is showing its layout gear.
+    var dashboardGearVisible: Bool {
+        get { self[DashboardGearVisibleKey.self] }
+        set { self[DashboardGearVisibleKey.self] = newValue }
+    }
+}
 
 extension DashboardOverview {
     @ViewBuilder
@@ -459,6 +474,10 @@ private struct DashboardCardFrame<Content: View>: View {
 
     var body: some View {
         content
+            // Animated here rather than at each state change, so the readout
+            // also slides back when the popover closes on an outside click.
+            .environment(\.dashboardGearVisible, isHovered || optionsOpen)
+            .animation(.easeInOut(duration: 0.15), value: isHovered || optionsOpen)
             .overlay(alignment: .topTrailing) {
                 Button { optionsOpen.toggle() } label: {
                     Image(systemName: "gearshape")
