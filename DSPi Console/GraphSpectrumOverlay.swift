@@ -420,9 +420,9 @@ struct RtaCurveBuilder {
         return out
     }
 
-    /// The bins, smoothed across frequency first (see `rtaSmoothBins`), as one
-    /// point per pixel column, taking the loudest bin that
-    /// lands in each: above a few hundred hertz several bins share a column,
+    /// The bins, averaged over time (see `RtaBinAverage`) and smoothed across
+    /// frequency (see `rtaSmoothBins`), as one point per pixel column, taking
+    /// the loudest bin that lands in each: above a few hundred hertz several bins share a column,
     /// and a maximum is the only summary that keeps a tone from disappearing
     /// between columns.  Columns between two bins - which is most of them at
     /// the bottom of a log axis - are interpolated rather than carried
@@ -431,7 +431,7 @@ struct RtaCurveBuilder {
         guard frame.bins.count > 1 else { return [] }
         let columns = max(Int(plot.width.rounded()), 2)
         var level = [Double](repeating: -.infinity, count: columns)
-        let smoothed = rtaSmoothBins(frame.bins.map { engine.levelDB($0) },
+        let smoothed = rtaSmoothBins(frame.levelsDB ?? frame.bins.map { engine.levelDB($0) },
                                      octaves: rtaBinSmoothingOctaves)
         for k in 1..<frame.bins.count {
             let hz = frame.frequency(ofBin: k)

@@ -152,6 +152,9 @@ struct RtaBinFrame: Equatable {
     /// One level byte per bin, bin k centred at
     /// k * sampleRateHz / (2 * bins.count).
     var bins: [UInt8] = []
+    /// dBFS per bin after the engine's time average; nil for a frame straight
+    /// off the wire.
+    var levelsDB: [Double]? = nil
 
     /// Hz of bin `k`.
     func frequency(ofBin k: Int) -> Double {
@@ -258,6 +261,45 @@ struct RtaRequest: Equatable {
     var wantsBins: Bool = false
 }
 
+/// The bins averaged over time the way the device averages its bands: power,
+/// moved toward each new frame by dt / (avgMs + dt).  The device never averages
+/// the bins it publishes, so without this the Averaging setting stops at the bass.
+struct RtaBinAverage {
+    private struct Series: Equatable {
+        let tap: UInt8, channel: UInt8, fftOrder: UInt8, sampleRateHz: UInt32, count: Int
+    }
+    private var series: Series?
+    private var seq = -1
+    private var time = Date.distantPast
+    private var power: [Double] = []
+    private(set) var levels: [Double] = []
+
+    mutating func reset() { series = nil }
+
+    /// Averaged dBFS per bin.  A frame already counted (same sequence number)
+    /// changes nothing; a different tap, channel, size or rate starts over.
+    mutating func add(_ frame: RtaBinFrame, tap: UInt8, at now: Date, avgMs: UInt16,
+                      levelDB: (UInt8) -> Double) -> [Double] {
+        let key = Series(tap: tap, channel: frame.channel, fftOrder: frame.fftOrder,
+                         sampleRateHz: frame.sampleRateHz, count: frame.bins.count)
+        if key == series, Int(frame.seq) == seq { return levels }
+
+        let fresh = frame.bins.map { pow(10, levelDB($0) / 10) }
+        if key != series || avgMs == 0 {
+            power = fresh
+        } else {
+            let dt = max(now.timeIntervalSince(time), 0)
+            let a = dt / (Double(avgMs) / 1000 + dt)
+            for i in power.indices { power[i] += (fresh[i] - power[i]) * a }
+        }
+        series = key
+        seq = Int(frame.seq)
+        time = now
+        levels = power.map { 10 * log10(max($0, 1e-30)) }
+        return levels
+    }
+}
+
 /// Everything the engine republishes after a poll, in one value so a tick costs
 /// SwiftUI a single invalidation rather than one per field.
 struct RtaSnapshot: Equatable {
@@ -276,7 +318,8 @@ struct RtaSnapshot: Equatable {
 /// pushes them whenever it starts watching.
 struct RtaOptions: Equatable {
     var fftOrder: UInt8 = 10
-    /// Power-domain averaging; bass retains its minimum detector smoothing at 0.
+    /// Power-domain averaging: the device applies it to the bands, the engine to
+    /// the bins.  Bass retains its minimum detector smoothing at 0.
     var avgMs: UInt16 = 300
     /// Peak-hold decay in dB per second; 0 turns the peak hold off.
     var peakDecayDBs: UInt8 = 12
@@ -339,6 +382,8 @@ final class RtaEngine: ObservableObject {
     private var pollFrameInterval: TimeInterval = 1024.0 / 48000.0
     private var lastBinRead: Date = .distantPast
     private var lastStatusRead: Date = .distantPast
+    /// Time average of the bin frames.  Main thread only.
+    private var binAverage = RtaBinAverage()
 
     init(usb: USBDevice) {
         self.usb = usb
@@ -385,13 +430,17 @@ final class RtaEngine: ObservableObject {
         let usb = self.usb
         DispatchQueue.global(qos: .utility).async { [weak self] in
             _ = usb?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
-            DispatchQueue.main.async { self?.snapshot = RtaSnapshot() }
+            DispatchQueue.main.async {
+                self?.snapshot = RtaSnapshot()
+                self?.binAverage.reset()
+            }
         }
     }
 
-    /// Clear the running average and the peak hold on the device without
-    /// disturbing the frame in flight.
+    /// Clear the running averages (the device's bands and the bins here) and the
+    /// peak hold without disturbing the frame in flight.  Main thread only.
     func resetAveraging() {
+        binAverage.reset()
         let usb = self.usb
         DispatchQueue.global(qos: .utility).async {
             _ = usb?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_RESET_AVG, index: 2, length: 1)
@@ -595,6 +644,7 @@ final class RtaEngine: ObservableObject {
         if readBins {
             bins = Self.readBinFrame(usb: usb, length: binFrameLength)
         }
+        let binsReadAt = Date()
 
         var status: RtaStatus? = nil
         var applied: RtaConfig? = nil
@@ -639,6 +689,8 @@ final class RtaEngine: ObservableObject {
         }
 
         let tap = want.tap
+        // What the device reports it applied, when this tick read it back.
+        let avgMs = want.avgMs
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             var s = self.snapshot
@@ -648,7 +700,11 @@ final class RtaEngine: ObservableObject {
             if s.tap != tap { s.frames = [:]; s.bins = nil }
             s.tap = tap
             for (ch, f) in frames { s.frames[ch] = f }
-            if let bins { s.bins = bins }
+            if var bins {
+                bins.levelsDB = self.binAverage.add(bins, tap: tap, at: binsReadAt,
+                                                    avgMs: avgMs, levelDB: self.levelDB)
+                s.bins = bins
+            }
             if let status { s.status = status }
             if s != self.snapshot { self.snapshot = s }
             if let rejected, rejected != self.configRejected { self.configRejected = rejected }

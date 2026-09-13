@@ -569,6 +569,87 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(rtaSmoothBins(levels, octaves: 0), levels)
     }
 
+    // MARK: - Time averaging of FFT bins
+
+    private func binFrame(_ bins: [UInt8], seq: UInt8, channel: UInt8 = 0,
+                          order: UInt8 = 10) -> RtaBinFrame {
+        RtaBinFrame(channel: channel, seq: seq, fftOrder: order, sampleRateHz: 48000, bins: bins)
+    }
+
+    private let wireDB: (UInt8) -> Double = {
+        (Double($0) - Double(RTA_LEVEL_ZERO_DBFS)) * RTA_LEVEL_STEP_DB
+    }
+
+    func testBinAverageAdoptsTheFirstFrame() {
+        var avg = RtaBinAverage()
+        let out = avg.add(binFrame([203, 163], seq: 1), tap: RTA_TAP_OUTPUT, at: Date(),
+                          avgMs: 300, levelDB: wireDB)
+        XCTAssertEqual(out[0], -20, accuracy: 1e-9)
+        XCTAssertEqual(out[1], -40, accuracy: 1e-9)
+    }
+
+    /// The same weight the device gives its bands: dt / (avgMs + dt), in power.
+    func testBinAverageStepMatchesTheDeviceFormula() {
+        var avg = RtaBinAverage()
+        let t0 = Date()
+        _ = avg.add(binFrame([163], seq: 1), tap: RTA_TAP_OUTPUT, at: t0, avgMs: 300, levelDB: wireDB)
+        let out = avg.add(binFrame([203], seq: 2), tap: RTA_TAP_OUTPUT,
+                          at: t0.addingTimeInterval(0.1), avgMs: 300, levelDB: wireDB)
+        XCTAssertEqual(out[0], 10 * log10(0.0001 + 0.25 * (0.01 - 0.0001)), accuracy: 1e-6)
+    }
+
+    /// Polls outpace a slow rotation, so one frame is often read twice.  A
+    /// repeat must not be counted again.
+    func testBinAverageIgnoresARepeatedFrame() {
+        var avg = RtaBinAverage()
+        let t0 = Date()
+        _ = avg.add(binFrame([163], seq: 1), tap: RTA_TAP_OUTPUT, at: t0, avgMs: 300, levelDB: wireDB)
+        let once = avg.add(binFrame([203], seq: 2), tap: RTA_TAP_OUTPUT,
+                           at: t0.addingTimeInterval(0.1), avgMs: 300, levelDB: wireDB)
+        let again = avg.add(binFrame([203], seq: 2), tap: RTA_TAP_OUTPUT,
+                            at: t0.addingTimeInterval(0.2), avgMs: 300, levelDB: wireDB)
+        XCTAssertEqual(once, again)
+    }
+
+    func testBinAverageKeepsASteadyLevel() {
+        var avg = RtaBinAverage()
+        var t = Date()
+        var out: [Double] = []
+        for s in 0..<40 {
+            t = t.addingTimeInterval(0.05)
+            out = avg.add(binFrame([203], seq: UInt8(s)), tap: RTA_TAP_OUTPUT, at: t, avgMs: 1000, levelDB: wireDB)
+        }
+        XCTAssertEqual(out[0], -20, accuracy: 1e-9)
+    }
+
+    /// Averaging set to zero draws every frame as it arrives, as the bands do.
+    func testBinAverageOffPassesFramesThrough() {
+        var avg = RtaBinAverage()
+        let t0 = Date()
+        _ = avg.add(binFrame([163], seq: 1), tap: RTA_TAP_OUTPUT, at: t0, avgMs: 0, levelDB: wireDB)
+        let out = avg.add(binFrame([203], seq: 2), tap: RTA_TAP_OUTPUT,
+                          at: t0.addingTimeInterval(0.1), avgMs: 0, levelDB: wireDB)
+        XCTAssertEqual(out[0], -20, accuracy: 1e-9)
+    }
+
+    /// A different tap, channel or size, or a reset, starts over rather than
+    /// averaging numbers that meant something else.
+    func testBinAverageStartsOverOnANewSeriesOrReset() {
+        var avg = RtaBinAverage()
+        let t0 = Date()
+        _ = avg.add(binFrame([163], seq: 1), tap: RTA_TAP_OUTPUT, at: t0, avgMs: 300, levelDB: wireDB)
+        let tap = avg.add(binFrame([203], seq: 2), tap: RTA_TAP_INPUT,
+                          at: t0.addingTimeInterval(0.1), avgMs: 300, levelDB: wireDB)
+        XCTAssertEqual(tap[0], -20, accuracy: 1e-9)
+        let size = avg.add(binFrame([163, 163], seq: 3, order: 9), tap: RTA_TAP_INPUT,
+                           at: t0.addingTimeInterval(0.2), avgMs: 300, levelDB: wireDB)
+        XCTAssertEqual(size[0], -40, accuracy: 1e-9)
+        avg.reset()
+        let reset = avg.add(binFrame([203, 203], seq: 4, order: 9), tap: RTA_TAP_INPUT,
+                            at: t0.addingTimeInterval(0.3), avgMs: 300, levelDB: wireDB)
+        XCTAssertEqual(reset[0], -20, accuracy: 1e-9)
+    }
+
     // MARK: - Live device (spec §5.1)
 
     /// Reading the caps is the whole feature probe.  Firmware without the
