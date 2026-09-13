@@ -22,11 +22,10 @@ func eqCurveColor(eqCh: Int, chOut1: Int) -> Color {
 /// plot, its ceiling at the top) and is drawn as a translucent fill under the
 /// curves rather than as another line competing with them.
 ///
-/// One channel selected gets the bands in the bass and the raw FFT bins above
-/// it, which is the finer picture; more than one uses the bands throughout,
-/// because the device publishes bins for whichever channel it transformed last
-/// and a multichannel selection would make them rotate.  The peak-hold contour
-/// always comes from the bands, which carry it at every selection size.
+/// It always shows one channel: the one being edited on a channel page, or the
+/// one picked as "Dashboard FFT" on the dashboard.  That channel gets the bands
+/// in the bass and the raw FFT bins above them, with the peak-hold contour from
+/// the bands.
 struct GraphSpectrumOverlay: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
@@ -92,25 +91,23 @@ struct GraphSpectrumOverlay: View {
         return Channel(eq: eqCh, rta: rta)
     }
 
-    /// The single analyser configuration that covers what the graph is showing.
+    /// The analyser configuration for the one channel the graph shows.
     ///
-    /// There is one FFT engine and it works at one tap, so a graph showing both
-    /// inputs and outputs cannot have both: the selected channel wins, and
-    /// failing that the outputs do, which is what the graph is usually being
-    /// read for.
+    /// On a channel page that is the edited channel, and hiding its curve hides
+    /// its spectrum too.  The dashboard's channel is an explicit choice, so it
+    /// is drawn whether or not its curve is visible.
     private var plan: Plan? {
-        guard vm.isDeviceReady, !visibleEqChannels.isEmpty else { return nil }
-        if let active = activeEqChannel, visibleEqChannels.contains(active),
-           let ch = channel(forEq: active) {
-            return Plan(tap: ch.eq < vm.chOut1 ? RTA_TAP_INPUT : RTA_TAP_OUTPUT,
-                        channels: [ch], wantsBins: true)
+        guard vm.isDeviceReady else { return nil }
+        let eqCh: Int
+        if let active = activeEqChannel {
+            guard visibleEqChannels.contains(active) else { return nil }
+            eqCh = active
+        } else {
+            eqCh = vm.eqChannel(for: vm.dashboardRtaSource)
         }
-        let outputs = visibleEqChannels.filter { $0 >= vm.chOut1 }
-        let tap: UInt8 = outputs.isEmpty ? RTA_TAP_INPUT : RTA_TAP_OUTPUT
-        let eqChannels = outputs.isEmpty ? visibleEqChannels : outputs
-        let channels = eqChannels.sorted().compactMap { channel(forEq: $0) }
-        guard !channels.isEmpty else { return nil }
-        return Plan(tap: tap, channels: channels, wantsBins: channels.count == 1)
+        guard let ch = channel(forEq: eqCh) else { return nil }
+        return Plan(tap: eqCh < vm.chOut1 ? RTA_TAP_INPUT : RTA_TAP_OUTPUT,
+                    channels: [ch], wantsBins: true)
     }
 
 }

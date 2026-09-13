@@ -212,8 +212,8 @@ struct RtaBandsView: View, Equatable {
     let color: Color
     let scale: RtaScale
     var showPeakHold: Bool = true
-    /// Axis labels and the dB grid: on in the full-size views, off in the
-    /// thumbnails, where they would be unreadable anyway.
+    /// Axis labels and the dB grid: on in the full-size views, off where the
+    /// bars are too small for them to be readable.
     var showLabels: Bool = false
 
     private var bandCount: Int {
@@ -629,120 +629,74 @@ extension RtaEngine {
 
 // MARK: - Inline strips
 
-/// A labelled thumbnail for one channel, used on the dashboard grid.
-struct RtaChannelThumbnail: View {
-    @ObservedObject var engine: RtaEngine
-    @ObservedObject private var settings = AppSettings.shared
-    let title: String
-    let channel: Int
-    let tap: UInt8
-    let color: Color
-    let scale: RtaScale
-    let showPeakHold: Bool
+/// The one channel the dashboard's spectrum shows, picked with "Dashboard FFT"
+/// in the sidebar's context menu.  Held as a tap and an index rather than an
+/// EQ channel, because the EQ numbering of outputs moves with the input count.
+enum RtaDashboardSource: Equatable {
+    case input(Int)
+    case output(Int)
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 4) {
-                Circle().fill(color).frame(width: 5, height: 5)
-                Text(title)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            RtaBandsView(engine: engine,
-                         frame: engine.frame(channel: channel, tap: tap),
-                         color: color,
-                         scale: scale,
-                         showPeakHold: showPeakHold).equatable()
-                .frame(height: 52)
-                .help(rtaShadedBandHelp)
+    var storageKey: String {
+        switch self {
+        case .input(let n):  return "in:\(n)"
+        case .output(let n): return "out:\(n)"
         }
-        .padding(6)
-        .background(Color.black.opacity(0.18))
-        .cornerRadius(6)
+    }
+
+    init?(storageKey: String) {
+        let parts = storageKey.split(separator: ":")
+        guard parts.count == 2, let n = Int(parts[1]), n >= 0 else { return nil }
+        switch parts[0] {
+        case "in":  self = .input(n)
+        case "out": self = .output(n)
+        default:    return nil
+        }
+    }
+
+    var tap: UInt8 {
+        switch self {
+        case .input:  return RTA_TAP_INPUT
+        case .output: return RTA_TAP_OUTPUT
+        }
+    }
+
+    /// The analyser's channel at `tap`: the input row, or the matrix output.
+    var index: Int {
+        switch self {
+        case .input(let n), .output(let n): return n
+        }
     }
 }
 
-/// The dashboard's analyser: every enabled output at once.
-///
-/// One request covers the whole grid, because the device rotates through the
-/// selected set at constant CPU - eight outputs cost exactly what one does, and
-/// only the refresh interval of any single channel lengthens.
-struct DashboardSpectrumCard: View {
-    @ObservedObject var vm: DSPViewModel
-    @ObservedObject var engine: RtaEngine
-    @ObservedObject private var settings = AppSettings.shared
-    @EnvironmentObject var analyserController: SpectrumAnalyserWindowController
-
-    private var enabledOutputs: [Int] {
-        (0..<vm.numOutputChannels).filter { vm.outputEnabled[$0] }
+extension DSPViewModel {
+    /// The dashboard's spectrum channel: the stored choice while it is live on
+    /// this device, otherwise the first enabled output, otherwise input 1.
+    var dashboardRtaSource: RtaDashboardSource {
+        if let stored = RtaDashboardSource(storageKey: AppSettings.shared.rtaDashboardSourceKey),
+           isLiveRtaSource(stored) {
+            return stored
+        }
+        if let first = (0..<numOutputChannels).first(where: { $0 < outputEnabled.count && outputEnabled[$0] }) {
+            return .output(first)
+        }
+        return .input(0)
     }
 
-    private var mask: UInt16 {
-        enabledOutputs.reduce(UInt16(0)) { $0 | (UInt16(1) << UInt16($1)) }
+    func setDashboardRtaSource(_ source: RtaDashboardSource) {
+        AppSettings.shared.rtaDashboardSourceKey = source.storageKey
     }
 
-    private var scale: RtaScale {
-        RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB)
+    private func isLiveRtaSource(_ source: RtaDashboardSource) -> Bool {
+        switch source {
+        case .input(let n):  return n < numMatrixInputs
+        case .output(let n): return n < numOutputChannels && n < outputEnabled.count && outputEnabled[n]
+        }
     }
 
-    private func outputColor(_ idx: Int) -> Color {
-        idx == vm.pdmOutputIndex ? ChannelPalette.pdm : ChannelPalette.output(idx)
-    }
-
-    private func outputName(_ idx: Int) -> String {
-        let eqCh = vm.eqChannel(forOutput: idx)
-        return eqCh < vm.channelNames.count ? vm.channelNames[eqCh] : "Out \(idx + 1)"
-    }
-
-    private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
-
-    var body: some View {
-        if engine.supported, !enabledOutputs.isEmpty {
-            VStack(spacing: 0) {
-                HStack {
-                    Text("SPECTRUM (OUTPUTS)")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Text(engine.refreshDescription)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(.secondary)
-                    Button {
-                        analyserController.show(vm: vm)
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 9, weight: .medium))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
-                    .help("Open the Spectrum Analyser window")
-                }
-                .padding(8)
-                .frame(height: 32)
-                .background(Color.white.opacity(0.01))
-
-                Divider().overlay(Color.gray.opacity(0.1))
-
-                LazyVGrid(columns: columns, spacing: 8) {
-                    ForEach(enabledOutputs, id: \.self) { idx in
-                        RtaChannelThumbnail(engine: engine,
-                                            title: outputName(idx),
-                                            channel: idx,
-                                            tap: RTA_TAP_OUTPUT,
-                                            color: outputColor(idx),
-                                            scale: scale,
-                                            showPeakHold: settings.rtaShowPeakHold)
-                    }
-                }
-                .padding(8)
-            }
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-            .cornerRadius(10)
-            .overlay(RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.secondary.opacity(0.25), lineWidth: 1))
-            .rtaWatching(engine, RtaRequest(tap: RTA_TAP_OUTPUT, mask: mask))
+    func eqChannel(for source: RtaDashboardSource) -> Int {
+        switch source {
+        case .input(let n):  return n
+        case .output(let n): return eqChannel(forOutput: n)
         }
     }
 }

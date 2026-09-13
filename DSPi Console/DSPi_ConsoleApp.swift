@@ -24,10 +24,10 @@ class AppState: ObservableObject {
 }
 
 // MARK: - App Settings
-/// Where the live spectrum for the selected channel is drawn.  One picture in
-/// one place: the graph overlay and the channel-page strip show the same
-/// channel, so offering both at once would only ask the device for the same
-/// numbers twice.
+/// Where a page's live spectrum is drawn.  One picture in one place: the graph
+/// overlay and the strip show the same channel, so offering both at once would
+/// only ask the device for the same numbers twice.  The dashboard and the
+/// channel pages each choose their own.
 enum RtaSpectrumPlacement: String, CaseIterable, Identifiable {
     case off
     /// Behind the response curves, on the analyser's own dBFS scale.
@@ -79,12 +79,18 @@ class AppSettings: ObservableObject {
     // here rather than on the device because the analyser is transient: the
     // firmware forgets them at every power cycle, so the Console is the only
     // place they can live.  See `AppSettings.rtaOptions`.
-    @AppStorage("rtaShowOnDashboard") var rtaShowOnDashboard: Bool = true
-    /// Where the selected channel's spectrum is drawn: inside the filter
-    /// response graph, in a strip of its own above the filter table, or
-    /// nowhere.  String-backed because @AppStorage doesn't support raw enums;
-    /// read it through `rtaPlacement`.
-    @AppStorage("rtaSpectrumPlacement") var rtaSpectrumPlacement: String = RtaSpectrumPlacement.graph.rawValue
+    /// Where a channel page draws its channel's spectrum: inside the filter
+    /// response graph, in a strip above the filter table, or nowhere.
+    /// String-backed because @AppStorage doesn't support raw enums; read it
+    /// through `rtaChannelPlacement`.  The key predates the dashboard setting.
+    @AppStorage("rtaSpectrumPlacement") var rtaChannelSpectrumPlacement: String = RtaSpectrumPlacement.graph.rawValue
+    /// The same choice for the dashboard, which shows the one channel picked
+    /// as "Dashboard FFT" in the sidebar.  Read through `rtaDashboardPlacement`.
+    @AppStorage("rtaDashboardSpectrumPlacement") var rtaDashboardSpectrumPlacement: String = RtaSpectrumPlacement.graph.rawValue
+    /// The dashboard's channel as `RtaDashboardSource.storageKey`, or empty
+    /// for the default.  Resolve it through `DSPViewModel.dashboardRtaSource`,
+    /// which falls back when the stored channel is not live on this device.
+    @AppStorage("rtaDashboardSource") var rtaDashboardSourceKey: String = ""
     /// How present the fill in the graph is, 0.3 to 1.  Low values leave it as
     /// a hint behind the curves; high values make it the loudest thing there.
     @AppStorage("rtaGraphOpacity") var rtaGraphOpacity: Double = 1.0
@@ -100,10 +106,19 @@ class AppSettings: ObservableObject {
     @AppStorage("rtaAvgMs") var rtaAvgMs: Int = 300
     @AppStorage("rtaPeakDecayDBs") var rtaPeakDecayDBs: Int = 12
 
-    /// `rtaSpectrumPlacement` as the enum, falling back to the graph for a
-    /// stored value this build does not know.
-    var rtaPlacement: RtaSpectrumPlacement {
-        RtaSpectrumPlacement(rawValue: rtaSpectrumPlacement) ?? .graph
+    /// The two placements as the enum, falling back to the graph for a stored
+    /// value this build does not know.
+    var rtaChannelPlacement: RtaSpectrumPlacement {
+        RtaSpectrumPlacement(rawValue: rtaChannelSpectrumPlacement) ?? .graph
+    }
+    var rtaDashboardPlacement: RtaSpectrumPlacement {
+        RtaSpectrumPlacement(rawValue: rtaDashboardSpectrumPlacement) ?? .graph
+    }
+
+    /// The placement for whichever page is showing: the dashboard when no
+    /// channel is being edited.
+    func rtaPlacement(onDashboard: Bool) -> RtaSpectrumPlacement {
+        onDashboard ? rtaDashboardPlacement : rtaChannelPlacement
     }
 
     /// The device-side half of the analyser settings, in the shape the engine
@@ -132,6 +147,16 @@ class AppSettings: ObservableObject {
             let hadStrip = defaults.object(forKey: "rtaShowOnChannelPages") as? Bool ?? true
             defaults.set((hadStrip ? RtaSpectrumPlacement.graph : .off).rawValue,
                          forKey: "rtaSpectrumPlacement")
+        }
+        // The dashboard used to follow the channel-page placement for its graph
+        // and carry a grid of per-output thumbnails behind its own toggle.  Keep
+        // whichever picture the user was seeing there.
+        if defaults.string(forKey: "rtaDashboardSpectrumPlacement") == nil {
+            let channel = RtaSpectrumPlacement(rawValue: defaults.string(forKey: "rtaSpectrumPlacement") ?? "") ?? .graph
+            let hadThumbnails = defaults.object(forKey: "rtaShowOnDashboard") as? Bool ?? true
+            let dashboard: RtaSpectrumPlacement = channel == .graph ? .graph : (hadThumbnails ? .strip : .off)
+            defaults.set(dashboard.rawValue, forKey: "rtaDashboardSpectrumPlacement")
+            defaults.removeObject(forKey: "rtaShowOnDashboard")
         }
     }
 }
@@ -1531,16 +1556,44 @@ struct SpectrumSettingsTab: View {
 
     private func push() { engine.setOptions(settings.rtaOptions) }
 
-    /// What the chosen placement means, in one line under the picker.
-    private var placementExplanation: String {
-        switch settings.rtaPlacement {
+    /// What the dashboard's placement means, in one line under its picker.
+    private var dashboardExplanation: String {
+        switch settings.rtaDashboardPlacement {
         case .graph:
-            return "Drawn behind the response curves on the analyser's own dBFS scale, as a fine FFT curve for the selected channel and third-octave bands when several are shown at once."
+            return "The Dashboard FFT channel is drawn behind the response curves on the analyser's own dBFS scale. Right-click a channel in the sidebar to choose it."
         case .strip:
-            return "A strip of third-octave bars above the filter table, for the selected channel alone, leaving the response graph to the filter curves."
+            return "The Dashboard FFT channel gets a strip of third-octave bars above the channel cards. Right-click a channel in the sidebar to choose it."
         case .off:
-            return "Neither is drawn. The Dashboard thumbnails and the analyser window are unaffected, and with those closed too the device stops the analyser."
+            return "The dashboard shows no spectrum."
         }
+    }
+
+    /// What the channel pages' placement means, in one line under its picker.
+    private var channelExplanation: String {
+        switch settings.rtaChannelPlacement {
+        case .graph:
+            return "The selected channel is drawn behind the response curves on the analyser's own dBFS scale, as a fine FFT curve."
+        case .strip:
+            return "A strip of third-octave bars above the filter table, for the selected channel, leaving the response graph to the filter curves."
+        case .off:
+            return "Channel pages show no spectrum."
+        }
+    }
+
+    private func placementPicker(_ title: String, selection: Binding<String>, explanation: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.body)
+            Picker("", selection: selection) {
+                ForEach(RtaSpectrumPlacement.allCases) { placement in
+                    Text(placement.label).tag(placement.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(explanation)
+                .font(.caption).foregroundColor(.secondary)
+        }
+        .padding(.vertical, 4)
     }
 
     /// Sizes this device offers, from the caps where they have been read and
@@ -1563,21 +1616,13 @@ struct SpectrumSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Live Spectrum").font(.body)
-                    Picker("", selection: $settings.rtaSpectrumPlacement) {
-                        ForEach(RtaSpectrumPlacement.allCases) { placement in
-                            Text(placement.label).tag(placement.rawValue)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    Text(placementExplanation)
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                .padding(.vertical, 4)
+                placementPicker("Dashboard", selection: $settings.rtaDashboardSpectrumPlacement,
+                                explanation: dashboardExplanation)
 
-                if settings.rtaPlacement == .graph {
+                placementPicker("Channel Pages", selection: $settings.rtaChannelSpectrumPlacement,
+                                explanation: channelExplanation)
+
+                if settings.rtaDashboardPlacement == .graph || settings.rtaChannelPlacement == .graph {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Spectrum Strength: \(Int(settings.rtaGraphOpacity * 100))%")
                             .font(.body)
@@ -1587,16 +1632,6 @@ struct SpectrumSettingsTab: View {
                     }
                     .padding(.vertical, 4)
                 }
-
-                Toggle(isOn: $settings.rtaShowOnDashboard) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Show on the Dashboard").font(.body)
-                        Text("A thumbnail per enabled output above the channel cards")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
-                .padding(.vertical, 4)
 
                 Toggle(isOn: $settings.rtaShowPeakHold) {
                     VStack(alignment: .leading, spacing: 2) {

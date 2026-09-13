@@ -145,6 +145,18 @@ struct ContentView: View {
         vm.channelVisibility[eqCh] = !(vm.channelVisibility[eqCh] ?? true)
     }
 
+    /// Context-menu item that points the dashboard's spectrum at a channel.
+    /// Only offered on the dashboard, and only while it draws a spectrum.
+    @ViewBuilder
+    private func dashboardFFTMenuItem(_ source: RtaDashboardSource) -> some View {
+        if selection == .overview && vm.rta.supported && settings.rtaDashboardPlacement != .off {
+            Divider()
+            Toggle("Dashboard FFT", isOn: Binding(
+                get: { vm.dashboardRtaSource == source },
+                set: { if $0 { vm.setDashboardRtaSource(source) } }))
+        }
+    }
+
     private func presetLabel(_ slot: Int) -> String {
         let display = slot + 1
         return "\(display): \(presetDropdownLabel(slot))"
@@ -388,6 +400,7 @@ struct ContentView: View {
                                     vm.pasteChannelParams(eqChannel: ch)
                                 }
                                 .disabled(vm.channelClipboard == nil)
+                                dashboardFFTMenuItem(.input(ch))
                             }
                     }
                 }
@@ -431,6 +444,7 @@ struct ContentView: View {
                                     vm.pasteChannelParams(eqChannel: eqCh)
                                 }
                                 .disabled(vm.channelClipboard == nil)
+                                dashboardFFTMenuItem(.output(out.index))
                             }
                     }
                 }
@@ -851,7 +865,7 @@ struct ContentView: View {
                             // table below it rather than the raw source.  The
                             // graph overlay shows the same channel, so the two
                             // placements are one choice rather than two.
-                            if settings.rtaPlacement == .strip {
+                            if settings.rtaChannelPlacement == .strip {
                                 ChannelSpectrumStrip(
                                     vm: vm, engine: vm.rta,
                                     title: vm.channelNames[ch],
@@ -897,7 +911,7 @@ struct ContentView: View {
                             // The output tap sits after gain and delay and
                             // before encoding, so this is exactly what the slot
                             // transmits.
-                            if settings.rtaPlacement == .strip {
+                            if settings.rtaChannelPlacement == .strip {
                                 ChannelSpectrumStrip(
                                     vm: vm, engine: vm.rta,
                                     title: vm.channelNames[vm.eqChannel(forOutput: idx)],

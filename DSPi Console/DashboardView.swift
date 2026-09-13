@@ -18,12 +18,17 @@ struct DashboardOverview: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            // Every enabled output at once.  The device transforms one channel
-            // per frame and rotates through the set, so watching all of them
-            // costs exactly what watching one does - only the interval between
-            // refreshes of any single channel grows.
-            if settings.rtaShowOnDashboard {
-                DashboardSpectrumCard(vm: vm, engine: vm.rta)
+            // The one channel picked as "Dashboard FFT" in the sidebar.  In
+            // graph placement the response graph draws it instead.
+            if settings.rtaDashboardPlacement == .strip {
+                let source = vm.dashboardRtaSource
+                let eqCh = vm.eqChannel(for: source)
+                ChannelSpectrumStrip(
+                    vm: vm, engine: vm.rta,
+                    title: eqCh < vm.channelNames.count ? vm.channelNames[eqCh] : "",
+                    channel: source.index,
+                    tap: source.tap,
+                    color: eqCurveColor(eqCh: eqCh, chOut1: vm.chOut1))
             }
 
             StereoDashboardCard(

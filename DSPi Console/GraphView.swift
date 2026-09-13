@@ -193,8 +193,8 @@ struct BodePlotView: View {
     }
 
     /// The EQ channels this instance is drawing, in the graph's own numbering.
-    /// The spectrum overlay follows the same set, so turning a curve off takes
-    /// its spectrum with it.
+    /// On a channel page the spectrum overlay checks this set, so turning the
+    /// edited channel's curve off takes its spectrum with it.
     private var visibleEqChannels: [Int] {
         guard vm.isDeviceReady else { return [] }
         return (0..<vm.numChannels).filter { eqCh in
@@ -270,7 +270,7 @@ struct BodePlotView: View {
             }
 
             // Live spectrum, behind the curves and above the grid.
-            if settings.rtaPlacement == .graph {
+            if settings.rtaPlacement(onDashboard: vm.activeEqChannel == nil) == .graph {
                 GraphSpectrumOverlay(vm: vm, engine: vm.rta,
                                      visibleEqChannels: visibleEqChannels,
                                      activeEqChannel: vm.activeEqChannel,
