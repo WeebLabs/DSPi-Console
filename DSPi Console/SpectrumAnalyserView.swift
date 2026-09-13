@@ -215,6 +215,9 @@ struct RtaBandsView: View, Equatable {
     /// Axis labels and the dB grid: on in the full-size views, off where the
     /// bars are too small for them to be readable.
     var showLabels: Bool = false
+    /// The dB numbers beside the grid lines, when `showLabels` is on.  The
+    /// inline strip leaves them out: the frequency axis is what it needs.
+    var showLevelLabels: Bool = true
 
     private var bandCount: Int {
         let n = Int(frame?.nBands ?? 0)
@@ -226,7 +229,7 @@ struct RtaBandsView: View, Equatable {
     }
 
     init(engine: RtaEngine, frame: RtaBandFrame?, color: Color, scale: RtaScale,
-         showPeakHold: Bool = true, showLabels: Bool = false) {
+         showPeakHold: Bool = true, showLabels: Bool = false, showLevelLabels: Bool = true) {
         configuration = RtaDisplayConfiguration(engine: engine)
         fallTau = rtaFallTau(engine, AppSettings.shared.rtaSmoothing)
         self.frame = frame?.displayFrame
@@ -234,12 +237,14 @@ struct RtaBandsView: View, Equatable {
         self.scale = scale
         self.showPeakHold = showPeakHold
         self.showLabels = showLabels
+        self.showLevelLabels = showLevelLabels
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.configuration == rhs.configuration && lhs.fallTau == rhs.fallTau
             && lhs.frame == rhs.frame && lhs.color == rhs.color && lhs.scale == rhs.scale
             && lhs.showPeakHold == rhs.showPeakHold && lhs.showLabels == rhs.showLabels
+            && lhs.showLevelLabels == rhs.showLevelLabels
     }
 
     /// One pole per band, carried across redraws.  A reference type in
@@ -273,7 +278,8 @@ struct RtaBandsView: View, Equatable {
         let target = targets()
         ZStack {
             if showLabels {
-                RtaBandGrid(scale: scale, centres: configuration.centres, visible: visibleBands).equatable()
+                RtaBandGrid(scale: scale, centres: configuration.centres, visible: visibleBands,
+                            showLevelLabels: showLevelLabels).equatable()
             }
             if fallTau > 0 {
                 TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !renderingActive)) { timeline in
@@ -352,6 +358,7 @@ private struct RtaBandGrid: View, Equatable {
     let scale: RtaScale
     let centres: [Double]
     let visible: [Int]
+    let showLevelLabels: Bool
 
     var body: some View {
         Canvas { ctx, size in
@@ -374,9 +381,11 @@ private struct RtaBandGrid: View, Equatable {
             line.addLine(to: CGPoint(x: plot.maxX, y: y))
             ctx.stroke(line, with: .color(.secondary.opacity(db == 0 ? 0.35 : 0.12)),
                        lineWidth: db == 0 ? 1 : 0.5)
-            ctx.draw(Text("\(Int(db))").font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(.secondary.opacity(0.6)),
-                     at: CGPoint(x: plot.maxX - 2, y: y - 6), anchor: .topTrailing)
+            if showLevelLabels {
+                ctx.draw(Text("\(Int(db))").font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.6)),
+                         at: CGPoint(x: plot.maxX - 2, y: y - 6), anchor: .topTrailing)
+            }
             db -= 12
         }
     }
@@ -384,15 +393,39 @@ private struct RtaBandGrid: View, Equatable {
     private func drawFrequencyLabels(_ ctx: GraphicsContext, _ plot: CGRect,
                                      bands: [Int], slot: CGFloat, labelY: CGFloat) {
         guard !centres.isEmpty else { return }
+        struct Label { let hz: Double; let x: CGFloat; let text: String }
+        var candidates: [Label] = []
         for (pos, i) in bands.enumerated() where i < centres.count {
             let hz = centres[i]
             // The table carries nominal centres rounded to whole hertz, so 31.5
             // arrives as 31 or 32; match on proportion rather than equality.
-            guard rtaLabelledCentres.contains(where: { abs(hz - $0) < $0 * 0.03 }) else { continue }
-            let x = plot.minX + (CGFloat(pos) + 0.5) * slot
-            ctx.draw(Text(rtaShortHz(hz)).font(.system(size: 8, design: .monospaced))
+            guard let nominal = rtaLabelledCentres.first(where: { abs(hz - $0) < $0 * 0.03 }) else { continue }
+            candidates.append(Label(hz: nominal, x: plot.minX + (CGFloat(pos) + 0.5) * slot,
+                                    text: rtaShortHz(hz)))
+        }
+
+        // A narrow cell cannot fit every label.  Decades are placed first, then
+        // the 2s and 5s between them wherever they clear what is already there
+        // and the cell's edges, so a crowded axis thins out instead of
+        // overprinting.  Widths are estimated from the 8 pt monospaced face.
+        let charWidth: CGFloat = 4.9, gap: CGFloat = 4
+        func span(_ label: Label) -> ClosedRange<CGFloat> {
+            let half = CGFloat(label.text.count) * charWidth / 2
+            return (label.x - half)...(label.x + half)
+        }
+        let decadeHz: Set<Double> = [10, 100, 1000, 10000]
+        let decades = candidates.filter { decadeHz.contains($0.hz) }
+        let others = candidates.filter { !decadeHz.contains($0.hz) }
+        var placed: [ClosedRange<CGFloat>] = []
+        for label in decades + others {
+            let s = span(label)
+            guard s.lowerBound >= plot.minX, s.upperBound <= plot.maxX,
+                  !placed.contains(where: { s.lowerBound < $0.upperBound + gap && s.upperBound > $0.lowerBound - gap })
+            else { continue }
+            placed.append(s)
+            ctx.draw(Text(label.text).font(.system(size: 8, design: .monospaced))
                         .foregroundColor(.secondary),
-                     at: CGPoint(x: x, y: labelY), anchor: .top)
+                     at: CGPoint(x: label.x, y: labelY), anchor: .top)
         }
     }
 }
@@ -1225,11 +1258,84 @@ private struct GraphSetupPage: View {
     }
 }
 
+/// A tiny picture of a bar-strip layout: two rows of rounded cells in the given
+/// number of columns, drawn in the current foreground colour.
+private struct BarLayoutGlyph: View {
+    let columns: Int
+    var size = CGSize(width: 16, height: 10)
+
+    var body: some View {
+        let gap: CGFloat = size.width > 20 ? 2 : 1.5
+        VStack(spacing: gap) {
+            ForEach(0..<2, id: \.self) { _ in
+                HStack(spacing: gap) {
+                    ForEach(0..<columns, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: gap)
+                    }
+                }
+            }
+        }
+        .frame(width: size.width, height: size.height)
+    }
+}
+
+/// The bar strip's gear popover: how many columns the channels use, and the
+/// full analyser window.
+private struct BarStripOptionsPanel: View {
+    @Binding var columns: Int
+    /// Layout means nothing with a single channel, so it is left out then.
+    let showsLayout: Bool
+    let onOpenWindow: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if showsLayout {
+                Text("LAYOUT")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                HStack(spacing: 6) {
+                    ForEach(1...4, id: \.self) { n in tile(n) }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+                Divider()
+            }
+            GraphOptionsActionRow(icon: "macwindow", title: "Open in Window", action: onOpenWindow)
+                .padding(.vertical, 6)
+        }
+        .frame(width: 200)
+    }
+
+    private func tile(_ n: Int) -> some View {
+        let on = columns == n
+        let shape = RoundedRectangle(cornerRadius: 6)
+        return Button { columns = n } label: {
+            VStack(spacing: 4) {
+                BarLayoutGlyph(columns: n, size: CGSize(width: 22, height: 13))
+                Text("\(n)")
+                    .font(.system(size: 9, weight: on ? .semibold : .regular))
+            }
+            .foregroundColor(on ? .accentColor : .secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 38)
+            .background(shape.fill(on ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.05)))
+            .overlay(shape.stroke(on ? Color.accentColor.opacity(0.7) : .clear, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .help(n == 1 ? "Stack the channels in one column" : "Lay the channels out in up to \(n) columns")
+    }
+}
+
 // MARK: - Bar strip
 
 /// Third-octave bars for the selected channels, above the dashboard's cards or
-/// a channel page's filter table, when the page has bars switched on.  One card with a row per channel, so a larger
-/// selection grows the card instead of stacking more cards.
+/// a channel page's filter table, when the page has bars switched on.  One card with a cell per channel, laid side by side
+/// before wrapping, so a larger selection grows the card instead of stacking
+/// more cards.
 struct SpectrumBarStrip: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
@@ -1251,39 +1357,60 @@ struct SpectrumBarStrip: View {
             let single = selection.channels.count == 1
             VStack(alignment: .leading, spacing: 6) {
                 header(selection, single: single)
-                ForEach(Array(selection.channels.enumerated()), id: \.element) { pos, ch in
-                    let last = pos == selection.channels.count - 1
-                    VStack(alignment: .leading, spacing: 2) {
-                        if !single {
-                            HStack(spacing: 5) {
-                                Circle().fill(color(selection, ch)).frame(width: 5, height: 5)
-                                Text(vm.rtaChannelName(tap: selection.tap, channel: ch))
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundColor(.secondary)
+                // Equal flexible columns and one fixed cell height, so cells
+                // line up across rows whatever the channel names.
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12),
+                                         count: columnCount(selection.channels.count)),
+                          alignment: .leading, spacing: 8) {
+                    ForEach(selection.channels, id: \.self) { ch in
+                        VStack(alignment: .leading, spacing: 2) {
+                            if !single {
+                                HStack(spacing: 5) {
+                                    Circle().fill(color(selection, ch)).frame(width: 5, height: 5)
+                                    Text(vm.rtaChannelName(tap: selection.tap, channel: ch))
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
                             }
+                            // Every cell carries its own frequency axis, since
+                            // side-by-side cells share no row below them.
+                            RtaBandsView(engine: engine,
+                                         frame: engine.frame(channel: ch, tap: selection.tap),
+                                         color: color(selection, ch),
+                                         scale: scale,
+                                         showPeakHold: settings.rtaShowPeakHold,
+                                         showLabels: true,
+                                         showLevelLabels: false).equatable()
+                                .frame(height: single ? 96 : 72)
                         }
-                        // Frequency labels only under the last row, where they
-                        // read for every row above it.
-                        RtaBandsView(engine: engine,
-                                     frame: engine.frame(channel: ch, tap: selection.tap),
-                                     color: color(selection, ch),
-                                     scale: scale,
-                                     showPeakHold: settings.rtaShowPeakHold,
-                                     showLabels: last).equatable()
-                            .frame(height: single ? 96 : (last ? 56 : 44))
                     }
                 }
             }
-            .help(rtaShadedBandHelp)
             .padding(10)
             .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
             .cornerRadius(10)
             .overlay(RoundedRectangle(cornerRadius: 10)
                         .stroke(single ? color(selection, selection.channels[0]).opacity(0.3)
                                        : Color.secondary.opacity(0.2), lineWidth: 1))
+            .onHover { hovering in
+                withAnimation(.easeInOut(duration: 0.15)) { isHovered = hovering }
+            }
             .rtaWatching(engine, RtaRequest(tap: selection.tap, mask: selection.mask))
         }
     }
+
+    /// Side by side up to the user's chosen column count, then wrapping.  A
+    /// selection smaller than that fills the width rather than leaving gaps.
+    @State private var optionsOpen = false
+    @State private var isHovered = false
+
+    private var chosenColumns: Int { min(max(settings.rtaBarColumns, 1), 4) }
+
+    private func columnCount(_ n: Int) -> Int {
+        min(max(n, 1), chosenColumns)
+    }
+
 
     private func header(_ selection: RtaChannelSelection, single: Bool) -> some View {
         HStack(spacing: 6) {
@@ -1298,20 +1425,30 @@ struct SpectrumBarStrip: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            if selection.channels.allSatisfy({ engine.frame(channel: $0, tap: selection.tap).map { !$0.hasData } ?? false }) {
-                Text("waiting for audio")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
-            Button {
-                analyserController.show(vm: vm)
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 9, weight: .medium))
+            // One control, on the right like the graph's gear: the layout and
+            // the analyser window are occasional choices, not live ones.
+            Button { optionsOpen.toggle() } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(optionsOpen ? .primary : .secondary)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-            .help("Open the Spectrum Analyser window")
+            .help("Spectrum strip options")
+            // Shown on hover like the graph's gear, and held while its popover
+            // is open.  Faded rather than removed, so the header keeps its
+            // height and the popover keeps its anchor.
+            .opacity(isHovered || optionsOpen ? 1 : 0)
+            .allowsHitTesting(isHovered || optionsOpen)
+            .popover(isPresented: $optionsOpen, arrowEdge: .bottom) {
+                BarStripOptionsPanel(
+                    columns: Binding(get: { chosenColumns }, set: { settings.rtaBarColumns = $0 }),
+                    showsLayout: !single,
+                    onOpenWindow: {
+                        optionsOpen = false
+                        analyserController.show(vm: vm)
+                    })
+            }
         }
     }
 }
