@@ -110,6 +110,7 @@ struct BodePlotView: View {
     @ObservedObject private var settings = AppSettings.shared
     @EnvironmentObject var graphWindowController: GraphWindowController
     @State private var isHovered = false
+    @State private var optionsOpen = false
 
     init(vm: DSPViewModel, isPopOut: Bool = false, visibilityOverride: Binding<[Int: Bool]> = .constant([:])) {
         self.vm = vm
@@ -388,11 +389,12 @@ struct BodePlotView: View {
             GraphVerticalZoomHandler(settings: settings)
         )
         .overlay(alignment: .topTrailing) {
-            // The pop-out window gets the gear too, without the pop-out item:
-            // with the graph popped out it is the only place the menu can live.
-            if isHovered && (isPopOut || !graphWindowController.isVisible) {
-                GraphOptionsMenu(vm: vm, engine: vm.rta,
-                                 onPopOut: isPopOut ? nil : { graphWindowController.show(vm: vm) })
+            // The pop-out window gets the gear too, without the pop-out row:
+            // with the graph popped out it is the only place the panel can live.
+            // An open popover keeps the gear, or it would vanish from under it.
+            if (isHovered || optionsOpen) && (isPopOut || !graphWindowController.isVisible) {
+                GraphOptionsButton(vm: vm, engine: vm.rta, isOpen: $optionsOpen,
+                                   onPopOut: isPopOut ? nil : { graphWindowController.show(vm: vm) })
                     .padding(6)
                     .transition(.opacity)
             }

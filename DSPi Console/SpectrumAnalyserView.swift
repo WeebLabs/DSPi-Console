@@ -767,75 +767,221 @@ extension DSPViewModel {
     }
 }
 
-// MARK: - Graph options menu
+// MARK: - Graph options popover
 
-/// The gear at the graph's top-right corner: which channels the spectrum shows,
-/// how it is drawn, and the pop-out.  It edits whichever page is showing, so the
-/// same menu serves the dashboard and the channel pages.
-struct GraphOptionsMenu: View {
+/// The gear at the graph's top-right corner.  It opens a popover rather than a
+/// menu, so the channels can be shown as chips in their curve colours and the
+/// drawing options as real switches.  It edits whichever page is showing, so
+/// the same panel serves the dashboard and the channel pages.
+struct GraphOptionsButton: View {
+    @ObservedObject var vm: DSPViewModel
+    @ObservedObject var engine: RtaEngine
+    /// Owned by the graph, which keeps the gear on screen while the popover is
+    /// open even after the pointer has left the plot.
+    @Binding var isOpen: Bool
+    /// Nil in the pop-out window, which has nowhere further to pop out to.
+    let onPopOut: (() -> Void)?
+
+    var body: some View {
+        Button { isOpen.toggle() } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.white.opacity(isOpen ? 0.95 : 0.7))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(vm.activeEqChannel == nil ? "Graph options for the dashboard" : "Graph options for this channel page")
+        .popover(isPresented: $isOpen, arrowEdge: .bottom) {
+            GraphOptionsPanel(vm: vm, engine: engine,
+                              onPopOut: onPopOut.map { popOut in { isOpen = false; popOut() } })
+        }
+    }
+}
+
+private struct GraphOptionsPanel: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var engine: RtaEngine
     @ObservedObject private var settings = AppSettings.shared
-    /// Nil in the pop-out window, which has nowhere further to pop out to.
     let onPopOut: (() -> Void)?
 
     private var onDashboard: Bool { vm.activeEqChannel == nil }
 
     var body: some View {
-        Menu {
+        VStack(alignment: .leading, spacing: 0) {
             if engine.supported && vm.isDeviceReady {
-                let selection = vm.rtaSelection
-                channelSection("Input Spectrum", tap: RTA_TAP_INPUT, selection: selection)
-                channelSection("Output Spectrum", tap: RTA_TAP_OUTPUT, selection: selection)
-
-                Button("Hide Spectrum") { vm.setRtaSelection(.none) }
-                    .disabled(selection.isEmpty)
-
-                Section("Show Spectrum") {
-                    Toggle("On Response Graph", isOn: showBinding(.graph))
-                    Toggle("As Bars", isOn: showBinding(.bars))
+                channelSection
+                    .padding(12)
+                Divider()
+                VStack(spacing: 0) {
+                    switchRow(icon: "waveform.path", title: "On Response Graph", view: .graph)
+                    switchRow(icon: "chart.bar.fill", title: "As Bars", view: .bars)
                 }
-
-                if onPopOut != nil { Divider() }
+                .padding(.vertical, 6)
+            } else {
+                Text(vm.isDeviceReady ? "This firmware has no spectrum analyser."
+                                      : "Connect a DSPi to show its spectrum.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(12)
             }
             if let onPopOut {
-                Button("Pop Out Graph", action: onPopOut)
+                Divider()
+                GraphOptionsActionRow(icon: "arrow.down.backward.and.arrow.up.forward",
+                                      title: "Pop Out Graph", action: onPopOut)
+                    .padding(.vertical, 6)
             }
-        } label: {
-            Image(systemName: "gearshape")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white.opacity(0.7))
         }
-        // Plain rather than borderless, so the label keeps the same size and
-        // tint the pop-out arrow had.
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help(onDashboard ? "Graph options for the dashboard" : "Graph options for this channel page")
+        .frame(width: 280)
     }
 
-    private func showBinding(_ view: RtaSpectrumView) -> Binding<Bool> {
-        Binding(get: { settings.rtaShows(view, onDashboard: onDashboard) },
-                set: { settings.setRtaShows(view, onDashboard: onDashboard, $0) })
+    // MARK: Channels
+
+    /// Choosing a side is what keeps inputs and outputs apart: only one side's
+    /// chips are ever on screen, and switching sides starts an empty selection.
+    private var tapBinding: Binding<UInt8> {
+        Binding(get: { vm.rtaSelection.tap },
+                set: { tap in
+                    guard tap != vm.rtaSelection.tap else { return }
+                    vm.setRtaSelection(RtaChannelSelection(tap: tap, channels: []))
+                })
     }
 
-    /// One tap's channels as checkboxes.  While the other tap has anything
-    /// checked they are disabled, and the header says why.
-    @ViewBuilder
-    private func channelSection(_ title: String, tap: UInt8, selection: RtaChannelSelection) -> some View {
-        let channels = vm.rtaChannels(tap: tap)
-        if !channels.isEmpty {
-            let open = selection.accepts(tap: tap)
-            Section(open ? title : "\(title) (hide the other side first)") {
-                ForEach(channels, id: \.self) { ch in
-                    Toggle(vm.rtaChannelName(tap: tap, channel: ch), isOn: Binding(
-                        get: { selection.contains(tap: tap, channel: ch) },
-                        set: { _ in vm.setRtaSelection(vm.rtaSelection.toggling(tap: tap, channel: ch)) }))
-                        .disabled(!open)
+    private var channelSection: some View {
+        let selection = vm.rtaSelection
+        let channels = vm.rtaChannels(tap: selection.tap)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("SPECTRUM")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Picker("", selection: tapBinding) {
+                    Text("Inputs").tag(RTA_TAP_INPUT)
+                    Text("Outputs").tag(RTA_TAP_OUTPUT)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+            }
+
+            if channels.isEmpty {
+                Text(selection.tap == RTA_TAP_INPUT ? "No active inputs." : "No enabled outputs.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } else {
+                // Two equal columns, so chips line up whatever the names.
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6),
+                                    GridItem(.flexible(), spacing: 6)],
+                          spacing: 6) {
+                    ForEach(channels, id: \.self) { ch in
+                        chip(ch, tap: selection.tap, on: selection.contains(tap: selection.tap, channel: ch))
+                    }
+                }
+            }
+
+            HStack {
+                Text(summary(selection))
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if !selection.isEmpty {
+                    Button("Clear") { vm.setRtaSelection(RtaChannelSelection(tap: selection.tap, channels: [])) }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.accentColor)
                 }
             }
         }
+    }
+
+    private func summary(_ selection: RtaChannelSelection) -> String {
+        switch selection.channels.count {
+        case 0:  return "Spectrum hidden"
+        case 1:  return "1 channel"
+        default: return "\(selection.channels.count) channels"
+        }
+    }
+
+    private func chip(_ ch: Int, tap: UInt8, on: Bool) -> some View {
+        let color = eqCurveColor(eqCh: vm.rtaEqChannel(tap: tap, channel: ch), chOut1: vm.chOut1)
+        let name = vm.rtaChannelName(tap: tap, channel: ch)
+        let shape = RoundedRectangle(cornerRadius: 6)
+        return Button {
+            vm.setRtaSelection(vm.rtaSelection.toggling(tap: tap, channel: ch))
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(color.opacity(on ? 1 : 0.4))
+                    .frame(width: 7, height: 7)
+                Text(name)
+                    .font(.system(size: 11, weight: on ? .semibold : .regular))
+                    .foregroundColor(on ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24)
+            .background(shape.fill(on ? color.opacity(0.22) : Color.primary.opacity(0.05)))
+            .overlay(shape.stroke(on ? color.opacity(0.75) : Color.primary.opacity(0.08), lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .help(name)
+        .animation(.easeInOut(duration: 0.12), value: on)
+    }
+
+    // MARK: Drawing
+
+    private func switchRow(icon: String, title: String, view: RtaSpectrumView) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 18)
+            Text(title)
+                .font(.system(size: 12))
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { settings.rtaShows(view, onDashboard: onDashboard) },
+                set: { settings.setRtaShows(view, onDashboard: onDashboard, $0) }))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 28)
+    }
+}
+
+/// A menu-like action row: highlighted under the pointer, icon aligned with the
+/// switch rows above it (4 pt outside plus 8 pt inside matches their 12 pt).
+private struct GraphOptionsActionRow: View {
+    let icon: String
+    let title: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .frame(width: 18)
+                Text(title)
+                    .font(.system(size: 12))
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .foregroundColor(hovered ? .white : .primary)
+            .background(RoundedRectangle(cornerRadius: 5).fill(hovered ? Color.accentColor : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 4)
+        .onHover { hovered = $0 }
     }
 }
 
