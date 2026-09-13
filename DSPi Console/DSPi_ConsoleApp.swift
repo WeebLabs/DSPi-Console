@@ -1689,6 +1689,7 @@ struct SpectrumSettingsTab: View {
                                 set: { settings.rtaAvgMs = $0; push() }
                             )) {
                                 Text("Off").tag(0)
+                                Text("50 ms").tag(50)
                                 Text("125 ms").tag(125)
                                 Text("300 ms").tag(300)
                                 Text("1 s").tag(1000)
