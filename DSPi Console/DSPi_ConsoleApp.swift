@@ -91,7 +91,10 @@ class AppSettings: ObservableObject {
     /// fraction of the channel rotation interval.  0 draws the numbers as they
     /// arrive, which steps visibly once more than a couple of channels share
     /// the rotation.
-    @AppStorage("rtaSmoothing") var rtaSmoothing: Double = 0.6
+    @AppStorage("rtaSmoothingOn") var rtaSmoothingOn: Bool = true
+    /// The smoothing amount the views use: what was once the Light setting when
+    /// on.  Heavier settings made the spectrum lag the audio more than they helped.
+    var rtaSmoothing: Double { rtaSmoothingOn ? 0.35 : 0 }
     @AppStorage("rtaFftOrder") var rtaFftOrder: Int = 10
     @AppStorage("rtaAvgMs") var rtaAvgMs: Int = 300
     @AppStorage("rtaPeakDecayDBs") var rtaPeakDecayDBs: Int = 12
@@ -176,6 +179,13 @@ class AppSettings: ObservableObject {
             let strip = defaults.string(forKey: placementKey) == "strip"
             defaults.set(!strip, forKey: graphKey)
             defaults.set(strip, forKey: barsKey)
+        }
+        // Smoothing went from Off/Light/Medium/Heavy to a switch.  Any of the
+        // three amounts means the user wanted it on.
+        if defaults.object(forKey: "rtaSmoothingOn") == nil,
+           let amount = defaults.object(forKey: "rtaSmoothing") as? Double {
+            defaults.set(amount > 0, forKey: "rtaSmoothingOn")
+            defaults.removeObject(forKey: "rtaSmoothing")
         }
     }
 }
@@ -1614,19 +1624,14 @@ struct SpectrumSettingsTab: View {
                 .toggleStyle(.switch)
                 .padding(.vertical, 4)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Smoothing").font(.body)
-                    Picker("", selection: $settings.rtaSmoothing) {
-                        Text("Off").tag(0.0)
-                        Text("Light").tag(0.35)
-                        Text("Medium").tag(0.6)
-                        Text("Heavy").tag(1.0)
+                Toggle(isOn: $settings.rtaSmoothingOn) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Smoothing").font(.body)
+                        Text("Glides the spectrum between device frames the way the peak meters glide between polls. It matters most with several channels selected, where one channel refreshes only every few hundred milliseconds and the picture would otherwise step.")
+                            .font(.caption).foregroundColor(.secondary)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    Text("Glides the bars between device frames the way the peak meters glide between polls. It matters most with several channels selected, where one channel refreshes only every few hundred milliseconds and the bars would otherwise step.")
-                        .font(.caption).foregroundColor(.secondary)
                 }
+                .toggleStyle(.switch)
                 .padding(.vertical, 4)
             } header: {
                 Label("Display", systemImage: "rectangle.3.group")
