@@ -420,7 +420,8 @@ struct RtaCurveBuilder {
         return out
     }
 
-    /// The raw bins as one point per pixel column, taking the loudest bin that
+    /// The bins, smoothed across frequency first (see `rtaSmoothBins`), as one
+    /// point per pixel column, taking the loudest bin that
     /// lands in each: above a few hundred hertz several bins share a column,
     /// and a maximum is the only summary that keeps a tone from disappearing
     /// between columns.  Columns between two bins - which is most of them at
@@ -430,11 +431,13 @@ struct RtaCurveBuilder {
         guard frame.bins.count > 1 else { return [] }
         let columns = max(Int(plot.width.rounded()), 2)
         var level = [Double](repeating: -.infinity, count: columns)
+        let smoothed = rtaSmoothBins(frame.bins.map { engine.levelDB($0) },
+                                     octaves: rtaBinSmoothingOctaves)
         for k in 1..<frame.bins.count {
             let hz = frame.frequency(ofBin: k)
             guard hz >= minFreq, hz <= maxFreq else { continue }
             let c = min(max(Int((x(hz) - plot.minX).rounded()), 0), columns - 1)
-            level[c] = max(level[c], engine.levelDB(frame.bins[k]))
+            level[c] = max(level[c], smoothed[k])
         }
 
         guard let firstFilled = level.firstIndex(where: { $0.isFinite }),
@@ -464,6 +467,33 @@ struct RtaCurveBuilder {
             CGPoint(x: plot.minX + CGFloat(firstFilled + offset), y: y(db))
         }
     }
+}
+
+// MARK: - Frequency smoothing
+
+/// Width each FFT bin is averaged over.  Bins are evenly spaced, so the treble
+/// otherwise shows far finer detail than the third-octave bass bands beside it.
+let rtaBinSmoothingOctaves = 1.0 / 6.0
+
+/// Each bin's level averaged in power over `octaves` centred on it.  Where that
+/// window is narrower than a bin, as it is across the low end, the bin is left
+/// alone.  A pure tone high in the treble is spread over its window and reads low.
+func rtaSmoothBins(_ levelsDB: [Double], octaves: Double) -> [Double] {
+    let n = levelsDB.count
+    guard octaves > 0, n > 2 else { return levelsDB }
+    var prefix = [Double](repeating: 0, count: n + 1)
+    for k in 0..<n { prefix[k + 1] = prefix[k] + pow(10, levelsDB[k] / 10) }
+    // Bin frequency is proportional to its index, so the window is a ratio.
+    let half = pow(2, octaves / 2)
+    var out = levelsDB
+    for k in 1..<n {
+        let lo = max(1, Int((Double(k) / half).rounded(.up)))
+        let hi = min(n - 1, Int((Double(k) * half).rounded(.down)))
+        guard hi > lo else { continue }
+        let mean = (prefix[hi + 1] - prefix[lo]) / Double(hi - lo + 1)
+        out[k] = 10 * log10(max(mean, 1e-30))
+    }
+    return out
 }
 
 // MARK: - Smoothing state

@@ -528,6 +528,47 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(first, again)
     }
 
+    // MARK: - Frequency smoothing of FFT bins
+
+    /// Where a sixth of an octave is narrower than a bin (bins 1-16 of 512),
+    /// the bins are drawn exactly as the device sent them.
+    func testBinSmoothingLeavesTheLowEndAlone() {
+        let levels = (0..<512).map { Double(($0 * 37) % 60) - 80 }
+        let out = rtaSmoothBins(levels, octaves: 1.0 / 6.0)
+        XCTAssertEqual(Array(out[0...16]), Array(levels[0...16]))
+        XCTAssertNotEqual(out[300], levels[300])
+    }
+
+    func testBinSmoothingKeepsAFlatSpectrumFlat() {
+        let out = rtaSmoothBins([Double](repeating: -40, count: 512), octaves: 1.0 / 6.0)
+        XCTAssertTrue(out.allSatisfy { abs($0 + 40) < 1e-9 })
+    }
+
+    /// Alternating -20 and -40 dB bins average to their mean power, about
+    /// -23 dB, not the -30 dB an average of decibels would give.
+    func testBinSmoothingAveragesPowerNotDecibels() {
+        let levels = (0..<512).map { $0 % 2 == 0 ? -20.0 : -40.0 }
+        let out = rtaSmoothBins(levels, octaves: 1.0 / 6.0)
+        XCTAssertEqual(out[300], 10 * log10((0.01 + 0.0001) / 2), accuracy: 0.3)
+    }
+
+    /// A lone treble peak is spread over its window: it reads lower, and the
+    /// bins beside it rise.
+    func testBinSmoothingSpreadsAnIsolatedTreblePeak() {
+        var levels = [Double](repeating: -120, count: 512)
+        levels[400] = -20
+        let out = rtaSmoothBins(levels, octaves: 1.0 / 6.0)
+        XCTAssertLessThan(out[400], -30)
+        XCTAssertGreaterThan(out[400], -40)
+        XCTAssertGreaterThan(out[395], -60)
+        XCTAssertEqual(out[300], -120, accuracy: 1e-6)
+    }
+
+    func testBinSmoothingOffPassesThrough() {
+        let levels = (0..<512).map { Double($0 % 7) - 50 }
+        XCTAssertEqual(rtaSmoothBins(levels, octaves: 0), levels)
+    }
+
     // MARK: - Live device (spec §5.1)
 
     /// Reading the caps is the whole feature probe.  Firmware without the
