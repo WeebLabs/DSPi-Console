@@ -454,15 +454,32 @@ struct GraphResizeHandle: View {
     }
 }
 
+/// A vertical drag strip that resizes whatever height setting it is given.
+/// Defaults to the response graph's; the spectrum bar strip uses its own.
 struct GraphResizeHandleRepresentable: NSViewRepresentable {
+    var value: ReferenceWritableKeyPath<AppSettings, Double> = \.graphHeight
+    var range: ClosedRange<Double> = 200...350
+    /// How far the edge moves per unit of the setting.  Above 1 when the
+    /// setting sizes several stacked rows, so the edge still tracks the cursor.
+    var pointsPerUnit: Double = 1
+
     func makeNSView(context: Context) -> GraphResizeNSView {
-        GraphResizeNSView()
+        let view = GraphResizeNSView()
+        updateNSView(view, context: context)
+        return view
     }
 
-    func updateNSView(_ nsView: GraphResizeNSView, context: Context) {}
+    func updateNSView(_ nsView: GraphResizeNSView, context: Context) {
+        nsView.value = value
+        nsView.range = range
+        nsView.pointsPerUnit = pointsPerUnit
+    }
 }
 
 class GraphResizeNSView: NSView {
+    var value: ReferenceWritableKeyPath<AppSettings, Double> = \.graphHeight
+    var range: ClosedRange<Double> = 200...350
+    var pointsPerUnit: Double = 1
     private var dragStartHeight: Double = 0
     private var dragStartY: CGFloat = 0
     private var isDragging = false
@@ -480,7 +497,7 @@ class GraphResizeNSView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         dragStartY = NSEvent.mouseLocation.y
-        dragStartHeight = AppSettings.shared.graphHeight
+        dragStartHeight = AppSettings.shared[keyPath: value]
         isDragging = true
     }
 
@@ -488,8 +505,8 @@ class GraphResizeNSView: NSView {
         guard isDragging else { return }
         let currentY = NSEvent.mouseLocation.y
         let delta = Double(currentY - dragStartY)
-        let newHeight = dragStartHeight - delta
-        AppSettings.shared.graphHeight = min(max(newHeight, 200), 350)
+        let newHeight = dragStartHeight - delta / max(pointsPerUnit, 0.01)
+        AppSettings.shared[keyPath: value] = min(max(newHeight, range.lowerBound), range.upperBound)
     }
 
     override func mouseUp(with event: NSEvent) {

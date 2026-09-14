@@ -89,6 +89,10 @@ class AppSettings: ObservableObject {
     /// The most columns the bar strip lays its channels out in, chosen with
     /// the buttons on the strip itself.  1 to 4.
     @AppStorage("rtaBarColumns") var rtaBarColumns: Int = 2
+    /// Height of a bar strip cell with one channel selected, in points, set by
+    /// dragging the strip's bottom edge.  Cells with several channels use
+    /// three quarters of it.
+    @AppStorage("rtaBarHeight") var rtaBarHeight: Double = 96
     /// Whether a channel page opens with its own channel's spectrum showing.
     /// Cleared by hiding the spectrum on a channel page, set by checking one.
     @AppStorage("rtaChannelPagesShowSpectrum") var rtaChannelPagesShowSpectrum: Bool = true

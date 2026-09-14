@@ -61,12 +61,15 @@ final class RtaMetalBarsTests: XCTestCase {
     }
 
     func testStripPlotsAlignWithGridAcrossRowsAndSingleChannel() {
-        XCTAssertEqual(rtaBarStripPlot(index: 0, count: 1, columns: 1, width: 300),
+        XCTAssertEqual(rtaBarStripPlot(index: 0, count: 1, columns: 1, width: 300, graphHeight: 96),
                        CGRect(x: 10, y: 26, width: 280, height: 84))
-        XCTAssertEqual(rtaBarStripPlot(index: 2, count: 5, columns: 3, width: 344),
+        XCTAssertEqual(rtaBarStripPlot(index: 2, count: 5, columns: 3, width: 344, graphHeight: 72),
                        CGRect(x: 234, y: 26, width: 100, height: 60))
-        XCTAssertEqual(rtaBarStripPlot(index: 3, count: 5, columns: 3, width: 344),
+        XCTAssertEqual(rtaBarStripPlot(index: 3, count: 5, columns: 3, width: 344, graphHeight: 72),
                        CGRect(x: 10, y: 122, width: 100, height: 60))
+        // A resized strip moves the second row down by the new cell height.
+        XCTAssertEqual(rtaBarStripPlot(index: 3, count: 5, columns: 3, width: 344, graphHeight: 120),
+                       CGRect(x: 10, y: 170, width: 100, height: 108))
     }
 
     func testShaderABIAndPipeline() throws {

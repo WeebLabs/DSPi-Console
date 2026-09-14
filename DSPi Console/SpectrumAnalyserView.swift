@@ -1268,10 +1268,11 @@ extension RtaMetalBarPanel {
 
 /// Shared with the static grid: padding 10, column gap 12, row gap 8,
 /// name row 14 + spacing 2, and a 12-point frequency-label row below each plot.
-func rtaBarStripPlot(index: Int, count: Int, columns: Int, width: CGFloat) -> CGRect {
+/// `graphHeight` is one cell's bars plus that label row.
+func rtaBarStripPlot(index: Int, count: Int, columns: Int, width: CGFloat,
+                     graphHeight: CGFloat) -> CGRect {
     let columns = max(1, columns)
     let cellWidth = max(0, (width - 20 - CGFloat(columns - 1) * 12) / CGFloat(columns))
-    let graphHeight: CGFloat = count == 1 ? 96 : 72
     return CGRect(x: 10 + CGFloat(index % columns) * (cellWidth + 12),
                   y: 10 + CGFloat(index / columns) * (14 + 2 + graphHeight + 8) + 14 + 2,
                   width: cellWidth, height: graphHeight - 12)
@@ -1317,6 +1318,18 @@ struct SpectrumBarStrip: View {
         min(max(n, 1), chosenColumns)
     }
 
+    /// Limits for the dragged height of a single-channel cell.
+    private static let barHeightRange: ClosedRange<Double> = 64...240
+
+    /// One cell's bars plus its label row.  Several channels keep the three
+    /// quarters they have always had of a lone channel's height, so one drag
+    /// resizes both.
+    private func cellHeight(single: Bool) -> CGFloat {
+        let height = min(max(settings.rtaBarHeight, Self.barHeightRange.lowerBound),
+                         Self.barHeightRange.upperBound)
+        return CGFloat(single ? height : (height * 0.75).rounded())
+    }
+
     var body: some View {
         let selection = vm.rtaSelection
         if engine.supported, vm.isDeviceReady, !selection.isEmpty,
@@ -1353,7 +1366,7 @@ struct SpectrumBarStrip: View {
                                      showLabels: true,
                                      showLevelLabels: false,
                                      drawsBars: RtaMetalBarResources.shared == nil).equatable()
-                            .frame(height: single ? 96 : 72)
+                            .frame(height: cellHeight(single: single))
                     }
                 }
             }
@@ -1375,7 +1388,9 @@ struct SpectrumBarStrip: View {
                                 color: color(selection, ch), scale: scale, fallTau: tau,
                                 showPeakHold: settings.rtaShowPeakHold,
                                 rect: rtaBarStripPlot(index: index, count: count, columns: columns,
-                                                     width: geometry.size.width), cache: barCache)
+                                                     width: geometry.size.width,
+                                                     graphHeight: cellHeight(single: single)),
+                                cache: barCache)
                         })
                     }
                     .allowsHitTesting(false)
@@ -1389,6 +1404,17 @@ struct SpectrumBarStrip: View {
             .overlay(alignment: .topTrailing) {
                 gearButton(single: single)
                     .padding(6)
+            }
+            // Drag strip in the card's bottom padding, like the one under the
+            // response graph, so resizing costs no extra height.
+            .overlay(alignment: .bottom) {
+                // Every row grows with the setting, and several channels by
+                // three quarters of it, so scale the drag to keep the edge
+                // under the cursor.
+                let rows = (count + columns - 1) / columns
+                GraphResizeHandleRepresentable(value: \.rtaBarHeight, range: Self.barHeightRange,
+                                               pointsPerUnit: Double(rows) * (single ? 1 : 0.75))
+                    .frame(height: 10)
             }
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.15)) { isHovered = hovering }
