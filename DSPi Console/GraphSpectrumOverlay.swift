@@ -130,7 +130,17 @@ private struct GraphSpectrumCanvas: View, Equatable {
         // The active flag is read below the equatable boundary: see
         // `RtaRenderingActiveReader` for why reading it here would miss changes.
         RtaRenderingActiveReader { active in
-            if tau > 0 {
+            if RtaMetalCurveResources.shared != nil {
+                RtaMetalCurves(panel: RtaMetalCurvePanel(
+                    tap: plan.tap, configuration: configuration,
+                    channels: plan.channels.map { channel in
+                        RtaMetalCurveChannel(channel: channel.rta,
+                            color: RtaMetalBarPanel.rgba(eqCurveColor(eqCh: channel.eq, chOut1: chOut1)),
+                            bands: frames[UInt8(clamping: channel.rta)],
+                            bins: plan.wantsBins ? bins : nil)
+                    }, minFreq: Double(minFreq), maxFreq: Double(maxFreq), scale: scale,
+                    fallTau: tau, showPeak: showPeak, glow: glow, opacity: opacity), active: active)
+            } else if tau > 0 {
                 TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
                     canvas(now: timeline.date)
                 }
