@@ -1982,10 +1982,9 @@ class DSPViewModel: ObservableObject {
         return UInt8(truncatingIfNeeded: stored)
     }
 
-    // Firmware version tuple parsed from REQ_GET_PLATFORM: bytes 4-5 when the
-    // device answers with 6 bytes, else the legacy nibble pair in byte 2; beta
-    // from byte 6, or 0 from firmware predating it.
-    // nil before the first successful fetchPlatform().
+    // Firmware version decoded from REQ_GET_PLATFORM by
+    // FirmwareVersion.fromPlatformReply.  nil from disconnect until the
+    // connected device's fetchPlatform() lands.
     @Published var firmwareVersion: (major: Int, minor: Int, patch: Int, beta: Int)? = nil
 
     /// How the connected device's firmware compares with the version this
@@ -2672,6 +2671,11 @@ class DSPViewModel: ObservableObject {
                     self?.isDeviceConnected = connected
                     if !connected {
                         self?.isDeviceReady = false
+                        // A reconnect publishes isDeviceConnected before the
+                        // platform read lands, so a kept version would be
+                        // reported as the new device's - the firmware
+                        // installer's verify step read the pre-flash one.
+                        self?.firmwareVersion = nil
                         self?.savedSnapshot = nil
                         self?.siggenStatus = SiggenStatus()
                         self?.presetOccupied = 0
