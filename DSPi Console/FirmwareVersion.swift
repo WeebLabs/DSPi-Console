@@ -10,9 +10,22 @@ struct FirmwareVersion: Comparable, Hashable, CustomStringConvertible {
     let major: Int
     let minor: Int
     let patch: Int
-    /// 0 = final release, 1...255 = beta N.  Betas of a patch share that patch
-    /// number, so this is the only field telling two of them apart.
+    /// 0 = final release, 1...255 = beta N, or `earlyBeta` for a beta built
+    /// before the ordinal existed.  Betas of a patch share that patch number,
+    /// so this is the only field telling two of them apart.
     let beta: Int
+
+    /// A beta that could not say which one it is.  1.1.6 beta 1 and beta 2
+    /// predate the ordinal on the wire, so they answer the platform request as
+    /// plain 1.1.6.  Sorts below every numbered beta, since whichever it was,
+    /// it came before the first build that reports its number.
+    static let earlyBeta = -1
+
+    /// The first release whose every build, betas included, reports the beta
+    /// ordinal: it arrived part way through the 1.1.6 betas.  A reply without
+    /// it that claims this version or later can only be one of those early
+    /// betas, never a final release.
+    static let firstWithOrdinal = (major: 1, minor: 1, patch: 6)
 
     init(_ major: Int, _ minor: Int, _ patch: Int, _ beta: Int = 0) {
         self.major = major
@@ -40,21 +53,29 @@ struct FirmwareVersion: Comparable, Hashable, CustomStringConvertible {
     }
 
     var description: String {
-        beta == 0 ? "\(major).\(minor).\(patch)"
-                  : "\(major).\(minor).\(patch) beta \(beta)"
+        switch beta {
+        case 0:         return "\(major).\(minor).\(patch)"
+        case Self.earlyBeta: return "\(major).\(minor).\(patch) early beta"
+        default:        return "\(major).\(minor).\(patch) beta \(beta)"
+        }
     }
 
     /// Tag spelling, for anything that has to match a GitHub tag or a `.uf2`
-    /// filename rather than read as prose.
-    var tagSuffix: String {
-        beta == 0 ? "\(major).\(minor).\(patch)"
-                  : "\(major).\(minor).\(patch)-beta\(beta)"
+    /// filename rather than read as prose.  nil for an early beta, which names
+    /// no single tag.
+    var tagSuffix: String? {
+        switch beta {
+        case 0:         return "\(major).\(minor).\(patch)"
+        case Self.earlyBeta: return nil
+        default:        return "\(major).\(minor).\(patch)-beta\(beta)"
+        }
     }
 
     /// Sort key for the ordinal.  Final is encoded as 0 but outranks every beta
     /// of its patch, so it cannot be compared as the plain number it is.  Watch
     /// the default argument: `FirmwareVersion(1, 1, 7)` means 1.1.7 final, which
-    /// sorts *above* 1.1.7 beta 3, not below it.
+    /// sorts *above* 1.1.7 beta 3, not below it.  `earlyBeta` (-1) needs no
+    /// case of its own: it already sorts below beta 1.
     private var betaRank: Int { beta == 0 ? 256 : beta }
 
     static func < (a: FirmwareVersion, b: FirmwareVersion) -> Bool {
@@ -63,6 +84,33 @@ struct FirmwareVersion: Comparable, Hashable, CustomStringConvertible {
 }
 
 extension FirmwareVersion {
+    /// Decodes a REQ_GET_PLATFORM reply into its platform byte and version.
+    ///
+    /// The request asks for 7 bytes.  Bytes 4-5 are full-width minor and patch,
+    /// because the legacy byte 2 packs them into a nibble each and so caps both
+    /// at 15; byte 6 is the beta ordinal.  Older firmware answers short with 6
+    /// or 4 bytes, so fall back to the nibbles, never mixing the two decodes.
+    ///
+    /// A short reply is a final release only below `firstWithOrdinal`.  At or
+    /// above it the ordinal has always been sent, except by the betas that came
+    /// before it, so a short reply there is one of those.  Returns nil for a
+    /// reply too short to hold a version.
+    static func fromPlatformReply(_ bytes: [UInt8]) -> (platform: UInt8, version: FirmwareVersion)? {
+        guard bytes.count >= 4 else { return nil }
+        let major = Int(bytes[1])
+        let minor = bytes.count >= 6 ? Int(bytes[4]) : Int(bytes[2] >> 4)
+        let patch = bytes.count >= 6 ? Int(bytes[5]) : Int(bytes[2] & 0x0F)
+        let beta: Int
+        if bytes.count >= 7 {
+            beta = Int(bytes[6])
+        } else if (major, minor, patch) >= (firstWithOrdinal.major, firstWithOrdinal.minor, firstWithOrdinal.patch) {
+            beta = earlyBeta
+        } else {
+            beta = 0
+        }
+        return (bytes[0], FirmwareVersion(major, minor, patch, beta))
+    }
+
     /// The firmware version this Console build expects a device to be running,
     /// read from `CFBundleShortVersionString` (driven by `MARKETING_VERSION`).
     ///

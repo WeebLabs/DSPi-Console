@@ -17,10 +17,11 @@ final class FirmwareInstallerTests: XCTestCase {
         XCTAssertEqual(FirmwareVersion("1.1.7"), FirmwareVersion(1, 1, 7))
     }
 
-    /// Builds predating the point-release policy still have to compare, and a
-    /// suffix carries no information the device could report anyway.
-    func testIgnoresLegacySuffix() {
-        XCTAssertEqual(FirmwareVersion("1.1.6-beta2"), FirmwareVersion(1, 1, 6))
+    /// The tag spelling carries the beta ordinal, which the device reports too;
+    /// any other suffix still reads as a final release.
+    func testParsesBetaSuffixAndIgnoresOthers() {
+        XCTAssertEqual(FirmwareVersion("1.1.6-beta2"), FirmwareVersion(1, 1, 6, 2))
+        XCTAssertEqual(FirmwareVersion("1.1.6-rc1"), FirmwareVersion(1, 1, 6))
     }
 
     func testMissingPatchIsZero() {
