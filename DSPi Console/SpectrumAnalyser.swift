@@ -708,17 +708,55 @@ final class RtaEngine: ObservableObject {
             // the other side of the matrix.
             if s.tap != tap { s.frames = [:]; s.bins = nil }
             s.tap = tap
-            for (ch, f) in frames { s.frames[ch] = f }
+            let fresh = Self.silencingStale(frames, staleAfterMs: self.staleAfterMs)
+            for (ch, f) in fresh.frames { s.frames[ch] = f }
             if var bins {
                 bins.levelsDB = self.binAverage.add(bins, tap: tap, at: binsReadAt,
                                                     avgMs: avgMs, levelDB: self.levelDB)
                 bins.smoothedLevelsDB = self.binAverage.smoothedLevels
                 s.bins = bins
             }
+            // Bins carry no age of their own, and the device keeps the last
+            // transform's bins just as it keeps the bands, so they go with
+            // their channel's frame.
+            if let held = s.bins, fresh.stale.contains(held.channel) {
+                s.bins = nil
+                self.binAverage.reset()
+            }
             if let status { s.status = status }
             if s != self.snapshot { self.snapshot = s }
             if let rejected, rejected != self.configRejected { self.configRejected = rejected }
         }
+    }
+
+    // MARK: Stopped streams
+
+    /// How old a channel's frame may get before it is shown as silence: a few
+    /// refresh intervals, so a slow rotation through many channels is not
+    /// mistaken for a stopped stream.  Main thread only.
+    private var staleAfterMs: Double {
+        max(500, channelRefreshInterval * 4000)
+    }
+
+    /// Frames with any that have stopped updating replaced by silence.
+    ///
+    /// The device only publishes when a channel's capture fills, and it only
+    /// captures while audio blocks arrive.  When the host stops streaming (it
+    /// switched output to another device, say), each channel keeps reporting
+    /// the last levels it published, part way down a fade, forever.  Its age
+    /// keeps growing, which is the one sign of it the wire carries.
+    static func silencingStale(_ frames: [UInt8: RtaBandFrame],
+                               staleAfterMs: Double) -> (frames: [UInt8: RtaBandFrame], stale: Set<UInt8>) {
+        var out = frames
+        var stale = Set<UInt8>()
+        for (ch, frame) in frames where frame.hasData && Double(frame.ageMs) > staleAfterMs {
+            var silent = frame
+            silent.avg = Array(repeating: 0, count: frame.avg.count)
+            silent.peak = Array(repeating: 0, count: frame.peak.count)
+            out[ch] = silent
+            stale.insert(ch)
+        }
+        return (out, stale)
     }
 
     // MARK: Reads that need more than one transfer
