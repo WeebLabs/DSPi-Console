@@ -187,14 +187,14 @@ final class OnboardingCoordinatorTests: XCTestCase {
     /// Simulating an upgrade from a named release is how a new step's
     /// introduction gets tested without waiting for a release.
     func testUpdaterOverrideMarksEverythingFromThatReleaseSeen() {
-        defaults.set("updater:1.1.7", forKey: OnboardingDebug.Key.cohort)
+        defaults.set("updater:1.1.6-beta3", forKey: OnboardingDebug.Key.cohort)
         let coordinator = makeCoordinator()
         coordinator.evaluate(vm: DSPViewModel())
 
-        // Every step currently ships in 1.1.7, so an updater from it has
+        // Every step currently ships in 1.1.6 beta 3, so an updater from it has
         // nothing left; when later steps are added this becomes the interesting
         // case, and the assertion still holds for whatever remains.
-        let leftover = coordinator.pending.filter { $0.introducedIn <= FirmwareVersion(1, 1, 7) }
+        let leftover = coordinator.pending.filter { $0.introducedIn <= FirmwareVersion(1, 1, 6, 3) }
         XCTAssertTrue(leftover.isEmpty)
     }
 

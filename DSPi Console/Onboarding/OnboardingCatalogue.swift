@@ -124,7 +124,7 @@ enum OnboardingCatalogue {
     /// The release onboarding first shipped in.  Nothing may be dated earlier:
     /// an updater is treated as having already been offered every step from
     /// before their version, so a step backdated past this is shown to nobody.
-    static let firstRelease = FirmwareVersion(1, 1, 7)
+    static let firstRelease = FirmwareVersion(1, 1, 6, 3)
 
     static let all: [OnboardingStep] = setup + basics + justInTime
 
@@ -137,13 +137,13 @@ enum OnboardingCatalogue {
     /// These records exist for persistence: finishing or skipping the wizard
     /// marks them all seen.
     static let setup: [OnboardingStep] = [
-        OnboardingStep(id: "setup.welcome", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "setup.welcome", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .setup, title: "Welcome",
                        applies: { _ in true }),
-        OnboardingStep(id: "setup.board", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "setup.board", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .setup, title: "Get your board running",
                        applies: { _ in true }),
-        OnboardingStep(id: "setup.finished", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "setup.finished", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .setup, title: "You are set up",
                        applies: { _ in true }),
     ]
@@ -155,7 +155,7 @@ enum OnboardingCatalogue {
     /// instead; the only subsystem that earns a place here is routing, which
     /// is not optional knowledge and gets its own window visit.
     static let basics: [OnboardingStep] = [
-        OnboardingStep(id: "basics.sidebar", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.sidebar", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Inputs and outputs",
                        message: "Every channel lives here: inputs are what arrives from your computer, outputs are what leaves for your speakers, and each row's meter shows what is reaching it. Click a channel's name or meter to open its page and edit its filters. The small coloured tag at the end of the row is a separate control - it shows or hides that channel's curve on the graph, and leaves whichever page you have open alone.",
                        anchor: "basics.sidebar",
@@ -167,7 +167,7 @@ enum OnboardingCatalogue {
         // which the tour opens on the user's behalf.  Describing the grid from
         // the outside taught nobody anything: it named controls the user had
         // never seen and left them to go and find them afterwards.
-        OnboardingStep(id: "basics.routing", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.routing", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "The Matrix Mixer",
                        message: "The Matrix Mixer decides which sound reaches which output, and it is the one screen standing between you and working audio: to begin with your left and right channels reach the first pair of outputs and nothing else is connected, so everything past plain stereo starts here. This button opens it, and it is worth remembering where it is. Next opens it for you.",
                        anchor: "basics.routing",
@@ -175,34 +175,34 @@ enum OnboardingCatalogue {
         // Anchored to the whole grid rather than one crosspoint, so every
         // circle in it stays clickable through the spotlight and the
         // invitation to try one is real.
-        OnboardingStep(id: "basics.matrix-grid", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.matrix-grid", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Connecting an input to an output",
                        message: "Every input has a row and every output has a column. The circle where a row meets a column is the connection: click one and that input plays through that output. A connected circle grows a level field above it and an INV switch below, which flips its polarity for a driver wired backwards. Try one now. An input can feed several outputs at once, which is how you send bass to a subwoofer while the main speakers carry the rest.",
                        host: .matrixMixer,
                        anchor: "matrix.grid",
                        invitesTyping: true,
                        applies: { _ in true }),
-        OnboardingStep(id: "basics.matrix-outputs", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.matrix-outputs", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "What each output does",
                        message: "These rows act on a whole output rather than on one connection. ENABLE switches an output off and gives its processing time back to the device, GAIN and DELAY set its level and time it against your other speakers, and MUTE silences it while you work. Each output also has its own filters, which is how a crossover is built: send the same input to two outputs and filter each one differently.",
                        host: .matrixMixer,
                        anchor: "matrix.outputs",
                        applies: { _ in true }),
-        OnboardingStep(id: "basics.graph", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.graph", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "The response graph",
                        message: "This draws what your filters do to the sound. Each curve is the result of every filter on that channel combined, so you can see the shape you are building as you build it. The coloured tags in the sidebar decide which curves are drawn, so you can compare a few channels or narrow it down to one.",
                        anchor: "basics.graph",
                        applies: { _ in true }),
         // The one step that asks for an action.  A tour with something real in
         // it is remembered; a tour that only points at things is not.
-        OnboardingStep(id: "basics.add-filter", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.add-filter", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Add a filter",
                        message: "Each channel has ten filter slots, empty until you give one a type. Try it now: set a slot to Peaking, then give it a frequency, a gain and a Q. Q is how wide the filter reaches around its frequency - low Q is broad and gentle, high Q is narrow. The graph redraws as you type, and so does the device.",
                        anchor: "basics.add-filter",
                        needsChannelDetail: true,
                        invitesTyping: true,
                        applies: { _ in true }),
-        OnboardingStep(id: "basics.volume-controls", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.volume-controls", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Volume Controls",
                        message: "Two volume controls share this spot and clicking the label above the slider enables you to switch between them. User Volume is the everyday control and chooses the amount by which your input source will be attenuated. Master Volume is stored on DSPi and has the final word on the highest volume that will actually come out of your speakers or headphones.",
                        anchor: "basics.volume",
@@ -214,16 +214,16 @@ enum OnboardingCatalogue {
         // which live outside the window and cannot be spotlit, so the card
         // stands on its own rather than pointing at something that is only
         // half the story.
-        OnboardingStep(id: "basics.saving", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.saving", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Saving to the device",
                        message: "This is the one thing worth reading twice. Changes take effect on the device immediately, but they live in memory until you commit them, and a power cycle loses anything uncommitted. Commit Parameters and Revert to Saved are both in the Tools menu. An asterisk beside the preset name means there is uncommitted work.",
                        applies: { _ in true }),
-        OnboardingStep(id: "basics.presets", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.presets", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Presets",
                        message: "The device holds ten named presets, each a complete configuration you can name and switch between. Switching discards anything uncommitted, so commit first if you want to keep what you have been working on.",
                        anchor: "basics.presets",
                        applies: { _ in true }),
-        OnboardingStep(id: "basics.where-things-live", introducedIn: FirmwareVersion(1, 1, 7),
+        OnboardingStep(id: "basics.where-things-live", introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .basics, title: "Where everything else lives",
                        message: "That is the whole of the everyday interface. Everything else lives in these icons and in the Tools menu, including crossfeed, loudness compensation, upmixing and test signals. Each one explains itself the first time you open it, so there is nothing to learn in advance.",
                        anchor: "basics.tools",
@@ -293,7 +293,7 @@ enum OnboardingCatalogue {
                             _ message: String,
                             _ applies: @escaping (DSPViewModel) -> Bool = { _ in true }) -> OnboardingStep {
         OnboardingStep(id: "jit.\(key)",
-                       introducedIn: FirmwareVersion(1, 1, 7),
+                       introducedIn: FirmwareVersion(1, 1, 6, 3),
                        phase: .justInTime(key),
                        title: title,
                        message: message,
