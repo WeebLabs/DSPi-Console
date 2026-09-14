@@ -1754,7 +1754,6 @@ struct SpectrumSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle("Spectrum Analyser")
     }
 }
 
