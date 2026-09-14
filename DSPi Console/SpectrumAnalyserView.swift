@@ -818,9 +818,9 @@ private struct GraphOptionsPanel: View {
                     .padding(12)
                 Divider()
                 VStack(spacing: 0) {
-                    GraphOptionsToggleRow(icon: "waveform.path", title: "On Response Graph",
+                    GraphOptionsToggleRow(icon: "waveform.path", title: "FFT Graph",
                                           isOn: showBinding(.graph))
-                    GraphOptionsToggleRow(icon: "chart.bar.fill", title: "As Bars",
+                    GraphOptionsToggleRow(icon: "chart.bar.fill", title: "RTA Bars",
                                           isOn: showBinding(.bars))
                 }
                 .padding(.vertical, 6)
