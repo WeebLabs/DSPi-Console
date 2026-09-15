@@ -11,7 +11,7 @@ class CrossfeedWindowController: NSObject, ObservableObject {
             let view = CrossfeedView(vm: vm).onboardingHint("crossfeed")
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 560),
+                contentRect: NSRect(x: 0, y: 0, width: 780, height: 470),
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -20,8 +20,7 @@ class CrossfeedWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: view)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
-            window?.contentMinSize = NSSize(width: 380, height: 300)
-            window?.contentMaxSize = NSSize(width: 380, height: 680)
+            window?.contentMinSize = NSSize(width: 740, height: 460)
         }
 
         window?.center()
@@ -51,9 +50,9 @@ private struct CrossfeedPreset {
 }
 
 private let crossfeedPresets: [CrossfeedPreset] = [
-    CrossfeedPreset(name: "Default", description: "700 Hz / 4.5 dB — Balanced, most popular", freq: 700, feed: 4.5),
-    CrossfeedPreset(name: "Chu Moy", description: "700 Hz / 6.0 dB — Stronger spatial effect", freq: 700, feed: 6.0),
-    CrossfeedPreset(name: "Jan Meier", description: "650 Hz / 9.5 dB — Natural speaker-like", freq: 650, feed: 9.5),
+    CrossfeedPreset(name: "Default", description: "700 Hz / 4.5 dB - Balanced, most popular", freq: 700, feed: 4.5),
+    CrossfeedPreset(name: "Chu Moy", description: "700 Hz / 6.0 dB - Stronger spatial effect", freq: 700, feed: 6.0),
+    CrossfeedPreset(name: "Jan Meier", description: "650 Hz / 9.5 dB - Natural speaker-like", freq: 650, feed: 9.5),
     CrossfeedPreset(name: "Custom", description: "User-defined parameters", freq: 700, feed: 4.5),
 ]
 
@@ -88,38 +87,34 @@ struct CrossfeedView: View {
 
             Divider()
 
-            ScrollView {
-                VStack(spacing: 20) {
+            // Two columns of the sections the other tool windows stack. The
+            // graph sits over the presets that set it; the right column holds
+            // the custom parameters, the time delay and where crossfeed applies.
+            HStack(alignment: .top, spacing: 0) {
+                VStack(alignment: .leading, spacing: 14) {
                     crossfeedGraph
-                        .padding(.top, 16)
-                        .padding(.horizontal, 16)
-
-                    Divider().padding(.horizontal, 16)
-
-                    if showPairMask {
-                        outputPairSection
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-                    }
-
+                    Divider()
                     presetSection
-                        .padding(.horizontal, 16)
-
-                    Divider().padding(.horizontal, 16)
-
-                    parameterSection
-                        .padding(.horizontal, 16)
-
-                    Divider().padding(.horizontal, 16)
-
-                    itdSection
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 16)
                 }
+                .toolColumn()
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    parameterSection
+                    Divider()
+                    itdSection
+                    if showPairMask {
+                        Divider()
+                        outputPairSection
+                    }
+                }
+                .toolColumn()
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 16)
         }
-        .frame(minWidth: 380, maxWidth: 380)
+        .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Header
@@ -170,7 +165,7 @@ struct CrossfeedView: View {
                 )
                 .padding(8)
             }
-            .frame(height: 140)
+            .frame(height: 160)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)

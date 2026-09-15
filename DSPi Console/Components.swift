@@ -2344,6 +2344,18 @@ struct ValueField: View {
     }
 }
 
+// MARK: - Tool Window Column
+
+extension View {
+    /// One column of a two-column tool window: an equal share of the width,
+    /// content pinned to the top so section labels line up across columns.
+    func toolColumn() -> some View {
+        self
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
 // MARK: - Value Field Scroll Handler
 
 struct ValueFieldScrollHandler: NSViewRepresentable {

@@ -131,7 +131,7 @@ struct SubharmonicSynthView: View {
                         Divider()
                         bandsColumn
                     }
-                    .column()
+                    .toolColumn()
 
                     Divider()
 
@@ -146,7 +146,7 @@ struct SubharmonicSynthView: View {
                         Divider()
                         outputSection
                     }
-                    .column()
+                    .toolColumn()
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, 16)
@@ -725,15 +725,6 @@ struct SubharmonicSynthView: View {
     }
 }
 
-private extension View {
-    /// One column of the control row: equal share of the width, content pinned
-    /// to the top so section labels line up across columns.
-    func column() -> some View {
-        self
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-}
 
 // MARK: - Band Visualization
 
