@@ -113,6 +113,61 @@ final class RtaMetalCurvesTests: XCTestCase {
                                                    width: 100, backingScale: 2).isEmpty)
     }
 
+    /// The pointer-based table must match the plain implementation it replaced
+    /// bit for bit, including clipped ends, repeated x, backwards steps and NaN.
+    func testFillTableMatchesPlainImplementationExactly() {
+        func reference(_ points: [SIMD2<Float>], width: CGFloat, backingScale: CGFloat) -> [SIMD2<Float>] {
+            guard points.count > 1 else { return [] }
+            let start = max(0, points[0].x), end = min(Float(width), points[points.count - 1].x)
+            guard end > start else { return [] }
+            let intervals = max(1, Int(ceil(Double(end - start) * Double(max(1, backingScale)))))
+            let step = (end - start) / Float(intervals)
+            var samples: [SIMD2<Float>] = []
+            var segment = 0
+            for column in 0...intervals {
+                let x = start + Float(column) * step
+                while segment < points.count - 2, points[segment + 1].x < x { segment += 1 }
+                let a = points[segment], b = points[segment + 1]
+                let t = min(1, max(0, (x - a.x) / max(b.x - a.x, 1e-6)))
+                samples.append(SIMD2(x, a.y + (b.y - a.y) * t))
+            }
+            return samples
+        }
+        func bits(_ s: [SIMD2<Float>]) -> [UInt32] { s.flatMap { [$0.x.bitPattern, $0.y.bitPattern] } }
+
+        var wave: [SIMD2<Float>] = []
+        var seed: UInt32 = 12345
+        for i in 0..<300 {
+            seed = seed &* 1664525 &+ 1013904223
+            wave.append(SIMD2(Float(i) * 3.7 - 20, Float(seed % 1000) / 10))
+        }
+        let cases: [(points: [SIMD2<Float>], width: CGFloat, scale: CGFloat)] = [
+            (wave, 1000, 2), (wave, 517.3, 1), (wave, 1000, 1.5),
+            ([SIMD2(-10, 60), SIMD2(50, 0), SIMD2(110, 60)], 100, 2),
+            ([SIMD2(0, 10), SIMD2(0, 20), SIMD2(0, 30), SIMD2(40, 5)], 40, 1),
+            ([SIMD2(0, 10), SIMD2(30, 20), SIMD2(10, 30), SIMD2(60, 5)], 60, 2),
+            ([SIMD2(0, .nan), SIMD2(20, 4), SIMD2(40, .nan)], 40, 1),
+            ([SIMD2(5, 1), SIMD2(6, 2)], 100, 3),
+        ]
+        for c in cases {
+            XCTAssertEqual(bits(RtaCurveGeometry.fillSamples(c.points, width: c.width, backingScale: c.scale)),
+                           bits(reference(c.points, width: c.width, backingScale: c.scale)))
+        }
+    }
+
+    /// Only a gap-free run of whole columns inside the plot may stand in for
+    /// its own fill table: the shader assumes evenly spaced entries.
+    func testColumnSeriesIsItsOwnFillTable() {
+        let columns = (3...40).map { SIMD2(Float($0), Float($0 % 7)) }
+        XCTAssertTrue(RtaCurveGeometry.isColumnSeries(columns, width: 100))
+        var gapped = columns
+        gapped.remove(at: 10)
+        XCTAssertFalse(RtaCurveGeometry.isColumnSeries(gapped, width: 100))
+        XCTAssertFalse(RtaCurveGeometry.isColumnSeries(columns, width: 30))
+        XCTAssertFalse(RtaCurveGeometry.isColumnSeries([SIMD2(-1, 0), SIMD2(0, 0)], width: 100))
+        XCTAssertFalse(RtaCurveGeometry.isColumnSeries([SIMD2(5, 0)], width: 100))
+    }
+
     @MainActor
     private func render(_ panel: RtaMetalCurvePanel, size: Int = 96,
                         renderer: RtaMetalCurveRenderer? = nil) throws -> [UInt8] {

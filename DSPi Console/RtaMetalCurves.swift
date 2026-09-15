@@ -239,25 +239,58 @@ final class RtaMetalCurveView: MTKView {
 /// fraction of a physical pixel. This preserves the band/peak contours without
 /// asking SwiftUI/CoreGraphics to tessellate and stroke them every frame.
 enum RtaCurveGeometry {
-    /// A physical-pixel height table lets the GPU fill a curve with two
+    /// True when `points` are consecutive whole columns inside the plot, as the
+    /// blended FFT curve is.  Such a series is already evenly spaced, which is
+    /// all the fill shader asks of its height table.
+    static func isColumnSeries(_ points: [SIMD2<Float>], width: CGFloat) -> Bool {
+        guard points.count > 1, let first = points.first, let last = points.last,
+              first.x >= 0, last.x <= Float(width) else { return false }
+        return last.x - first.x == Float(points.count - 1)
+    }
+
+    /// An evenly spaced height table lets the GPU fill a curve with two
     /// triangles, avoiding thousands of tall, subpixel-width fill triangles.
+    /// `backingScale` sets the spacing: one sample per pixel at that scale.
+    ///
+    /// Runs for every curve on every frame, so it works on the raw `Float`
+    /// storage with explicit comparisons: unoptimised builds do not specialise
+    /// the generic SIMD accessors, `min`/`max` or `append`, and those calls cost
+    /// many times the arithmetic.  Each comparison is written the way the
+    /// standard library's `min`/`max` are, so every sample, NaN included, is
+    /// what the plain version produced.
     static func fillSamples(_ points: [SIMD2<Float>], width: CGFloat, backingScale: CGFloat) -> [SIMD2<Float>] {
-        guard points.count > 1 else { return [] }
-        let start = max(0, points[0].x), end = min(Float(width), points[points.count - 1].x)
-        guard end > start else { return [] }
-        let intervals = max(1, Int(ceil(Double(end - start) * Double(max(1, backingScale)))))
-        let step = (end - start) / Float(intervals)
-        var samples: [SIMD2<Float>] = []
-        samples.reserveCapacity(intervals + 1)
-        var segment = 0
-        for column in 0...intervals {
-            let x = start + Float(column) * step
-            while segment < points.count - 2, points[segment + 1].x < x { segment += 1 }
-            let a = points[segment], b = points[segment + 1]
-            let t = min(1, max(0, (x - a.x) / max(b.x - a.x, 1e-6)))
-            samples.append(SIMD2(x, a.y + (b.y - a.y) * t))
+        let n = points.count
+        guard n > 1 else { return [] }
+        return points.withUnsafeBytes { raw -> [SIMD2<Float>] in
+            // SIMD2<Float> is two Floats: x at 2i, y at 2i + 1.
+            let p = raw.baseAddress!.assumingMemoryBound(to: Float.self)
+            let firstX = p[0], lastX = p[2 * (n - 1)], limit = Float(width)
+            let start: Float = firstX >= 0 ? firstX : 0
+            let end: Float = lastX < limit ? lastX : limit
+            guard end > start else { return [] }
+            let intervals = max(1, Int(ceil(Double(end - start) * Double(max(1, backingScale)))))
+            let step = (end - start) / Float(intervals)
+            let count = intervals + 1
+            return [SIMD2<Float>](unsafeUninitializedCapacity: count) { buffer, initialized in
+                let out = UnsafeMutableRawPointer(buffer.baseAddress!).assumingMemoryBound(to: Float.self)
+                var segment = 0
+                var column = 0
+                while column < count {
+                    let x = start + Float(column) * step
+                    while segment < n - 2, p[2 * segment + 2] < x { segment += 1 }
+                    let ax = p[2 * segment], ay = p[2 * segment + 1]
+                    let bx = p[2 * segment + 2], by = p[2 * segment + 3]
+                    let span = bx - ax
+                    var t = (x - ax) / (1e-6 >= span ? 1e-6 : span)
+                    t = t >= 0 ? t : 0
+                    t = t < 1 ? t : 1
+                    out[2 * column] = x
+                    out[2 * column + 1] = ay + (by - ay) * t
+                    column += 1
+                }
+                initialized = count
+            }
         }
-        return samples
     }
 
     static func flatten(_ points: [CGPoint], dense: Bool, plot: CGRect,
@@ -382,7 +415,8 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
                 let bins = channel.bins.flatMap { Int($0.channel) == channel.channel ? $0 : nil }
                     .map { builder.binPoints($0, channel: channel.channel) } ?? []
                 let curve = builder.blend(bands: bands, bins: bins)
-                let avg = RtaCurveGeometry.flatten(curve, dense: bins.count > 1, plot: plot, backingScale: backingScale)
+                let dense = bins.count > 1
+                let avg = RtaCurveGeometry.flatten(curve, dense: dense, plot: plot, backingScale: backingScale)
                 let peakPoints = panel.showPeak ? band.map { builder.bandPoints($0, peak: true, channel: channel.channel) } ?? [] : []
                 let peak = RtaCurveGeometry.flatten(peakPoints, dense: false, plot: plot, backingScale: backingScale)
                 let first = min(avg.first?.x ?? .infinity, peak.first?.x ?? .infinity)
@@ -391,9 +425,19 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
                 points.append(contentsOf: avg)
                 let peakRange = points.count..<(points.count + peak.count)
                 points.append(contentsOf: peak)
-                let fill = RtaCurveGeometry.fillSamples(avg, width: size.width, backingScale: backingScale)
-                let fillRange = points.count..<(points.count + fill.count)
-                points.append(contentsOf: fill)
+                // The fill shader interpolates linearly between table entries.
+                // A curve with a point in every column is therefore its own
+                // table, and a flattened band curve is followed to a small
+                // fraction of a pixel by one sample per point; resampling either
+                // at physical pixels every frame was most of this loop's cost.
+                let fillRange: Range<Int>
+                if dense, RtaCurveGeometry.isColumnSeries(avg, width: size.width) {
+                    fillRange = avgRange
+                } else {
+                    let fill = RtaCurveGeometry.fillSamples(avg, width: size.width, backingScale: 1)
+                    fillRange = points.count..<(points.count + fill.count)
+                    points.append(contentsOf: fill)
+                }
                 traces.append(Trace(color: channel.color, average: avgRange, fill: fillRange, peak: peakRange, start: first))
             }
         }
