@@ -11,7 +11,7 @@ class PsychoacousticBassWindowController: NSObject, ObservableObject {
             let view = PsychoacousticBassView(vm: vm).onboardingHint("psybass")
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 640),
+                contentRect: NSRect(x: 0, y: 0, width: 780, height: 500),
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -20,8 +20,7 @@ class PsychoacousticBassWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: view)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
-            window?.contentMinSize = NSSize(width: 380, height: 360)
-            window?.contentMaxSize = NSSize(width: 380, height: 900)
+            window?.contentMinSize = NSSize(width: 740, height: 496)
         }
 
         window?.center()
@@ -96,34 +95,34 @@ struct PsychoacousticBassView: View {
             Divider()
 
             if supported {
-                ScrollView {
-                    VStack(spacing: 20) {
+                // Two columns of the sections the other tool windows stack.
+                // The graph sits over the cutoff and level that shape its
+                // harmonic band; the right column chooses the outputs and
+                // shapes how the harmonics are made.
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 14) {
                         spectrumGraph
-                            .padding(.top, 16)
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-
-                        startingPointsSection
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-
-                        outputSection
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-
-                        parameterSection
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 16)
+                        Divider()
+                        harmonicsSection
                     }
+                    .toolColumn()
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        outputSection
+                        Divider()
+                        shapingSection
+                    }
+                    .toolColumn()
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 16)
             } else {
                 unsupportedNote
             }
         }
-        .frame(minWidth: 380, maxWidth: 380)
+        .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Header
@@ -180,9 +179,13 @@ struct PsychoacousticBassView: View {
 
     private var spectrumGraph: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("SPECTRUM")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+            HStack {
+                Text("SPECTRUM")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                startingPointsMenu
+            }
 
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
@@ -196,7 +199,7 @@ struct PsychoacousticBassView: View {
                 )
                 .padding(8)
             }
-            .frame(height: 140)
+            .frame(height: 160)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)
@@ -206,31 +209,25 @@ struct PsychoacousticBassView: View {
 
     // MARK: - Starting Points
 
-    private var startingPointsSection: some View {
-        HStack {
-            Text("STARTING POINTS")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
-            Spacer()
-            Menu {
-                ForEach(0..<psybassStartingPoints.count, id: \.self) { i in
-                    let p = psybassStartingPoints[i]
-                    Button("\(p.name) - \(p.detail)") {
-                        vm.setPsybassCutoff(p.cutoff)
-                        vm.setPsybassHarmonics(p.harmonics)
-                        vm.setPsybassDrive(p.drive)
-                        vm.setPsybassCharacter(p.character)
-                        vm.setPsybassOriginal(p.original)
-                    }
+    private var startingPointsMenu: some View {
+        Menu {
+            ForEach(0..<psybassStartingPoints.count, id: \.self) { i in
+                let p = psybassStartingPoints[i]
+                Button("\(p.name) - \(p.detail)") {
+                    vm.setPsybassCutoff(p.cutoff)
+                    vm.setPsybassHarmonics(p.harmonics)
+                    vm.setPsybassDrive(p.drive)
+                    vm.setPsybassCharacter(p.character)
+                    vm.setPsybassOriginal(p.original)
                 }
-            } label: {
-                Text("Apply preset")
-                    .font(.system(size: 11))
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(!vm.isDeviceConnected)
+        } label: {
+            Text("Apply preset")
+                .font(.system(size: 11))
         }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(!vm.isDeviceConnected)
     }
 
     // MARK: - Output Channels
@@ -300,15 +297,14 @@ struct PsychoacousticBassView: View {
         .animation(.easeInOut(duration: 0.12), value: on)
     }
 
-    // MARK: - Parameters
+    // MARK: - Harmonics
 
-    private var parameterSection: some View {
+    private var harmonicsSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("PARAMETERS")
+            Text("HARMONICS")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            // Cutoff Frequency
             paramRow(
                 title: "Cutoff Frequency",
                 unit: "Hz",
@@ -322,7 +318,6 @@ struct PsychoacousticBassView: View {
 
             Divider()
 
-            // Harmonics Level
             paramRow(
                 title: "Harmonics",
                 unit: "dB",
@@ -333,10 +328,17 @@ struct PsychoacousticBassView: View {
                 help: "Level of the synthesized harmonics. The primary amount-of-effect control. Higher = more perceived bass.",
                 set: { vm.setPsybassHarmonics($0) }
             )
+        }
+    }
 
-            Divider()
+    // MARK: - Shaping
 
-            // Drive
+    private var shapingSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("SHAPING")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+
             paramRow(
                 title: "Drive",
                 unit: "dB",
@@ -350,7 +352,6 @@ struct PsychoacousticBassView: View {
 
             Divider()
 
-            // Character
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Character")
@@ -385,7 +386,6 @@ struct PsychoacousticBassView: View {
 
             Divider()
 
-            // Original Bass
             paramRow(
                 title: "Original Bass",
                 unit: "dB",
