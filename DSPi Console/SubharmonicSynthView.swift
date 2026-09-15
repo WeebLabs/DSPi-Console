@@ -257,10 +257,9 @@ struct SubharmonicSynthView: View {
 
     private var bandGraph: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 16) {
+            HStack {
                 sectionLabel("BANDS")
                 Spacer()
-                headroomReadout
                 startingPointsMenu
             }
 
@@ -283,17 +282,22 @@ struct SubharmonicSynthView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)
             )
+
+            headroomReadout
+                .padding(.top, 4)
         }
     }
 
-    /// The worst-case gain of the current setting, in the graph's header row:
-    /// it is a property of what the graph is showing, and the number moves
+    /// The worst-case gain of the current setting, sitting under the graph as
+    /// its caption: it is a property of what the graph is showing, and the number moves
     /// whenever a band level, the boost or the ceiling does.  Shown as a
     /// requirement rather than a suggestion - the effect is amplitude-linear,
     /// so lowering the preamp by this much is exact.
     private var headroomReadout: some View {
         HStack(spacing: 6) {
             sectionLabel("HEADROOM COST")
+
+            Spacer()
 
             Text(vm.subharmHeadroomDB > 0
                  ? String(format: "%+.1f dB", vm.subharmHeadroomDB)
