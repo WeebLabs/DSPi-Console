@@ -54,8 +54,8 @@ class LoudnessWindowController: NSObject, ObservableObject {
             let view = LoudnessView(vm: vm).onboardingHint("loudness")
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 600),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 780, height: 400),
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
@@ -63,6 +63,7 @@ class LoudnessWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: view)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
+            window?.contentMinSize = NSSize(width: 740, height: 390)
         }
 
         window?.center()
@@ -126,27 +127,33 @@ struct LoudnessView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             headerSection
 
             Divider()
 
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Visualization
-                    compensationGraph
-                        .padding(.top, 16)
-                        .padding(.horizontal, 16)
+            // Two columns of the sections the other tool windows stack. The
+            // curve has the left column to itself and grows to the height of
+            // the parameters and outputs beside it, so the columns always end
+            // together.
+            HStack(alignment: .top, spacing: 0) {
+                compensationGraph
+                    .toolColumn()
 
-                    Divider().padding(.horizontal, 16)
+                Divider()
 
-                    // Parameters
+                VStack(alignment: .leading, spacing: 14) {
                     parameterSection
-                        .padding(.horizontal, 16)
+                    if showMask {
+                        Divider()
+                        channelSection
+                    }
                 }
+                .toolColumn()
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 16)
         }
-        .frame(width: 380, height: 560)
+        .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Header
@@ -201,7 +208,7 @@ struct LoudnessView: View {
                 )
                 .padding(8)
             }
-            .frame(height: 140)
+            .frame(minHeight: 160, maxHeight: .infinity)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)
@@ -213,11 +220,6 @@ struct LoudnessView: View {
 
     private var parameterSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if showMask {
-                channelSection
-                Divider()
-            }
-
             Text("PARAMETERS")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
