@@ -113,6 +113,12 @@ final class MeterBarNSView: NSView {
             sublayer.cornerRadius = 2
             layer?.addSublayer(sublayer)
         }
+        // The layers carry their own behaviour, so setting a level needs no
+        // transaction of its own: every bar changed in a run-loop pass joins
+        // the one implicit commit at its end.  An explicit transaction per
+        // poll was measured committing on top of that one, not instead of it.
+        bar.actions = ["bounds": Self.glide]
+        clip.actions = ["hidden": NSNull()]
         clip.isHidden = true
         applyColors()
     }
@@ -124,22 +130,23 @@ final class MeterBarNSView: NSView {
 
     private var meterWidth: CGFloat { max(0, bounds.width - Self.clipZoneWidth) }
 
+    /// The 60 ms linear glide between polls.
+    private static let glide: CABasicAnimation = {
+        let animation = CABasicAnimation()
+        animation.duration = 0.06
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        return animation
+    }()
+
     func set(level newLevel: Float, clipping newClipping: Bool) {
         let clamped = CGFloat(max(0, min(1, newLevel)))
         if clamped != level {
             level = clamped
-            CATransaction.begin()
-            CATransaction.setAnimationDuration(0.06)
-            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
             bar.bounds.size.width = level * meterWidth
-            CATransaction.commit()
         }
         if newClipping != clipping {
             clipping = newClipping
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
             clip.isHidden = !clipping
-            CATransaction.commit()
         }
     }
 
