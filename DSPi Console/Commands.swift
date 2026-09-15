@@ -217,7 +217,9 @@ extension DSPViewModel {
                 s.clipTimestamp = nil
                 DispatchQueue.global(qos: .utility).async { self.clearClips() }
             }
-            self.meters.status = s
+            // Silence and a stopped stream repeat the same reading; only a
+            // change is worth an update.
+            if s != self.meters.status { self.meters.status = s }
         }
 
         // Poll sample rate at a lower cadence than meter traffic to keep

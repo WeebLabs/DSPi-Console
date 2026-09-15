@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Right Click Handler
 
@@ -84,6 +85,91 @@ struct OptionClickHandler: NSViewRepresentable {
 
 // MARK: - Meter Components
 
+/// A level bar drawn by one Core Animation layer.
+///
+/// As a SwiftUI shape with `.animation`, every 60 ms poll re-evaluated the
+/// bar's row, and each 60 ms glide was replaced just as it finished, so SwiftUI
+/// kept animating and laying the window out on every display frame.  Core
+/// Animation runs the same glide in the render server: a new level costs one
+/// layer change on the main thread.
+final class MeterBarNSView: NSView {
+    private let bar = CALayer()
+    private let clip = CALayer()
+    private var level: CGFloat = 0
+    private var clipping = false
+
+    /// The red marker at the right-hand end while the channel has clipped.
+    private static let clipZoneWidth: CGFloat = 3
+
+    var color: NSColor = .controlAccentColor {
+        didSet { if color != oldValue { applyColors() } }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        for sublayer in [bar, clip] {
+            sublayer.anchorPoint = .zero
+            sublayer.cornerRadius = 2
+            layer?.addSublayer(sublayer)
+        }
+        clip.isHidden = true
+        applyColors()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// The row around the bar owns every click.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private var meterWidth: CGFloat { max(0, bounds.width - Self.clipZoneWidth) }
+
+    func set(level newLevel: Float, clipping newClipping: Bool) {
+        let clamped = CGFloat(max(0, min(1, newLevel)))
+        if clamped != level {
+            level = clamped
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(0.06)
+            CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
+            bar.bounds.size.width = level * meterWidth
+            CATransaction.commit()
+        }
+        if newClipping != clipping {
+            clipping = newClipping
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            clip.isHidden = !clipping
+            CATransaction.commit()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        bar.frame = CGRect(x: 0, y: 0, width: level * meterWidth, height: bounds.height)
+        clip.frame = CGRect(x: meterWidth, y: 0, width: Self.clipZoneWidth, height: bounds.height)
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColors()
+    }
+
+    private func applyColors() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            bar.backgroundColor = color.cgColor
+            clip.backgroundColor = NSColor.systemRed.cgColor
+        }
+        CATransaction.commit()
+    }
+}
+
+/// A meter bar for a level the caller supplies, where the surrounding view
+/// updates anyway (the Subharmonic Synth window's own meter timer).
 struct HorizontalMeterBar: View {
     var level: Float        // 0.0 to 1.0
     var color: Color
@@ -91,27 +177,80 @@ struct HorizontalMeterBar: View {
     var isClipping: Bool = false
 
     var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let clipZoneWidth: CGFloat = 3
-            let meterWidth = w - clipZoneWidth
+        MeterBarLevel(level: level, color: color, clipping: isClipping)
+            .frame(height: 6)
+            .opacity(isMuted ? 0.4 : 1.0)
+    }
+}
 
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(color)
-                    .frame(width: CGFloat(max(0, min(1, level))) * meterWidth)
-                    .animation(.linear(duration: 0.06), value: level)
+private struct MeterBarLevel: NSViewRepresentable {
+    let level: Float
+    let color: Color
+    let clipping: Bool
 
-                if isClipping {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.red)
-                        .frame(width: clipZoneWidth)
-                        .offset(x: meterWidth)
-                }
+    func makeNSView(context: Context) -> MeterBarNSView { MeterBarNSView() }
+
+    func updateNSView(_ view: MeterBarNSView, context: Context) {
+        view.color = NSColor(color)
+        view.set(level: level, clipping: clipping)
+    }
+}
+
+/// A sidebar channel meter that follows `DSPMeterModel` itself.  Its row does
+/// not observe the meters, so a status poll moves this layer and re-evaluates
+/// no SwiftUI view at all.
+struct ChannelMeterBar: View {
+    let meters: DSPMeterModel
+    let channel: Int
+    let color: Color
+    var isMuted: Bool = false
+
+    var body: some View {
+        LiveMeterBar(meters: meters, channel: channel, color: color)
+            .frame(height: 6)
+            .opacity(isMuted ? 0.4 : 1.0)
+    }
+}
+
+private struct LiveMeterBar: NSViewRepresentable {
+    let meters: DSPMeterModel
+    let channel: Int
+    let color: Color
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> MeterBarNSView {
+        let view = MeterBarNSView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: MeterBarNSView, context: Context) {
+        view.color = NSColor(color)
+        context.coordinator.follow(meters, channel: channel, view: view)
+    }
+
+    static func dismantleNSView(_ view: MeterBarNSView, coordinator: Coordinator) {
+        coordinator.subscription = nil
+    }
+
+    final class Coordinator {
+        var subscription: AnyCancellable?
+        private weak var meters: DSPMeterModel?
+        private var channel = -1
+
+        func follow(_ meters: DSPMeterModel, channel: Int, view: MeterBarNSView) {
+            guard meters !== self.meters || channel != self.channel else { return }
+            self.meters = meters
+            self.channel = channel
+            // @Published delivers the new value before storing it, so the
+            // level is read from the event rather than from the model.
+            subscription = meters.$status.sink { [weak view] status in
+                let level = channel < status.peaks.count ? status.peaks[channel] : 0
+                let clipping = channel < 32 && status.clipLatched & (UInt32(1) << UInt32(channel)) != 0
+                view?.set(level: level, clipping: clipping)
             }
         }
-        .frame(height: 6)
-        .opacity(isMuted ? 0.4 : 1.0)
     }
 }
 
@@ -404,7 +543,8 @@ struct ChannelRow: View {
     let descriptor: String
     let isSelected: Bool
     let name: String
-    @ObservedObject var meters: DSPMeterModel
+    /// Handed to the meter bar, which follows it; the row itself does not observe it.
+    let meters: DSPMeterModel
     let isRenaming: Bool
     @Binding var renameText: String
     /// Row height, tightened by the sidebar when input channels are crowded.
@@ -439,11 +579,7 @@ struct ChannelRow: View {
                     .frame(width: 80, alignment: .leading)
             }
 
-            HorizontalMeterBar(
-                level: channelIndex < meters.status.peaks.count ? meters.status.peaks[channelIndex] : 0,
-                color: color,
-                isClipping: (meters.status.clipLatched & (UInt32(1) << UInt32(channelIndex))) != 0
-            )
+            ChannelMeterBar(meters: meters, channel: channelIndex, color: color)
             .padding(.leading, 4)
 
             ChannelVisibilityPill(descriptor: descriptor,
@@ -472,7 +608,8 @@ struct OutputRow: View {
     let isSelected: Bool
     let name: String
     let isMuted: Bool
-    @ObservedObject var meters: DSPMeterModel
+    /// Handed to the meter bar, which follows it; the row itself does not observe it.
+    let meters: DSPMeterModel
     let isRenaming: Bool
     @Binding var renameText: String
     /// Row height, tightened by the sidebar when input channels are crowded.
@@ -509,12 +646,7 @@ struct OutputRow: View {
                     .frame(width: 80, alignment: .leading)
             }
 
-            HorizontalMeterBar(
-                level: chIdx < meters.status.peaks.count ? meters.status.peaks[chIdx] : 0,
-                color: output.color,
-                isMuted: isMuted,
-                isClipping: (meters.status.clipLatched & (UInt32(1) << UInt32(chIdx))) != 0
-            )
+            ChannelMeterBar(meters: meters, channel: chIdx, color: output.color, isMuted: isMuted)
             .padding(.leading, 4)
 
             ChannelVisibilityPill(descriptor: output.descriptor,

@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Data Structures
 
-struct SystemStatus {
+struct SystemStatus: Equatable {
     var peaks: [Float] = Array(repeating: 0, count: WIRE_MAX_CHANNELS)  // up to 17 channels (RP2350)
     var cpu0: Int = 0
     var cpu1: Int = 0
