@@ -1,6 +1,63 @@
 import SwiftUI
 import MetalKit
 import MetalPerformanceShaders
+import Combine
+
+/// The spectrum curves, described by where their numbers come from; see
+/// `RtaMetalBarSource`.
+struct RtaMetalCurveSource: Equatable {
+    struct Channel: Equatable {
+        let channel: Int
+        let color: SIMD4<Float>
+    }
+    let tap: UInt8
+    let channels: [Channel]
+    let wantsBins: Bool
+    let minFreq: Double
+    let maxFreq: Double
+    let scale: RtaScale
+    let smoothing: Double
+    let showPeak: Bool
+    let glow: Bool
+    let opacity: Double
+}
+
+/// Resolves a source into a panel against the engine's latest snapshot, and
+/// only when the engine reports the picture changed.  Main thread only.
+final class RtaMetalCurveFeed {
+    private weak var engine: RtaEngine?
+    private var source: RtaMetalCurveSource?
+    private var resolvedVersion: UInt64?
+
+    init(engine: RtaEngine) { self.engine = engine }
+
+    var animating: Bool { (source?.smoothing ?? 0) > 0 }
+
+    func setSource(_ new: RtaMetalCurveSource) {
+        guard new != source else { return }
+        source = new
+        resolvedVersion = nil
+    }
+
+    /// A new panel, or nil when nothing has changed since the last call.
+    func panelIfChanged() -> RtaMetalCurvePanel? {
+        guard let engine, let source else { return nil }
+        let version = engine.frameFeed.version
+        guard version != resolvedVersion else { return nil }
+        resolvedVersion = version
+        let snapshot = engine.snapshot
+        let bins = source.wantsBins && snapshot.tap == source.tap ? snapshot.bins : nil
+        return RtaMetalCurvePanel(
+            tap: source.tap, configuration: RtaDisplayConfiguration(engine: engine),
+            channels: source.channels.map {
+                RtaMetalCurveChannel(channel: $0.channel, color: $0.color,
+                                     bands: engine.frame(channel: $0.channel, tap: source.tap), bins: bins)
+            },
+            minFreq: source.minFreq, maxFreq: source.maxFreq, scale: source.scale,
+            fallTau: rtaFallTau(engine, source.smoothing), showPeak: source.showPeak,
+            glow: source.glow, opacity: source.opacity)
+    }
+}
 
 struct RtaMetalCurveChannel {
     let channel: Int
@@ -69,15 +126,18 @@ final class RtaMetalCurveResources {
 }
 
 struct RtaMetalCurves: NSViewRepresentable {
-    let panel: RtaMetalCurvePanel
+    let engine: RtaEngine
+    let source: RtaMetalCurveSource
     let active: Bool
 
     func makeNSView(context: Context) -> RtaMetalCurveView {
         let view = RtaMetalCurveView()
-        view.update(panel: panel, active: active)
+        view.update(source: source, engine: engine, active: active)
         return view
     }
-    func updateNSView(_ view: RtaMetalCurveView, context: Context) { view.update(panel: panel, active: active) }
+    func updateNSView(_ view: RtaMetalCurveView, context: Context) {
+        view.update(source: source, engine: engine, active: active)
+    }
     static func dismantleNSView(_ view: RtaMetalCurveView, coordinator: ()) { view.stop() }
 }
 
@@ -88,6 +148,8 @@ final class RtaMetalCurveView: MTKView {
     private var requestedActive = true
     private var animating = false
     private var observers: [NSObjectProtocol] = []
+    private var feed: RtaMetalCurveFeed?
+    private var feedChanges: AnyCancellable?
 
     init() {
         let resources = RtaMetalCurveResources.shared
@@ -108,10 +170,31 @@ final class RtaMetalCurveView: MTKView {
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// A fixed panel, for tests and benchmarks.
     func update(panel: RtaMetalCurvePanel, active: Bool) {
         renderer?.update(panel)
         requestedActive = active
         animating = panel.fallTau > 0
+        updateVisibility()
+        needsDisplay = true
+    }
+
+    /// Live curves: the draw loop resolves `source` against the engine's frames.
+    func update(source: RtaMetalCurveSource, engine: RtaEngine, active: Bool) {
+        if feed == nil {
+            let feed = RtaMetalCurveFeed(engine: engine)
+            self.feed = feed
+            renderer?.feed = feed
+            // Smoothing keeps the loop running; without it nothing draws until
+            // asked, so ask whenever the picture changes.
+            feedChanges = engine.frameFeed.$version.sink { [weak self] _ in
+                guard let self, !self.animating else { return }
+                self.needsDisplay = true
+            }
+        }
+        feed?.setSource(source)
+        requestedActive = active
+        animating = feed?.animating ?? false
         updateVisibility()
         needsDisplay = true
     }
@@ -146,6 +229,7 @@ final class RtaMetalCurveView: MTKView {
         isPaused = true
         renderer?.active = false
         removeObservers()
+        feedChanges = nil
         delegate = nil
     }
     deinit { removeObservers() }
@@ -246,10 +330,15 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
         busy[i] = false
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    /// Set for live curves; nil when a panel is supplied directly.
+    var feed: RtaMetalCurveFeed?
+
     func draw(in view: MTKView) {
         precondition(Thread.isMainThread)
-        guard active, view.bounds.width > 4, view.bounds.height > 4,
-              let drawable = view.currentDrawable, let command = resources.queue.makeCommandBuffer() else { return }
+        guard active, view.bounds.width > 4, view.bounds.height > 4 else { return }
+        if let fresh = feed?.panelIfChanged() { update(fresh) }
+        guard let drawable = view.currentDrawable,
+              let command = resources.queue.makeCommandBuffer() else { return }
         let scale = CGFloat(drawable.texture.width) / view.bounds.width
         guard encode(command: command, target: drawable.texture, size: view.bounds.size, backingScale: scale,
                      now: Date(timeIntervalSinceReferenceDate: CACurrentMediaTime())) else { return }

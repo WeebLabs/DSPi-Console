@@ -51,6 +51,15 @@ struct RtaRenderingActiveReader<Content: View>: View {
     var body: some View { content(active) }
 }
 
+/// Re-evaluates its content whenever the analyser's picture changes.  Only the
+/// Canvas fallbacks need it: the Metal views follow the frames without SwiftUI.
+struct RtaFrameFeedReader<Content: View>: View {
+    @ObservedObject var feed: RtaFrameFeed
+    @ViewBuilder let content: () -> Content
+
+    var body: some View { content() }
+}
+
 /// Watches the analyser for as long as the view is on screen.
 ///
 /// The device has one FFT engine, so a view cannot simply ask for a picture -
@@ -221,9 +230,13 @@ func rtaBandIsPopulated(band i: Int, sampleRateHz: Double, fftOrder: Int,
 /// own band-centre table rather than a table of our own, so the picture and the
 /// labels can never disagree about where a band sits.
 struct RtaBandsView: View, Equatable {
+    /// Where the frames come from.  Always the same engine, so left out of `==`.
+    let engine: RtaEngine
+    let tap: UInt8
+    let channel: Int
     let configuration: RtaDisplayConfiguration
-    let fallTau: TimeInterval
-    let frame: RtaBandFrame?
+    /// The smoothing preference; the time constant is worked out when drawing.
+    let smoothing: Double
     let color: Color
     let scale: RtaScale
     var showPeakHold: Bool = true
@@ -236,21 +249,20 @@ struct RtaBandsView: View, Equatable {
     /// The strip supplies one shared Metal surface above all its static grids.
     var drawsBars: Bool = true
 
-    private var bandCount: Int {
-        let n = Int(frame?.nBands ?? 0)
-        return n > 0 ? min(n, RTA_MAX_BANDS) : max(configuration.centres.count, 34)
-    }
+    private var bandCount: Int { configuration.barCount }
 
     private var visibleBands: [Int] {
-        smoothing.cache.visibleBands(configuration: configuration, count: bandCount)
+        renderState.cache.visibleBands(configuration: configuration, count: bandCount)
     }
 
-    init(engine: RtaEngine, frame: RtaBandFrame?, color: Color, scale: RtaScale,
+    init(engine: RtaEngine, tap: UInt8, channel: Int, color: Color, scale: RtaScale,
          showPeakHold: Bool = true, showLabels: Bool = false, showLevelLabels: Bool = true,
          drawsBars: Bool = true) {
+        self.engine = engine
+        self.tap = tap
+        self.channel = channel
         configuration = RtaDisplayConfiguration(engine: engine)
-        fallTau = rtaFallTau(engine, AppSettings.shared.rtaSmoothing)
-        self.frame = frame?.displayFrame
+        smoothing = AppSettings.shared.rtaSmoothing
         self.color = color
         self.scale = scale
         self.showPeakHold = showPeakHold
@@ -260,8 +272,9 @@ struct RtaBandsView: View, Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.configuration == rhs.configuration && lhs.fallTau == rhs.fallTau
-            && lhs.frame == rhs.frame && lhs.color == rhs.color && lhs.scale == rhs.scale
+        lhs.tap == rhs.tap && lhs.channel == rhs.channel
+            && lhs.configuration == rhs.configuration && lhs.smoothing == rhs.smoothing
+            && lhs.color == rhs.color && lhs.scale == rhs.scale
             && lhs.showPeakHold == rhs.showPeakHold && lhs.showLabels == rhs.showLabels
             && lhs.showLevelLabels == rhs.showLevelLabels
             && lhs.drawsBars == rhs.drawsBars
@@ -271,11 +284,11 @@ struct RtaBandsView: View, Equatable {
     /// `@State`, so SwiftUI keeps it for the life of this view without
     /// observing it: stepping the filter must not invalidate the view that
     /// stepped it, or the two would chase each other every frame.
-    @State private var smoothing = RtaSmoothingState()
+    @State private var renderState = RtaSmoothingState()
 
     /// Levels in dBFS, one per band slot, with no frame reading as silence so
     /// the bars rise into view rather than appearing at full height.
-    private func targets() -> (avg: [Double], peak: [Double]) {
+    private func targets(_ frame: RtaBandFrame?) -> (avg: [Double], peak: [Double]) {
         let n = bandCount
         guard let frame else {
             return (Array(repeating: scale.floorDB, count: n),
@@ -293,7 +306,7 @@ struct RtaBandsView: View, Equatable {
     /// Distinguishes one channel's numbers from another's, so a channel change
     /// snaps instead of sliding over from the channel before it.
     private var seriesIdentity: Int {
-        Int(configuration.tap) << 24 | Int(frame?.channel ?? 0xFF) << 8 | bandCount
+        Int(tap) << 24 | channel << 8 | bandCount
     }
 
     var body: some View {
@@ -307,28 +320,35 @@ struct RtaBandsView: View, Equatable {
             RtaRenderingActiveReader { active in
                 if drawsBars, RtaMetalBarResources.shared != nil {
                     GeometryReader { geometry in
-                        RtaMetalBars(panels: [RtaMetalBarPanel(
-                            configuration: configuration, frame: frame, color: color, scale: scale,
-                            fallTau: fallTau, showPeakHold: showPeakHold,
+                        RtaMetalBars(engine: engine, sources: [RtaMetalBarSource(
+                            tap: tap, channel: channel, color: RtaMetalBarPanel.rgba(color),
+                            scale: scale, smoothing: smoothing, showPeakHold: showPeakHold,
                             rect: CGRect(x: 0, y: 0, width: geometry.size.width,
-                                         height: max(0, geometry.size.height - (showLabels ? 12 : 0))),
-                            cache: smoothing.cache)], active: active)
-                    }
-                } else if drawsBars, fallTau > 0 {
-                    let target = targets()
-                    TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
-                        canvas(now: timeline.date, target: target)
+                                         height: max(0, geometry.size.height - (showLabels ? 12 : 0))))],
+                            active: active)
                     }
                 } else if drawsBars {
-                    canvas(now: nil, target: targets())
+                    // Without Metal the Canvas is the only renderer, so it has
+                    // to follow each frame through SwiftUI.
+                    RtaFrameFeedReader(feed: engine.frameFeed) {
+                        let target = targets(engine.frame(channel: channel, tap: tap))
+                        let tau = rtaFallTau(engine, smoothing)
+                        if tau > 0 {
+                            TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
+                                canvas(now: timeline.date, target: target, tau: tau)
+                            }
+                        } else {
+                            canvas(now: nil, target: target, tau: 0)
+                        }
+                    }
                 }
             }
         }
     }
 
-    private func canvas(now: Date?, target t: (avg: [Double], peak: [Double])) -> some View {
+    private func canvas(now: Date?, target t: (avg: [Double], peak: [Double]),
+                        tau: TimeInterval) -> some View {
         let identity = seriesIdentity
-        let tau = fallTau
         // Allow asynchronous presentation; data preparation is cached separately.
         return Canvas(rendersAsynchronously: true) { ctx, size in
             let labelHeight: CGFloat = showLabels ? 12 : 0
@@ -341,13 +361,13 @@ struct RtaBandsView: View, Equatable {
             let avg: [Double]
             let peak: [Double]
             if let now {
-                avg = smoothing.bars.step(now: now, target: t.avg, identity: identity,
-                                          riseTau: tau * 0.4, fallTau: tau)
+                avg = renderState.bars.step(now: now, target: t.avg, identity: identity,
+                                            riseTau: tau * 0.4, fallTau: tau)
                 // A peak cap that eased upward would stop being a peak; only
                 // its fall is interpolated, and the device is already decaying
                 // it at the rate the user chose.
-                peak = showPeakHold ? smoothing.caps.step(now: now, target: t.peak, identity: identity,
-                                                          riseTau: 0, fallTau: tau) : []
+                peak = showPeakHold ? renderState.caps.step(now: now, target: t.peak, identity: identity,
+                                                            riseTau: 0, fallTau: tau) : []
             } else {
                 avg = t.avg
                 peak = t.peak
@@ -544,7 +564,7 @@ extension RtaEngine {
     /// Kept separate from raw-bin geometry so quiet bass remains measurable.
     func transformHasBin(inBand i: Int) -> Bool {
         guard i >= 0, i < bandCentresHz.count else { return true }
-        let rate = snapshot.status.sampleRateHz > 0 ? Double(snapshot.status.sampleRateHz) : 48000
+        let rate = display.sampleRateHz > 0 ? Double(display.sampleRateHz) : 48000
         return rtaBandIsPopulated(band: i, sampleRateHz: rate,
                                   fftOrder: Int(options.fftOrder), bassBands: Int(caps.bassBands))
     }
@@ -552,7 +572,7 @@ extension RtaEngine {
     /// The centre of the lowest band this configuration can measure at all, for
     /// the note that tells the user what a larger transform would buy.
     var lowestMeasurableCentreHz: Double? {
-        let first = snapshot.status.firstResolvedBand
+        let first = display.firstResolvedBand
         guard first > 0, first < bandCentresHz.count else { return nil }
         return bandCentresHz[first]
     }
@@ -1245,11 +1265,11 @@ private struct BarStripOptionsPanel: View {
 // MARK: - Bar strip
 
 extension RtaMetalBarPanel {
-    init(configuration: RtaDisplayConfiguration, frame: RtaBandFrame?, color: Color,
-         scale: RtaScale, fallTau: TimeInterval, showPeakHold: Bool, rect: CGRect,
-         cache: RtaRenderCache) {
-        let count = (frame?.nBands ?? 0) > 0
-            ? min(Int(frame!.nBands), RTA_MAX_BANDS) : max(configuration.centres.count, 34)
+    init(configuration: RtaDisplayConfiguration, tap: UInt8, channel: Int, frame: RtaBandFrame?,
+         color: SIMD4<Float>, scale: RtaScale, fallTau: TimeInterval, showPeakHold: Bool,
+         rect: CGRect, cache: RtaRenderCache) {
+        // The same count the grid lays out, so bars and labels stay aligned.
+        let count = configuration.barCount
         var levels = [Double](repeating: scale.floorDB, count: count)
         var peaks = showPeakHold ? levels : []
         if let frame {
@@ -1258,10 +1278,10 @@ extension RtaMetalBarPanel {
                 if showPeakHold, i < frame.peak.count { peaks[i] = configuration.levelDB(frame.peak[i]) }
             }
         }
-        self.init(identity: Int(configuration.tap) << 24 | Int(frame?.channel ?? 0xFF) << 8 | count,
+        self.init(identity: Int(tap) << 24 | channel << 8 | count,
                   rect: rect, levels: levels, peaks: peaks,
                   visible: cache.visibleBands(configuration: configuration, count: count),
-                  color: Self.rgba(color), floorDB: scale.floorDB, ceilingDB: scale.ceilingDB,
+                  color: color, floorDB: scale.floorDB, ceilingDB: scale.ceilingDB,
                   fallTau: fallTau, showPeakHold: showPeakHold)
     }
 }
@@ -1294,7 +1314,6 @@ struct SpectrumBarStrip: View {
 
     @State private var optionsOpen = false
     @State private var isHovered = false
-    @State private var barCache = RtaRenderCache()
 
     /// Tall enough for the gear, and kept in every cell so rows line up.
     private let nameRowHeight: CGFloat = 14
@@ -1358,8 +1377,7 @@ struct SpectrumBarStrip: View {
                         .frame(height: nameRowHeight)
                         // Every cell carries its own frequency axis, since
                         // side-by-side cells share no row below them.
-                        RtaBandsView(engine: engine,
-                                     frame: engine.frame(channel: ch, tap: selection.tap),
+                        RtaBandsView(engine: engine, tap: selection.tap, channel: ch,
                                      color: color(selection, ch),
                                      scale: scale,
                                      showPeakHold: settings.rtaShowPeakHold,
@@ -1379,18 +1397,15 @@ struct SpectrumBarStrip: View {
             .overlay {
                 if RtaMetalBarResources.shared != nil {
                     GeometryReader { geometry in
-                        let configuration = RtaDisplayConfiguration(engine: engine)
-                        let tau = rtaFallTau(engine, settings.rtaSmoothing)
-                        RtaMetalBars(panels: selection.channels.enumerated().map { index, ch in
-                            RtaMetalBarPanel(
-                                configuration: configuration,
-                                frame: engine.frame(channel: ch, tap: selection.tap),
-                                color: color(selection, ch), scale: scale, fallTau: tau,
+                        RtaMetalBars(engine: engine, sources: selection.channels.enumerated().map { index, ch in
+                            RtaMetalBarSource(
+                                tap: selection.tap, channel: ch,
+                                color: RtaMetalBarPanel.rgba(color(selection, ch)), scale: scale,
+                                smoothing: settings.rtaSmoothing,
                                 showPeakHold: settings.rtaShowPeakHold,
                                 rect: rtaBarStripPlot(index: index, count: count, columns: columns,
                                                      width: geometry.size.width,
-                                                     graphHeight: cellHeight(single: single)),
-                                cache: barCache)
+                                                     graphHeight: cellHeight(single: single)))
                         })
                     }
                     .allowsHitTesting(false)
@@ -1742,8 +1757,7 @@ struct SpectrumAnalyserView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
-            RtaBandsView(engine: engine,
-                         frame: engine.frame(channel: ch, tap: tap),
+            RtaBandsView(engine: engine, tap: tap, channel: ch,
                          color: color(tap, ch),
                          scale: scale,
                          showPeakHold: settings.rtaShowPeakHold,
@@ -1803,7 +1817,20 @@ struct SpectrumAnalyserView: View {
     // MARK: Status
 
     private func statusBar(showsBars: Bool) -> some View {
-        let s = engine.snapshot.status
+        RtaStatusBar(engine: engine, telemetry: engine.telemetry, showsBars: showsBars)
+    }
+}
+
+/// The analyser window's status line.  It is the only view observing the
+/// telemetry, so the status changing twice a second redraws this line alone.
+private struct RtaStatusBar: View {
+    @ObservedObject var engine: RtaEngine
+    @ObservedObject var telemetry: RtaTelemetry
+    @ObservedObject private var settings = AppSettings.shared
+    let showsBars: Bool
+
+    var body: some View {
+        let s = telemetry.status
         // The shaded bars low in the scale have a remedy in Settings, so name
         // it rather than leave the user to conclude the analyser is broken.
         let lowBandHint: Double? = showsBars && s.isRunning

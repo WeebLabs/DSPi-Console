@@ -44,13 +44,10 @@ struct GraphSpectrumOverlay: View {
     var body: some View {
         if engine.supported, let plan = plan {
             GraphSpectrumCanvas(
-                plan: plan, configuration: RtaDisplayConfiguration(engine: engine),
-                frames: engine.snapshot.frames.filter { key, _ in plan.channels.contains { $0.rta == Int(key) } }
-                    .mapValues { $0.displayFrame },
-                bins: plan.wantsBins ? engine.snapshot.bins?.displayFrame : nil,
+                engine: engine, plan: plan, configuration: RtaDisplayConfiguration(engine: engine),
                 chOut1: vm.chOut1, minFreq: minFreq, maxFreq: maxFreq,
                 scale: RtaScale(floorDB: settings.rtaFloorDB, ceilingDB: settings.rtaCeilingDB),
-                tau: rtaFallTau(engine, settings.rtaSmoothing), showPeak: settings.rtaShowPeakHold,
+                smoothing: settings.rtaSmoothing, showPeak: settings.rtaShowPeakHold,
                 glow: settings.showGraphGlow, opacity: settings.rtaGraphOpacity)
                 .equatable()
                 .allowsHitTesting(false)
@@ -101,28 +98,27 @@ struct GraphSpectrumOverlay: View {
 
 }
 
-/// A value-only boundary keeps unrelated meter and analyser telemetry updates
-/// out of the animated canvas. Only the selected channels enter this view.
+/// A value-only boundary keeps view-model updates out of the drawing.  The
+/// frames never pass through it: the Metal view reads them from the engine.
 private struct GraphSpectrumCanvas: View, Equatable {
+    /// Where the frames come from.  Always the same engine, so left out of `==`.
+    let engine: RtaEngine
     let plan: GraphSpectrumOverlay.Plan
     let configuration: RtaDisplayConfiguration
-    let frames: [UInt8: RtaBandFrame]
-    let bins: RtaBinFrame?
     let chOut1: Int
     let minFreq: Float
     let maxFreq: Float
     let scale: RtaScale
-    let tau: TimeInterval
+    let smoothing: Double
     let showPeak: Bool
     let glow: Bool
     let opacity: Double
-    @State private var smoothing = RtaCurveSmoothing()
+    @State private var curveSmoothing = RtaCurveSmoothing()
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.plan == rhs.plan && lhs.configuration == rhs.configuration
-            && lhs.frames == rhs.frames && lhs.bins == rhs.bins && lhs.chOut1 == rhs.chOut1
+        lhs.plan == rhs.plan && lhs.configuration == rhs.configuration && lhs.chOut1 == rhs.chOut1
             && lhs.minFreq == rhs.minFreq && lhs.maxFreq == rhs.maxFreq && lhs.scale == rhs.scale
-            && lhs.tau == rhs.tau && lhs.showPeak == rhs.showPeak
+            && lhs.smoothing == rhs.smoothing && lhs.showPeak == rhs.showPeak
             && lhs.glow == rhs.glow && lhs.opacity == rhs.opacity
     }
 
@@ -131,32 +127,42 @@ private struct GraphSpectrumCanvas: View, Equatable {
         // `RtaRenderingActiveReader` for why reading it here would miss changes.
         RtaRenderingActiveReader { active in
             if RtaMetalCurveResources.shared != nil {
-                RtaMetalCurves(panel: RtaMetalCurvePanel(
-                    tap: plan.tap, configuration: configuration,
+                RtaMetalCurves(engine: engine, source: RtaMetalCurveSource(
+                    tap: plan.tap,
                     channels: plan.channels.map { channel in
-                        RtaMetalCurveChannel(channel: channel.rta,
-                            color: RtaMetalBarPanel.rgba(eqCurveColor(eqCh: channel.eq, chOut1: chOut1)),
-                            bands: frames[UInt8(clamping: channel.rta)],
-                            bins: plan.wantsBins ? bins : nil)
-                    }, minFreq: Double(minFreq), maxFreq: Double(maxFreq), scale: scale,
-                    fallTau: tau, showPeak: showPeak, glow: glow, opacity: opacity), active: active)
-            } else if tau > 0 {
-                TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
-                    canvas(now: timeline.date)
-                }
+                        RtaMetalCurveSource.Channel(channel: channel.rta,
+                            color: RtaMetalBarPanel.rgba(eqCurveColor(eqCh: channel.eq, chOut1: chOut1)))
+                    },
+                    wantsBins: plan.wantsBins, minFreq: Double(minFreq), maxFreq: Double(maxFreq),
+                    scale: scale, smoothing: smoothing, showPeak: showPeak, glow: glow,
+                    opacity: opacity), active: active)
             } else {
-                canvas(now: nil)
+                // Without Metal the Canvas is the only renderer, so it has to
+                // follow each frame through SwiftUI.
+                RtaFrameFeedReader(feed: engine.frameFeed) {
+                    let snapshot = engine.snapshot
+                    let bins = plan.wantsBins ? snapshot.bins : nil
+                    let tau = rtaFallTau(engine, smoothing)
+                    if tau > 0 {
+                        TimelineView(.animation(minimumInterval: rtaFrameInterval, paused: !active)) { timeline in
+                            canvas(now: timeline.date, frames: snapshot.frames, bins: bins, tau: tau)
+                        }
+                    } else {
+                        canvas(now: nil, frames: snapshot.frames, bins: bins, tau: 0)
+                    }
+                }
             }
         }
     }
 
-    private func canvas(now: Date?) -> some View {
+    private func canvas(now: Date?, frames: [UInt8: RtaBandFrame], bins: RtaBinFrame?,
+                        tau: TimeInterval) -> some View {
         // Allow asynchronous presentation; data preparation is cached separately.
         return Canvas(rendersAsynchronously: true) { ctx, size in
             let plot = CGRect(origin: .zero, size: size)
             guard plot.width > 4, plot.height > 4, configuration.tap == plan.tap else { return }
 
-            let curves = RtaCurveBuilder(configuration: configuration, smoothing: smoothing,
+            let curves = RtaCurveBuilder(configuration: configuration, smoothing: curveSmoothing,
                                          minFreq: Double(minFreq), maxFreq: Double(maxFreq),
                                          plot: plot, scale: scale, now: now, tau: tau)
             var traces: [Trace] = []
@@ -170,11 +176,11 @@ private struct GraphSpectrumCanvas: View, Equatable {
                 var curve = bands
                 var dense = false
                 if plan.wantsBins {
-                    let bins = self.bins.flatMap { Int($0.channel) == channel.rta ? $0 : nil }
+                    let binPoints = bins.flatMap { Int($0.channel) == channel.rta ? $0 : nil }
                         .map { curves.binPoints($0, channel: channel.rta) } ?? []
-                    curve = curves.blend(bands: bands, bins: bins)
+                    curve = curves.blend(bands: bands, bins: binPoints)
                     // Until a bin frame arrives the blend is just the bands.
-                    dense = bins.count > 1
+                    dense = binPoints.count > 1
                 }
                 var trace = Trace(colour: colour)
                 if curve.count > 1 {

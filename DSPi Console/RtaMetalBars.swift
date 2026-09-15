@@ -1,8 +1,59 @@
 import SwiftUI
 import MetalKit
+import Combine
 
-/// An immutable channel snapshot. SwiftUI supplies new targets at USB cadence;
-/// MetalKit owns the 60 Hz draw loop without reevaluating SwiftUI every frame.
+/// One channel's bars, described by where their numbers come from.  SwiftUI
+/// hands these over only when the layout or a setting changes; the draw loop
+/// reads each new frame from the engine itself, so a frame costs no view update.
+struct RtaMetalBarSource: Equatable {
+    let tap: UInt8
+    let channel: Int
+    let color: SIMD4<Float>
+    let scale: RtaScale
+    /// The smoothing preference.  The time constant also depends on the
+    /// engine's live refresh interval, so it is worked out when resolving.
+    let smoothing: Double
+    let showPeakHold: Bool
+    let rect: CGRect
+}
+
+/// Resolves sources into panels against the engine's latest snapshot, and only
+/// when the engine reports the picture changed.  Main thread only.
+final class RtaMetalBarFeed {
+    private weak var engine: RtaEngine?
+    private var sources: [RtaMetalBarSource] = []
+    private var resolvedVersion: UInt64?
+    private let cache = RtaRenderCache()
+
+    init(engine: RtaEngine) { self.engine = engine }
+
+    var animating: Bool { sources.contains { $0.smoothing > 0 } }
+
+    func setSources(_ new: [RtaMetalBarSource]) {
+        guard new != sources else { return }
+        sources = new
+        resolvedVersion = nil
+    }
+
+    /// New panels, or nil when nothing has changed since the last call.
+    func panelsIfChanged() -> [RtaMetalBarPanel]? {
+        guard let engine else { return nil }
+        let version = engine.frameFeed.version
+        guard version != resolvedVersion else { return nil }
+        resolvedVersion = version
+        let configuration = RtaDisplayConfiguration(engine: engine)
+        return sources.map { source in
+            RtaMetalBarPanel(configuration: configuration, tap: source.tap, channel: source.channel,
+                             frame: engine.frame(channel: source.channel, tap: source.tap),
+                             color: source.color, scale: source.scale,
+                             fallTau: rtaFallTau(engine, source.smoothing),
+                             showPeakHold: source.showPeakHold, rect: source.rect, cache: cache)
+        }
+    }
+}
+
+/// An immutable channel snapshot: resolved from a source by the draw loop, or
+/// supplied directly by tests and benchmarks.
 struct RtaMetalBarPanel {
     let identity: Int
     let rect: CGRect
@@ -63,17 +114,18 @@ final class RtaMetalBarResources {
 }
 
 struct RtaMetalBars: NSViewRepresentable {
-    let panels: [RtaMetalBarPanel]
+    let engine: RtaEngine
+    let sources: [RtaMetalBarSource]
     var active = true
 
     func makeNSView(context: Context) -> RtaMetalBarView {
         let view = RtaMetalBarView()
-        view.update(panels: panels, active: active)
+        view.update(sources: sources, engine: engine, active: active)
         return view
     }
 
     func updateNSView(_ view: RtaMetalBarView, context: Context) {
-        view.update(panels: panels, active: active)
+        view.update(sources: sources, engine: engine, active: active)
     }
 
     static func dismantleNSView(_ view: RtaMetalBarView, coordinator: ()) {
@@ -88,6 +140,8 @@ final class RtaMetalBarView: MTKView {
     private var requestedActive = true
     private var animating = false
     private var observers: [NSObjectProtocol] = []
+    private var feed: RtaMetalBarFeed?
+    private var feedChanges: AnyCancellable?
 
     init() {
         let resources = RtaMetalBarResources.shared
@@ -111,10 +165,31 @@ final class RtaMetalBarView: MTKView {
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+    /// Fixed panels, for tests and benchmarks.
     func update(panels: [RtaMetalBarPanel], active: Bool) {
         renderer?.update(panels)
         requestedActive = active
         animating = panels.contains { $0.fallTau > 0 }
+        updateVisibility()
+        needsDisplay = true
+    }
+
+    /// Live bars: the draw loop resolves `sources` against the engine's frames.
+    func update(sources: [RtaMetalBarSource], engine: RtaEngine, active: Bool) {
+        if feed == nil {
+            let feed = RtaMetalBarFeed(engine: engine)
+            self.feed = feed
+            renderer?.feed = feed
+            // Smoothing keeps the loop running; without it nothing draws until
+            // asked, so ask whenever the picture changes.
+            feedChanges = engine.frameFeed.$version.sink { [weak self] _ in
+                guard let self, !self.animating else { return }
+                self.needsDisplay = true
+            }
+        }
+        feed?.setSources(sources)
+        requestedActive = active
+        animating = feed?.animating ?? false
         updateVisibility()
         needsDisplay = true
     }
@@ -155,6 +230,7 @@ final class RtaMetalBarView: MTKView {
         isPaused = true
         renderer?.active = false
         removeObservers()
+        feedChanges = nil
         delegate = nil
     }
 
@@ -208,10 +284,14 @@ final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+    /// Set for live bars; nil when panels are supplied directly.
+    var feed: RtaMetalBarFeed?
+
     func draw(in view: MTKView) {
         precondition(Thread.isMainThread)
-        guard active, view.bounds.width > 0, view.bounds.height > 0,
-              let slot = acquireSlot() else { return }
+        guard active, view.bounds.width > 0, view.bounds.height > 0 else { return }
+        if let fresh = feed?.panelsIfChanged() { update(fresh) }
+        guard let slot = acquireSlot() else { return }
         guard let descriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
               let command = resources.queue.makeCommandBuffer(),

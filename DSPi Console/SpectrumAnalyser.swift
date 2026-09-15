@@ -305,8 +305,7 @@ struct RtaBinAverage {
     }
 }
 
-/// Everything the engine republishes after a poll, in one value so a tick costs
-/// SwiftUI a single invalidation rather than one per field.
+/// Everything the engine holds after a poll.
 struct RtaSnapshot: Equatable {
     /// Latest band frame per channel, keyed by channel index at the active tap.
     var frames: [UInt8: RtaBandFrame] = [:]
@@ -315,6 +314,40 @@ struct RtaSnapshot: Equatable {
     /// The tap the frames in this snapshot were taken at.  A view at the other
     /// tap must not draw them as its own.
     var tap: UInt8 = RTA_TAP_OUTPUT
+}
+
+/// The frame-derived state that decides how a display is laid out rather than
+/// what it shows.  It changes with the configuration or the sample rate, not
+/// with every frame, so it is the only frame-derived state SwiftUI observes.
+struct RtaDisplayState: Equatable {
+    var tap: UInt8 = RTA_TAP_OUTPUT
+    var sampleRateHz: UInt32 = 0
+    var firstResolvedBand: Int = 0
+    /// Bands in the latest frames; 0 until a frame arrives.
+    var bandCount: Int = 0
+
+    init() {}
+
+    init(_ snapshot: RtaSnapshot) {
+        tap = snapshot.tap
+        sampleRateHz = snapshot.status.sampleRateHz
+        firstResolvedBand = snapshot.status.firstResolvedBand
+        bandCount = snapshot.frames.values.map { Int($0.nBands) }.max() ?? 0
+    }
+}
+
+/// Advances whenever the analyser's picture changes, for the displays that draw
+/// only on demand: a Metal view with smoothing off, and the Canvas fallback.
+/// Kept apart from the engine's published state so nothing else redraws with it.
+final class RtaFrameFeed: ObservableObject {
+    @Published private(set) var version: UInt64 = 0
+    func advance() { version &+= 1 }
+}
+
+/// The analyser window's status line, published on its own so its changes
+/// twice a second redraw the status bar and nothing else.
+final class RtaTelemetry: ObservableObject {
+    @Published fileprivate(set) var status = RtaStatus()
 }
 
 /// The three settings the device owns rather than the app: transform size,
@@ -355,7 +388,15 @@ final class RtaEngine: ObservableObject {
     /// Nominal third-octave centre frequencies, straight from the caps table,
     /// so the axis labels come from the same source as the band edges.
     @Published private(set) var bandCentresHz: [Double] = []
-    @Published private(set) var snapshot = RtaSnapshot()
+    /// The latest frames, bins and status.  Deliberately not published: an
+    /// update at the poll rate re-evaluated every view observing the engine and
+    /// laid the window out again, only to hand the numbers to Metal views that
+    /// can read them here as they draw.  Main thread only.
+    private(set) var snapshot = RtaSnapshot()
+    /// The layout-relevant part of the snapshot, published only when it changes.
+    @Published private(set) var display = RtaDisplayState()
+    let frameFeed = RtaFrameFeed()
+    let telemetry = RtaTelemetry()
     /// Set when the device has repeatedly refused the configuration we are
     /// asking for.  The views show the reason rather than an empty graph.
     @Published private(set) var configRejected: Bool = false
@@ -440,7 +481,7 @@ final class RtaEngine: ObservableObject {
                 // A hidden window can be shown again before STOP completes.
                 // Never clear data belonging to that new subscription.
                 guard let self, !self.isWatching else { return }
-                self.snapshot = RtaSnapshot()
+                self.replaceSnapshot(RtaSnapshot())
                 self.binAverage.reset()
             }
         }
@@ -461,6 +502,7 @@ final class RtaEngine: ObservableObject {
     func setOptions(_ new: RtaOptions) {
         guard new != options else { return }
         options = new
+        frameFeed.advance()
         lock.lock()
         pollOptions = new
         appliedConfig = nil
@@ -526,6 +568,7 @@ final class RtaEngine: ObservableObject {
             guard let self, usb.generation == generation else { return }
             self.caps = caps
             self.bandCentresHz = Array(centres.prefix(Int(caps.maxBands)))
+            self.frameFeed.advance()
             self.supported = complete
             // Fold this device's limits into the options: a size outside the
             // range this device reports would be STALLed on every push.
@@ -548,7 +591,7 @@ final class RtaEngine: ObservableObject {
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.supported = false
-            self?.snapshot = RtaSnapshot()
+            self?.replaceSnapshot(RtaSnapshot())
             self?.configRejected = false
         }
     }
@@ -724,9 +767,35 @@ final class RtaEngine: ObservableObject {
                 self.binAverage.reset()
             }
             if let status { s.status = status }
-            if s != self.snapshot { self.snapshot = s }
+            self.replaceSnapshot(s)
             if let rejected, rejected != self.configRejected { self.configRejected = rejected }
         }
+    }
+
+    // MARK: Publishing
+
+    /// Adopt a new snapshot.  Main thread only.
+    ///
+    /// Only the display state and the telemetry reach SwiftUI, each only when
+    /// it changes.  The feed advances when something a display draws changed;
+    /// a frame whose age or sequence number alone moved has not.
+    private func replaceSnapshot(_ s: RtaSnapshot) {
+        let old = snapshot
+        guard s != old else { return }
+        snapshot = s
+        if s.tap != old.tap || s.status != old.status
+            || s.bins?.displayFrame != old.bins?.displayFrame || !Self.drawsSame(s.frames, old.frames) {
+            frameFeed.advance()
+        }
+        if telemetry.status != s.status { telemetry.status = s.status }
+        let d = RtaDisplayState(s)
+        if d != display { display = d }
+    }
+
+    /// Whether two sets of band frames draw the same picture.
+    static func drawsSame(_ a: [UInt8: RtaBandFrame], _ b: [UInt8: RtaBandFrame]) -> Bool {
+        guard a.count == b.count else { return false }
+        return a.allSatisfy { ch, f in b[ch].map { $0.displayFrame == f.displayFrame } ?? false }
     }
 
     // MARK: Stopped streams

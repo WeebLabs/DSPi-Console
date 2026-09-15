@@ -10,22 +10,32 @@ struct RtaDisplayConfiguration: Equatable {
     var bassBands: Int
     var firstResolvedBand: Int
     var levelZero: Double
+    /// Bands in the device's latest frames; 0 until one arrives.
+    var bandCount: Int = 0
 
     func levelDB(_ value: UInt8) -> Double {
         (Double(value) - levelZero) * RTA_LEVEL_STEP_DB
+    }
+
+    /// Band slots a bar display lays out: the device's count once it has
+    /// reported one, the centre table's before that.
+    var barCount: Int {
+        bandCount > 0 ? min(bandCount, RTA_MAX_BANDS) : max(centres.count, 34)
     }
 }
 
 extension RtaDisplayConfiguration {
     init(engine: RtaEngine) {
-        tap = engine.snapshot.tap
+        let display = engine.display
+        tap = display.tap
         centres = engine.bandCentresHz
-        sampleRateHz = engine.snapshot.status.sampleRateHz
+        sampleRateHz = display.sampleRateHz
         fftOrder = Int(engine.options.fftOrder)
         bassBands = Int(engine.caps.bassBands)
-        firstResolvedBand = engine.snapshot.status.firstResolvedBand
+        firstResolvedBand = display.firstResolvedBand
         levelZero = engine.caps.levelZero == 0
             ? Double(RTA_LEVEL_ZERO_DBFS) : Double(engine.caps.levelZero)
+        bandCount = display.bandCount
     }
 
 }
