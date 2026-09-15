@@ -17,7 +17,7 @@ class SubharmonicSynthWindowController: NSObject, ObservableObject {
             let view = SubharmonicSynthView(vm: vm, controller: self).onboardingHint("subharm")
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 920),
+                contentRect: NSRect(x: 0, y: 0, width: 780, height: 620),
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -26,8 +26,7 @@ class SubharmonicSynthWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: view)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
-            window?.contentMinSize = NSSize(width: 380, height: 360)
-            window?.contentMaxSize = NSSize(width: 380, height: 1200)
+            window?.contentMinSize = NSSize(width: 740, height: 612)
         }
 
         window?.center()
@@ -115,8 +114,6 @@ struct SubharmonicSynthView: View {
         return idx < vm.channelNames.count ? vm.channelNames[idx] : "Out \(out + 1)"
     }
 
-    private func isOff(_ bandDB: Float) -> Bool { bandDB <= SUBHARM_LEVEL_MIN }
-
     var body: some View {
         VStack(spacing: 0) {
             headerSection
@@ -124,47 +121,40 @@ struct SubharmonicSynthView: View {
             Divider()
 
             if supported {
-                ScrollView {
-                    VStack(spacing: 20) {
+                // Two columns of the sections the other tool windows stack.
+                // The graph sits over the band levels that move it, at a
+                // column's width; the right column runs the rest of the
+                // signal path top to bottom.
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 14) {
                         bandGraph
-                            .padding(.top, 16)
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-
-                        startingPointsSection
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-
-                        outputSection
-                            .padding(.horizontal, 16)
-
-                        Divider().padding(.horizontal, 16)
-
-                        parameterSection
-                            .padding(.horizontal, 16)
-
-                        if extended {
-                            Divider().padding(.horizontal, 16)
-
-                            selectivitySection
-                                .padding(.horizontal, 16)
-
-                            Divider().padding(.horizontal, 16)
-
-                            ceilingSection
-                                .padding(.horizontal, 16)
-                                .padding(.bottom, 16)
-                        }
+                        Divider()
+                        bandsColumn
                     }
-                    .padding(.bottom, extended ? 0 : 16)
+                    .column()
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        if extended {
+                            selectivitySection
+                            Divider()
+                            ceilingSection
+                            Divider()
+                        }
+                        boostSection
+                        Divider()
+                        outputSection
+                    }
+                    .column()
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 16)
             } else {
                 unsupportedNote
             }
         }
-        .frame(minWidth: 380, maxWidth: 380)
+        .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear {
             // The bulk fetch carries every field except the headroom, which the
             // firmware derives on demand, and solo, which is runtime-only and
@@ -178,6 +168,12 @@ struct SubharmonicSynthView: View {
             guard controller.isVisible, extended, vm.isDeviceConnected, vm.subharmEnabled else { return }
             DispatchQueue.global(qos: .utility).async { vm.fetchSubharmMeter() }
         }
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundColor(.secondary)
     }
 
     // MARK: - Header
@@ -261,9 +257,12 @@ struct SubharmonicSynthView: View {
 
     private var bandGraph: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("BANDS")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+            HStack(spacing: 16) {
+                sectionLabel("BANDS")
+                Spacer()
+                headroomReadout
+                startingPointsMenu
+            }
 
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
@@ -284,27 +283,17 @@ struct SubharmonicSynthView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)
             )
-
-            // The enclosing stack's 6pt sits the header hard against the graph
-            // frame; this takes the gap to the 20pt that separates every other
-            // section, since the row is styled as a section header.
-            headroomReadout
-                .padding(.top, 14)
         }
     }
 
-    /// The worst-case gain of the current setting, sitting under the graph as
-    /// its caption: it is a property of what the graph is showing, and the
-    /// number moves whenever a band level, the boost or the ceiling does.  Shown
-    /// as a requirement rather than a suggestion - the effect is
-    /// amplitude-linear, so lowering the preamp by this much is exact.
+    /// The worst-case gain of the current setting, in the graph's header row:
+    /// it is a property of what the graph is showing, and the number moves
+    /// whenever a band level, the boost or the ceiling does.  Shown as a
+    /// requirement rather than a suggestion - the effect is amplitude-linear,
+    /// so lowering the preamp by this much is exact.
     private var headroomReadout: some View {
         HStack(spacing: 6) {
-            Text("HEADROOM COST")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
-
-            Spacer()
+            sectionLabel("HEADROOM COST")
 
             Text(vm.subharmHeadroomDB > 0
                  ? String(format: "%+.1f dB", vm.subharmHeadroomDB)
@@ -317,156 +306,31 @@ struct SubharmonicSynthView: View {
               : "This setting cannot push the signal past full scale.")
     }
 
-    // MARK: - Starting Points
-
-    private var startingPointsSection: some View {
-        HStack {
-            Text("STARTING POINTS")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
-            Spacer()
-            Menu {
-                ForEach(0..<subharmStartingPoints.count, id: \.self) { i in
-                    let p = subharmStartingPoints[i]
-                    Button("\(p.name) - \(p.detail)") {
-                        vm.setSubharmLow(p.low)
-                        vm.setSubharmHigh(p.high)
-                        vm.setSubharmBoost(p.boost)
-                        if extended { vm.setSubharmTop(SUBHARM_LEVEL_MIN) }
-                    }
-                }
-            } label: {
-                Text("Apply preset")
-                    .font(.system(size: 11))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(!vm.isDeviceConnected)
-        }
-    }
-
-    // MARK: - Output Channels
-
-    private var outputSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("OUTPUTS")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Menu {
-                    Button("Sub only (recommended)") {
-                        vm.setSubharmMask(subOnlyMask)
-                    }
-                    Button("All outputs") {
-                        vm.setSubharmMask(allOutputsMask)
-                    }
-                    Button("None") {
-                        vm.setSubharmMask(0x0000)
-                    }
-                } label: {
-                    Text("Presets")
-                        .font(.system(size: 11))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .disabled(!vm.isDeviceConnected)
-            }
-
-            Text("Select the outputs that can actually play 24 to 80 Hz. Subharm runs before the crossover, so a satellite with a highpass loses the sub again - mask it off and save the CPU instead.")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 6) {
-                ForEach(0..<outputCount, id: \.self) { out in
-                    outputChip(
-                        out: out,
-                        on: vm.subharmOutputMask & (UInt16(1) << out) != 0
-                    ) {
-                        vm.setSubharmOutputChannel(out, enabled: vm.subharmOutputMask & (UInt16(1) << out) == 0)
-                    }
+    private var startingPointsMenu: some View {
+        Menu {
+            ForEach(0..<subharmStartingPoints.count, id: \.self) { i in
+                let p = subharmStartingPoints[i]
+                Button("\(p.name) - \(p.detail)") {
+                    vm.setSubharmLow(p.low)
+                    vm.setSubharmHigh(p.high)
+                    vm.setSubharmBoost(p.boost)
+                    if extended { vm.setSubharmTop(SUBHARM_LEVEL_MIN) }
                 }
             }
-
-            if extended {
-                Text("The bar under each output is the synthesized sub on its own, not the output - which is what makes it useful while the band levels are being set.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                linkPairsRow
-            }
+        } label: {
+            Text("Apply preset")
+                .font(.system(size: 11))
         }
-    }
-
-    private func outputChip(out: Int, on: Bool, action: @escaping () -> Void) -> some View {
-        VStack(spacing: 3) {
-            Button(action: action) {
-                Text("\(out + 1)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .foregroundColor(on ? .white : .primary.opacity(0.6))
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            if extended {
-                // A masked-off output is never metered by the firmware, so its
-                // rail stays empty rather than showing a stale reading.
-                HorizontalMeterBar(
-                    level: on ? subMeterLevel(out) : Float(0),
-                    color: .accentColor
-                )
-                .frame(height: 3)
-                .opacity(on ? 1 : 0.25)
-            }
-        }
-        .help(outputName(out))
+        .menuStyle(.borderlessButton)
+        .fixedSize()
         .disabled(!vm.isDeviceConnected)
-        .animation(.easeInOut(duration: 0.12), value: on)
     }
 
-    private func subMeterLevel(_ out: Int) -> Float {
-        out < vm.subharmSubMeter.count ? vm.subharmSubMeter[out] : 0
-    }
+    // MARK: - Bands
 
-    private var linkPairsRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Link output pairs")
-                    .font(.system(size: 12, weight: .medium))
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { vm.subharmLinkPairs },
-                    set: { vm.setSubharmLinkPairs($0) }
-                ))
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .disabled(!vm.isDeviceConnected)
-            }
-
-            Text("Synthesize one sub per output pair from its mono sum and feed it to both channels, as the dbx does. Bass is near-mono in most material, and two independent dividers can land on opposite polarities, which cancels a centred note's sub between the speakers.")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    // MARK: - Parameters
-
-    private var parameterSection: some View {
+    private var bandsColumn: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("PARAMETERS")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+            sectionLabel("LEVELS")
 
             bandRow(
                 title: "24 - 36 Hz",
@@ -494,43 +358,13 @@ struct SubharmonicSynthView: View {
                     set: { vm.setSubharmTop($0) }
                 )
             }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("LF Boost")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "dB",
-                        value: vm.subharmBoostDB,
-                        width: 60,
-                        scrollStep: 0.5,
-                        maxDecimals: 1
-                    ) { vm.setSubharmBoost(min(max($0, SUBHARM_BOOST_MIN), SUBHARM_BOOST_MAX)) }
-                }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.subharmBoostDB },
-                        set: { vm.setSubharmBoost($0) }
-                    ),
-                    range: SUBHARM_BOOST_MIN...SUBHARM_BOOST_MAX
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("A gentle bell at 70 Hz, Q 0.9, applied to the whole output after the subs are summed. It fills the gap between the synthesized sub and the program's own mid-bass. Meant to stay gentle, as on the dbx.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 
     /// One band-level row.  The floor is a real setting rather than the bottom
     /// of a range - it switches the band off and skips its divider - so the
-    /// field reads "Off" there instead of "-30.0".
+    /// field reads "Off" there instead of "-30.0".  The explanation is a
+    /// tooltip here: inline, it would set the height of the whole row.
     private func bandRow(
         title: String,
         value: Float,
@@ -565,12 +399,8 @@ struct SubharmonicSynthView: View {
             }
             .font(.system(size: 9))
             .foregroundColor(.secondary)
-
-            Text(help)
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
+        .help(help)
     }
 
     // MARK: - Selectivity (V30)
@@ -579,95 +409,64 @@ struct SubharmonicSynthView: View {
 
     private var selectivitySection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("SELECTIVITY")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+            sectionLabel("SELECTIVITY")
 
-            Picker("", selection: Binding(
-                get: { vm.subharmSelectMode },
-                set: { vm.setSubharmSelectMode($0) }
-            )) {
-                Text("All material").tag(SUBHARM_SELECT_ALL)
-                Text("Percussive").tag(SUBHARM_SELECT_PERCUSSIVE)
-                Text("Sustained").tag(SUBHARM_SELECT_SUSTAINED)
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("", selection: Binding(
+                    get: { vm.subharmSelectMode },
+                    set: { vm.setSubharmSelectMode($0) }
+                )) {
+                    Text("All material").tag(SUBHARM_SELECT_ALL)
+                    Text("Percussive").tag(SUBHARM_SELECT_PERCUSSIVE)
+                    Text("Sustained").tag(SUBHARM_SELECT_SUSTAINED)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(!vm.isDeviceConnected)
+
+                Text(selectivitySummary)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(!vm.isDeviceConnected)
-
-            Text(selectivityHelp)
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            .help(selectivityHelp)
 
             // Depth and hold are ignored by the firmware in "all material" mode,
             // so they are hidden there rather than shown doing nothing.
             if selectivityActive {
-                Divider()
+                paramRow(
+                    title: "Depth",
+                    unit: "%",
+                    value: vm.subharmSelectDepthPct,
+                    range: SUBHARM_DEPTH_MIN...SUBHARM_DEPTH_MAX,
+                    scrollStep: 5,
+                    maxDecimals: 0,
+                    help: "How far the material this mode does not favour is gated down. At 0% the selectivity is inaudible whatever the mode is set to; 100% is full gating.",
+                    set: { vm.setSubharmSelectDepth($0) }
+                )
 
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Depth")
-                            .font(.system(size: 12, weight: .medium))
-                        Spacer()
-                        ValueField(
-                            label: "%",
-                            value: vm.subharmSelectDepthPct,
-                            width: 60,
-                            scrollStep: 5,
-                            maxDecimals: 0
-                        ) { vm.setSubharmSelectDepth(min(max($0, SUBHARM_DEPTH_MIN), SUBHARM_DEPTH_MAX)) }
-                    }
-
-                    CustomSlider(
-                        value: Binding(
-                            get: { vm.subharmSelectDepthPct },
-                            set: { vm.setSubharmSelectDepth($0) }
-                        ),
-                        range: SUBHARM_DEPTH_MIN...SUBHARM_DEPTH_MAX
-                    )
-                    .disabled(!vm.isDeviceConnected)
-
-                    Text("How far the material this mode does not favour is gated down. At 0% the selectivity is inaudible whatever the mode is set to; 100% is full gating.")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Hold")
-                            .font(.system(size: 12, weight: .medium))
-                        Spacer()
-                        ValueField(
-                            label: "ms",
-                            value: vm.subharmSelectHoldMs,
-                            width: 66,
-                            scrollStep: 10,
-                            maxDecimals: 0,
-                            labelWidth: 24
-                        ) { vm.setSubharmSelectHold(min(max($0, SUBHARM_HOLD_MIN_MS), SUBHARM_HOLD_MAX_MS)) }
-                    }
-
-                    CustomSlider(
-                        value: Binding(
-                            get: { vm.subharmSelectHoldMs },
-                            set: { vm.setSubharmSelectHold($0) }
-                        ),
-                        range: SUBHARM_HOLD_MIN_MS...SUBHARM_HOLD_MAX_MS
-                    )
-                    .disabled(!vm.isDeviceConnected)
-
-                    Text(vm.subharmSelectMode == SUBHARM_SELECT_PERCUSSIVE
-                         ? "The length of the sub burst after each attack."
-                         : "How long a band must ring before its sub opens. Every note's first hold period has no sub, so staccato bass lines get little.")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                paramRow(
+                    title: "Hold",
+                    unit: "ms",
+                    value: vm.subharmSelectHoldMs,
+                    range: SUBHARM_HOLD_MIN_MS...SUBHARM_HOLD_MAX_MS,
+                    scrollStep: 10,
+                    maxDecimals: 0,
+                    help: vm.subharmSelectMode == SUBHARM_SELECT_PERCUSSIVE
+                        ? "The length of the sub burst after each attack."
+                        : "How long a band must ring before its sub opens. Every note's first hold period has no sub, so staccato bass lines get little.",
+                    set: { vm.setSubharmSelectHold($0) }
+                )
             }
+        }
+    }
+
+    /// One line under the picker; the full explanation is its tooltip.
+    private var selectivitySummary: String {
+        switch vm.subharmSelectMode {
+        case SUBHARM_SELECT_PERCUSSIVE: return "A short sub burst after each attack - extends kicks, not the bass line."
+        case SUBHARM_SELECT_SUSTAINED:  return "The sub opens once a band has been ringing - extends bass notes, not kicks."
+        default:                        return "Every band signal is treated alike."
         }
     }
 
@@ -687,45 +486,237 @@ struct SubharmonicSynthView: View {
     private var ceilingOff: Bool { vm.subharmCeilingDB >= SUBHARM_CEILING_MAX }
 
     private var ceilingSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("SUB CEILING")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
-                Spacer()
-                ValueField(
-                    label: "dB",
-                    value: vm.subharmCeilingDB,
-                    width: 66,
-                    scrollStep: 1,
-                    maxDecimals: 0,
-                    displayOverride: ceilingOff ? "Off" : nil
-                ) { vm.setSubharmCeiling(min(max($0, SUBHARM_CEILING_MIN), SUBHARM_CEILING_MAX)) }
-            }
-            .padding(.bottom, 4)
+        VStack(alignment: .leading, spacing: 14) {
+            sectionLabel("SUB CEILING")
 
-            CustomSlider(
-                value: Binding(
-                    get: { vm.subharmCeilingDB },
-                    set: { vm.setSubharmCeiling($0) }
-                ),
-                range: SUBHARM_CEILING_MIN...SUBHARM_CEILING_MAX
-            )
-            .disabled(!vm.isDeviceConnected)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Threshold")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    ValueField(
+                        label: "dB",
+                        value: vm.subharmCeilingDB,
+                        width: 60,
+                        scrollStep: 1,
+                        maxDecimals: 0,
+                        displayOverride: ceilingOff ? "Off" : nil
+                    ) { vm.setSubharmCeiling(min(max($0, SUBHARM_CEILING_MIN), SUBHARM_CEILING_MAX)) }
+                }
 
-            HStack {
-                Text("-40 dBFS")
-                Spacer()
-                Text("Off")
-            }
-            .font(.system(size: 9))
-            .foregroundColor(.secondary)
+                CustomSlider(
+                    value: Binding(
+                        get: { vm.subharmCeilingDB },
+                        set: { vm.setSubharmCeiling($0) }
+                    ),
+                    range: SUBHARM_CEILING_MIN...SUBHARM_CEILING_MAX
+                )
+                .disabled(!vm.isDeviceConnected)
 
-            Text("A soft limit on the synthesized sub just before it is mixed back in, capping how far it can push a driver without touching the program signal. It is an absolute level, so a ceiling at full scale limits nothing and means the stage is off. With it on, the headroom above is only the ceiling's worth. A loud onset overshoots it by a few dB for the first few milliseconds while the limiter's 3 ms attack catches up.")
+                HStack {
+                    Text("-40 dBFS")
+                    Spacer()
+                    Text("Off")
+                }
                 .font(.system(size: 9))
                 .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .help("A soft limit on the synthesized sub just before it is mixed back in, capping how far it can push a driver without touching the program signal. It is an absolute level, so a ceiling at full scale limits nothing and means the stage is off. With it on, the headroom cost is only the ceiling's worth. A loud onset overshoots it by a few dB for the first few milliseconds while the limiter's 3 ms attack catches up.")
+    }
+
+    // MARK: - LF Boost
+
+    private var boostSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionLabel("LF BOOST")
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("70 Hz bell")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    ValueField(
+                        label: "dB",
+                        value: vm.subharmBoostDB,
+                        width: 60,
+                        scrollStep: 0.5,
+                        maxDecimals: 1
+                    ) { vm.setSubharmBoost(min(max($0, SUBHARM_BOOST_MIN), SUBHARM_BOOST_MAX)) }
+                }
+
+                CustomSlider(
+                    value: Binding(
+                        get: { vm.subharmBoostDB },
+                        set: { vm.setSubharmBoost($0) }
+                    ),
+                    range: SUBHARM_BOOST_MIN...SUBHARM_BOOST_MAX
+                )
+                .disabled(!vm.isDeviceConnected)
+
+                HStack {
+                    Text("Off")
+                    Spacer()
+                    Text(String(format: "%+.0f dB", SUBHARM_BOOST_MAX))
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            }
+        }
+        .help("A gentle bell at 70 Hz, Q 0.9, applied to the whole output after the subs are summed. It fills the gap between the synthesized sub and the program's own mid-bass. Meant to stay gentle, as on the dbx.")
+    }
+
+    // MARK: - Output Channels
+
+    private var outputSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                sectionLabel("OUTPUTS")
+                Spacer()
+                Menu {
+                    Button("Sub only (recommended)") {
+                        vm.setSubharmMask(subOnlyMask)
+                    }
+                    Button("All outputs") {
+                        vm.setSubharmMask(allOutputsMask)
+                    }
+                    Button("None") {
+                        vm.setSubharmMask(0x0000)
+                    }
+                } label: {
+                    Text("Presets")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(!vm.isDeviceConnected)
+            }
+
+            HStack(spacing: 6) {
+                ForEach(0..<outputCount, id: \.self) { out in
+                    outputChip(
+                        out: out,
+                        on: vm.subharmOutputMask & (UInt16(1) << out) != 0
+                    ) {
+                        vm.setSubharmOutputChannel(out, enabled: vm.subharmOutputMask & (UInt16(1) << out) == 0)
+                    }
+                }
+            }
+            .help("Select the outputs that can actually play 24 to 80 Hz. Subharm runs before the crossover, so a satellite with a highpass loses the sub again - mask it off and save the CPU instead.")
+
+            if extended {
+                linkPairsRow
+                    .padding(.top, 4)
+            }
+        }
+    }
+
+    private func outputChip(out: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 3) {
+            Button(action: action) {
+                Text("\(out + 1)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .foregroundColor(on ? .white : .primary.opacity(0.6))
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            if extended {
+                // A masked-off output is never metered by the firmware, so its
+                // rail stays empty rather than showing a stale reading.  The
+                // bar is the synthesized sub on its own, not the output.
+                HorizontalMeterBar(
+                    level: on ? subMeterLevel(out) : Float(0),
+                    color: .accentColor
+                )
+                .frame(height: 3)
+                .opacity(on ? 1 : 0.25)
+            }
+        }
+        .help(outputName(out))
+        .disabled(!vm.isDeviceConnected)
+        .animation(.easeInOut(duration: 0.12), value: on)
+    }
+
+    private func subMeterLevel(_ out: Int) -> Float {
+        out < vm.subharmSubMeter.count ? vm.subharmSubMeter[out] : 0
+    }
+
+    private var linkPairsRow: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Link output pairs")
+                    .font(.system(size: 12, weight: .medium))
+                Text("One sub per pair, from its mono sum.")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { vm.subharmLinkPairs },
+                set: { vm.setSubharmLinkPairs($0) }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(!vm.isDeviceConnected)
+        }
+        .help("Synthesize one sub per output pair from its mono sum and feed it to both channels, as the dbx does. Bass is near-mono in most material, and two independent dividers can land on opposite polarities, which cancels a centred note's sub between the speakers.")
+    }
+
+    // MARK: - Parameter Row
+
+    /// The labelled ValueField + CustomSlider row the other tool windows use.
+    private func paramRow(
+        title: String,
+        unit: String,
+        value: Float,
+        range: ClosedRange<Float>,
+        scrollStep: Float,
+        maxDecimals: Int,
+        help: String,
+        set: @escaping (Float) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                ValueField(
+                    label: unit,
+                    value: value,
+                    width: 60,
+                    scrollStep: scrollStep,
+                    maxDecimals: maxDecimals
+                ) { set(min(max($0, range.lowerBound), range.upperBound)) }
+            }
+
+            CustomSlider(
+                value: Binding(get: { value }, set: { set($0) }),
+                range: range
+            )
+            .disabled(!vm.isDeviceConnected)
+        }
+        .help(help)
+    }
+}
+
+private extension View {
+    /// One column of the control row: equal share of the width, content pinned
+    /// to the top so section labels line up across columns.
+    func column() -> some View {
+        self
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
