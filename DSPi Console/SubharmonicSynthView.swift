@@ -338,6 +338,7 @@ struct SubharmonicSynthView: View {
 
             bandRow(
                 title: "24 - 36 Hz",
+                source: "48 - 72 Hz",
                 value: vm.subharmLowDB,
                 help: "Level of the sub synthesized from program content between 48 and 72 Hz. At 0 dB it comes out 1.4 dB below the bass that produced it, which is the divider's own gain.",
                 set: { vm.setSubharmLow($0) }
@@ -347,6 +348,7 @@ struct SubharmonicSynthView: View {
 
             bandRow(
                 title: "36 - 56 Hz",
+                source: "72 - 112 Hz",
                 value: vm.subharmHighDB,
                 help: "Level of the sub synthesized from program content between 72 and 112 Hz. This band has its own divider, so a bass note here and a kick in the band below are tracked independently.",
                 set: { vm.setSubharmHigh($0) }
@@ -357,6 +359,7 @@ struct SubharmonicSynthView: View {
 
                 bandRow(
                     title: "56 - 80 Hz",
+                    source: "112 - 160 Hz",
                     value: vm.subharmTopDB,
                     help: "Level of the sub synthesized from program content between 112 and 160 Hz. It ships off: this band reaches up into the range where a divided sub starts to compete with the program's own fundamentals. Turn it up for a subwoofer that cannot reach the lowest octave.",
                     set: { vm.setSubharmTop($0) }
@@ -371,14 +374,22 @@ struct SubharmonicSynthView: View {
     /// tooltip here: inline, it would set the height of the whole row.
     private func bandRow(
         title: String,
+        source: String,
         value: Float,
         help: String,
         set: @escaping (Float) -> Void
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                // The title is the sub the band adds; the caption names the
+                // program range it is synthesized from, an octave above.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Derived from \(source)")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
                 ValueField(
                     label: "dB",
