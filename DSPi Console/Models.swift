@@ -15,6 +15,14 @@ class DSPMeterModel: ObservableObject {
     @Published var status = SystemStatus()
 }
 
+/// Output gains while their slider is being dragged, keyed by output index.
+/// Only the response graph observes this, so a drag step moves the curve
+/// without re-evaluating every view that observes `DSPViewModel`; the release
+/// commits the value to `outputGainDB` once.
+final class OutputGainPreview: ObservableObject {
+    @Published var gains: [Int: Float] = [:]
+}
+
 // MARK: - Channel Model
 
 enum Channel: Int, CaseIterable {

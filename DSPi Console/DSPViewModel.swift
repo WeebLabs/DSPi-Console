@@ -2238,6 +2238,7 @@ class DSPViewModel: ObservableObject {
 
     // Live Data
     let meters = DSPMeterModel()
+    let outputGainPreview = OutputGainPreview()
 
     /// The device's spectrum analyser.  Its own observable, because it
     /// republishes at the poll rate and everything watching the view model

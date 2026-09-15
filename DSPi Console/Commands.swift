@@ -291,10 +291,16 @@ extension DSPViewModel {
         return rounded == -0.0 ? 0.0 : rounded
     }
 
+    /// Drag-time output gain.  The device follows every 0.1 dB step, but only
+    /// the response graph sees it, through `outputGainPreview`: publishing
+    /// `outputGainDB` on every mouse movement re-evaluated each view observing
+    /// the model and starved the main thread.  The release commits the value
+    /// once through `setOutputGain`.
     func sendOutputGainToDevice(output: Int, db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
-        outputGainDB[output] = val
+        guard outputGainPreview.gains[output] != val else { return }
+        outputGainPreview.gains[output] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }
@@ -1687,6 +1693,9 @@ extension DSPViewModel {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
         outputGainDB[output] = val
+        // A drag's preview hands over to the committed value in the same pass,
+        // so the curve does not flick back to the pre-drag gain.
+        if outputGainPreview.gains[output] != nil { outputGainPreview.gains[output] = nil }
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }

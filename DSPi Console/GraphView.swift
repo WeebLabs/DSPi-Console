@@ -105,6 +105,8 @@ struct BodeLineShape: Shape {
 
 struct BodePlotView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Output gains mid-drag, which move the curves without the model publishing.
+    @ObservedObject private var gainPreview: OutputGainPreview
     var isPopOut: Bool = false
     @Binding var visibilityOverride: [Int: Bool]
     @ObservedObject private var settings = AppSettings.shared
@@ -114,6 +116,7 @@ struct BodePlotView: View {
 
     init(vm: DSPViewModel, isPopOut: Bool = false, visibilityOverride: Binding<[Int: Bool]> = .constant([:])) {
         self.vm = vm
+        self.gainPreview = vm.outputGainPreview
         self.isPopOut = isPopOut
         self._visibilityOverride = visibilityOverride
     }
@@ -158,12 +161,22 @@ struct BodePlotView: View {
         isPopOut && !settings.popoutGraphFollowsSelection && !visibilityOverride.isEmpty
     }
 
+    /// Visible channels sharing one identical curve, drawn as a single line.
+    /// Identified by its channels rather than its values: keyed by values, a
+    /// line whose curve changes (a gain drag, a filter edit) became a new view
+    /// on every step instead of animating the one already drawn.
+    struct CurveGroup {
+        let id: [Int]
+        let mags: [Double]
+        let entries: [ChannelEntry]
+    }
+
     // Group visible channels by identical magnitudes
-    func groupedChannels() -> [[Double]: [ChannelEntry]] {
+    func groupedChannels() -> [CurveGroup] {
         // No curves without a device: the cached magnitudes are the previous
         // device's.  The grid and axes stay, so the graph pane keeps its
         // place rather than closing.
-        guard vm.isDeviceReady else { return [:] }
+        guard vm.isDeviceReady else { return [] }
         var groups: [[Double]: [ChannelEntry]] = [:]
         let activeEq = vm.activeEqChannel
         let followsSelection = !isPopOut || settings.popoutGraphFollowsSelection
@@ -178,7 +191,9 @@ struct BodePlotView: View {
                 var mags = vm.cachedMagnitudes[eqCh] ?? Array(repeating: 0.0, count: 201)
                 // Apply output gain as constant offset (output channels only)
                 if eqCh >= vm.chOut1 {
-                    let gain = Double(vm.outputGainDB[eqCh - vm.chOut1])
+                    let output = eqCh - vm.chOut1
+                    // A gain mid-drag lives in the preview until the release.
+                    let gain = Double(gainPreview.gains[output] ?? vm.outputGainDB[output])
                     if gain != 0 { mags = mags.map { $0 + gain } }
                 }
                 let isActive = !followsSelection || activeEq == nil || eqCh == activeEq
@@ -191,6 +206,8 @@ struct BodePlotView: View {
             }
         }
         return groups
+            .map { CurveGroup(id: $0.value.map(\.eqCh), mags: $0.key, entries: $0.value) }
+            .sorted { ($0.id.first ?? 0) < ($1.id.first ?? 0) }
     }
 
     var body: some View {
@@ -267,8 +284,9 @@ struct BodePlotView: View {
             }
 
             // Animated Lines - grouped by identical curves
-            ForEach(Array(groups.keys), id: \.self) { mags in
-                let entries = groups[mags] ?? []
+            ForEach(groups, id: \.id) { group in
+                let mags = group.mags
+                let entries = group.entries
                 let lineWidth = settings.graphLineWidth
                 let anyActive = entries.contains { $0.isActive }
                 let dashPattern: [CGFloat] = anyActive ? [] : [6, 4]
