@@ -187,7 +187,7 @@ struct SubharmonicSynthView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Subharmonic Synthesizer")
                     .font(.system(size: 14, weight: .semibold))
-                Text("Octave divider - adds a real fundamental below the bass")
+                Text("Generates a subharmonic at half the frequency of the source's bass")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
