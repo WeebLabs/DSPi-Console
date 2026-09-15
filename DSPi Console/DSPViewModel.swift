@@ -1051,7 +1051,7 @@ struct CsDisplayStatus: Equatable {
     }
 }
 
-// MARK: - Test Signal Generator Wire Structs
+// MARK: - Signal Generator Wire Structs
 //
 // Wire-format structs mirroring firmware `siggen.h`
 // (test_signals_spec.md §3).  All packed, little-endian; floats are IEEE-754

@@ -282,7 +282,7 @@ enum OnboardingCatalogue {
             { $0.firmwareSupportsSubharm }),
         jit("autoeq", "AutoEQ",
             "A library of measured headphone corrections. Find your model, load its filters, and the DSPi applies the correction that measurement suggests - a good starting point to adjust by ear afterwards."),
-        jit("test-signals", "Test Signals",
+        jit("test-signals", "Signal Generator",
             "Generates tones, sweeps and noise on the device itself, so you can check wiring, identify a channel or take a measurement without needing a source playing. Start quiet: test signals are far more consistent than music and will happily drive a speaker hard."),
         jit("stats", "Stats",
             "Live diagnostics from the device: processor load, sample rates, clock lock state and the health of each input. The first place to look when something sounds wrong or a source will not lock."),

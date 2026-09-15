@@ -892,7 +892,7 @@ class InterruptMonitor: ObservableObject {
             }
         }
 
-        // Dispatch siggen state pushes so the Test Signals window reacts
+        // Dispatch siggen state pushes so the Signal Generator window reacts
         // (completion, preset-load stop, walk advance) without polling lag.
         if let handler = onSiggenState,
            bytes.count >= 8,

@@ -7093,7 +7093,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_FILTER_Q:           return "Filter Q"
         case CS_NOUN_FILTER_TYPE:        return "Filter Type"
         case CS_NOUN_FILTER_BYPASS:      return "Filter Bypass"
-        case CS_NOUN_SIGGEN:             return "Test Signal"
+        case CS_NOUN_SIGGEN:             return "Signal Generator"
         case CS_NOUN_DAC_MUTE_TEST:      return "DAC Mute Test"
         case CS_NOUN_CLIP_CH:            return "Channel Clipping"
         case CS_NOUN_LEVEL:              return "Channel Level"
@@ -10993,7 +10993,7 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("V", modifiers: [.command, .shift])
 
-                Button("Test Signals...") {
+                Button("Signal Generator...") {
                     testSignalsWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("G", modifiers: [.command, .shift])

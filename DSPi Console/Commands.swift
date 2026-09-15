@@ -3064,7 +3064,7 @@ extension DSPViewModel {
         return CsIrLearnResult.fromData(d)
     }
 
-    // MARK: - Test Signal Generator
+    // MARK: - Signal Generator
 
     /// Enumerate siggen capabilities + live state at connect.  The caps
     /// header (REQ_SIGGEN_GET_CAPS, wValue=0xFFFF) doubles as the feature
@@ -3152,7 +3152,7 @@ extension DSPViewModel {
     /// (index + 1) pentatonic blips at that channel's pitch (spec §2.2).  Two
     /// passes then auto-complete to idle - brief but unmistakable.
     ///
-    /// Transient, never persisted; leaves the Test Signals editing draft
+    /// Transient, never persisted; leaves the Signal Generator editing draft
     /// untouched (a running user signal is restarted as the ident and resumes
     /// only if the user restarts it).  No-op when the firmware has no
     /// generator.  Dispatches the blocking USB work off the caller's thread,
