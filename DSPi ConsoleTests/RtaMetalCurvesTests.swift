@@ -155,6 +155,28 @@ final class RtaMetalCurvesTests: XCTestCase {
         }
     }
 
+    /// The per-column band curve is the Hermite interpolation `sampleBands`
+    /// gives, clamped to the plot, as a gap-free series the fill can reuse.  A
+    /// later frame with new heights on the cached basis must still match.
+    func testBandColumnSeriesMatchesSampledBands() {
+        let plot = CGRect(x: 0, y: 0, width: 300, height: 120)
+        let heights: [CGFloat] = [60, -40, 90, 30, 110, 5, 70, 140, 50, 20, 80]
+        let points = heights.enumerated().map { i, y in CGPoint(x: -20 + CGFloat(i) * 35, y: y) }
+        let cache = RtaRenderCache()
+        for frame in [points, points.map { CGPoint(x: $0.x, y: $0.y * 0.5 + 10) }] {
+            let series = cache.columnSeries(frame, plot: plot)
+            let expected = RtaRenderCache().sampleBands(frame, plot: plot, columns: 300)
+                .enumerated().compactMap { column, y in y.map { SIMD2(Float(column), Float($0)) } }
+            XCTAssertTrue(RtaCurveGeometry.isColumnSeries(series, width: plot.width))
+            XCTAssertEqual(series.count, expected.count)
+            for (s, e) in zip(series, expected) {
+                XCTAssertEqual(s.x, e.x)
+                XCTAssertEqual(s.y, e.y, accuracy: 1e-3)
+            }
+        }
+        XCTAssertTrue(cache.columnSeries([CGPoint(x: 5, y: 1)], plot: plot).isEmpty)
+    }
+
     /// Only a gap-free run of whole columns inside the plot may stand in for
     /// its own fill table: the shader assumes evenly spaced entries.
     func testColumnSeriesIsItsOwnFillTable() {

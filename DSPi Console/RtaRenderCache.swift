@@ -217,4 +217,77 @@ final class RtaRenderCache {
         }
         return out
     }
+
+    private var columnKey: SamplingKey?
+    /// Flat rows of six: column x, segment, and the four Hermite weights.
+    private var columnBasis: [Float] = []
+
+    /// The band curve as one point per whole column inside the plot, from the
+    /// same Hermite interpolation as `sampleBands`.  The Metal renderer draws
+    /// it as the line and reuses it as the fill table.
+    ///
+    /// Band positions do not move between frames, so the basis is rebuilt only
+    /// for a new axis or width and a frame just weighs the new heights.  That
+    /// loop runs on raw Float storage because it runs for every curve on every
+    /// frame, and unoptimised builds do not specialise the generic accessors.
+    func columnSeries(_ points: [CGPoint], plot: CGRect) -> [SIMD2<Float>] {
+        let n = points.count
+        guard n > 1 else { return [] }
+        let columns = max(Int(plot.width.rounded()), 2)
+        let key = SamplingKey(positions: points.map(\.x), origin: plot.minX, columns: columns)
+        if key != columnKey {
+            columnKey = key
+            columnBasis.removeAll(keepingCapacity: true)
+            var seg = 0
+            for column in 0..<columns {
+                let x = plot.minX + CGFloat(column)
+                guard x >= points[0].x, x <= points[n - 1].x else { continue }
+                while seg < n - 2, x > points[seg + 1].x { seg += 1 }
+                let h = points[seg + 1].x - points[seg].x
+                var weights: (CGFloat, CGFloat, CGFloat, CGFloat) = (1, 0, 0, 0)
+                if h > 0 {
+                    let t = (x - points[seg].x) / h, t2 = t * t, t3 = t2 * t
+                    weights = (2 * t3 - 3 * t2 + 1, (t3 - 2 * t2 + t) * h,
+                               -2 * t3 + 3 * t2, (t3 - t2) * h)
+                }
+                columnBasis.append(contentsOf: [Float(x), Float(seg), Float(weights.0),
+                                                Float(weights.1), Float(weights.2), Float(weights.3)])
+            }
+        }
+        let rows = columnBasis.count / 6
+        guard rows > 0 else { return [] }
+
+        var heights = [Float](repeating: 0, count: n)
+        var slopes = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            heights[i] = Float(points[i].y)
+            let a = points[max(i - 1, 0)], b = points[min(i + 1, n - 1)]
+            slopes[i] = b.x > a.x ? Float((b.y - a.y) / (b.x - a.x)) : 0
+        }
+        let top = Float(plot.minY), bottom = Float(plot.maxY)
+
+        return [SIMD2<Float>](unsafeUninitializedCapacity: rows) { buffer, initialized in
+            // SIMD2<Float> is two Floats: x at 2r, y at 2r + 1.
+            let out = UnsafeMutableRawPointer(buffer.baseAddress!).assumingMemoryBound(to: Float.self)
+            columnBasis.withUnsafeBufferPointer { basis in
+                heights.withUnsafeBufferPointer { y in
+                    slopes.withUnsafeBufferPointer { m in
+                        var r = 0
+                        while r < rows {
+                            let o = 6 * r
+                            let i = Int(basis[o + 1])
+                            var v = basis[o + 2] * y[i] + basis[o + 3] * m[i]
+                                + basis[o + 4] * y[i + 1] + basis[o + 5] * m[i + 1]
+                            v = top >= v ? top : v
+                            v = bottom < v ? bottom : v
+                            out[2 * r] = basis[o]
+                            out[2 * r + 1] = v
+                            r += 1
+                        }
+                    }
+                }
+            }
+            initialized = rows
+        }
+    }
 }

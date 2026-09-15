@@ -416,22 +416,26 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
                     .map { builder.binPoints($0, channel: channel.channel) } ?? []
                 let curve = builder.blend(bands: bands, bins: bins)
                 let dense = bins.count > 1
-                let avg = RtaCurveGeometry.flatten(curve, dense: dense, plot: plot, backingScale: backingScale)
+                // The blend already has a point per column.  A band curve is
+                // evaluated per column from a cached basis instead of being
+                // subdivided afresh every frame, which also makes it its own
+                // fill table below.
+                let avg = dense
+                    ? RtaCurveGeometry.flatten(curve, dense: true, plot: plot, backingScale: backingScale)
+                    : smoothing.cache.columnSeries(curve, plot: plot)
                 let peakPoints = panel.showPeak ? band.map { builder.bandPoints($0, peak: true, channel: channel.channel) } ?? [] : []
-                let peak = RtaCurveGeometry.flatten(peakPoints, dense: false, plot: plot, backingScale: backingScale)
+                let peak = smoothing.cache.columnSeries(peakPoints, plot: plot)
                 let first = min(avg.first?.x ?? .infinity, peak.first?.x ?? .infinity)
                 guard first.isFinite else { continue }
                 let avgRange = points.count..<(points.count + avg.count)
                 points.append(contentsOf: avg)
                 let peakRange = points.count..<(points.count + peak.count)
                 points.append(contentsOf: peak)
-                // The fill shader interpolates linearly between table entries.
-                // A curve with a point in every column is therefore its own
-                // table, and a flattened band curve is followed to a small
-                // fraction of a pixel by one sample per point; resampling either
-                // at physical pixels every frame was most of this loop's cost.
+                // The fill shader interpolates linearly between table entries,
+                // so a curve with a point in every column, band or FFT, is its
+                // own table.  Anything else is resampled once per point.
                 let fillRange: Range<Int>
-                if dense, RtaCurveGeometry.isColumnSeries(avg, width: size.width) {
+                if RtaCurveGeometry.isColumnSeries(avg, width: size.width) {
                     fillRange = avgRange
                 } else {
                     let fill = RtaCurveGeometry.fillSamples(avg, width: size.width, backingScale: 1)
