@@ -938,7 +938,6 @@ struct ContentView: View {
             }
         }
         .navigationTitle("DSPi Console")
-        .frame(maxHeight:900)
         // The tour describes the filter table and the channel header, neither
         // of which exists on the overview the console opens on.  Selecting a
         // channel for those steps is the difference between a coach mark that
