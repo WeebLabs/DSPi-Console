@@ -340,7 +340,19 @@ struct RtaCurveBuilder {
         let slots = min(Int(frame.nBands) > 0 ? Int(frame.nBands) : centres.count, RTA_MAX_BANDS)
         let source = peak ? frame.peak : frame.avg
         var levels = [Double](repeating: scale.floorDB, count: slots)
-        for i in 0..<slots where i < source.count { levels[i] = configuration.levelDB(source[i]) }
+        // Index loops over raw buffers, here and below: this runs for every
+        // curve on every frame, and unoptimised builds do not specialise range
+        // and array iteration.
+        let filled = min(slots, source.count)
+        source.withUnsafeBufferPointer { src in
+            levels.withUnsafeMutableBufferPointer { out in
+                var i = 0
+                while i < filled {
+                    out[i] = configuration.levelDB(src[i])
+                    i += 1
+                }
+            }
+        }
 
         if let now {
             // A peak cap that eased upward would stop being a peak.
@@ -358,13 +370,27 @@ struct RtaCurveBuilder {
         var points: [CGPoint] = []
         points.reserveCapacity(visible.count)
         var below: CGPoint?
-        for i in visible where i < centres.count {
-            let hz = centres[i]
-            let point = CGPoint(x: plot.minX + positions[i], y: y(levels[i]))
-            if hz < minFreq { below = point; continue }
-            if let b = below { points.append(b); below = nil }
-            points.append(point)
-            if hz > maxFreq { break }
+        let minX = plot.minX, maxY = plot.maxY, height = plot.height
+        visible.withUnsafeBufferPointer { vis in
+            centres.withUnsafeBufferPointer { hzs in
+                positions.withUnsafeBufferPointer { xs in
+                    levels.withUnsafeBufferPointer { lv in
+                        var k = 0
+                        while k < vis.count {
+                            let i = vis[k]
+                            k += 1
+                            guard i < hzs.count, i < xs.count, i < lv.count else { continue }
+                            let hz = hzs[i]
+                            let point = CGPoint(x: minX + xs[i],
+                                                y: maxY - height * CGFloat(scale.norm(lv[i])))
+                            if hz < minFreq { below = point; continue }
+                            if let b = below { points.append(b); below = nil }
+                            points.append(point)
+                            if hz > maxFreq { break }
+                        }
+                    }
+                }
+            }
         }
         return points
     }

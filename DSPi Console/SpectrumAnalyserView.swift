@@ -151,9 +151,20 @@ final class RtaBarSmoother {
         lastTime = now
         let riseK = riseTau > 0 ? 1 - exp(-dt / riseTau) : 1
         let fallK = fallTau > 0 ? 1 - exp(-dt / fallTau) : 1
-        for i in values.indices {
-            let t = target[i]
-            values[i] += (t - values[i]) * (t > values[i] ? riseK : fallK)
+        // A pointer loop: this runs for every band of every bar panel and curve
+        // on every frame, and unoptimised builds do not specialise array
+        // indices or subscripts.  Same arithmetic as `values[i] += ...`.
+        let n = values.count
+        target.withUnsafeBufferPointer { t in
+            values.withUnsafeMutableBufferPointer { v in
+                guard let tp = t.baseAddress, let vp = v.baseAddress else { return }
+                var i = 0
+                while i < n {
+                    let ti = tp[i], vi = vp[i]
+                    vp[i] = vi + (ti - vi) * (ti > vi ? riseK : fallK)
+                    i += 1
+                }
+            }
         }
         return values
     }

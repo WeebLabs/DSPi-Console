@@ -353,30 +353,60 @@ final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
         let slot = plot.width / CGFloat(panel.visible.count)
         let gap = min(2.0, max(0.5, slot * 0.18))
         let width = max(1, slot - gap)
-        let clip = SIMD4<Float>(Float(plot.minX), Float(plot.minY), Float(plot.maxX), Float(plot.maxY))
+        let floorDB = panel.floorDB, rangeDB = panel.ceilingDB - panel.floorDB
+        let minX = plot.minX, minY = plot.minY, maxY = plot.maxY, plotHeight = plot.height
+        let clipX0 = Float(plot.minX), clipY0 = Float(plot.minY)
+        let clipX1 = Float(plot.maxX), clipY1 = Float(plot.maxY)
+        let red = panel.color.x, green = panel.color.y, blue = panel.color.z, alpha = panel.color.w
+        let barWidth = Float(width), corner = Float(min(1.5, width / 3))
+        let showPeaks = panel.showPeakHold
+
+        // Runs for every band of every panel on every frame, so it writes the
+        // instance floats directly and compares explicitly: unoptimised builds
+        // do not specialise the SIMD initialisers, enumerated() or min/max.
+        // The comparisons mirror the standard library's, so the values match.
+        // RtaBarInstance is four float4s: rect, clip, color, style.
+        let f = UnsafeMutableRawPointer(out).assumingMemoryBound(to: Float.self)
         func norm(_ db: Double) -> Double {
             guard db.isFinite else { return 0 }
-            return min(1, max(0, (db - panel.floorDB) / (panel.ceilingDB - panel.floorDB)))
+            let v = (db - floorDB) / rangeDB
+            let w = v >= 0 ? v : 0
+            return w < 1 ? w : 1
         }
-        for (pos, band) in panel.visible.enumerated() where levels.indices.contains(band) {
-            let x = plot.minX + CGFloat(pos) * slot + gap / 2
-            let level = norm(levels[band])
-            if level > 0.001, count < capacity {
-                let height = plot.height * level
-                out[count] = RtaBarInstance(
-                    rect: SIMD4(Float(x), Float(plot.maxY - height), Float(width), Float(height)),
-                    clip: clip, color: panel.color,
-                    style: SIMD4(Float(min(1.5, width / 3)), 0.95, 0.45, 0))
-                count += 1
-            }
-            if panel.showPeakHold, peaks.indices.contains(band) {
-                let peak = norm(peaks[band])
-                if peak > 0.001, count < capacity {
-                    let y = max(plot.minY, plot.maxY - plot.height * peak - 1)
-                    out[count] = RtaBarInstance(
-                        rect: SIMD4(Float(x), Float(y), Float(width), 1.5),
-                        clip: clip, color: panel.color, style: SIMD4(0, 0.9, 0.9, 0))
-                    count += 1
+        panel.visible.withUnsafeBufferPointer { visible in
+            levels.withUnsafeBufferPointer { lv in
+                peaks.withUnsafeBufferPointer { pk in
+                    var pos = 0
+                    while pos < visible.count {
+                        let band = visible[pos]
+                        let x = minX + CGFloat(pos) * slot + gap / 2
+                        pos += 1
+                        guard band >= 0, band < lv.count else { continue }
+                        let level = norm(lv[band])
+                        if level > 0.001, count < capacity {
+                            let height = plotHeight * level
+                            let o = count * 16
+                            f[o] = Float(x); f[o + 1] = Float(maxY - height)
+                            f[o + 2] = barWidth; f[o + 3] = Float(height)
+                            f[o + 4] = clipX0; f[o + 5] = clipY0; f[o + 6] = clipX1; f[o + 7] = clipY1
+                            f[o + 8] = red; f[o + 9] = green; f[o + 10] = blue; f[o + 11] = alpha
+                            f[o + 12] = corner; f[o + 13] = 0.95; f[o + 14] = 0.45; f[o + 15] = 0
+                            count += 1
+                        }
+                        if showPeaks, band < pk.count {
+                            let peak = norm(pk[band])
+                            if peak > 0.001, count < capacity {
+                                let top = maxY - plotHeight * peak - 1
+                                let y = top >= minY ? top : minY
+                                let o = count * 16
+                                f[o] = Float(x); f[o + 1] = Float(y); f[o + 2] = barWidth; f[o + 3] = 1.5
+                                f[o + 4] = clipX0; f[o + 5] = clipY0; f[o + 6] = clipX1; f[o + 7] = clipY1
+                                f[o + 8] = red; f[o + 9] = green; f[o + 10] = blue; f[o + 11] = alpha
+                                f[o + 12] = 0; f[o + 13] = 0.9; f[o + 14] = 0.9; f[o + 15] = 0
+                                count += 1
+                            }
+                        }
+                    }
                 }
             }
         }
