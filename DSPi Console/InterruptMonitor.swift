@@ -819,8 +819,8 @@ class InterruptMonitor: ObservableObject {
 
     /// Build an InterruptEvent from the raw bytes and post to the main
     /// thread for display.  Swallowed silently when paused.  Idle keep-alive
-    /// packets (single-byte 0x00) are dropped — they exist only so the
-    /// device can keep EP 0x83 armed and avoid a DCD crash; they're not
+    /// packets (single-byte 0x00) are dropped - the device sends one after
+    /// 100 ms without an event, only to keep the pipe active; they're not
     /// user events.
     private func enqueueEvent(bytes: [UInt8], session: ReaderSession) {
         // Idle: single-byte 0x00 packet (kept version-neutral in firmware).
