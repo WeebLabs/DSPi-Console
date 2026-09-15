@@ -9434,8 +9434,8 @@ class StatsWindowController: NSObject, ObservableObject {
             let statsView = StatsView(vm: statsVM!)
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 960, height: 660),
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
@@ -9443,6 +9443,7 @@ class StatsWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: statsView.onboardingHint("stats"))
             window?.isReleasedWhenClosed = false
             window?.delegate = self
+            window?.contentMinSize = NSSize(width: 900, height: 480)
         }
 
         window?.center()
