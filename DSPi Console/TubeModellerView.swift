@@ -20,7 +20,7 @@ class TubeModellerWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: view)
             window?.isReleasedWhenClosed = false
             window?.delegate = self
-            window?.contentMinSize = NSSize(width: 740, height: 660)
+            window?.contentMinSize = NSSize(width: 740, height: 400)
         }
 
         window?.center()
@@ -32,6 +32,28 @@ class TubeModellerWindowController: NSObject, ObservableObject {
         window?.orderOut(nil)
         isVisible = false
     }
+
+    /// Sizes the window to its content's height, keeping the top edge where it
+    /// was.  Basic and Advanced are different heights, so the window follows
+    /// whichever is showing; only its width stays free to resize.
+    func fit(contentHeight: CGFloat) {
+        guard let window, contentHeight > 0 else { return }
+        let height = ceil(contentHeight)
+        window.contentMinSize = NSSize(width: 740, height: height)
+        window.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: height)
+        let current = window.contentRect(forFrameRect: window.frame).size
+        guard abs(current.height - height) > 0.5 else { return }
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: current.width, height: height)))
+        frame.origin.x = window.frame.origin.x
+        frame.origin.y = window.frame.maxY - frame.height
+        window.setFrame(frame, display: true, animate: window.isVisible)
+    }
+}
+
+/// Height of the window's content, reported so the controller can fit to it.
+private struct TubeContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 extension TubeModellerWindowController: NSWindowDelegate {
@@ -74,6 +96,10 @@ struct TubeModellerView: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject var controller: TubeModellerWindowController
 
+    /// Basic shows the tube and the two controls most people need; Advanced
+    /// shows every parameter.  Remembered across launches.
+    @AppStorage("tubeModellerAdvanced") private var advanced = false
+
     /// The saturation meter is a 300 ms decaying peak; the spec suggests 10 to
     /// 20 Hz, and 10 is enough to watch a drive setting land.
     private let meterTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
@@ -111,7 +137,9 @@ struct TubeModellerView: View {
 
             Divider()
 
-            if supported {
+            if supported && !advanced {
+                basicBody
+            } else if supported {
                 // Two columns of the sections the other tool windows stack.
                 // The left column is the stage itself: its curve, the tube and
                 // how hard it is driven, and where it applies.  The right column
@@ -141,6 +169,10 @@ struct TubeModellerView: View {
                 unsupportedNote
             }
         }
+        .background(GeometryReader { geo in
+            Color.clear.preference(key: TubeContentHeightKey.self, value: geo.size.height)
+        })
+        .onPreferenceChange(TubeContentHeightKey.self) { controller.fit(contentHeight: $0) }
         .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onReceive(meterTimer) { _ in
             // Only while the panel is up and there is something to meter.
@@ -153,6 +185,169 @@ struct TubeModellerView: View {
         Text(title)
             .font(.system(size: 10, weight: .bold))
             .foregroundColor(.secondary)
+    }
+
+    // MARK: - Basic Mode
+
+    /// The tube on show on the left, and on the right the choice of tube, the
+    /// two controls that matter most, and where it applies.  Everything else
+    /// keeps the value it has, so switching modes never changes the sound.
+    private var basicBody: some View {
+        HStack(alignment: .top, spacing: 0) {
+            tubeShowcase
+                .toolColumn()
+                .frame(maxHeight: .infinity)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 14) {
+                tubeShelf
+                Divider()
+                basicControls
+                Divider()
+                outputSection
+            }
+            .toolColumn()
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.vertical, 16)
+    }
+
+    private var family: TubeFamily { TubeFamily.of(vm.tubeType) }
+
+    /// How hard the hardest-driven selected output is working, for the glow.
+    private var heat: Double {
+        var peak: Float = 0
+        for (i, level) in vm.tubeSaturationMeter.enumerated()
+        where i < 16 && vm.tubeOutputMask & (UInt16(1) << UInt16(i)) != 0 {
+            peak = max(peak, level)
+        }
+        return Double(peak)
+    }
+
+    private var tubeShowcase: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+            // A warm pool of light behind the glass while the stage is on.
+            RoundedRectangle(cornerRadius: 10)
+                .fill(RadialGradient(colors: [Color.orange.opacity(0.10), .clear],
+                                     center: UnitPoint(x: 0.5, y: 0.42), startRadius: 0, endRadius: 190))
+                .opacity(vm.tubeEnabled ? 1 : 0)
+                .animation(.easeInOut(duration: vm.tubeEnabled ? 0.9 : 0.6), value: vm.tubeEnabled)
+
+            VStack(spacing: 12) {
+                Spacer(minLength: 8)
+                ZStack {
+                    TubeIllustration(family: family, lit: vm.tubeEnabled, heat: heat)
+                        .id(family)
+                        .transition(.opacity)
+                }
+                .frame(width: 168, height: 280)
+                .animation(.easeInOut(duration: 0.25), value: family)
+
+                VStack(spacing: 4) {
+                    Text(selectedRow?.name ?? "Custom")
+                        .font(.system(size: 17, weight: .semibold))
+                    Text(showcaseCaption)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 12)
+                Spacer(minLength: 8)
+            }
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+        )
+    }
+
+    private var showcaseCaption: String {
+        guard let row = selectedRow else {
+            return "Character set by hand. Pick a tube to load one, or fine-tune it in Advanced."
+        }
+        if row.pushPull && !vm.tubeXfmrEnabled {
+            return "\(row.style). Meant for use with the output transformer, in Advanced."
+        }
+        return "\(row.style)."
+    }
+
+    /// Every tube as a one-click chip, grouped by kind of stage.
+    private var tubeShelf: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel("TUBE")
+            shelfGroup("Preamp triodes", 1...8)
+            shelfGroup("Preamp pentodes", 9...10)
+            shelfGroup("Power stages", 11...16)
+        }
+        .help("Loads the character of a real tube: its bias, asymmetry, knee hardness and sag. Drive, mix and everything in Advanced keep their values.")
+    }
+
+    private func shelfGroup(_ title: String, _ types: ClosedRange<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
+                ForEach(Array(types), id: \.self) { tubeChip($0) }
+            }
+        }
+    }
+
+    private func tubeChip(_ type: Int) -> some View {
+        let on = vm.tubeType == type
+        let row = TUBE_TYPE_ROWS[type]
+        return Button(action: { vm.setTubeType(type) }) {
+            Text(row?.shortName ?? tubeTypeName(type))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .foregroundColor(on ? .white : .primary.opacity(0.75))
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(row.map { "\($0.name): \($0.style)" } ?? tubeTypeName(type))
+        .disabled(!vm.isDeviceConnected)
+        .animation(.easeInOut(duration: 0.12), value: on)
+    }
+
+    /// Drive and mix: how hard the tube works, and how much of it is heard.
+    private var basicControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            paramRow(
+                title: "Drive",
+                unit: "dB",
+                value: vm.tubeDriveDB,
+                range: TUBE_DRIVE_MIN...TUBE_DRIVE_MAX,
+                scrollStep: 0.5,
+                maxDecimals: 1,
+                ends: ("Warmth", "Overdrive"),
+                help: "How hard the tube is driven. A few dB adds warmth and gentle compression; the top of the range is overdrive.",
+                set: { vm.setTubeDrive($0) }
+            )
+
+            paramRow(
+                title: "Mix",
+                unit: "%",
+                value: vm.tubeMixPct,
+                range: TUBE_MIX_MIN...TUBE_MIX_MAX,
+                scrollStep: 1,
+                maxDecimals: 0,
+                ends: ("Dry", "All tube"),
+                help: "Blends the tube with the untouched signal. Below 100% the original transients stay intact under the colour, which is the easiest way to use heavy drive subtly.",
+                set: { vm.setTubeMix($0) }
+            )
+        }
     }
 
     // MARK: - Header
@@ -172,6 +367,17 @@ struct TubeModellerView: View {
             }
 
             Spacer()
+
+            if supported {
+                Picker("", selection: $advanced) {
+                    Text("Basic").tag(false)
+                    Text("Advanced").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .padding(.trailing, 4)
+            }
 
             Toggle("", isOn: Binding(
                 get: { vm.tubeEnabled },
@@ -202,7 +408,8 @@ struct TubeModellerView: View {
             Spacer()
         }
         .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
+        .frame(height: 240)
     }
 
     // MARK: - Transfer Graph
@@ -655,6 +862,7 @@ struct TubeModellerView: View {
         range: ClosedRange<Float>,
         scrollStep: Float,
         maxDecimals: Int,
+        ends: (String, String)? = nil,
         help: String,
         set: @escaping (Float) -> Void
     ) -> some View {
@@ -677,6 +885,16 @@ struct TubeModellerView: View {
                 range: range
             )
             .disabled(!vm.isDeviceConnected)
+
+            if let ends {
+                HStack {
+                    Text(ends.0)
+                    Spacer()
+                    Text(ends.1)
+                }
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            }
         }
         .help(help)
     }

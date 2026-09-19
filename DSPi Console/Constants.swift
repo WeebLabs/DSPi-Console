@@ -340,6 +340,9 @@ struct TubeTypeRow {
     /// Push-pull power stages cancel even harmonics, so their character comes
     /// from hardness, sag and the transformer; the UI suggests enabling it.
     var pushPull: Bool = false
+
+    /// The first of the equivalent names, short enough for a chip.
+    var shortName: String { name.components(separatedBy: " / ").first ?? name }
 }
 
 /// Indexed by `tube_type`; index 0 is Custom and carries no row.  Rows never
