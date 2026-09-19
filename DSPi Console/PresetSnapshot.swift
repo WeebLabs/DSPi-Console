@@ -73,6 +73,21 @@ struct PresetSnapshot: Equatable {
     let subharmSelectHoldMs: Float
     let subharmCeilingDB: Float
     let subharmLinkPairs: Bool
+    let tubeEnabled: Bool
+    let tubeOutputMask: UInt16
+    let tubeType: Int
+    let tubeDriveDB: Float
+    let tubeBiasPct: Float
+    let tubeAsymDB: Float
+    let tubeHardnessPct: Float
+    let tubeSagPct: Float
+    let tubeRectifier: Int
+    let tubeXfmrEnabled: Bool
+    let tubeXfmrLfHz: Float
+    let tubeXfmrSatPct: Float
+    let tubeXfmrHfHz: Float
+    let tubeMixPct: Float
+    let tubeTrimDB: Float
     let upmixEnabled: Bool
     let upmixCenterMode: Int
     let upmixSurroundMode: Int
@@ -287,6 +302,56 @@ extension PresetSnapshot {
         }
         if old.subharmBoostDB != new.subharmBoostDB {
             changes.append(.init(category: "Subharm", description: "Subharm LF boost: \(formatVal(old.subharmBoostDB)) dB → \(formatVal(new.subharmBoostDB)) dB"))
+        }
+
+        // Tube Modeller.  A type change also moves the four character knobs, so
+        // those lines are expected alongside it rather than being noise.
+        if old.tubeEnabled != new.tubeEnabled {
+            changes.append(.init(category: "Tube", description: "Tube Modeller: \(new.tubeEnabled ? "enabled" : "disabled")"))
+        }
+        if old.tubeOutputMask != new.tubeOutputMask {
+            changes.append(.init(category: "Tube", description: "Tube outputs: \(String(format: "0x%04X", old.tubeOutputMask)) → \(String(format: "0x%04X", new.tubeOutputMask))"))
+        }
+        if old.tubeType != new.tubeType {
+            changes.append(.init(category: "Tube", description: "Tube type: \(tubeTypeName(old.tubeType)) → \(tubeTypeName(new.tubeType))"))
+        }
+        if old.tubeDriveDB != new.tubeDriveDB {
+            changes.append(.init(category: "Tube", description: "Tube drive: \(formatVal(old.tubeDriveDB)) dB → \(formatVal(new.tubeDriveDB)) dB"))
+        }
+        if old.tubeBiasPct != new.tubeBiasPct {
+            changes.append(.init(category: "Tube", description: "Tube bias: \(formatVal(old.tubeBiasPct))% → \(formatVal(new.tubeBiasPct))%"))
+        }
+        if old.tubeAsymDB != new.tubeAsymDB {
+            changes.append(.init(category: "Tube", description: "Tube asymmetry: \(formatVal(old.tubeAsymDB)) dB → \(formatVal(new.tubeAsymDB)) dB"))
+        }
+        if old.tubeHardnessPct != new.tubeHardnessPct {
+            changes.append(.init(category: "Tube", description: "Tube knee hardness: \(formatVal(old.tubeHardnessPct))% → \(formatVal(new.tubeHardnessPct))%"))
+        }
+        if old.tubeSagPct != new.tubeSagPct {
+            changes.append(.init(category: "Tube", description: "Tube sag: \(formatVal(old.tubeSagPct))% → \(formatVal(new.tubeSagPct))%"))
+        }
+        if old.tubeRectifier != new.tubeRectifier {
+            changes.append(.init(category: "Tube", description: "Tube rectifier: \(tubeRectifierName(old.tubeRectifier)) → \(tubeRectifierName(new.tubeRectifier))"))
+        }
+        if old.tubeXfmrEnabled != new.tubeXfmrEnabled {
+            changes.append(.init(category: "Tube", description: "Tube transformer: \(new.tubeXfmrEnabled ? "enabled" : "disabled")"))
+        }
+        if old.tubeXfmrLfHz != new.tubeXfmrLfHz {
+            changes.append(.init(category: "Tube", description: "Tube transformer low split: \(formatVal(old.tubeXfmrLfHz)) → \(formatVal(new.tubeXfmrLfHz)) Hz"))
+        }
+        if old.tubeXfmrSatPct != new.tubeXfmrSatPct {
+            changes.append(.init(category: "Tube", description: "Tube transformer saturation: \(formatVal(old.tubeXfmrSatPct))% → \(formatVal(new.tubeXfmrSatPct))%"))
+        }
+        if old.tubeXfmrHfHz != new.tubeXfmrHfHz {
+            // The top of the range is a bypass rather than a 20 kHz corner.
+            func hfText(_ hz: Float) -> String { hz >= TUBE_XFMR_HF_MAX ? "off" : "\(formatVal(hz)) Hz" }
+            changes.append(.init(category: "Tube", description: "Tube transformer HF rolloff: \(hfText(old.tubeXfmrHfHz)) → \(hfText(new.tubeXfmrHfHz))"))
+        }
+        if old.tubeMixPct != new.tubeMixPct {
+            changes.append(.init(category: "Tube", description: "Tube mix: \(formatVal(old.tubeMixPct))% → \(formatVal(new.tubeMixPct))%"))
+        }
+        if old.tubeTrimDB != new.tubeTrimDB {
+            changes.append(.init(category: "Tube", description: "Tube output trim: \(formatVal(old.tubeTrimDB)) dB → \(formatVal(new.tubeTrimDB)) dB"))
         }
 
         // Stereo Upmixer

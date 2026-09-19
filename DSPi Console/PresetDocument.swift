@@ -43,6 +43,8 @@ struct PresetDocument: Codable {
     var upmix: UpmixBlock?
     /// Absent when the source device had no subharmonic synthesizer (pre-V29).
     var subharm: SubharmBlock?
+    /// Absent when the source device had no tube modeller (pre-V31).  Additive.
+    var tube: TubeBlock?
     var channels: [ChannelBlock] = []
     var matrix: [CrosspointBlock] = []
     /// Physical wiring.  Applied only when the user opts in on import, since
@@ -62,6 +64,7 @@ struct PresetDocument: Codable {
         psybass = c.value(.psybass, nil)
         upmix = c.value(.upmix, nil)
         subharm = c.value(.subharm, nil)
+        tube = c.value(.tube, nil)
         channels = c.value(.channels, [])
         matrix = c.value(.matrix, [])
         io = c.value(.io, IoBlock())
@@ -261,6 +264,49 @@ struct PresetDocument: Codable {
             selectHoldMs = c.value(.selectHoldMs, 150)
             ceilingDb = c.value(.ceilingDb, 0)
             linkPairs = c.value(.linkPairs, true)
+        }
+    }
+
+    /// Every value is stored as the firmware holds it, the four character knobs
+    /// included, so a file saved on a tube type restores that exact sound even if
+    /// a later firmware retunes the row.  Defaults are the firmware's factory
+    /// values (the 12AX7 row).
+    struct TubeBlock: Codable {
+        var enabled = false
+        var outputMask: Int = Int(TUBE_DEFAULT_OUTPUT_MASK)
+        var tubeType: Int = TUBE_DEFAULT_TUBE_TYPE
+        var driveDb: Float = 6
+        var biasPct: Float = 30
+        var asymDb: Float = 3
+        var hardnessPct: Float = 40
+        var sagPct: Float = 30
+        var rectifier: Int = TUBE_DEFAULT_RECTIFIER
+        var xfmrEnabled = false
+        var xfmrLfHz: Float = 80
+        var xfmrSatPct: Float = 30
+        var xfmrHfHz: Float = 20000
+        var mixPct: Float = 100
+        var trimDb: Float = 0
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = c.value(.enabled, false)
+            outputMask = c.value(.outputMask, Int(TUBE_DEFAULT_OUTPUT_MASK))
+            tubeType = c.value(.tubeType, TUBE_DEFAULT_TUBE_TYPE)
+            driveDb = c.value(.driveDb, 6)
+            biasPct = c.value(.biasPct, 30)
+            asymDb = c.value(.asymDb, 3)
+            hardnessPct = c.value(.hardnessPct, 40)
+            sagPct = c.value(.sagPct, 30)
+            rectifier = c.value(.rectifier, TUBE_DEFAULT_RECTIFIER)
+            xfmrEnabled = c.value(.xfmrEnabled, false)
+            xfmrLfHz = c.value(.xfmrLfHz, 80)
+            xfmrSatPct = c.value(.xfmrSatPct, 30)
+            xfmrHfHz = c.value(.xfmrHfHz, 20000)
+            mixPct = c.value(.mixPct, 100)
+            trimDb = c.value(.trimDb, 0)
         }
     }
 

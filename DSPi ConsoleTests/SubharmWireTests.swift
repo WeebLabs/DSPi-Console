@@ -78,14 +78,14 @@ final class SubharmWireTests: XCTestCase {
     /// 5944; V30 grew it to 36 by tail-appending, taking the flat layout from
     /// 5960 to 5980 bytes (spec §4).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 30)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5980)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 31)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 6028)
         XCTAssertEqual(BULK_SUBHARM_OFFSET, 5944)
         XCTAssertEqual(WIRE_SUBHARM_PARAMS_SIZE, 36)
         // It sits immediately after the 44-byte upmixer section (V25).
         XCTAssertEqual(BULK_UPMIX_OFFSET + 44, BULK_SUBHARM_OFFSET)
-        // And it is still the last section: 36 bytes take the image to full size.
-        XCTAssertEqual(BULK_SUBHARM_OFFSET + WIRE_SUBHARM_PARAMS_SIZE, Int(BULK_PARAMS_SIZE))
+        // V31 appended the tube section after it, so subharm is no longer last.
+        XCTAssertEqual(BULK_SUBHARM_OFFSET + WIRE_SUBHARM_PARAMS_SIZE, BULK_TUBE_OFFSET)
     }
 
     // MARK: - WireSubharmParams field decode (spec §4 table)

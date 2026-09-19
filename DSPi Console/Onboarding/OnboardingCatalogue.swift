@@ -280,6 +280,10 @@ enum OnboardingCatalogue {
         jit("subharm", "Subharmonic Synthesizer",
             "The opposite of psychoacoustic bass: instead of implying a low note a speaker cannot play, this synthesises a real one an octave below the bass already in the music. Only worth switching on for an output that can reproduce 24 to 80 Hz - a subwoofer, or a large full-range system.",
             { $0.firmwareSupportsSubharm }),
+        jit("tube", "Tube Modeller",
+            "Adds the harmonic colour, gentle compression and transformer weight of a valve amplifier. Pick a tube to load its character, then use drive to decide how hard the stage works: a few dB is warmth, a lot is overdrive.",
+            { $0.firmwareSupportsTube },
+            introducedIn: FirmwareVersion(1, 1, 6, 4)),
         jit("autoeq", "AutoEQ",
             "A library of measured headphone corrections. Find your model, load its filters, and the DSPi applies the correction that measurement suggests - a good starting point to adjust by ear afterwards."),
         jit("test-signals", "Signal Generator",
@@ -291,9 +295,10 @@ enum OnboardingCatalogue {
     private static func jit(_ key: String,
                             _ title: String,
                             _ message: String,
-                            _ applies: @escaping (DSPViewModel) -> Bool = { _ in true }) -> OnboardingStep {
+                            _ applies: @escaping (DSPViewModel) -> Bool = { _ in true },
+                            introducedIn: FirmwareVersion = FirmwareVersion(1, 1, 6, 3)) -> OnboardingStep {
         OnboardingStep(id: "jit.\(key)",
-                       introducedIn: FirmwareVersion(1, 1, 6, 3),
+                       introducedIn: introducedIn,
                        phase: .justInTime(key),
                        title: title,
                        message: message,

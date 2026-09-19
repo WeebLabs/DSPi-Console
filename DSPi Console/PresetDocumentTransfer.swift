@@ -117,6 +117,26 @@ extension PresetDocument {
             doc.subharm = block
         }
 
+        if vm.firmwareSupportsTube {
+            var block = TubeBlock()
+            block.enabled = vm.tubeEnabled
+            block.outputMask = Int(vm.tubeOutputMask)
+            block.tubeType = vm.tubeType
+            block.driveDb = vm.tubeDriveDB
+            block.biasPct = vm.tubeBiasPct
+            block.asymDb = vm.tubeAsymDB
+            block.hardnessPct = vm.tubeHardnessPct
+            block.sagPct = vm.tubeSagPct
+            block.rectifier = vm.tubeRectifier
+            block.xfmrEnabled = vm.tubeXfmrEnabled
+            block.xfmrLfHz = vm.tubeXfmrLfHz
+            block.xfmrSatPct = vm.tubeXfmrSatPct
+            block.xfmrHfHz = vm.tubeXfmrHfHz
+            block.mixPct = vm.tubeMixPct
+            block.trimDb = vm.tubeTrimDB
+            doc.tube = block
+        }
+
         // Channels: every input the platform has (not just the ones currently
         // streaming - the dormant ones still hold EQ on the device), then every
         // output.
@@ -567,6 +587,32 @@ enum PresetDocumentApply {
                 vm.setSubharm(subharm.enabled)
             } else {
                 report.skip("Subharmonic synthesizer (not supported by this firmware)")
+            }
+        }
+
+        if let tube = doc.tube {
+            if vm.firmwareSupportsTube {
+                // The type goes first: it loads its row, and the stored knobs
+                // written after it only drop the type to Custom if they differ
+                // from that row.  So a file matching the row keeps its type,
+                // and one that does not still restores its exact sound.
+                vm.setTubeType(tube.tubeType)
+                vm.setTubeBias(tube.biasPct)
+                vm.setTubeAsym(tube.asymDb)
+                vm.setTubeHardness(tube.hardnessPct)
+                vm.setTubeSag(tube.sagPct)
+                vm.setTubeDrive(tube.driveDb)
+                vm.setTubeRectifier(tube.rectifier)
+                vm.setTubeXfmrLf(tube.xfmrLfHz)
+                vm.setTubeXfmrSat(tube.xfmrSatPct)
+                vm.setTubeXfmrHf(tube.xfmrHfHz)
+                vm.setTubeXfmr(tube.xfmrEnabled)
+                vm.setTubeMix(tube.mixPct)
+                vm.setTubeTrim(tube.trimDb)
+                vm.setTubeMask(UInt16(truncatingIfNeeded: tube.outputMask))
+                vm.setTube(tube.enabled)
+            } else {
+                report.skip("Tube preamp (not supported by this firmware)")
             }
         }
 

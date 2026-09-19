@@ -337,6 +337,7 @@ final class PresetDocumentTests: XCTestCase {
         doc.psybass = PresetDocument.PsybassBlock()
         doc.upmix = PresetDocument.UpmixBlock()
         doc.subharm = PresetDocument.SubharmBlock()
+        doc.tube = PresetDocument.TubeBlock()
         doc.io.dacHwMute = PresetDocument.DacHwMuteBlock()
 
         let object = try XCTUnwrap(
@@ -360,7 +361,7 @@ final class PresetDocumentTests: XCTestCase {
 
         XCTAssertTrue(Set(object.keys).isSuperset(of: [
             "schemaVersion", "meta", "global", "loudness", "crossfeed",
-            "leveller", "psybass", "upmix", "subharm", "channels", "matrix", "io",
+            "leveller", "psybass", "upmix", "subharm", "tube", "channels", "matrix", "io",
         ]), "top-level keys drifted: \(Set(object.keys).sorted())")
 
         try XCTAssertTrue(keys(["meta"]).isSuperset(of: [
@@ -391,6 +392,11 @@ final class PresetDocumentTests: XCTestCase {
         try XCTAssertTrue(keys(["subharm"]).isSuperset(of: [
             "enabled", "lowDb", "highDb", "topDb", "boostDb", "outputMask",
             "selectMode", "selectDepthPct", "selectHoldMs", "ceilingDb", "linkPairs",
+        ]))
+        try XCTAssertTrue(keys(["tube"]).isSuperset(of: [
+            "enabled", "outputMask", "tubeType", "driveDb", "biasPct", "asymDb",
+            "hardnessPct", "sagPct", "rectifier", "xfmrEnabled", "xfmrLfHz",
+            "xfmrSatPct", "xfmrHfHz", "mixPct", "trimDb",
         ]))
         try XCTAssertTrue(keys(["channels"]).isSuperset(of: [
             "channelId", "name", "isOutput", "delayMs", "gainDb", "muted",

@@ -1341,6 +1341,32 @@ class DSPViewModel: ObservableObject {
     /// Polled only while the subharm window is open; empty when never read.
     @Published var subharmSubMeter: [Float] = []
 
+    // Tube Modeller (V31): valve-style waveshaper with supply sag and an optional
+    // transformer stage, per output channel selected by `tubeOutputMask`.  The
+    // defaults are the firmware's (the 12AX7 row), so an unconnected app and a
+    // fresh device agree before the first bulk read.
+    @Published var tubeEnabled: Bool = false
+    @Published var tubeOutputMask: UInt16 = TUBE_DEFAULT_OUTPUT_MASK
+    /// 0 = Custom, 1..16 = a row of TUBE_TYPE_ROWS.  Selecting a row loads the
+    /// four character knobs; editing one of them drops the type back to Custom.
+    @Published var tubeType: Int = TUBE_DEFAULT_TUBE_TYPE
+    @Published var tubeDriveDB: Float = 6.0         // 0..24 dB
+    @Published var tubeBiasPct: Float = 30.0        // -100..+100 %
+    @Published var tubeAsymDB: Float = 3.0          // -12..+12 dB
+    @Published var tubeHardnessPct: Float = 40.0    // 0..100 %
+    @Published var tubeSagPct: Float = 30.0         // 0..100 %
+    @Published var tubeRectifier: Int = TUBE_DEFAULT_RECTIFIER
+    @Published var tubeXfmrEnabled: Bool = false
+    @Published var tubeXfmrLfHz: Float = 80.0       // 20..300 Hz
+    @Published var tubeXfmrSatPct: Float = 30.0     // 0..100 %
+    @Published var tubeXfmrHfHz: Float = 20000.0    // 2k..20k Hz (20k = bypass)
+    @Published var tubeMixPct: Float = 100.0        // 0..100 %
+    @Published var tubeTrimDB: Float = 0.0          // -12..+12 dB
+    /// Decaying peak of the shaper drive per output (0x81), normalized to 0..1;
+    /// 1 means the stage is fully clipped.  Polled only while the tube window is
+    /// open; empty when never read.
+    @Published var tubeSaturationMeter: [Float] = []
+
     // Stereo Upmixer (V25): derives Centre + Ls/Rs matrix source rows from a
     // stereo input.  These mirror UpmixConfigPacket (spec §6.1); defaults match
     // the firmware factory defaults so a fresh device and the app agree before
@@ -2101,6 +2127,10 @@ class DSPViewModel: ObservableObject {
     /// `firmwareSupportsSubharm`; it is spelled out separately because the
     /// individual GETs STALL on V29 firmware and the UI hides these controls.
     var firmwareSupportsSubharmExtended: Bool { firmwareWireFormatVersion >= 30 }
+
+    /// Tube Modeller (cmds 0x3E/0x3F/0x81) shipped in wire format V31, which
+    /// appends WireTubeParams to the bulk layout.  Both platforms run it.
+    var firmwareSupportsTube: Bool { firmwareWireFormatVersion >= 31 }
 
     /// Stereo Upmixer (cmds 0x4A-0x4E) shipped in wire format V25 and gained the
     /// presence control in V26; the app is a V26 client (strict version match on
@@ -2900,6 +2930,21 @@ class DSPViewModel: ObservableObject {
             subharmSelectHoldMs: subharmSelectHoldMs,
             subharmCeilingDB: subharmCeilingDB,
             subharmLinkPairs: subharmLinkPairs,
+            tubeEnabled: tubeEnabled,
+            tubeOutputMask: tubeOutputMask,
+            tubeType: tubeType,
+            tubeDriveDB: tubeDriveDB,
+            tubeBiasPct: tubeBiasPct,
+            tubeAsymDB: tubeAsymDB,
+            tubeHardnessPct: tubeHardnessPct,
+            tubeSagPct: tubeSagPct,
+            tubeRectifier: tubeRectifier,
+            tubeXfmrEnabled: tubeXfmrEnabled,
+            tubeXfmrLfHz: tubeXfmrLfHz,
+            tubeXfmrSatPct: tubeXfmrSatPct,
+            tubeXfmrHfHz: tubeXfmrHfHz,
+            tubeMixPct: tubeMixPct,
+            tubeTrimDB: tubeTrimDB,
             upmixEnabled: upmixEnabled,
             upmixCenterMode: upmixCenterMode,
             upmixSurroundMode: upmixSurroundMode,

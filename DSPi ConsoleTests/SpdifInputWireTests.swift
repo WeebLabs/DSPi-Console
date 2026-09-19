@@ -57,8 +57,8 @@ final class SpdifInputWireTests: XCTestCase {
     /// the section's last reserved byte and pushing the fields below it down one.
     /// The section stays 16 bytes, so no later section moved.
     func testWireInputConfigLayout() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 30)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5980)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 31)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 6028)
         // +8/+9/+10 optional pins, +11 enable mask, +12 I2S clock mode,
         // +13/+14/+15 the ADAT input trio - exactly filling the 16-byte section.
         XCTAssertEqual(BULK_INPUT_I2S_CLOCK_MODE_OFFSET, BULK_INPUT_CONFIG_OFFSET + 12)

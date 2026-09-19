@@ -1385,6 +1385,159 @@ extension DSPViewModel {
         }
     }
 
+    // MARK: - Tube Modeller (V31, cmds 0x3E/0x3F/0x81)
+
+    // One indexed SET/GET pair carries all fifteen parameters as float32, the
+    // bools, mask and enums included.  Every SET is fire-and-forget and updates
+    // app state first; the app clamps exactly as the firmware does, and mirrors
+    // the two cross-field rules (a type loads its row, a character edit drops the
+    // type to Custom) because the firmware's notifications for our own writes are
+    // filtered out as HOST-sourced and would never correct us.
+
+    private func sendTubeParam(_ index: UInt16, _ value: Float) {
+        var val = value
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_SET_TUBE_PARAM, value: index, index: 0, data: data)
+    }
+
+    /// Reads one parameter; nil when the GET STALLs (index out of range, or
+    /// firmware older than V31).
+    func fetchTubeParam(_ index: UInt16) -> Float? {
+        guard let d = usb.getControlRequest(request: REQ_GET_TUBE_PARAM, value: index, index: 0, length: 4),
+              d.count >= 4 else { return nil }
+        return d.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
+    private static func clampTube(_ v: Float, _ lo: Float, _ hi: Float) -> Float {
+        min(max(v, lo), hi)
+    }
+
+    func setTube(_ enabled: Bool) {
+        self.tubeEnabled = enabled
+        sendTubeParam(TUBE_PARAM_ENABLED, enabled ? 1 : 0)
+    }
+
+    /// Sets the per-output mask.  The firmware reads it live each packet with no
+    /// recompute, and resets a masked-off output's state so it re-enters cleanly.
+    func setTubeMask(_ mask: UInt16) {
+        self.tubeOutputMask = mask
+        sendTubeParam(TUBE_PARAM_OUTPUT_MASK, Float(mask))
+    }
+
+    func setTubeOutputChannel(_ output: Int, enabled: Bool) {
+        guard output >= 0, output < 16 else { return }
+        var mask = tubeOutputMask
+        if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
+        setTubeMask(mask)
+    }
+
+    /// Selects a tube style.  1..16 copies that row into the four character
+    /// knobs; 0 (Custom) leaves them where they are.
+    func setTubeType(_ type: Int) {
+        let t = min(max(type, TUBE_TYPE_CUSTOM), TUBE_TYPE_MAX)
+        self.tubeType = t
+        if t < TUBE_TYPE_ROWS.count, let row = TUBE_TYPE_ROWS[t] {
+            self.tubeBiasPct = row.biasPct
+            self.tubeAsymDB = row.asymDB
+            self.tubeHardnessPct = row.hardnessPct
+            self.tubeSagPct = row.sagPct
+        }
+        sendTubeParam(TUBE_PARAM_TUBE_TYPE, Float(t))
+    }
+
+    func setTubeDrive(_ db: Float) {
+        let v = Self.clampTube(db, TUBE_DRIVE_MIN, TUBE_DRIVE_MAX)
+        self.tubeDriveDB = v
+        sendTubeParam(TUBE_PARAM_DRIVE_DB, v)
+    }
+
+    /// Shared by the four character knobs.  Only a real change drops the type
+    /// to Custom, matching the firmware: re-sending the stored value keeps it.
+    private func setTubeCharacter(_ index: UInt16, _ value: Float,
+                                  _ lo: Float, _ hi: Float,
+                                  _ field: ReferenceWritableKeyPath<DSPViewModel, Float>) {
+        let v = Self.clampTube(value, lo, hi)
+        if self[keyPath: field] != v {
+            self[keyPath: field] = v
+            self.tubeType = TUBE_TYPE_CUSTOM
+        }
+        sendTubeParam(index, v)
+    }
+
+    func setTubeBias(_ pct: Float) {
+        setTubeCharacter(TUBE_PARAM_BIAS_PCT, pct, TUBE_BIAS_MIN, TUBE_BIAS_MAX, \.tubeBiasPct)
+    }
+
+    func setTubeAsym(_ db: Float) {
+        setTubeCharacter(TUBE_PARAM_ASYM_DB, db, TUBE_ASYM_MIN, TUBE_ASYM_MAX, \.tubeAsymDB)
+    }
+
+    func setTubeHardness(_ pct: Float) {
+        setTubeCharacter(TUBE_PARAM_HARDNESS_PCT, pct, TUBE_HARDNESS_MIN, TUBE_HARDNESS_MAX, \.tubeHardnessPct)
+    }
+
+    func setTubeSag(_ pct: Float) {
+        setTubeCharacter(TUBE_PARAM_SAG_PCT, pct, TUBE_SAG_MIN, TUBE_SAG_MAX, \.tubeSagPct)
+    }
+
+    func setTubeRectifier(_ rect: Int) {
+        let r = min(max(rect, TUBE_RECT_SOLID_STATE), TUBE_RECT_MAX)
+        self.tubeRectifier = r
+        sendTubeParam(TUBE_PARAM_RECTIFIER, Float(r))
+    }
+
+    func setTubeXfmr(_ enabled: Bool) {
+        self.tubeXfmrEnabled = enabled
+        sendTubeParam(TUBE_PARAM_XFMR_ENABLED, enabled ? 1 : 0)
+    }
+
+    func setTubeXfmrLf(_ hz: Float) {
+        let v = Self.clampTube(hz, TUBE_XFMR_LF_MIN, TUBE_XFMR_LF_MAX)
+        self.tubeXfmrLfHz = v
+        sendTubeParam(TUBE_PARAM_XFMR_LF_HZ, v)
+    }
+
+    func setTubeXfmrSat(_ pct: Float) {
+        let v = Self.clampTube(pct, TUBE_XFMR_SAT_MIN, TUBE_XFMR_SAT_MAX)
+        self.tubeXfmrSatPct = v
+        sendTubeParam(TUBE_PARAM_XFMR_SAT_PCT, v)
+    }
+
+    func setTubeXfmrHf(_ hz: Float) {
+        let v = Self.clampTube(hz, TUBE_XFMR_HF_MIN, TUBE_XFMR_HF_MAX)
+        self.tubeXfmrHfHz = v
+        sendTubeParam(TUBE_PARAM_XFMR_HF_HZ, v)
+    }
+
+    func setTubeMix(_ pct: Float) {
+        let v = Self.clampTube(pct, TUBE_MIX_MIN, TUBE_MIX_MAX)
+        self.tubeMixPct = v
+        sendTubeParam(TUBE_PARAM_MIX_PCT, v)
+    }
+
+    func setTubeTrim(_ db: Float) {
+        let v = Self.clampTube(db, TUBE_TRIM_MIN, TUBE_TRIM_MAX)
+        self.tubeTrimDB = v
+        sendTubeParam(TUBE_PARAM_TRIM_DB, v)
+    }
+
+    /// Reads the per-output saturation meter: one uint16 LE per output on the
+    /// 0..32767 status-peaks scale, normalized to 0..1.  A short read keeps the
+    /// entries that did arrive.
+    func fetchTubeMeter() {
+        let want = numOutputChannels
+        guard want > 0 else { return }
+        guard let d = usb.getControlRequest(request: REQ_GET_TUBE_METER, value: 0, index: 0,
+                                            length: UInt16(want * 2)), d.count >= 2 else { return }
+        var levels: [Float] = []
+        levels.reserveCapacity(min(want, d.count / 2))
+        for i in 0..<min(want, d.count / 2) {
+            let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
+            levels.append(Float(raw) / TUBE_METER_FULL_SCALE)
+        }
+        DispatchQueue.main.async { self.tubeSaturationMeter = levels }
+    }
+
     // MARK: - Stereo Upmixer (V25, cmds 0x4A-0x4E)
 
     /// Sends one upmix parameter as a 4-byte LE float via REQ_UPMIX_SET_PARAM
@@ -3194,8 +3347,8 @@ extension DSPViewModel {
         // accepted.  A short or wrong-version payload means incompatible
         // firmware - the device is still connected, so don't disconnect (avoids
         // a reconnect loop); just record the version so the UI can react.
-        // Requiring the full V30 size keeps the last section (subharm, offset
-        // 5944..5979) in range along with every section before it.
+        // Requiring the full V31 size keeps the last section (tube, offset
+        // 5980..6027) in range along with every section before it.
         guard data.count >= Int(BULK_PARAMS_SIZE), Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
@@ -3451,6 +3604,18 @@ extension DSPViewModel {
         let shSelectMode = min(Int(data[BULK_SUBHARM_OFFSET + 32]), SUBHARM_SELECT_SUSTAINED)
         let shLinkPairs = data[BULK_SUBHARM_OFFSET + 33] != 0
 
+        // --- Tube Modeller (offset 5980, WireTubeParams 48 bytes) ---
+        // Restored verbatim, with no row lookup: a preset saved as a type keeps
+        // its stored knobs even if a later firmware retunes that row.
+        let tbEnabled = data[BULK_TUBE_OFFSET] != 0
+        let tbType = min(Int(data[BULK_TUBE_OFFSET + 1]), TUBE_TYPE_MAX)
+        let tbRectifier = min(Int(data[BULK_TUBE_OFFSET + 2]), TUBE_RECT_MAX)
+        let tbXfmrEnabled = data[BULK_TUBE_OFFSET + 3] != 0
+        let tbOutputMask = UInt16(data[BULK_TUBE_OFFSET + 4]) | (UInt16(data[BULK_TUBE_OFFSET + 5]) << 8)
+        func tbF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: BULK_TUBE_OFFSET + off, as: Float.self) } }
+        let tbDrive = tbF(8), tbBias = tbF(12), tbAsym = tbF(16), tbHardness = tbF(20), tbSag = tbF(24)
+        let tbXfmrLf = tbF(28), tbXfmrSat = tbF(32), tbXfmrHf = tbF(36), tbMix = tbF(40), tbTrim = tbF(44)
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -3491,6 +3656,22 @@ extension DSPViewModel {
             self.subharmSelectHoldMs = shHold
             self.subharmCeilingDB = shCeiling
             self.subharmLinkPairs = shLinkPairs
+
+            self.tubeEnabled = tbEnabled
+            self.tubeOutputMask = tbOutputMask
+            self.tubeType = tbType
+            self.tubeDriveDB = tbDrive
+            self.tubeBiasPct = tbBias
+            self.tubeAsymDB = tbAsym
+            self.tubeHardnessPct = tbHardness
+            self.tubeSagPct = tbSag
+            self.tubeRectifier = tbRectifier
+            self.tubeXfmrEnabled = tbXfmrEnabled
+            self.tubeXfmrLfHz = tbXfmrLf
+            self.tubeXfmrSatPct = tbXfmrSat
+            self.tubeXfmrHfHz = tbXfmrHf
+            self.tubeMixPct = tbMix
+            self.tubeTrimDB = tbTrim
 
             self.upmixEnabled = umEnabled
             self.upmixCenterMode = umCenterMode
@@ -3956,7 +4137,7 @@ extension DSPViewModel {
     /// The listed offsets are decoded in place: EQ and crossover bands, channel
     /// names, dac_hw_mute, user volume, LG, and the input / I2S / ADAT config.
     /// Anything else - the DSP feature blocks (loudness, crossfeed, leveller,
-    /// psybass, upmixer, preamp, output gain / mute / delay) - falls through to
+    /// psybass, subharm, tube, upmixer, preamp, output gain / mute / delay) - falls through to
     /// a coalesced full re-read instead, which costs one bulk transfer but
     /// needs no per-block decoder here and cannot drift out of step with the
     /// wire format.  That path is what lets a bound pot or IR button move those

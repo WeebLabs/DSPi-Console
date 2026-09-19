@@ -482,6 +482,29 @@ private enum ParamOffsetDecoder {
             }
         }
 
+        // Tube Modeller (5980..6027) - WireTubeParams.  A tube-type SET notifies the
+        // type byte and all four character knobs; the meter has no wire offset.
+        if off >= BULK_TUBE_OFFSET && off < BULK_TUBE_OFFSET + WIRE_TUBE_PARAMS_SIZE {
+            switch off - BULK_TUBE_OFFSET {
+            case 0:  return ("tube.enabled", fmtBool(payload))
+            case 1:  return ("tube.tube_type", tubeTypeName(Int(payload.first ?? 0)))
+            case 2:  return ("tube.rectifier", tubeRectifierName(Int(payload.first ?? 0)))
+            case 3:  return ("tube.xfmr_enabled", fmtBool(payload))
+            case 4:  return ("tube.output_mask", fmtHex(payload))
+            case 8:  return ("tube.drive_db", fmtFloat(payload, suffix: " dB"))
+            case 12: return ("tube.bias_pct", fmtFloat(payload, suffix: "%"))
+            case 16: return ("tube.asym_db", fmtFloat(payload, suffix: " dB"))
+            case 20: return ("tube.hardness_pct", fmtFloat(payload, suffix: "%"))
+            case 24: return ("tube.sag_pct", fmtFloat(payload, suffix: "%"))
+            case 28: return ("tube.xfmr_lf_hz", fmtFloat(payload, suffix: " Hz"))
+            case 32: return ("tube.xfmr_sat_pct", fmtFloat(payload, suffix: "%"))
+            case 36: return ("tube.xfmr_hf_hz", fmtFloat(payload, suffix: " Hz"))
+            case 40: return ("tube.mix_pct", fmtFloat(payload, suffix: "%"))
+            case 44: return ("tube.trim_db", fmtFloat(payload, suffix: " dB"))
+            default: break
+            }
+        }
+
         // Fallback — unknown offset
         return (String(format: "offset=0x%04X size=%d", off, sz), fmtHex(payload))
     }

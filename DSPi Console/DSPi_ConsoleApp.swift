@@ -6139,6 +6139,9 @@ struct ControlSurfacesSettingsTab: View {
                              CS_NOUN_SUBHARM_HOLD, CS_NOUN_SUBHARM_CEILING,
                              CS_NOUN_SUBHARM_LINK, CS_NOUN_SUBHARM_SOLO],
                      strip: ["Subharm"], enableNoun: CS_NOUN_SUBHARM),
+        NounCategory(name: "Tube Modeller",
+                     nouns: [CS_NOUN_TUBE, CS_NOUN_TUBE_TYPE, CS_NOUN_TUBE_DRIVE, CS_NOUN_TUBE_MIX],
+                     strip: ["Tube"], enableNoun: CS_NOUN_TUBE),
         NounCategory(name: "Upmixer",
                      nouns: [CS_NOUN_UPMIX, CS_NOUN_UPMIX_CENTER_MODE, CS_NOUN_UPMIX_SURROUND_MODE,
                              CS_NOUN_UPMIX_STRENGTH, CS_NOUN_UPMIX_WIDTH, CS_NOUN_UPMIX_PRESENCE],
@@ -7126,6 +7129,10 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_SUBHARM_CEILING:    return "Subharm Sub Ceiling"
         case CS_NOUN_SUBHARM_LINK:       return "Subharm Pair Link"
         case CS_NOUN_SUBHARM_SOLO:       return "Subharm Solo"
+        case CS_NOUN_TUBE:               return "Tube Modeller"
+        case CS_NOUN_TUBE_DRIVE:         return "Tube Drive"
+        case CS_NOUN_TUBE_TYPE:          return "Tube Type"
+        case CS_NOUN_TUBE_MIX:           return "Tube Mix"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
@@ -7381,6 +7388,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_UPMIX_SURROUND_MODE:
             let names = ["Off", "Sinner", "Logician"]
             return (value >= 0 && value < names.count) ? names[value] : "Mode \(value)"
+        case CS_NOUN_TUBE_TYPE:
+            return tubeTypeName(value)
         case CS_NOUN_FILTER_TYPE:
             let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "Low Pass",
                          "High Pass", "Notch", "All Pass", "All Pass (1st)",
@@ -10746,6 +10755,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var psybassWindowController = PsychoacousticBassWindowController()
     @StateObject private var subharmWindowController = SubharmonicSynthWindowController()
+    @StateObject private var tubeWindowController = TubeModellerWindowController()
     @StateObject private var upmixerWindowController = UpmixerWindowController()
     @StateObject private var levellerWindowController = VolumeLevellerWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
@@ -10785,6 +10795,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(crossfeedWindowController)
                 .environmentObject(psybassWindowController)
                 .environmentObject(subharmWindowController)
+                .environmentObject(tubeWindowController)
                 .environmentObject(upmixerWindowController)
                 .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
@@ -10982,6 +10993,11 @@ struct DSPi_ConsoleApp: App {
                     subharmWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("S", modifiers: [.command, .shift])
+
+                Button("Tube Modeller...") {
+                    tubeWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("D", modifiers: [.command, .shift])
 
                 Button("Stereo Upmixer...") {
                     upmixerWindowController.show(vm: AppState.shared.viewModel)
