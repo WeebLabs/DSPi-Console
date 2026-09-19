@@ -159,8 +159,8 @@ struct TubeModellerView: View {
 
     private var headerSection: some View {
         HStack(spacing: 12) {
-            Image(systemName: "flame")
-                .font(.system(size: 22))
+            TubeIcon(lit: vm.tubeEnabled)
+                .frame(width: 27, height: 27)
                 .foregroundColor(.accentColor)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -679,6 +679,83 @@ struct TubeModellerView: View {
             .disabled(!vm.isDeviceConnected)
         }
         .help(help)
+    }
+}
+
+// MARK: - Tube Icon
+
+/// A vacuum tube drawn on a 24-point grid, sized to sit beside the SF Symbols
+/// the other tool windows use in their headers.  The glass, base and pins take
+/// the foreground colour; the filament glows only while the effect is on, so
+/// the header doubles as a status light.
+struct TubeIcon: View {
+    var lit: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            // 1.9 pt at the 27-point header size, scaling with the frame.
+            let w = min(geo.size.width, geo.size.height) * 1.9 / 27
+            ZStack {
+                TubeIconShape(part: .envelope)
+                    .stroke(style: StrokeStyle(lineWidth: w, lineCap: .round, lineJoin: .round))
+                TubeIconShape(part: .base).fill()
+                TubeIconShape(part: .pins)
+                    .stroke(style: StrokeStyle(lineWidth: w, lineCap: .round))
+                TubeIconShape(part: .rods)
+                    .stroke(style: StrokeStyle(lineWidth: w * 0.8, lineCap: .round))
+                // Both layers stay in place and cross-fade, so the filament
+                // warms and cools rather than switching.
+                TubeIconShape(part: .filament)
+                    .stroke(style: StrokeStyle(lineWidth: w * 0.8, lineCap: .round))
+                    .opacity(lit ? 0 : 1)
+                TubeIconShape(part: .filament)
+                    .stroke(Color.orange, style: StrokeStyle(lineWidth: w, lineCap: .round))
+                    .shadow(color: .orange.opacity(0.9), radius: geo.size.width / 14)
+                    .opacity(lit ? 1 : 0)
+            }
+        }
+        // A heater takes a moment to glow and a little less to go dark.
+        .animation(.easeInOut(duration: lit ? 0.9 : 0.6), value: lit)
+    }
+}
+
+private struct TubeIconShape: Shape {
+    enum Part { case envelope, base, pins, rods, filament }
+    let part: Part
+
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        let ox = rect.midX - 12 * s, oy = rect.midY - 12 * s
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ox + x * s, y: oy + y * s) }
+
+        var path = Path()
+        switch part {
+        case .envelope:
+            // Straight-sided glass with a round dome and the exhaust tip.
+            path.move(to: p(5.5, 17))
+            path.addLine(to: p(5.5, 8.5))
+            path.addArc(center: p(12, 8.5), radius: 6.5 * s,
+                        startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+            path.addLine(to: p(18.5, 17))
+            path.move(to: p(12, 2))
+            path.addLine(to: p(12, 0.8))
+        case .base:
+            path.addRoundedRect(in: CGRect(origin: p(4.5, 16.8), size: CGSize(width: 15 * s, height: 3.6 * s)),
+                                cornerSize: CGSize(width: 1.2 * s, height: 1.2 * s))
+        case .pins:
+            for x: CGFloat in [8.5, 12, 15.5] {
+                path.move(to: p(x, 20.4))
+                path.addLine(to: p(x, 23.2))
+            }
+        case .rods:
+            // The heater's support wires, rising from the base.
+            path.move(to: p(10.5, 16.8)); path.addLine(to: p(10.5, 11))
+            path.move(to: p(13.5, 16.8)); path.addLine(to: p(13.5, 11))
+        case .filament:
+            path.move(to: p(10.5, 11))
+            path.addQuadCurve(to: p(13.5, 11), control: p(12, 6.5))
+        }
+        return path
     }
 }
 
