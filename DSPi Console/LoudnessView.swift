@@ -51,7 +51,7 @@ class LoudnessWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = LoudnessView(vm: vm).onboardingHint("loudness")
+            let view = LoudnessView(vm: vm, loudness: vm.loudness).onboardingHint("loudness")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 780, height: 400),
@@ -111,6 +111,11 @@ private func loudnessCompensationDB(
 
 struct LoudnessView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Observed separately from `vm` so a slider drag invalidates this
+    /// window and nothing else; see ToolParameters.swift.
+    @ObservedObject var loudness: LoudnessParameters
+    /// What the curve follows during a drag; see `GraphLive`.
+    @State private var graphLive = GraphLive<LoudnessGraphKey>()
 
     /// Output channels exposed in the mask grid (5 on RP2040, 9 on RP2350).
     private var outputCount: Int { vm.numOutputChannels }
@@ -201,12 +206,14 @@ struct LoudnessView: View {
                     .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
 
                 // Grid + curve
-                CompensationCurveView(
-                    refSPL: vm.loudnessRefSPL,
-                    intensity: vm.loudnessIntensity,
-                    isEnabled: vm.loudnessEnabled
-                )
-                .padding(8)
+                // In its own hosting view, so following a drag re-lays out the
+                // graph alone rather than the whole window.
+                LiveGraphHost(flexibleHeight: true) {
+                    LoudnessGraphPane(
+                        base: .init(refSPL: loudness.refSPL, intensity: loudness.intensity),
+                        isEnabled: vm.loudnessEnabled, live: graphLive)
+                    .padding(8)
+                }
             }
             .frame(minHeight: 160, maxHeight: .infinity)
             .overlay(
@@ -224,63 +231,33 @@ struct LoudnessView: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            // Reference SPL
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Reference SPL")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "dB",
-                        value: vm.loudnessRefSPL,
-                        width: 60
-                    ) { vm.setLoudnessRef($0) }
-                }
-                
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.loudnessRefSPL },
-                        set: { vm.setLoudnessRef($0) }
-                    ),
-                    range: 40...100
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("SPL at 1 kHz when USB volume is 0 dB. Lower = more compensation per dB of volume reduction.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Reference SPL",
+                unit: "dB",
+                value: loudness.refSPL,
+                range: 40...100,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "SPL at 1 kHz when USB volume is 0 dB. Lower = more compensation per dB of volume reduction.",
+                live: { v in vm.sendFloatParamToDevice(REQ_SET_LOUDNESS_REF, v); graphLive.set(.refSPL, v) },
+                set: { vm.setLoudnessRef($0) }
+            )
 
             Divider()
 
-            // Intensity
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Intensity")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "%",
-                        value: vm.loudnessIntensity,
-                        width: 60
-                    ) { vm.setLoudnessIntensity($0) }
-                }
-                
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.loudnessIntensity },
-                        set: { vm.setLoudnessIntensity($0) }
-                    ),
-                    range: 0...200
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Scales the ISO 226 compensation. 100% = standard curve. 0% = bypassed. >100% = exaggerated.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Intensity",
+                unit: "%",
+                value: loudness.intensity,
+                range: 0...200,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Scales the ISO 226 compensation. 100% = standard curve. 0% = bypassed. >100% = exaggerated.",
+                live: { v in vm.sendFloatParamToDevice(REQ_SET_LOUDNESS_INTENSITY, v); graphLive.set(.intensity, v) },
+                set: { vm.setLoudnessIntensity($0) }
+            )
         }
     }
 
@@ -321,9 +298,9 @@ struct LoudnessView: View {
                 ForEach(0..<outputCount, id: \.self) { out in
                     channelChip(
                         out: out,
-                        on: vm.loudnessOutputMask & (UInt16(1) << out) != 0
+                        on: loudness.outputMask & (UInt16(1) << out) != 0
                     ) {
-                        vm.setLoudnessOutputChannel(out, enabled: vm.loudnessOutputMask & (UInt16(1) << out) == 0)
+                        vm.setLoudnessOutputChannel(out, enabled: loudness.outputMask & (UInt16(1) << out) == 0)
                     }
                 }
             }
@@ -372,6 +349,26 @@ private struct InfoRow: View {
 }
 
 // MARK: - Compensation Curve Visualization
+
+enum LoudnessGraphKey: Hashable { case refSPL, intensity }
+
+/// The compensation curve, resolving live overrides over the committed values.
+/// Lives in a `LiveGraphHost`, so a live update costs the layout of this view alone.
+private struct LoudnessGraphPane: View {
+    struct Base: Equatable { var refSPL, intensity: Float }
+    let base: Base
+    let isEnabled: Bool
+    @ObservedObject var live: GraphLive<LoudnessGraphKey>
+
+    var body: some View {
+        CompensationCurveView(
+            refSPL: live[.refSPL, or: base.refSPL],
+            intensity: live[.intensity, or: base.intensity],
+            isEnabled: isEnabled
+        )
+        .onChange(of: base) { _ in live.clear() }
+    }
+}
 
 private struct CompensationCurveView: View {
     let refSPL: Float

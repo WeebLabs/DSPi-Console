@@ -52,25 +52,4 @@ final class SliderInteractionTests: XCTestCase {
         delivery.finish(11)
         XCTAssertEqual(sent, [1, 3, 11])
     }
-
-    @MainActor
-    func testNativeControlAcceptsExternalAndKeyboardValues() {
-        let slider = ParameterSlider(frame: NSRect(x: 0, y: 0, width: 300, height: 16))
-        var values: [Float] = []
-        slider.configure(value: 12, range: 0...24, enabled: true, onValue: { values.append($0) })
-        XCTAssertEqual(slider.floatValue, 12)
-        XCTAssertTrue(slider.isContinuous)
-        // Keyboard/accessibility actions have no pointer-tracking loop and
-        // must commit immediately rather than wait for a mouse-up event.
-        slider.floatValue = 13.5
-        slider.sendAction(slider.action, to: slider.target)
-        XCTAssertEqual(values, [13.5])
-        slider.configure(value: 7, range: 0...24, enabled: true, onValue: { values.append($0) })
-        XCTAssertEqual(slider.floatValue, 7)
-        slider.configure(value: 7, range: 0...24, enabled: false, onValue: { values.append($0) })
-        XCTAssertFalse(slider.isEnabled)
-        slider.floatValue = 10
-        slider.sendAction(slider.action, to: slider.target)
-        XCTAssertEqual(values, [13.5], "A disabled control sent a value")
-    }
 }

@@ -176,7 +176,7 @@ final class UpmixerWireTests: XCTestCase {
 
         // Enabled + adaptive surround: 5 rows, C/Ls/Rs above the stereo pair.
         vm.upmixEnabled = true
-        vm.upmixSurroundMode = UPMIX_SURROUND_MODE_ADAPTIVE
+        vm.upmix.surroundMode = UPMIX_SURROUND_MODE_ADAPTIVE
         XCTAssertTrue(vm.upmixDerivesRows)
         XCTAssertEqual(vm.matrixSourceRowCount, 5)
         XCTAssertEqual(vm.matrixRowShortName(2), "C")
@@ -185,7 +185,7 @@ final class UpmixerWireTests: XCTestCase {
         XCTAssertEqual(vm.matrixRowFullName(2), "Upmix Centre")
 
         // Surround OFF: only the Centre row is exposed (3 rows total).
-        vm.upmixSurroundMode = UPMIX_SURROUND_MODE_OFF
+        vm.upmix.surroundMode = UPMIX_SURROUND_MODE_OFF
         XCTAssertEqual(vm.matrixSourceRowCount, 3)
     }
 

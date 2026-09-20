@@ -8,7 +8,7 @@ class TubeModellerWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = TubeModellerView(vm: vm, controller: self).onboardingHint("tube")
+            let view = TubeModellerView(vm: vm, tube: vm.tube, controller: self).onboardingHint("tube")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 780, height: 664),
@@ -17,7 +17,14 @@ class TubeModellerWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "Tube Modeller"
-            window?.contentView = NSHostingView(rootView: view)
+            let hosting = NSHostingView(rootView: view)
+            // The controller sets the window's min and max content size itself
+            // in `fit`. Left to its defaults the hosting view derives them too,
+            // and that is a full ideal-size measurement of the whole tree on
+            // every display cycle - 30 % of the main thread during a slider
+            // drag, for a number nobody reads.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.contentMinSize = NSSize(width: 740, height: 400)
@@ -95,11 +102,20 @@ private let tubeStartingPoints: [TubeStartingPoint] = [
 
 struct TubeModellerView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Observed separately from `vm` so a slider drag invalidates this window
+    /// and nothing else; see ToolParameters.swift.
+    @ObservedObject var tube: TubeParameters
     @ObservedObject var controller: TubeModellerWindowController
 
     /// Basic shows the tube and the two controls most people need; Advanced
     /// shows every parameter.  Remembered across launches.
     @AppStorage("tubeModellerAdvanced") private var advanced = false
+
+    /// What the transfer graph follows during a drag: the committed parameters
+    /// with the dragged one substituted, or nil between drags. Held in `@State`
+    /// as a plain reference, deliberately not `@StateObject`, so this view does
+    /// not observe it; only the graph pane inside its `LiveGraphHost` does.
+    @State private var graphLive = TubeGraphLive()
 
     /// Output channels exposed in the mask grid (5 on RP2040, 9 on RP2350).
     private var outputCount: Int { vm.numOutputChannels }
@@ -124,7 +140,7 @@ struct TubeModellerView: View {
     }
 
     private var selectedRow: TubeTypeRow? {
-        let t = vm.tubeType
+        let t = tube.type
         return t > 0 && t < TUBE_TYPE_ROWS.count ? TUBE_TYPE_ROWS[t] : nil
     }
 
@@ -205,7 +221,7 @@ struct TubeModellerView: View {
         .padding(.vertical, 16)
     }
 
-    private var family: TubeFamily { TubeFamily.of(vm.tubeType) }
+    private var family: TubeFamily { TubeFamily.of(tube.type) }
 
     private var tubeShowcase: some View {
         ZStack {
@@ -223,7 +239,7 @@ struct TubeModellerView: View {
                 ZStack {
                     TubeIllustration(family: family, lit: vm.tubeEnabled,
                                      meters: vm.meters, outputStart: vm.chOut1,
-                                     outputCount: outputCount, outputMask: vm.tubeOutputMask,
+                                     outputCount: outputCount, outputMask: tube.outputMask,
                                      active: controller.isVisible && vm.isDeviceConnected)
                         .id(family)
                         .transition(.opacity)
@@ -254,7 +270,7 @@ struct TubeModellerView: View {
         guard let row = selectedRow else {
             return "Character set by hand. Pick a tube to load one, or fine-tune it in Advanced."
         }
-        if row.pushPull && !vm.tubeXfmrEnabled {
+        if row.pushPull && !tube.xfmrEnabled {
             return "\(row.style). Meant for use with the output stage, in Advanced."
         }
         return "\(row.style)."
@@ -283,7 +299,7 @@ struct TubeModellerView: View {
     }
 
     private func tubeChip(_ type: Int) -> some View {
-        let on = vm.tubeType == type
+        let on = tube.type == type
         let row = TUBE_TYPE_ROWS[type]
         return Button(action: { vm.setTubeType(type) }) {
             Text(row?.shortName ?? tubeTypeName(type))
@@ -312,11 +328,13 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Drive",
                 unit: "dB",
-                value: vm.tubeDriveDB,
+                value: tube.driveDB,
                 range: TUBE_DRIVE_MIN...TUBE_DRIVE_MAX,
                 scrollStep: 0.5,
                 maxDecimals: 1,
                 ends: ("Clean", "Overdrive"),
+                liveIndex: TUBE_PARAM_DRIVE_DB,
+                liveShaper: { shaperOverriding(driveDB: $0) },
                 help: "How hard the tube is driven. Drive moves the knee, not the level: at the -6 dB default the knee sits 6 dB above full scale and the colour is subtle, and the top of the range is overdrive.",
                 set: { vm.setTubeDrive($0) }
             )
@@ -324,11 +342,13 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Mix",
                 unit: "%",
-                value: vm.tubeMixPct,
+                value: tube.mixPct,
                 range: TUBE_MIX_MIN...TUBE_MIX_MAX,
                 scrollStep: 1,
                 maxDecimals: 0,
                 ends: ("Dry", "All tube"),
+                liveIndex: TUBE_PARAM_MIX_PCT,
+                liveShaper: { shaperOverriding(mixPct: $0) },
                 help: "Blends the tube with the untouched signal. Below 100% the original transients stay intact under the colour, which is the easiest way to use heavy drive subtly.",
                 set: { vm.setTubeMix($0) }
             )
@@ -400,8 +420,8 @@ struct TubeModellerView: View {
     // MARK: - Transfer Graph
 
     private var shaper: TubeShaper {
-        TubeShaper(driveDB: vm.tubeDriveDB, biasPct: vm.tubeBiasPct, asymDB: vm.tubeAsymDB,
-                   hardnessPct: vm.tubeHardnessPct, mixPct: vm.tubeMixPct, trimDB: vm.tubeTrimDB)
+        TubeShaper(driveDB: tube.driveDB, biasPct: tube.biasPct, asymDB: tube.asymDB,
+                   hardnessPct: tube.hardnessPct, mixPct: tube.mixPct, trimDB: tube.trimDB)
     }
 
     private var transferGraph: some View {
@@ -412,24 +432,21 @@ struct TubeModellerView: View {
                 startingPointsMenu
             }
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
-
-                TubeTransferView(shaper: shaper, isEnabled: vm.tubeEnabled)
-                    .equatable()
-                    .padding(8)
+            // In its own hosting view, so following a drag re-lays out the
+            // graph alone rather than the whole window.
+            LiveGraphHost {
+                TubeGraphPane(base: shaper, isEnabled: vm.tubeEnabled, live: graphLive)
             }
-            .frame(height: 188)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-            )
-
-            TubeHarmonicsReadout(shaper: shaper)
-                .equatable()
-                .padding(.top, 4)
         }
+    }
+
+    /// The committed shaper with one parameter replaced, for the graph to show
+    /// while that parameter is being dragged.
+    private func shaperOverriding(driveDB: Float? = nil, biasPct: Float? = nil, asymDB: Float? = nil,
+                                  hardnessPct: Float? = nil, mixPct: Float? = nil, trimDB: Float? = nil) -> TubeShaper {
+        TubeShaper(driveDB: driveDB ?? tube.driveDB, biasPct: biasPct ?? tube.biasPct,
+                   asymDB: asymDB ?? tube.asymDB, hardnessPct: hardnessPct ?? tube.hardnessPct,
+                   mixPct: mixPct ?? tube.mixPct, trimDB: trimDB ?? tube.trimDB)
     }
 
     private var startingPointsMenu: some View {
@@ -467,10 +484,12 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Drive",
                 unit: "dB",
-                value: vm.tubeDriveDB,
+                value: tube.driveDB,
                 range: TUBE_DRIVE_MIN...TUBE_DRIVE_MAX,
                 scrollStep: 0.5,
                 maxDecimals: 1,
+                liveIndex: TUBE_PARAM_DRIVE_DB,
+                liveShaper: { shaperOverriding(driveDB: $0) },
                 help: "Gain ahead of the shaper. At 0 dB a full-scale signal just reaches the knee, so this alone sets how hard the stage is driven. The shaper carries matching makeup gain, so clean material keeps its level at every drive; harmonics and sag rise with it.",
                 set: { vm.setTubeDrive($0) }
             )
@@ -478,10 +497,12 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Mix",
                 unit: "%",
-                value: vm.tubeMixPct,
+                value: tube.mixPct,
                 range: TUBE_MIX_MIN...TUBE_MIX_MAX,
                 scrollStep: 1,
                 maxDecimals: 0,
+                liveIndex: TUBE_PARAM_MIX_PCT,
+                liveShaper: { shaperOverriding(mixPct: $0) },
                 help: "Blend of the processed signal with the untouched input. The dry path is sample-aligned with the wet one, so blending never combs.",
                 set: { vm.setTubeMix($0) }
             )
@@ -489,10 +510,12 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Output Trim",
                 unit: "dB",
-                value: vm.tubeTrimDB,
+                value: tube.trimDB,
                 range: TUBE_TRIM_MIN...TUBE_TRIM_MAX,
                 scrollStep: 0.5,
                 maxDecimals: 1,
+                liveIndex: TUBE_PARAM_TRIM_DB,
+                liveShaper: { shaperOverriding(trimDB: $0) },
                 help: "Level of the processed signal only. A hard-driven, strongly asymmetric setting can push the wet path above full scale; watch the output clip indicators and bring it back here.",
                 set: { vm.setTubeTrim($0) }
             )
@@ -509,7 +532,7 @@ struct TubeModellerView: View {
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
                 Picker("", selection: Binding(
-                    get: { vm.tubeType },
+                    get: { tube.type },
                     set: { vm.setTubeType($0) }
                 )) {
                     Text("Custom").tag(TUBE_TYPE_CUSTOM)
@@ -545,7 +568,7 @@ struct TubeModellerView: View {
         guard let row = selectedRow else {
             return "Character controls as set, no tube row applied."
         }
-        if row.pushPull && !vm.tubeXfmrEnabled {
+        if row.pushPull && !tube.xfmrEnabled {
             return "\(row.style). Meant for use with the output stage on."
         }
         return "\(row.style)."
@@ -581,9 +604,9 @@ struct TubeModellerView: View {
                 ForEach(0..<outputCount, id: \.self) { out in
                     outputChip(
                         out: out,
-                        on: vm.tubeOutputMask & (UInt16(1) << out) != 0
+                        on: tube.outputMask & (UInt16(1) << out) != 0
                     ) {
-                        vm.setTubeOutputChannel(out, enabled: vm.tubeOutputMask & (UInt16(1) << out) == 0)
+                        vm.setTubeOutputChannel(out, enabled: tube.outputMask & (UInt16(1) << out) == 0)
                     }
                 }
             }
@@ -627,10 +650,12 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Bias",
                 unit: "%",
-                value: vm.tubeBiasPct,
+                value: tube.biasPct,
                 range: TUBE_BIAS_MIN...TUBE_BIAS_MAX,
                 scrollStep: 1,
                 maxDecimals: 0,
+                liveIndex: TUBE_PARAM_BIAS_PCT,
+                liveShaper: { shaperOverriding(biasPct: $0) },
                 help: "Shifts the operating point along the curve. Positive values give the classic warm second harmonic that grows with level; negative values give the same amount with the even products inverted, which only matters when mixed with the dry signal.",
                 set: { vm.setTubeBias($0) }
             )
@@ -638,10 +663,12 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Asymmetry",
                 unit: "dB",
-                value: vm.tubeAsymDB,
+                value: tube.asymDB,
                 range: TUBE_ASYM_MIN...TUBE_ASYM_MAX,
                 scrollStep: 0.5,
                 maxDecimals: 1,
+                liveIndex: TUBE_PARAM_ASYM_DB,
+                liveShaper: { shaperOverriding(asymDB: $0) },
                 help: "How much later the negative half reaches its knee than the positive half. Adds even-order content at heavy drive. Zero is symmetric, as in a push-pull stage.",
                 set: { vm.setTubeAsym($0) }
             )
@@ -649,10 +676,12 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Knee Hardness",
                 unit: "%",
-                value: vm.tubeHardnessPct,
+                value: tube.hardnessPct,
                 range: TUBE_HARDNESS_MIN...TUBE_HARDNESS_MAX,
                 scrollStep: 1,
                 maxDecimals: 0,
+                liveIndex: TUBE_PARAM_HARDNESS_PCT,
+                liveShaper: { shaperOverriding(hardnessPct: $0) },
                 help: "Blends from a soft cubic knee (0%) to a harder quintic one (100%). Clean material stays at the same level at every setting; only how abruptly the stage runs out changes.",
                 set: { vm.setTubeHardness($0) }
             )
@@ -660,14 +689,15 @@ struct TubeModellerView: View {
             paramRow(
                 title: "Sag",
                 unit: "%",
-                value: vm.tubeSagPct,
+                value: tube.sagPct,
                 range: TUBE_SAG_MIN...TUBE_SAG_MAX,
                 scrollStep: 1,
                 maxDecimals: 0,
+                liveIndex: TUBE_PARAM_SAG_PCT,
                 help: "Supply-sag compression: sustained heavy drive pulls the gain down slowly, then recovers. The rectifier below scales the depth and sets the timing.",
                 set: { vm.setTubeSag($0) }
             )
-            .opacity(vm.tubeRectifier == TUBE_RECT_SOLID_STATE ? 0.5 : 1)
+            .opacity(tube.rectifier == TUBE_RECT_SOLID_STATE ? 0.5 : 1)
 
             rectifierRow
         }
@@ -679,7 +709,7 @@ struct TubeModellerView: View {
                 .font(.system(size: 12, weight: .medium))
 
             Picker("", selection: Binding(
-                get: { vm.tubeRectifier },
+                get: { tube.rectifier },
                 set: { vm.setTubeRectifier($0) }
             )) {
                 Text("Solid state").tag(0)
@@ -700,7 +730,7 @@ struct TubeModellerView: View {
     }
 
     private var rectifierSummary: String {
-        let r = vm.tubeRectifier
+        let r = tube.rectifier
         guard r > TUBE_RECT_SOLID_STATE, r < TUBE_RECTIFIER_ROWS.count else {
             return "No sag: the supply holds up however hard the stage is driven."
         }
@@ -716,7 +746,7 @@ struct TubeModellerView: View {
     /// 4x nominal at resonance and 2x at the top lifts the terminal voltage by
     /// these amounts.  Cheap enough to read straight off the current value.
     private var xfmrLift: (bell: Float, top: Float) {
-        let df = max(vm.tubeXfmrDamping, TUBE_XFMR_DAMPING_MIN)
+        let df = max(tube.xfmrDamping, TUBE_XFMR_DAMPING_MIN)
         let bump = 4 * (df + 1) / (4 * df + 1)
         let top = 2 * (df + 1) / (2 * df + 1)
         return (20 * log10(bump), 20 * log10(top))
@@ -733,7 +763,7 @@ struct TubeModellerView: View {
                 }
                 Spacer()
                 Toggle("", isOn: Binding(
-                    get: { vm.tubeXfmrEnabled },
+                    get: { tube.xfmrEnabled },
                     set: { vm.setTubeXfmr($0) }
                 ))
                 .toggleStyle(.switch)
@@ -745,17 +775,18 @@ struct TubeModellerView: View {
             // The firmware compiles these stages out of the loop it runs while
             // the stage is off, so they are hidden rather than shown doing
             // nothing.
-            if vm.tubeXfmrEnabled {
+            if tube.xfmrEnabled {
                 let lift = xfmrLift
 
                 paramRow(
                     title: "Damping Factor",
                     unit: "",
-                    value: vm.tubeXfmrDamping,
+                    value: tube.xfmrDamping,
                     range: TUBE_XFMR_DAMPING_MIN...TUBE_XFMR_DAMPING_MAX,
                     scrollStep: 0.5,
                     maxDecimals: 1,
                     ends: ("1 (loose)", "20 (tight)"),
+                    liveIndex: TUBE_PARAM_XFMR_DAMPING,
                     help: "The speaker's nominal impedance divided by the amplifier's source impedance. A single-ended triode amplifier without feedback sits around 2 to 3; a push-pull pentode amplifier with feedback around 8 to 15. It sets the size of both the bell and the top lift.",
                     set: { vm.setTubeXfmrDamping($0) }
                 )
@@ -768,11 +799,12 @@ struct TubeModellerView: View {
                 paramRow(
                     title: "Speaker Resonance",
                     unit: "Hz",
-                    value: vm.tubeXfmrResHz,
+                    value: tube.xfmrResHz,
                     range: TUBE_XFMR_RES_MIN...TUBE_XFMR_RES_MAX,
                     scrollStep: 1,
                     maxDecimals: 0,
                     ends: ("30 Hz", "150 Hz"),
+                    liveIndex: TUBE_PARAM_XFMR_RES_HZ,
                     help: "Where the loudspeaker resonates in its enclosure, which is where the bell sits. Q is fixed at 0.707, so the bump is broad. 85 Hz suits a typical small to medium woofer; larger drivers sit lower.",
                     set: { vm.setTubeXfmrRes($0) }
                 )
@@ -782,8 +814,9 @@ struct TubeModellerView: View {
 
     // MARK: - Parameter Row
 
-    /// The labelled ValueField + CustomSlider row the other tool windows use.
-    /// The setters clamp, so the field can commit any typed value.
+    /// Wraps the shared `ParameterRow`, adding the device-only live send so a
+    /// drag never publishes.  `index`, `lo` and `hi` are the firmware's, so the
+    /// live path clamps exactly as the committing setter does.
     private func paramRow(
         title: String,
         unit: String,
@@ -792,40 +825,29 @@ struct TubeModellerView: View {
         scrollStep: Float,
         maxDecimals: Int,
         ends: (String, String)? = nil,
+        displayOverride: String? = nil,
+        liveIndex: UInt16,
+        liveShaper: ((Float) -> TubeShaper)? = nil,
         help: String,
         set: @escaping (Float) -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                Spacer()
-                ValueField(
-                    label: unit,
-                    value: value,
-                    width: 60,
-                    scrollStep: scrollStep,
-                    maxDecimals: maxDecimals
-                ) { set($0) }
-            }
-
-            CustomSlider(
-                value: Binding(get: { value }, set: { set($0) }),
-                range: range
-            )
-            .disabled(!vm.isDeviceConnected)
-
-            if let ends {
-                HStack {
-                    Text(ends.0)
-                    Spacer()
-                    Text(ends.1)
-                }
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-            }
-        }
-        .help(help)
+        ParameterRow(
+            title: title,
+            unit: unit,
+            value: value,
+            range: range,
+            scrollStep: scrollStep,
+            maxDecimals: maxDecimals,
+            ends: ends,
+            displayOverride: displayOverride,
+            isEnabled: vm.isDeviceConnected,
+            help: help,
+            live: { v in
+                vm.sendTubeParamToDevice(liveIndex, v, range.lowerBound, range.upperBound)
+                if let liveShaper { graphLive.shaper = liveShaper(v) }
+            },
+            set: set
+        )
     }
 }
 
@@ -1026,6 +1048,49 @@ private struct TubeHarmonicsReadout: View, Equatable {
         }
     }
 
+}
+
+// MARK: - Live Graph
+
+/// The override the transfer graph shows while a parameter is being dragged.
+/// Observed only by `TubeGraphPane`, inside its own hosting view.
+final class TubeGraphLive: ObservableObject {
+    @Published var shaper: TubeShaper?
+}
+
+/// The graph and its harmonics readout, resolving the live override over the
+/// committed shaper. Lives in a `LiveGraphHost`, so a live update costs the
+/// layout of this tree and nothing else.
+private struct TubeGraphPane: View {
+    let base: TubeShaper
+    let isEnabled: Bool
+    @ObservedObject var live: TubeGraphLive
+
+    var body: some View {
+        let shaper = live.shaper ?? base
+        // The commit on release changes `base` to the value the override
+        // already shows, so clearing here moves nothing visibly.
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+
+                TubeTransferView(shaper: shaper, isEnabled: isEnabled)
+                    .equatable()
+                    .padding(8)
+            }
+            .frame(height: 188)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+            )
+
+            TubeHarmonicsReadout(shaper: shaper)
+                .equatable()
+                .padding(.top, 4)
+        }
+        .onChange(of: base) { _ in live.shaper = nil }
+    }
 }
 
 // MARK: - Transfer Curve Visualization

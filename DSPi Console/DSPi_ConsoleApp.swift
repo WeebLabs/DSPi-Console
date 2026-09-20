@@ -9306,7 +9306,7 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
             let vm = AppState.shared.viewModel
             let triggers: [AnyPublisher<Void, Never>] = [
                 vm.$upmixEnabled.map { _ in () }.eraseToAnyPublisher(),
-                vm.$upmixSurroundMode.map { _ in () }.eraseToAnyPublisher(),
+                vm.upmix.$surroundMode.map { _ in () }.eraseToAnyPublisher(),
                 vm.$activeInputChannels.map { _ in () }.eraseToAnyPublisher(),
                 vm.$hostConfiguredInputChannels.map { _ in () }.eraseToAnyPublisher(),
                 vm.$inputSource.map { _ in () }.eraseToAnyPublisher(),

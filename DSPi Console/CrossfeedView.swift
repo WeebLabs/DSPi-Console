@@ -8,7 +8,7 @@ class CrossfeedWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = CrossfeedView(vm: vm).onboardingHint("crossfeed")
+            let view = CrossfeedView(vm: vm, crossfeed: vm.crossfeed).onboardingHint("crossfeed")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 780, height: 470),
@@ -60,8 +60,13 @@ private let crossfeedPresets: [CrossfeedPreset] = [
 
 struct CrossfeedView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Observed separately from `vm` so a slider drag invalidates this
+    /// window and nothing else; see ToolParameters.swift.
+    @ObservedObject var crossfeed: CrossfeedParameters
+    /// What the curve follows during a drag; see `GraphLive`.
+    @State private var graphLive = GraphLive<CrossfeedGraphKey>()
 
-    private var isCustom: Bool { vm.crossfeedPreset == 3 }
+    private var isCustom: Bool { crossfeed.preset == 3 }
 
     /// Number of stereo output pairs (S/PDIF instances): 2 on RP2040, 4 on RP2350.
     /// Pair p covers output slots 2p / 2p+1; the mono PDM sub is never crossfed.
@@ -158,12 +163,14 @@ struct CrossfeedView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
 
-                CrossfeedCurveView(
-                    freq: vm.crossfeedFreq,
-                    feed: vm.crossfeedFeed,
-                    isEnabled: vm.crossfeedEnabled
-                )
-                .padding(8)
+                // In its own hosting view, so following a drag re-lays out the
+                // graph alone rather than the whole window.
+                LiveGraphHost(flexibleHeight: true) {
+                    CrossfeedGraphPane(
+                        base: .init(freq: crossfeed.freq, feed: crossfeed.feed),
+                        isEnabled: vm.crossfeedEnabled, live: graphLive)
+                    .padding(8)
+                }
             }
             .frame(height: 160)
             .overlay(
@@ -192,9 +199,9 @@ struct CrossfeedView: View {
             vm.setCrossfeedPreset(index)
         }) {
             HStack(spacing: 10) {
-                Image(systemName: vm.crossfeedPreset == index ? "largecircle.fill.circle" : "circle")
+                Image(systemName: crossfeed.preset == index ? "largecircle.fill.circle" : "circle")
                     .font(.system(size: 14))
-                    .foregroundColor(vm.crossfeedPreset == index ? .accentColor : .secondary)
+                    .foregroundColor(crossfeed.preset == index ? .accentColor : .secondary)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(preset.name)
@@ -222,76 +229,48 @@ struct CrossfeedView: View {
                 .foregroundColor(.secondary)
 
             // Cutoff Frequency
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Cutoff Frequency")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "Hz",
-                        value: vm.crossfeedFreq,
-                        width: 60
-                    ) { val in
-                        let clamped = min(max(val, 500), 2000)
-                        vm.setCrossfeedFreq(clamped)
-                        if !isCustom { vm.setCrossfeedPreset(3) }
-                    }
+            ParameterRow(
+                title: "Cutoff Frequency",
+                unit: "Hz",
+                value: crossfeed.freq,
+                range: 500...2000,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Simulates head shadow lowpass cutoff. Lower = more bass crossfeed. Typical: 650-700 Hz.",
+                live: { v in
+                    let c = min(max(v, 500), 2000)
+                    vm.sendFloatParamToDevice(REQ_SET_CROSSFEED_FREQ, c)
+                    graphLive.set(.freq, c)
+                },
+                set: { val in
+                    vm.setCrossfeedFreq(min(max(val, 500), 2000))
+                    if !isCustom { vm.setCrossfeedPreset(3) }
                 }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.crossfeedFreq },
-                        set: { val in
-                            vm.setCrossfeedFreq(val)
-                            if !isCustom { vm.setCrossfeedPreset(3) }
-                        }
-                    ),
-                    range: 500...2000
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Simulates head shadow lowpass cutoff. Lower = more bass crossfeed. Typical: 650-700 Hz.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            )
 
             Divider()
 
             // Feed Level
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Feed Level")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "dB",
-                        value: vm.crossfeedFeed,
-                        width: 60
-                    ) { val in
-                        let clamped = min(max(val, 0), 15)
-                        vm.setCrossfeedFeed(clamped)
-                        if !isCustom { vm.setCrossfeedPreset(3) }
-                    }
+            ParameterRow(
+                title: "Feed Level",
+                unit: "dB",
+                value: crossfeed.feed,
+                range: 0...15,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Crossfeed attenuation below direct signal. Higher = more crossfeed. Typical: 4.5-9.5 dB.",
+                live: { v in
+                    let c = min(max(v, 0), 15)
+                    vm.sendFloatParamToDevice(REQ_SET_CROSSFEED_FEED, c)
+                    graphLive.set(.feed, c)
+                },
+                set: { val in
+                    vm.setCrossfeedFeed(min(max(val, 0), 15))
+                    if !isCustom { vm.setCrossfeedPreset(3) }
                 }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.crossfeedFeed },
-                        set: { val in
-                            vm.setCrossfeedFeed(val)
-                            if !isCustom { vm.setCrossfeedPreset(3) }
-                        }
-                    ),
-                    range: 0...15
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Crossfeed attenuation below direct signal. Higher = more crossfeed. Typical: 4.5-9.5 dB.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            )
         }
         .opacity(isCustom ? 1.0 : 0.5)
     }
@@ -312,7 +291,7 @@ struct CrossfeedView: View {
                 Spacer()
 
                 Toggle("", isOn: Binding(
-                    get: { vm.crossfeedITD },
+                    get: { crossfeed.itd },
                     set: { vm.setCrossfeedITD($0) }
                 ))
                 .toggleStyle(.switch)
@@ -358,9 +337,9 @@ struct CrossfeedView: View {
                 ForEach(0..<pairCount, id: \.self) { p in
                     pairChip(
                         pair: p,
-                        on: vm.crossfeedOutputMask & (UInt8(1) << p) != 0
+                        on: crossfeed.outputMask & (UInt8(1) << p) != 0
                     ) {
-                        vm.setCrossfeedOutputPair(p, enabled: vm.crossfeedOutputMask & (UInt8(1) << p) == 0)
+                        vm.setCrossfeedOutputPair(p, enabled: crossfeed.outputMask & (UInt8(1) << p) == 0)
                     }
                 }
             }
@@ -390,6 +369,26 @@ struct CrossfeedView: View {
 }
 
 // MARK: - Crossfeed Curve Visualization
+
+enum CrossfeedGraphKey: Hashable { case freq, feed }
+
+/// The response curve, resolving live overrides over the committed values.
+/// Lives in a `LiveGraphHost`, so a live update costs the layout of this view alone.
+private struct CrossfeedGraphPane: View {
+    struct Base: Equatable { var freq, feed: Float }
+    let base: Base
+    let isEnabled: Bool
+    @ObservedObject var live: GraphLive<CrossfeedGraphKey>
+
+    var body: some View {
+        CrossfeedCurveView(
+            freq: live[.freq, or: base.freq],
+            feed: live[.feed, or: base.feed],
+            isEnabled: isEnabled
+        )
+        .onChange(of: base) { _ in live.clear() }
+    }
+}
 
 private struct CrossfeedCurveView: View {
     let freq: Float

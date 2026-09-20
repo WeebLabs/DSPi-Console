@@ -44,75 +44,75 @@ extension PresetDocument {
 
         // Feature blocks
         doc.loudness.enabled = vm.loudnessEnabled
-        doc.loudness.refSpl = vm.loudnessRefSPL
-        doc.loudness.intensityPct = vm.loudnessIntensity
-        doc.loudness.outputMask = Int(vm.loudnessOutputMask)
+        doc.loudness.refSpl = vm.loudness.refSPL
+        doc.loudness.intensityPct = vm.loudness.intensity
+        doc.loudness.outputMask = Int(vm.loudness.outputMask)
 
         doc.crossfeed.enabled = vm.crossfeedEnabled
-        doc.crossfeed.preset = vm.crossfeedPreset
-        doc.crossfeed.freqHz = vm.crossfeedFreq
-        doc.crossfeed.feedDb = vm.crossfeedFeed
-        doc.crossfeed.itd = vm.crossfeedITD
-        doc.crossfeed.outputPairMask = Int(vm.crossfeedOutputMask)
+        doc.crossfeed.preset = vm.crossfeed.preset
+        doc.crossfeed.freqHz = vm.crossfeed.freq
+        doc.crossfeed.feedDb = vm.crossfeed.feed
+        doc.crossfeed.itd = vm.crossfeed.itd
+        doc.crossfeed.outputPairMask = Int(vm.crossfeed.outputMask)
 
         doc.leveller.enabled = vm.levellerEnabled
-        doc.leveller.speed = vm.levellerSpeed
-        doc.leveller.lookahead = vm.levellerLookahead
-        doc.leveller.amountPct = vm.levellerAmount
-        doc.leveller.maxGainDb = vm.levellerMaxGainDB
-        doc.leveller.gateDb = vm.levellerGateDB
-        doc.leveller.detectorMask = Int(vm.levellerDetectorMask)
-        doc.leveller.applyMask = Int(vm.levellerApplyMask)
+        doc.leveller.speed = vm.leveller.speed
+        doc.leveller.lookahead = vm.leveller.lookahead
+        doc.leveller.amountPct = vm.leveller.amount
+        doc.leveller.maxGainDb = vm.leveller.maxGainDB
+        doc.leveller.gateDb = vm.leveller.gateDB
+        doc.leveller.detectorMask = Int(vm.leveller.detectorMask)
+        doc.leveller.applyMask = Int(vm.leveller.applyMask)
 
         // Optional blocks are written only when the source device had the
         // feature, so a document never claims something the device never had.
         if vm.firmwareSupportsPsybass {
             var block = PsybassBlock()
             block.enabled = vm.psybassEnabled
-            block.cutoffHz = vm.psybassCutoffHz
-            block.harmonicsDb = vm.psybassHarmonicsDB
-            block.driveDb = vm.psybassDriveDB
-            block.characterPct = vm.psybassCharacterPct
-            block.originalDb = vm.psybassOriginalDB
-            block.outputMask = Int(vm.psybassOutputMask)
+            block.cutoffHz = vm.psybass.cutoffHz
+            block.harmonicsDb = vm.psybass.harmonicsDB
+            block.driveDb = vm.psybass.driveDB
+            block.characterPct = vm.psybass.characterPct
+            block.originalDb = vm.psybass.originalDB
+            block.outputMask = Int(vm.psybass.outputMask)
             doc.psybass = block
         }
 
         if vm.firmwareSupportsUpmixer {
             var block = UpmixBlock()
             block.enabled = vm.upmixEnabled
-            block.centerMode = vm.upmixCenterMode
-            block.surroundMode = vm.upmixSurroundMode
-            block.strengthPct = vm.upmixStrengthPct
-            block.centerWidthPct = vm.upmixCenterWidthPct
-            block.thresholdPct = vm.upmixThresholdPct
-            block.attackMs = vm.upmixAttackMs
-            block.releaseMs = vm.upmixReleaseMs
-            block.detectorHpfHz = vm.upmixDetectorHpfHz
-            block.surroundDelayMs = vm.upmixSurroundDelayMs
-            block.surroundHpfHz = vm.upmixSurroundHpfHz
-            block.surroundLpfHz = vm.upmixSurroundLpfHz
-            block.decorrPct = vm.upmixDecorrPct
-            block.presenceDb = vm.upmixPresenceDB
+            block.centerMode = vm.upmix.centerMode
+            block.surroundMode = vm.upmix.surroundMode
+            block.strengthPct = vm.upmix.strengthPct
+            block.centerWidthPct = vm.upmix.centerWidthPct
+            block.thresholdPct = vm.upmix.thresholdPct
+            block.attackMs = vm.upmix.attackMs
+            block.releaseMs = vm.upmix.releaseMs
+            block.detectorHpfHz = vm.upmix.detectorHpfHz
+            block.surroundDelayMs = vm.upmix.surroundDelayMs
+            block.surroundHpfHz = vm.upmix.surroundHpfHz
+            block.surroundLpfHz = vm.upmix.surroundLpfHz
+            block.decorrPct = vm.upmix.decorrPct
+            block.presenceDb = vm.upmix.presenceDB
             doc.upmix = block
         }
 
         if vm.firmwareSupportsSubharm {
             var block = SubharmBlock()
             block.enabled = vm.subharmEnabled
-            block.lowDb = vm.subharmLowDB
-            block.highDb = vm.subharmHighDB
-            block.boostDb = vm.subharmBoostDB
-            block.outputMask = Int(vm.subharmOutputMask)
+            block.lowDb = vm.subharm.lowDB
+            block.highDb = vm.subharm.highDB
+            block.boostDb = vm.subharm.boostDB
+            block.outputMask = Int(vm.subharm.outputMask)
             // V30 fields keep their defaults on V29 firmware, which has no such
             // state to capture.  Solo is never written: it is runtime-only.
             if vm.firmwareSupportsSubharmExtended {
-                block.topDb = vm.subharmTopDB
-                block.selectMode = vm.subharmSelectMode
-                block.selectDepthPct = vm.subharmSelectDepthPct
-                block.selectHoldMs = vm.subharmSelectHoldMs
-                block.ceilingDb = vm.subharmCeilingDB
-                block.linkPairs = vm.subharmLinkPairs
+                block.topDb = vm.subharm.topDB
+                block.selectMode = vm.subharm.selectMode
+                block.selectDepthPct = vm.subharm.selectDepthPct
+                block.selectHoldMs = vm.subharm.selectHoldMs
+                block.ceilingDb = vm.subharm.ceilingDB
+                block.linkPairs = vm.subharm.linkPairs
             }
             doc.subharm = block
         }
@@ -120,19 +120,19 @@ extension PresetDocument {
         if vm.firmwareSupportsTube {
             var block = TubeBlock()
             block.enabled = vm.tubeEnabled
-            block.outputMask = Int(vm.tubeOutputMask)
-            block.tubeType = vm.tubeType
-            block.driveDb = vm.tubeDriveDB
-            block.biasPct = vm.tubeBiasPct
-            block.asymDb = vm.tubeAsymDB
-            block.hardnessPct = vm.tubeHardnessPct
-            block.sagPct = vm.tubeSagPct
-            block.rectifier = vm.tubeRectifier
-            block.xfmrEnabled = vm.tubeXfmrEnabled
-            block.xfmrDamping = vm.tubeXfmrDamping
-            block.xfmrResHz = vm.tubeXfmrResHz
-            block.mixPct = vm.tubeMixPct
-            block.trimDb = vm.tubeTrimDB
+            block.outputMask = Int(vm.tube.outputMask)
+            block.tubeType = vm.tube.type
+            block.driveDb = vm.tube.driveDB
+            block.biasPct = vm.tube.biasPct
+            block.asymDb = vm.tube.asymDB
+            block.hardnessPct = vm.tube.hardnessPct
+            block.sagPct = vm.tube.sagPct
+            block.rectifier = vm.tube.rectifier
+            block.xfmrEnabled = vm.tube.xfmrEnabled
+            block.xfmrDamping = vm.tube.xfmrDamping
+            block.xfmrResHz = vm.tube.xfmrResHz
+            block.mixPct = vm.tube.mixPct
+            block.trimDb = vm.tube.trimDB
             doc.tube = block
         }
 

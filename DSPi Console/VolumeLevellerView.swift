@@ -8,7 +8,7 @@ class VolumeLevellerWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = VolumeLevellerView(vm: vm).onboardingHint("leveller")
+            let view = VolumeLevellerView(vm: vm, leveller: vm.leveller).onboardingHint("leveller")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 380, height: 540),
@@ -43,6 +43,9 @@ extension VolumeLevellerWindowController: NSWindowDelegate {
 
 struct VolumeLevellerView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Observed separately from `vm` so a slider drag invalidates this
+    /// window and nothing else; see ToolParameters.swift.
+    @ObservedObject var leveller: LevellerParameters
 
     /// Number of input channels to expose in the mask grid (live layout, 2-8).
     private var channelCount: Int { min(max(vm.effectiveInputChannels, 2), 8) }
@@ -114,33 +117,18 @@ struct VolumeLevellerView: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            // Amount
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Amount")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "%",
-                        value: vm.levellerAmount,
-                        width: 60
-                    ) { vm.setLevellerAmount(min(100, max(0, $0))) }
-                }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.levellerAmount },
-                        set: { vm.setLevellerAmount($0) }
-                    ),
-                    range: 0...100
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Compression strength. Higher values reduce dynamic range more aggressively.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Amount",
+                unit: "%",
+                value: leveller.amount,
+                range: 0...100,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Compression strength. Higher values reduce dynamic range more aggressively.",
+                live: { vm.sendFloatParamToDevice(REQ_SET_LEVELLER_AMOUNT, min(100, max(0, $0))) },
+                set: { vm.setLevellerAmount(min(100, max(0, $0))) }
+            )
 
             Divider()
 
@@ -150,7 +138,7 @@ struct VolumeLevellerView: View {
                     .font(.system(size: 12, weight: .medium))
 
                 Picker("", selection: Binding(
-                    get: { vm.levellerSpeed },
+                    get: { leveller.speed },
                     set: { vm.setLevellerSpeed($0) }
                 )) {
                     Text("Slow").tag(0)
@@ -168,63 +156,33 @@ struct VolumeLevellerView: View {
 
             Divider()
 
-            // Max Gain
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Max Gain")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "dB",
-                        value: vm.levellerMaxGainDB,
-                        width: 60
-                    ) { vm.setLevellerMaxGain(min(35, max(0, $0))) }
-                }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.levellerMaxGainDB },
-                        set: { vm.setLevellerMaxGain($0) }
-                    ),
-                    range: 0...35
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Maximum boost for quiet passages. Higher values risk amplifying noise.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Max Gain",
+                unit: "dB",
+                value: leveller.maxGainDB,
+                range: 0...35,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Maximum boost for quiet passages. Higher values risk amplifying noise.",
+                live: { vm.sendFloatParamToDevice(REQ_SET_LEVELLER_MAXGAIN, min(35, max(0, $0))) },
+                set: { vm.setLevellerMaxGain(min(35, max(0, $0))) }
+            )
 
             Divider()
 
-            // Gate Threshold
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Gate Threshold")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "dB",
-                        value: vm.levellerGateDB,
-                        width: 60
-                    ) { vm.setLevellerGate(min(0, max(-96, $0))) }
-                }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.levellerGateDB },
-                        set: { vm.setLevellerGate($0) }
-                    ),
-                    range: -96...0
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Silence gate. Signals below this level are not boosted, preventing noise amplification.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Gate Threshold",
+                unit: "dB",
+                value: leveller.gateDB,
+                range: -96...0,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Silence gate. Signals below this level are not boosted, preventing noise amplification.",
+                live: { vm.sendFloatParamToDevice(REQ_SET_LEVELLER_GATE, min(0, max(-96, $0))) },
+                set: { vm.setLevellerGate(min(0, max(-96, $0))) }
+            )
 
             Divider()
 
@@ -241,7 +199,7 @@ struct VolumeLevellerView: View {
                 Spacer()
 
                 Toggle("", isOn: Binding(
-                    get: { vm.levellerLookahead },
+                    get: { leveller.lookahead },
                     set: { vm.setLevellerLookahead($0) }
                 ))
                 .toggleStyle(.switch)
@@ -281,14 +239,14 @@ struct VolumeLevellerView: View {
             maskRow(
                 label: "Detector",
                 hint: "sets the shared gain",
-                isOn: { vm.levellerDetectorMask & (1 << $0) != 0 },
+                isOn: { leveller.detectorMask & (1 << $0) != 0 },
                 toggle: { vm.setLevellerDetectorChannel($0, enabled: $1) }
             )
 
             maskRow(
                 label: "Apply",
                 hint: "receives the gain",
-                isOn: { vm.levellerApplyMask & (1 << $0) != 0 },
+                isOn: { leveller.applyMask & (1 << $0) != 0 },
                 toggle: { vm.setLevellerApplyChannel($0, enabled: $1) }
             )
         }
@@ -336,7 +294,7 @@ struct VolumeLevellerView: View {
     }
 
     private var speedDescription: String {
-        switch vm.levellerSpeed {
+        switch leveller.speed {
         case 0: return "Slow \u{2014} Gentle response for music and wide dynamic range content."
         case 2: return "Fast \u{2014} Tight response for speech, dialogue, and podcasts."
         default: return "Medium \u{2014} Balanced response for general purpose use."

@@ -88,13 +88,13 @@ final class PsybassWireTests: XCTestCase {
 
     func testOutputChannelMaskToggle() {
         let vm = DSPViewModel()
-        vm.psybassOutputMask = 0x0000
+        vm.psybass.outputMask = 0x0000
         vm.setPsybassOutputChannel(0, enabled: true)
-        XCTAssertEqual(vm.psybassOutputMask & 0x0001, 0x0001)
+        XCTAssertEqual(vm.psybass.outputMask & 0x0001, 0x0001)
         vm.setPsybassOutputChannel(8, enabled: true)   // PDM sub bit on RP2350
-        XCTAssertEqual(vm.psybassOutputMask & 0x0100, 0x0100)
+        XCTAssertEqual(vm.psybass.outputMask & 0x0100, 0x0100)
         vm.setPsybassOutputChannel(0, enabled: false)
-        XCTAssertEqual(vm.psybassOutputMask & 0x0001, 0x0000)
+        XCTAssertEqual(vm.psybass.outputMask & 0x0001, 0x0000)
     }
 
     // MARK: - Live-device round-trips (skip when no DSPi attached)

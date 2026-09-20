@@ -2287,11 +2287,20 @@ struct ValueField: View {
     /// like "0.707" must still show full precision.
     var stripTrailingZeros: Bool = false
     var displayOverride: String? = nil
+    /// Set by a `ParameterRow` for the duration of a slider drag. The field
+    /// then shows the readout's text through an AppKit label that the drag
+    /// updates directly, so a value arriving per mouse event costs no SwiftUI
+    /// update, and therefore no layout, at all. See `ParameterRow`.
+    var liveReadout: LiveValueReadout? = nil
     let onCommit: (Float) -> Void
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
 
     private func format(_ v: Float) -> String {
+        Self.format(v, maxDecimals: maxDecimals, stripTrailingZeros: stripTrailingZeros)
+    }
+
+    static func format(_ v: Float, maxDecimals: Int, stripTrailingZeros: Bool) -> String {
         let full = String(format: "%.\(maxDecimals)f", v)
         // Trim trailing zeros from the decimal portion.
         let parts = full.split(separator: ".", maxSplits: 1)
@@ -2323,6 +2332,17 @@ struct ValueField: View {
                     .focused($isFocused)
                     .onSubmit { if let v = Float(text) { onCommit(v) } else { text = format(value) } }
                     .onChange(of: isFocused) { focused in if !focused { if let v = Float(text) { onCommit(v) } else { text = format(value) } } }
+
+                // Always present but hidden until a drag begins, and shown and
+                // hidden again purely in AppKit, so grabbing a slider changes
+                // nothing SwiftUI has to lay out. Same padding and width as the
+                // field, so the digits sit where the field's do.
+                if let liveReadout {
+                    LiveValueLabel(readout: liveReadout)
+                        .padding(4)
+                        .frame(width: width)
+                        .allowsHitTesting(false)
+                }
             }
             .fixedSize(horizontal: true, vertical: false)
 
@@ -2341,6 +2361,101 @@ struct ValueField: View {
         .onChange(of: displayOverride) { override in
             if !isFocused, let override { text = override } else { text = format(value) }
         }
+    }
+}
+
+// MARK: - Live Value Readout
+
+/// The channel between a slider drag and the AppKit label that shows its
+/// value. A plain class, deliberately not observable: writing to it changes
+/// nothing SwiftUI can see, which is the whole point. Begin and end are AppKit
+/// operations too, so the grab and the drag cost SwiftUI nothing; only the
+/// commit on release goes through the view model.
+final class LiveValueReadout {
+    var format: (Float) -> String = { String($0) }
+    fileprivate weak var label: LiveValueLabelView?
+    /// SwiftUI's own text field for the same value, hidden for the drag so the
+    /// two never overprint.
+    private weak var covered: NSView?
+
+    func beginLive(showing value: Float) {
+        guard let label else { return }
+        covered = Self.textField(overlapping: label)
+        covered?.isHidden = true
+        label.stringValue = format(value)
+        label.isHidden = false
+    }
+
+    func show(_ value: Float) {
+        label?.stringValue = format(value)
+    }
+
+    func endLive() {
+        label?.isHidden = true
+        covered?.isHidden = false
+        covered = nil
+    }
+
+    /// SwiftUI hosts a `TextField` as a platform `NSTextField` somewhere under
+    /// the same hosting view; find the one whose frame the label sits on.
+    private static func textField(overlapping label: NSView) -> NSView? {
+        guard let root = label.window?.contentView else { return nil }
+        let target = label.convert(label.bounds, to: nil)
+        func search(_ view: NSView) -> NSView? {
+            for sub in view.subviews {
+                if sub !== label, sub is NSTextField, !sub.isHidden,
+                   sub.convert(sub.bounds, to: nil).intersects(target) {
+                    return sub
+                }
+                if let found = search(sub) { return found }
+            }
+            return nil
+        }
+        return search(root)
+    }
+}
+
+/// The label itself: an `NSTextField` so its glyphs, padding and baseline are
+/// the ones SwiftUI's `TextField` draws with underneath. Its height is frozen
+/// once from the font, so it matches the field's and a new string can never
+/// start an Auto Layout pass or a SwiftUI re-layout; the width comes from the
+/// frame around it. (Reporting no intrinsic size at all left SwiftUI to hand
+/// it whatever height the row proposed, which stretched every row.)
+final class LiveValueLabelView: NSTextField {
+    private var frozenHeight: CGFloat = 0
+
+    /// Measure once, with a representative string, then never again.
+    func freezeHeight() {
+        let saved = stringValue
+        stringValue = "-000.0"
+        frozenHeight = super.intrinsicContentSize.height
+        stringValue = saved
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: frozenHeight)
+    }
+    override func invalidateIntrinsicContentSize() {}
+}
+
+private struct LiveValueLabel: NSViewRepresentable {
+    let readout: LiveValueReadout
+
+    func makeNSView(context: Context) -> LiveValueLabelView {
+        let label = LiveValueLabelView(labelWithString: "")
+        label.isHidden = true
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        label.alignment = .right
+        label.lineBreakMode = .byClipping
+        label.textColor = .labelColor
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.freezeHeight()
+        return label
+    }
+
+    func updateNSView(_ label: LiveValueLabelView, context: Context) {
+        readout.label = label
     }
 }
 

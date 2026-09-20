@@ -135,19 +135,19 @@ final class TubeWireTests: XCTestCase {
     func testDefaultsMatchTheFirmware() {
         let vm = DSPViewModel()
         XCTAssertFalse(vm.tubeEnabled)
-        XCTAssertEqual(vm.tubeOutputMask, 0xFFFF)
-        XCTAssertEqual(vm.tubeType, 1)
-        XCTAssertEqual(vm.tubeDriveDB, -6)
-        XCTAssertEqual(vm.tubeBiasPct, 10)
-        XCTAssertEqual(vm.tubeAsymDB, 3)
-        XCTAssertEqual(vm.tubeHardnessPct, 40)
-        XCTAssertEqual(vm.tubeSagPct, 15)
-        XCTAssertEqual(vm.tubeRectifier, 1)
-        XCTAssertFalse(vm.tubeXfmrEnabled)
-        XCTAssertEqual(vm.tubeXfmrDamping, 2)
-        XCTAssertEqual(vm.tubeXfmrResHz, 85)
-        XCTAssertEqual(vm.tubeMixPct, 100)
-        XCTAssertEqual(vm.tubeTrimDB, 0)
+        XCTAssertEqual(vm.tube.outputMask, 0xFFFF)
+        XCTAssertEqual(vm.tube.type, 1)
+        XCTAssertEqual(vm.tube.driveDB, -6)
+        XCTAssertEqual(vm.tube.biasPct, 10)
+        XCTAssertEqual(vm.tube.asymDB, 3)
+        XCTAssertEqual(vm.tube.hardnessPct, 40)
+        XCTAssertEqual(vm.tube.sagPct, 15)
+        XCTAssertEqual(vm.tube.rectifier, 1)
+        XCTAssertFalse(vm.tube.xfmrEnabled)
+        XCTAssertEqual(vm.tube.xfmrDamping, 2)
+        XCTAssertEqual(vm.tube.xfmrResHz, 85)
+        XCTAssertEqual(vm.tube.mixPct, 100)
+        XCTAssertEqual(vm.tube.trimDB, 0)
     }
 
     // MARK: - Cross-field rules mirrored from the firmware (spec §2.3)
@@ -156,14 +156,14 @@ final class TubeWireTests: XCTestCase {
     func testTypeLoadsItsRow() {
         let vm = DSPViewModel()
         vm.setTubeType(12)   // EL34
-        XCTAssertEqual(vm.tubeType, 12)
-        XCTAssertEqual(vm.tubeBiasPct, 0)
-        XCTAssertEqual(vm.tubeAsymDB, 0)
-        XCTAssertEqual(vm.tubeHardnessPct, 60)
-        XCTAssertEqual(vm.tubeSagPct, 30)
+        XCTAssertEqual(vm.tube.type, 12)
+        XCTAssertEqual(vm.tube.biasPct, 0)
+        XCTAssertEqual(vm.tube.asymDB, 0)
+        XCTAssertEqual(vm.tube.hardnessPct, 60)
+        XCTAssertEqual(vm.tube.sagPct, 30)
         // Drive, mix, the rectifier and the output stage are not part of a row.
-        XCTAssertEqual(vm.tubeDriveDB, TUBE_DEFAULT_DRIVE_DB)
-        XCTAssertEqual(vm.tubeRectifier, 1)
+        XCTAssertEqual(vm.tube.driveDB, TUBE_DEFAULT_DRIVE_DB)
+        XCTAssertEqual(vm.tube.rectifier, 1)
     }
 
     /// Custom stores 0 and leaves the knobs where they are.
@@ -171,9 +171,9 @@ final class TubeWireTests: XCTestCase {
         let vm = DSPViewModel()
         vm.setTubeType(16)
         vm.setTubeType(TUBE_TYPE_CUSTOM)
-        XCTAssertEqual(vm.tubeType, TUBE_TYPE_CUSTOM)
-        XCTAssertEqual(vm.tubeBiasPct, 12)
-        XCTAssertEqual(vm.tubeAsymDB, 6)
+        XCTAssertEqual(vm.tube.type, TUBE_TYPE_CUSTOM)
+        XCTAssertEqual(vm.tube.biasPct, 12)
+        XCTAssertEqual(vm.tube.asymDB, 6)
     }
 
     /// A real change to a character knob drops the type to Custom; re-sending
@@ -182,10 +182,10 @@ final class TubeWireTests: XCTestCase {
         let vm = DSPViewModel()
         vm.setTubeType(1)
         vm.setTubeBias(10)       // same as the 12AX7 row
-        XCTAssertEqual(vm.tubeType, 1)
+        XCTAssertEqual(vm.tube.type, 1)
         vm.setTubeHardness(41)
-        XCTAssertEqual(vm.tubeType, TUBE_TYPE_CUSTOM)
-        XCTAssertEqual(vm.tubeHardnessPct, 41)
+        XCTAssertEqual(vm.tube.type, TUBE_TYPE_CUSTOM)
+        XCTAssertEqual(vm.tube.hardnessPct, 41)
     }
 
     /// The comparison is made after clamping: an over-range write that lands on
@@ -193,37 +193,37 @@ final class TubeWireTests: XCTestCase {
     func testClampedRewriteIsNotAChange() {
         let vm = DSPViewModel()
         vm.setTubeBias(TUBE_BIAS_MAX)
-        vm.tubeType = 5          // as if a notification had set the type since
+        vm.tube.type = 5          // as if a notification had set the type since
         vm.setTubeBias(250)      // clamps to the stored +100
-        XCTAssertEqual(vm.tubeType, 5)
+        XCTAssertEqual(vm.tube.type, 5)
     }
 
     /// Floats clamp to their ranges and enums to theirs, as the firmware does.
     func testClamping() {
         let vm = DSPViewModel()
-        vm.setTubeDrive(40);        XCTAssertEqual(vm.tubeDriveDB, TUBE_DRIVE_MAX)
-        vm.setTubeDrive(-20);       XCTAssertEqual(vm.tubeDriveDB, TUBE_DRIVE_MIN)
-        vm.setTubeBias(-500);       XCTAssertEqual(vm.tubeBiasPct, TUBE_BIAS_MIN)
-        vm.setTubeXfmrDamping(0);   XCTAssertEqual(vm.tubeXfmrDamping, TUBE_XFMR_DAMPING_MIN)
-        vm.setTubeXfmrDamping(99);  XCTAssertEqual(vm.tubeXfmrDamping, TUBE_XFMR_DAMPING_MAX)
-        vm.setTubeXfmrRes(5);       XCTAssertEqual(vm.tubeXfmrResHz, TUBE_XFMR_RES_MIN)
-        vm.setTubeXfmrRes(5000);    XCTAssertEqual(vm.tubeXfmrResHz, TUBE_XFMR_RES_MAX)
-        vm.setTubeMix(150);         XCTAssertEqual(vm.tubeMixPct, TUBE_MIX_MAX)
-        vm.setTubeTrim(-20);        XCTAssertEqual(vm.tubeTrimDB, TUBE_TRIM_MIN)
-        vm.setTubeType(99);         XCTAssertEqual(vm.tubeType, TUBE_TYPE_MAX)
-        vm.setTubeRectifier(9);     XCTAssertEqual(vm.tubeRectifier, TUBE_RECT_MAX)
-        vm.setTubeRectifier(-1);    XCTAssertEqual(vm.tubeRectifier, TUBE_RECT_SOLID_STATE)
+        vm.setTubeDrive(40);        XCTAssertEqual(vm.tube.driveDB, TUBE_DRIVE_MAX)
+        vm.setTubeDrive(-20);       XCTAssertEqual(vm.tube.driveDB, TUBE_DRIVE_MIN)
+        vm.setTubeBias(-500);       XCTAssertEqual(vm.tube.biasPct, TUBE_BIAS_MIN)
+        vm.setTubeXfmrDamping(0);   XCTAssertEqual(vm.tube.xfmrDamping, TUBE_XFMR_DAMPING_MIN)
+        vm.setTubeXfmrDamping(99);  XCTAssertEqual(vm.tube.xfmrDamping, TUBE_XFMR_DAMPING_MAX)
+        vm.setTubeXfmrRes(5);       XCTAssertEqual(vm.tube.xfmrResHz, TUBE_XFMR_RES_MIN)
+        vm.setTubeXfmrRes(5000);    XCTAssertEqual(vm.tube.xfmrResHz, TUBE_XFMR_RES_MAX)
+        vm.setTubeMix(150);         XCTAssertEqual(vm.tube.mixPct, TUBE_MIX_MAX)
+        vm.setTubeTrim(-20);        XCTAssertEqual(vm.tube.trimDB, TUBE_TRIM_MIN)
+        vm.setTubeType(99);         XCTAssertEqual(vm.tube.type, TUBE_TYPE_MAX)
+        vm.setTubeRectifier(9);     XCTAssertEqual(vm.tube.rectifier, TUBE_RECT_MAX)
+        vm.setTubeRectifier(-1);    XCTAssertEqual(vm.tube.rectifier, TUBE_RECT_SOLID_STATE)
     }
 
     func testOutputChannelMaskToggle() {
         let vm = DSPViewModel()
-        vm.tubeOutputMask = 0
+        vm.tube.outputMask = 0
         vm.setTubeOutputChannel(8, enabled: true)
-        XCTAssertEqual(vm.tubeOutputMask, 0x0100)
+        XCTAssertEqual(vm.tube.outputMask, 0x0100)
         vm.setTubeOutputChannel(8, enabled: false)
-        XCTAssertEqual(vm.tubeOutputMask, 0)
+        XCTAssertEqual(vm.tube.outputMask, 0)
         vm.setTubeOutputChannel(16, enabled: true)
-        XCTAssertEqual(vm.tubeOutputMask, 0)
+        XCTAssertEqual(vm.tube.outputMask, 0)
     }
 
     // MARK: - Shaper model (the graph and the harmonics readout)
@@ -341,9 +341,9 @@ final class TubeWireTests: XCTestCase {
         let vm = DSPViewModel()
         vm.setTubeType(1)
         vm.setTubeBias(12)
-        XCTAssertEqual(vm.tubeType, TUBE_TYPE_CUSTOM)
-        XCTAssertEqual(vm.tubeBiasPct, 12)
-        XCTAssertEqual(vm.tubeAsymDB, 3)
+        XCTAssertEqual(vm.tube.type, TUBE_TYPE_CUSTOM)
+        XCTAssertEqual(vm.tube.biasPct, 12)
+        XCTAssertEqual(vm.tube.asymDB, 3)
     }
 
     // MARK: - Live device (skip when no DSPi is attached)

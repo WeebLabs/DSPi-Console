@@ -8,7 +8,7 @@ class PsychoacousticBassWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = PsychoacousticBassView(vm: vm).onboardingHint("psybass")
+            let view = PsychoacousticBassView(vm: vm, psybass: vm.psybass).onboardingHint("psybass")
 
             window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 780, height: 500),
@@ -63,6 +63,11 @@ private let psybassStartingPoints: [PsybassStartingPoint] = [
 
 struct PsychoacousticBassView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Observed separately from `vm` so a slider drag invalidates this
+    /// window and nothing else; see ToolParameters.swift.
+    @ObservedObject var psybass: PsybassParameters
+    /// What the spectrum follows during a drag; see `GraphLive`.
+    @State private var graphLive = GraphLive<PsybassGraphKey>()
 
     /// Output channels exposed in the mask grid (5 on RP2040, 9 on RP2350).
     private var outputCount: Int { vm.numOutputChannels }
@@ -191,13 +196,15 @@ struct PsychoacousticBassView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
 
-                PsybassSpectrumView(
-                    cutoff: vm.psybassCutoffHz,
-                    harmonicsDB: vm.psybassHarmonicsDB,
-                    originalDB: vm.psybassOriginalDB,
-                    isEnabled: vm.psybassEnabled
-                )
-                .padding(8)
+                // In its own hosting view, so following a drag re-lays out the
+                // graph alone rather than the whole window.
+                LiveGraphHost(flexibleHeight: true) {
+                    PsybassGraphPane(
+                        base: .init(cutoff: psybass.cutoffHz, harmonicsDB: psybass.harmonicsDB,
+                                    originalDB: psybass.originalDB),
+                        isEnabled: vm.psybassEnabled, live: graphLive)
+                    .padding(8)
+                }
             }
             .frame(height: 160)
             .overlay(
@@ -267,9 +274,9 @@ struct PsychoacousticBassView: View {
                 ForEach(0..<outputCount, id: \.self) { out in
                     outputChip(
                         out: out,
-                        on: vm.psybassOutputMask & (UInt16(1) << out) != 0
+                        on: psybass.outputMask & (UInt16(1) << out) != 0
                     ) {
-                        vm.setPsybassOutputChannel(out, enabled: vm.psybassOutputMask & (UInt16(1) << out) == 0)
+                        vm.setPsybassOutputChannel(out, enabled: psybass.outputMask & (UInt16(1) << out) == 0)
                     }
                 }
             }
@@ -308,10 +315,12 @@ struct PsychoacousticBassView: View {
             paramRow(
                 title: "Cutoff Frequency",
                 unit: "Hz",
-                value: vm.psybassCutoffHz,
+                value: psybass.cutoffHz,
                 range: 30...300,
                 maxDecimals: 0,
                 scrollStep: 1,
+                liveRequest: REQ_SET_PSYBASS_CUTOFF,
+                liveKey: .cutoff,
                 help: "The speaker's low-frequency limit. Content below this feeds the harmonic generator; generated harmonics span roughly this to 4x.",
                 set: { vm.setPsybassCutoff($0) }
             )
@@ -321,10 +330,12 @@ struct PsychoacousticBassView: View {
             paramRow(
                 title: "Harmonics",
                 unit: "dB",
-                value: vm.psybassHarmonicsDB,
+                value: psybass.harmonicsDB,
                 range: -24...12,
                 maxDecimals: 1,
                 scrollStep: 0.5,
+                liveRequest: REQ_SET_PSYBASS_HARMONICS,
+                liveKey: .harmonicsDB,
                 help: "Level of the synthesized harmonics. The primary amount-of-effect control. Higher = more perceived bass.",
                 set: { vm.setPsybassHarmonics($0) }
             )
@@ -342,66 +353,51 @@ struct PsychoacousticBassView: View {
             paramRow(
                 title: "Drive",
                 unit: "dB",
-                value: vm.psybassDriveDB,
+                value: psybass.driveDB,
                 range: 0...18,
                 maxDecimals: 1,
                 scrollStep: 0.5,
+                liveRequest: REQ_SET_PSYBASS_DRIVE,
                 help: "Pre-gain into the odd-harmonic soft clipper. Higher makes the effect audible on quieter passages. Mostly affects aggressive character.",
                 set: { vm.setPsybassDrive($0) }
             )
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Character")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "%",
-                        value: vm.psybassCharacterPct,
-                        width: 60,
-                        scrollStep: 1,
-                        maxDecimals: 0
-                    ) { vm.setPsybassCharacter(min(max($0, 0), 100)) }
-                }
-
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.psybassCharacterPct },
-                        set: { vm.setPsybassCharacter($0) }
-                    ),
-                    range: 0...100
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                HStack {
-                    Text("Warm")
-                    Spacer()
-                    Text("Aggressive")
-                }
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-            }
+            ParameterRow(
+                title: "Character",
+                unit: "%",
+                value: psybass.characterPct,
+                range: 0...100,
+                scrollStep: 1,
+                maxDecimals: 0,
+                ends: ("Warm", "Aggressive"),
+                isEnabled: vm.isDeviceConnected,
+                live: { vm.sendFloatParamToDevice(REQ_SET_PSYBASS_CHARACTER,
+                                                  min(max($0, 0), 100)) },
+                set: { vm.setPsybassCharacter(min(max($0, 0), 100)) }
+            )
 
             Divider()
 
             paramRow(
                 title: "Original Bass",
                 unit: "dB",
-                value: vm.psybassOriginalDB,
+                value: psybass.originalDB,
                 range: -60...0,
                 maxDecimals: 1,
                 scrollStep: 1,
+                liveRequest: REQ_SET_PSYBASS_ORIGINAL,
+                liveKey: .originalDB,
                 help: "Level of the un-reproducible fundamental below the cutoff. Lower attenuates it, freeing driver excursion and headroom. -60 dB is full removal. Speaker protection.",
                 set: { vm.setPsybassOriginal($0) }
             )
         }
     }
 
-    /// One labelled ValueField + CustomSlider + caption row.  The commit closure
-    /// clamps to the documented range so app state matches the firmware's silent
-    /// clamping without a read-back.
+    /// One labelled ValueField + slider + caption row, on the shared
+    /// `ParameterRow` so a drag stays out of the view model: `liveRequest` is
+    /// the vendor code the live value goes to, and `set` commits on release.
     private func paramRow(
         title: String,
         unit: String,
@@ -409,34 +405,27 @@ struct PsychoacousticBassView: View {
         range: ClosedRange<Float>,
         maxDecimals: Int,
         scrollStep: Float,
+        liveRequest: UInt8,
+        liveKey: PsybassGraphKey? = nil,
         help: String,
         set: @escaping (Float) -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                Spacer()
-                ValueField(
-                    label: unit,
-                    value: value,
-                    width: 60,
-                    scrollStep: scrollStep,
-                    maxDecimals: maxDecimals
-                ) { set(min(max($0, range.lowerBound), range.upperBound)) }
-            }
-
-            CustomSlider(
-                value: Binding(get: { value }, set: { set($0) }),
-                range: range
-            )
-            .disabled(!vm.isDeviceConnected)
-
-            Text(help)
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        ParameterRow(
+            title: title,
+            unit: unit,
+            value: value,
+            range: range,
+            scrollStep: scrollStep,
+            maxDecimals: maxDecimals,
+            isEnabled: vm.isDeviceConnected,
+            caption: help,
+            live: { v in
+                let c = min(max(v, range.lowerBound), range.upperBound)
+                vm.sendFloatParamToDevice(liveRequest, c)
+                if let liveKey { graphLive.set(liveKey, c) }
+            },
+            set: { set(min(max($0, range.lowerBound), range.upperBound)) }
+        )
     }
 }
 
@@ -445,6 +434,27 @@ struct PsychoacousticBassView: View {
 /// Schematic (not a precise DSP magnitude) illustration of what psybass does:
 /// the original low band below the cutoff, attenuated by `originalDB`, and the
 /// synthesized harmonic band from the cutoff to 4x the cutoff at `harmonicsDB`.
+enum PsybassGraphKey: Hashable { case cutoff, harmonicsDB, originalDB }
+
+/// The spectrum, resolving live overrides over the committed values. Lives in
+/// a `LiveGraphHost`, so a live update costs the layout of this view alone.
+private struct PsybassGraphPane: View {
+    struct Base: Equatable { var cutoff, harmonicsDB, originalDB: Float }
+    let base: Base
+    let isEnabled: Bool
+    @ObservedObject var live: GraphLive<PsybassGraphKey>
+
+    var body: some View {
+        PsybassSpectrumView(
+            cutoff: live[.cutoff, or: base.cutoff],
+            harmonicsDB: live[.harmonicsDB, or: base.harmonicsDB],
+            originalDB: live[.originalDB, or: base.originalDB],
+            isEnabled: isEnabled
+        )
+        .onChange(of: base) { _ in live.clear() }
+    }
+}
+
 private struct PsybassSpectrumView: View {
     let cutoff: Float
     let harmonicsDB: Float
