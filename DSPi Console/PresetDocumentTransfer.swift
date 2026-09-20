@@ -129,9 +129,8 @@ extension PresetDocument {
             block.sagPct = vm.tubeSagPct
             block.rectifier = vm.tubeRectifier
             block.xfmrEnabled = vm.tubeXfmrEnabled
-            block.xfmrLfHz = vm.tubeXfmrLfHz
-            block.xfmrSatPct = vm.tubeXfmrSatPct
-            block.xfmrHfHz = vm.tubeXfmrHfHz
+            block.xfmrDamping = vm.tubeXfmrDamping
+            block.xfmrResHz = vm.tubeXfmrResHz
             block.mixPct = vm.tubeMixPct
             block.trimDb = vm.tubeTrimDB
             doc.tube = block
@@ -603,9 +602,8 @@ enum PresetDocumentApply {
                 vm.setTubeSag(tube.sagPct)
                 vm.setTubeDrive(tube.driveDb)
                 vm.setTubeRectifier(tube.rectifier)
-                vm.setTubeXfmrLf(tube.xfmrLfHz)
-                vm.setTubeXfmrSat(tube.xfmrSatPct)
-                vm.setTubeXfmrHf(tube.xfmrHfHz)
+                vm.setTubeXfmrDamping(tube.xfmrDamping)
+                vm.setTubeXfmrRes(tube.xfmrResHz)
                 vm.setTubeXfmr(tube.xfmrEnabled)
                 vm.setTubeMix(tube.mixPct)
                 vm.setTubeTrim(tube.trimDb)

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - Tube Families
 
@@ -192,34 +193,200 @@ private struct TubeGeometry {
 
 // MARK: - Illustration
 
-/// A tube drawn large for the basic view.  The drawing itself is static; two
-/// glow layers sit over it, one faded by `lit` over the same warm-up and
-/// cool-down as the header icon, the other following `heat` (how hard the stage
-/// is being driven) so the heaters flare with the programme.
-struct TubeIllustration: View {
+/// The artwork is rasterized once per family, size and display scale. Audio
+/// goes straight from the existing status stream to a Core Animation opacity:
+/// no extra USB requests, SwiftUI invalidations, or per-frame drawing.
+struct TubeIllustration: NSViewRepresentable {
     let family: TubeFamily
-    var lit: Bool
-    var heat: Double = 0
+    let lit: Bool
+    let meters: DSPMeterModel
+    let outputStart: Int
+    let outputCount: Int
+    let outputMask: UInt16
+    let active: Bool
 
-    var body: some View {
-        let g = TubeGeometry.of(family)
-        ZStack {
-            Canvas { ctx, size in
-                TubeRenderer.drawTube(g, in: &ctx, size: size)
-            }
-            Canvas { ctx, size in
-                TubeRenderer.drawGlow(g, in: &ctx, size: size, bloom: false)
-            }
-            .opacity(lit ? 1 : 0)
-            .animation(.easeInOut(duration: lit ? 0.9 : 0.6), value: lit)
-            Canvas { ctx, size in
-                TubeRenderer.drawGlow(g, in: &ctx, size: size, bloom: true)
-            }
-            .opacity(lit ? min(max(heat, 0), 1) : 0)
-            .animation(.easeOut(duration: 0.15), value: heat)
-            .animation(.easeInOut(duration: 0.6), value: lit)
+    func makeNSView(context: Context) -> TubeIllustrationNSView {
+        TubeIllustrationNSView(frame: .zero)
+    }
+
+    func updateNSView(_ view: TubeIllustrationNSView, context: Context) {
+        view.configure(family: family, lit: lit, meters: meters,
+                       outputStart: outputStart, outputCount: outputCount,
+                       outputMask: outputMask, active: active)
+    }
+
+    static func dismantleNSView(_ view: TubeIllustrationNSView, coordinator: ()) {
+        view.stopFollowingAudio()
+    }
+}
+
+/// Select only routed outputs, using the platform's offset in the status
+/// packet. A square-root envelope keeps ordinary listening levels visible;
+/// 8-bit opacity avoids compositor commits for imperceptible changes.
+enum TubeAudioPulse {
+    static func opacity(peaks: [Float], outputStart: Int, outputCount: Int,
+                        outputMask: UInt16) -> Float {
+        var peak: Float = 0
+        for output in 0..<min(max(outputCount, 0), 16)
+        where outputMask & (UInt16(1) << output) != 0 {
+            let channel = outputStart + output
+            guard peaks.indices.contains(channel), peaks[channel].isFinite else { continue }
+            peak = max(peak, peaks[channel])
         }
-        .accessibilityHidden(true)
+        return (sqrt(min(peak, 1)) * 255).rounded() / 255
+    }
+}
+
+final class TubeIllustrationNSView: NSView {
+    private let tube = CALayer()
+    private let heater = CALayer()
+    private let bloom = CALayer()
+    private var family: TubeFamily = .novalTriode
+    private var lit = false
+    private var active = false
+    private weak var meters: DSPMeterModel?
+    private var outputStart = 0
+    private var outputCount = 0
+    private var outputMask: UInt16 = 0
+    private var audioSubscription: AnyCancellable?
+    private var windowSubscriptions: [AnyCancellable] = []
+
+    private struct ArtworkKey: Equatable {
+        let family: TubeFamily
+        let size: CGSize
+        let scale: CGFloat
+    }
+    private var artworkKey: ArtworkKey?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        for part in [tube, heater, bloom] {
+            part.actions = ["contents": NSNull(), "bounds": NSNull(),
+                            "position": NSNull(), "opacity": NSNull()]
+            layer?.addSublayer(part)
+        }
+        heater.opacity = 0
+        bloom.opacity = 0
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func configure(family: TubeFamily, lit: Bool, meters: DSPMeterModel,
+                   outputStart: Int, outputCount: Int, outputMask: UInt16, active: Bool) {
+        if self.meters !== meters || self.outputStart != outputStart ||
+            self.outputCount != outputCount || self.outputMask != outputMask {
+            audioSubscription = nil
+        }
+        self.meters = meters
+        self.outputStart = outputStart
+        self.outputCount = outputCount
+        self.outputMask = outputMask
+        self.active = active
+        if self.family != family {
+            self.family = family
+            needsLayout = true
+        }
+        if self.lit != lit {
+            self.lit = lit
+            fade(heater, to: lit ? 1 : 0, duration: lit ? 0.9 : 0.6)
+        }
+        updateAudioSubscription()
+    }
+
+    override func layout() {
+        super.layout()
+        let scale = window?.backingScaleFactor ?? 2
+        let key = ArtworkKey(family: family, size: bounds.size, scale: scale)
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if key != artworkKey {
+            let g = TubeGeometry.of(family)
+            // Keep only the current family's three images, rather than a
+            // growing cache of every tube and display size ever visited.
+            for (index, part) in [tube, heater, bloom].enumerated() {
+                let drawing = Canvas { ctx, size in
+                    if index == 0 {
+                        TubeRenderer.drawTube(g, in: &ctx, size: size)
+                    } else {
+                        TubeRenderer.drawGlow(g, in: &ctx, size: size, bloom: index == 2)
+                    }
+                }.frame(width: bounds.width, height: bounds.height)
+                let renderer = ImageRenderer(content: drawing)
+                renderer.scale = scale
+                part.contents = renderer.cgImage
+                part.contentsScale = scale
+            }
+            artworkKey = key
+        }
+        for part in [tube, heater, bloom] { part.frame = bounds }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowSubscriptions.removeAll()
+        if let window {
+            for name in [NSWindow.didChangeOcclusionStateNotification,
+                         NSWindow.didMiniaturizeNotification,
+                         NSWindow.didDeminiaturizeNotification] {
+                windowSubscriptions.append(NotificationCenter.default.publisher(for: name, object: window)
+                    .sink { [weak self] _ in self?.updateAudioSubscription() })
+            }
+        }
+        needsLayout = true
+        updateAudioSubscription()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        updateAudioSubscription()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        updateAudioSubscription()
+    }
+
+    private func updateAudioSubscription() {
+        guard active, lit, outputMask != 0, !isHiddenOrHasHiddenAncestor,
+              let window, window.occlusionState.contains(.visible), !window.isMiniaturized,
+              let meters else {
+            stopFollowingAudio()
+            return
+        }
+        guard audioSubscription == nil else { return }
+        // @Published sends before storing; consume the event, not meters.status.
+        audioSubscription = meters.$status.sink { [weak self] status in
+            guard let self else { return }
+            let opacity = TubeAudioPulse.opacity(peaks: status.peaks, outputStart: self.outputStart,
+                                                outputCount: self.outputCount, outputMask: self.outputMask)
+            self.fade(self.bloom, to: opacity, duration: 0.1)
+        }
+    }
+
+    func stopFollowingAudio() {
+        audioSubscription = nil
+        bloom.removeAllAnimations()
+        bloom.opacity = 0
+    }
+
+    private func fade(_ part: CALayer, to opacity: Float, duration: CFTimeInterval) {
+        guard part.opacity != opacity else { return }
+        let from = part.presentation()?.opacity ?? part.opacity
+        part.opacity = opacity
+        guard window?.occlusionState.contains(.visible) == true else { return }
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = from
+        animation.toValue = opacity
+        animation.duration = duration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        part.add(animation, forKey: "opacity")
     }
 }
 

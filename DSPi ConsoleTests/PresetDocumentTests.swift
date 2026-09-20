@@ -395,8 +395,8 @@ final class PresetDocumentTests: XCTestCase {
         ]))
         try XCTAssertTrue(keys(["tube"]).isSuperset(of: [
             "enabled", "outputMask", "tubeType", "driveDb", "biasPct", "asymDb",
-            "hardnessPct", "sagPct", "rectifier", "xfmrEnabled", "xfmrLfHz",
-            "xfmrSatPct", "xfmrHfHz", "mixPct", "trimDb",
+            "hardnessPct", "sagPct", "rectifier", "xfmrEnabled", "xfmrDamping",
+            "xfmrResHz", "mixPct", "trimDb",
         ]))
         try XCTAssertTrue(keys(["channels"]).isSuperset(of: [
             "channelId", "name", "isOutput", "delayMs", "gainDb", "muted",

@@ -71,23 +71,24 @@ private struct TubeStartingPoint {
     let driveDB: Float
     let rectifier: Int
     let xfmr: Bool
-    var xfmrLfHz: Float = 80
-    var xfmrSatPct: Float = 30
-    var xfmrHfHz: Float = TUBE_XFMR_HF_MAX
+    var damping: Float = TUBE_DEFAULT_XFMR_DAMPING
+    var resHz: Float = TUBE_DEFAULT_XFMR_RES_HZ
 }
 
-/// The spec's suggestions.  Each sets every non-character control, mix and trim
-/// included, so applying one lands on the same sound whatever came before; the
-/// type sets the character knobs.
+/// The spec's suggestions (§6).  Each sets every non-character control, mix and
+/// trim included, so applying one lands on the same sound whatever came before;
+/// the type sets the character knobs.
 private let tubeStartingPoints: [TubeStartingPoint] = [
-    TubeStartingPoint(name: "Warm hi-fi", detail: "12AU7 line stage, transformer off",
-                      tubeType: 5, driveDB: 4, rectifier: 1, xfmr: false),
-    TubeStartingPoint(name: "Single-ended sweetness", detail: "300B with transformer",
-                      tubeType: 16, driveDB: 6, rectifier: 1, xfmr: true),
-    TubeStartingPoint(name: "Guitar-amp style", detail: "12AX7 pushed, 5U4, dark transformer",
-                      tubeType: 1, driveDB: 15, rectifier: 2, xfmr: true, xfmrHfHz: 6000),
-    TubeStartingPoint(name: "Push-pull power", detail: "EL34 with transformer",
-                      tubeType: 12, driveDB: 6, rectifier: 1, xfmr: true),
+    TubeStartingPoint(name: "Clean default", detail: "12AX7, level-neutral, output stage off",
+                      tubeType: 1, driveDB: TUBE_DEFAULT_DRIVE_DB, rectifier: 1, xfmr: false),
+    TubeStartingPoint(name: "Warm hi-fi", detail: "12AU7 line stage, tightly damped",
+                      tubeType: 5, driveDB: -3, rectifier: 1, xfmr: true, damping: 10),
+    TubeStartingPoint(name: "Single-ended sweetness", detail: "300B, loose damping",
+                      tubeType: 16, driveDB: 3, rectifier: 1, xfmr: true, damping: 2),
+    TubeStartingPoint(name: "Guitar-amp style", detail: "12AX7 pushed, 5U4, loose damping",
+                      tubeType: 1, driveDB: 15, rectifier: 2, xfmr: true, damping: 2, resHz: 100),
+    TubeStartingPoint(name: "Push-pull power", detail: "EL34 with the output stage on",
+                      tubeType: 12, driveDB: 0, rectifier: 1, xfmr: true, damping: 6),
 ]
 
 // MARK: - Tube Modeller View
@@ -99,10 +100,6 @@ struct TubeModellerView: View {
     /// Basic shows the tube and the two controls most people need; Advanced
     /// shows every parameter.  Remembered across launches.
     @AppStorage("tubeModellerAdvanced") private var advanced = false
-
-    /// The saturation meter is a 300 ms decaying peak; the spec suggests 10 to
-    /// 20 Hz, and 10 is enough to watch a drive setting land.
-    private let meterTimer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     /// Output channels exposed in the mask grid (5 on RP2040, 9 on RP2350).
     private var outputCount: Int { vm.numOutputChannels }
@@ -143,7 +140,7 @@ struct TubeModellerView: View {
                 // Two columns of the sections the other tool windows stack.
                 // The left column is the stage itself: its curve, the tube and
                 // how hard it is driven, and where it applies.  The right column
-                // holds what the tube type presets and the transformer after it.
+                // holds what the tube type presets and the output stage after it.
                 HStack(alignment: .top, spacing: 0) {
                     VStack(alignment: .leading, spacing: 14) {
                         transferGraph
@@ -174,11 +171,6 @@ struct TubeModellerView: View {
         })
         .onPreferenceChange(TubeContentHeightKey.self) { controller.fit(contentHeight: $0) }
         .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onReceive(meterTimer) { _ in
-            // Only while the panel is up and there is something to meter.
-            guard controller.isVisible, supported, vm.isDeviceConnected, vm.tubeEnabled else { return }
-            DispatchQueue.global(qos: .utility).async { vm.fetchTubeMeter() }
-        }
     }
 
     private func sectionLabel(_ title: String) -> some View {
@@ -215,16 +207,6 @@ struct TubeModellerView: View {
 
     private var family: TubeFamily { TubeFamily.of(vm.tubeType) }
 
-    /// How hard the hardest-driven selected output is working, for the glow.
-    private var heat: Double {
-        var peak: Float = 0
-        for (i, level) in vm.tubeSaturationMeter.enumerated()
-        where i < 16 && vm.tubeOutputMask & (UInt16(1) << UInt16(i)) != 0 {
-            peak = max(peak, level)
-        }
-        return Double(peak)
-    }
-
     private var tubeShowcase: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10)
@@ -239,7 +221,10 @@ struct TubeModellerView: View {
             VStack(spacing: 12) {
                 Spacer(minLength: 8)
                 ZStack {
-                    TubeIllustration(family: family, lit: vm.tubeEnabled, heat: heat)
+                    TubeIllustration(family: family, lit: vm.tubeEnabled,
+                                     meters: vm.meters, outputStart: vm.chOut1,
+                                     outputCount: outputCount, outputMask: vm.tubeOutputMask,
+                                     active: controller.isVisible && vm.isDeviceConnected)
                         .id(family)
                         .transition(.opacity)
                 }
@@ -270,7 +255,7 @@ struct TubeModellerView: View {
             return "Character set by hand. Pick a tube to load one, or fine-tune it in Advanced."
         }
         if row.pushPull && !vm.tubeXfmrEnabled {
-            return "\(row.style). Meant for use with the output transformer, in Advanced."
+            return "\(row.style). Meant for use with the output stage, in Advanced."
         }
         return "\(row.style)."
     }
@@ -331,8 +316,8 @@ struct TubeModellerView: View {
                 range: TUBE_DRIVE_MIN...TUBE_DRIVE_MAX,
                 scrollStep: 0.5,
                 maxDecimals: 1,
-                ends: ("Warmth", "Overdrive"),
-                help: "How hard the tube is driven. A few dB adds warmth and gentle compression; the top of the range is overdrive.",
+                ends: ("Clean", "Overdrive"),
+                help: "How hard the tube is driven. Drive moves the knee, not the level: at the -6 dB default the knee sits 6 dB above full scale and the colour is subtle, and the top of the range is overdrive.",
                 set: { vm.setTubeDrive($0) }
             )
 
@@ -361,7 +346,7 @@ struct TubeModellerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Tube Modeller")
                     .font(.system(size: 14, weight: .semibold))
-                Text("Valve-style harmonic colour, supply sag and transformer saturation")
+                Text("Valve-style harmonic colour, supply sag and a tube amplifier's output stage")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
@@ -432,6 +417,7 @@ struct TubeModellerView: View {
                     .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
 
                 TubeTransferView(shaper: shaper, isEnabled: vm.tubeEnabled)
+                    .equatable()
                     .padding(8)
             }
             .frame(height: 188)
@@ -440,35 +426,9 @@ struct TubeModellerView: View {
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)
             )
 
-            harmonicsReadout
+            TubeHarmonicsReadout(shaper: shaper)
+                .equatable()
                 .padding(.top, 4)
-        }
-    }
-
-    /// The second and third harmonic a full-scale sine comes out with, as the
-    /// graph's caption.  They are the two numbers the character controls trade
-    /// against each other: bias and asymmetry raise the even one, drive and
-    /// hardness the odd one.
-    private var harmonicsReadout: some View {
-        let h = shaper.harmonics()
-        return HStack(spacing: 16) {
-            sectionLabel("AT FULL SCALE")
-            Spacer()
-            harmonicValue("2nd", h.second)
-            harmonicValue("3rd", h.third)
-        }
-        .help("Level of the second and third harmonic relative to the fundamental, for a full-scale sine through the static curve after mix and trim. Sag lowers the drive on sustained loud passages and the transformer adds its own low-frequency colour, so the running figures sit somewhat lower.")
-    }
-
-    private func harmonicValue(_ label: String, _ db: Double) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-            Text(db <= -100 ? "none" : String(format: "%.0f dB", db))
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundColor(db > -100 ? .primary : .secondary)
-                .frame(width: 42, alignment: .leading)
         }
     }
 
@@ -480,9 +440,8 @@ struct TubeModellerView: View {
                     vm.setTubeType(p.tubeType)
                     vm.setTubeDrive(p.driveDB)
                     vm.setTubeRectifier(p.rectifier)
-                    vm.setTubeXfmrLf(p.xfmrLfHz)
-                    vm.setTubeXfmrSat(p.xfmrSatPct)
-                    vm.setTubeXfmrHf(p.xfmrHfHz)
+                    vm.setTubeXfmrDamping(p.damping)
+                    vm.setTubeXfmrRes(p.resHz)
                     vm.setTubeXfmr(p.xfmr)
                     vm.setTubeMix(TUBE_MIX_MAX)
                     vm.setTubeTrim(0)
@@ -512,7 +471,7 @@ struct TubeModellerView: View {
                 range: TUBE_DRIVE_MIN...TUBE_DRIVE_MAX,
                 scrollStep: 0.5,
                 maxDecimals: 1,
-                help: "Gain ahead of the shaper. At 0 dB a full-scale signal just reaches the knee, so this alone sets how hard the stage is driven. Harmonics and sag both rise with it.",
+                help: "Gain ahead of the shaper. At 0 dB a full-scale signal just reaches the knee, so this alone sets how hard the stage is driven. The shaper carries matching makeup gain, so clean material keeps its level at every drive; harmonics and sag rise with it.",
                 set: { vm.setTubeDrive($0) }
             )
 
@@ -575,7 +534,7 @@ struct TubeModellerView: View {
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .help("Loads the bias, asymmetry, knee hardness and sag of a real tube. Drive, mix, the rectifier and the transformer are left alone. Editing any of the four character controls switches this to Custom.")
+        .help("Loads the bias, asymmetry, knee hardness and sag of a real tube. Drive, mix, the rectifier and the output stage are left alone. Editing any of the four character controls switches this to Custom.")
     }
 
     private func tubeTypeItem(_ t: Int) -> some View {
@@ -587,7 +546,7 @@ struct TubeModellerView: View {
             return "Character controls as set, no tube row applied."
         }
         if row.pushPull && !vm.tubeXfmrEnabled {
-            return "\(row.style). Meant for use with the transformer on."
+            return "\(row.style). Meant for use with the output stage on."
         }
         return "\(row.style)."
     }
@@ -628,44 +587,29 @@ struct TubeModellerView: View {
                     }
                 }
             }
-            .help("Tube runs before the crossover and the per-output EQ, where a real preamp sits: a sub output saturates the full-band program and then low-passes the result. The bar under each output shows how hard its stage is being driven; full means fully clipped.")
+            .help("Tube runs before the crossover and the per-output EQ, where a real preamp sits: a sub output saturates the full-band program and then low-passes the result.")
         }
     }
 
     private func outputChip(out: Int, on: Bool, action: @escaping () -> Void) -> some View {
-        VStack(spacing: 3) {
-            Button(action: action) {
-                Text("\(out + 1)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .foregroundColor(on ? .white : .primary.opacity(0.6))
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            // A masked-off output's state is reset by the firmware, so its rail
-            // stays empty rather than showing a stale reading.
-            HorizontalMeterBar(
-                level: on && vm.tubeEnabled ? saturationLevel(out) : Float(0),
-                color: .orange
-            )
-            .frame(height: 3)
-            .opacity(on ? 1 : 0.25)
+        Button(action: action) {
+            Text("\(out + 1)")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .foregroundColor(on ? .white : .primary.opacity(0.6))
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                )
         }
+        .buttonStyle(.plain)
         .help(outputName(out))
         .disabled(!vm.isDeviceConnected)
         .animation(.easeInOut(duration: 0.12), value: on)
-    }
-
-    private func saturationLevel(_ out: Int) -> Float {
-        out < vm.tubeSaturationMeter.count ? vm.tubeSaturationMeter[out] : 0
     }
 
     // MARK: - Character
@@ -765,16 +709,25 @@ struct TubeModellerView: View {
                       row.depthScale, row.attackMs, row.releaseMs)
     }
 
-    // MARK: - Transformer
+    // MARK: - Output Stage
 
-    private var xfmrHfOff: Bool { vm.tubeXfmrHfHz >= TUBE_XFMR_HF_MAX }
+    /// What the damping factor does to the response, by the spec's own formula:
+    /// a source impedance of Zn/df against a speaker whose impedance rises to
+    /// 4x nominal at resonance and 2x at the top lifts the terminal voltage by
+    /// these amounts.  Cheap enough to read straight off the current value.
+    private var xfmrLift: (bell: Float, top: Float) {
+        let df = max(vm.tubeXfmrDamping, TUBE_XFMR_DAMPING_MIN)
+        let bump = 4 * (df + 1) / (4 * df + 1)
+        let top = 2 * (df + 1) / (2 * df + 1)
+        return (20 * log10(bump), 20 * log10(top))
+    }
 
     private var transformerSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    sectionLabel("OUTPUT TRANSFORMER")
-                    Text("Low-band core saturation and a high-frequency rolloff.")
+                    sectionLabel("OUTPUT STAGE")
+                    Text("A valve amplifier's loose grip on the speaker.")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 }
@@ -787,66 +740,42 @@ struct TubeModellerView: View {
                 .controlSize(.mini)
                 .disabled(!vm.isDeviceConnected)
             }
-            .help("Core saturation scales with voltage over frequency, so only the band below the split saturates, at 6 dB per octave. The firmware skips the whole stage while it is off.")
+            .help("A tube amplifier's high source impedance lets the speaker's own impedance curve shape the response: a broad bump at the woofer resonance and a small lift at the top. Nothing here is nonlinear, and the firmware skips the whole stage while it is off.")
 
-            // The firmware skips these stages entirely while the transformer is
-            // off, so they are hidden rather than shown doing nothing.
+            // The firmware compiles these stages out of the loop it runs while
+            // the stage is off, so they are hidden rather than shown doing
+            // nothing.
             if vm.tubeXfmrEnabled {
-                paramRow(
-                    title: "Low Split",
-                    unit: "Hz",
-                    value: vm.tubeXfmrLfHz,
-                    range: TUBE_XFMR_LF_MIN...TUBE_XFMR_LF_MAX,
-                    scrollStep: 1,
-                    maxDecimals: 0,
-                    help: "Corner of the one-pole split feeding the saturator. Content below it saturates; everything above passes clean.",
-                    set: { vm.setTubeXfmrLf($0) }
-                )
+                let lift = xfmrLift
 
                 paramRow(
-                    title: "Saturation",
-                    unit: "%",
-                    value: vm.tubeXfmrSatPct,
-                    range: TUBE_XFMR_SAT_MIN...TUBE_XFMR_SAT_MAX,
-                    scrollStep: 1,
-                    maxDecimals: 0,
-                    help: "Moves the low-band knee from 0 dBFS (0%) down to -18 dBFS (100%). Even at 0% the low band is gently shaped near full scale; switch the transformer off for a linear low end.",
-                    set: { vm.setTubeXfmrSat($0) }
+                    title: "Damping Factor",
+                    unit: "",
+                    value: vm.tubeXfmrDamping,
+                    range: TUBE_XFMR_DAMPING_MIN...TUBE_XFMR_DAMPING_MAX,
+                    scrollStep: 0.5,
+                    maxDecimals: 1,
+                    ends: ("1 (loose)", "20 (tight)"),
+                    help: "The speaker's nominal impedance divided by the amplifier's source impedance. A single-ended triode amplifier without feedback sits around 2 to 3; a push-pull pentode amplifier with feedback around 8 to 15. It sets the size of both the bell and the top lift.",
+                    set: { vm.setTubeXfmrDamping($0) }
                 )
 
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("HF Rolloff")
-                            .font(.system(size: 12, weight: .medium))
-                        Spacer()
-                        ValueField(
-                            label: "Hz",
-                            value: vm.tubeXfmrHfHz,
-                            width: 60,
-                            scrollStep: 100,
-                            maxDecimals: 0,
-                            displayOverride: xfmrHfOff ? "Off" : nil
-                        ) { vm.setTubeXfmrHf($0) }
-                    }
-
-                    CustomSlider(
-                        value: Binding(
-                            get: { vm.tubeXfmrHfHz },
-                            set: { vm.setTubeXfmrHf($0) }
-                        ),
-                        range: TUBE_XFMR_HF_MIN...TUBE_XFMR_HF_MAX
-                    )
-                    .disabled(!vm.isDeviceConnected)
-
-                    HStack {
-                        Text("2 kHz")
-                        Spacer()
-                        Text("Off")
-                    }
+                Text(String(format: "+%.1f dB at resonance, +%.1f dB at the top.",
+                            lift.bell, lift.top))
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
-                }
-                .help("A one-pole rolloff after the saturator, for the darker top end of a real output transformer. The top of the range bypasses it; around 6 kHz suits a guitar-amp sound.")
+
+                paramRow(
+                    title: "Speaker Resonance",
+                    unit: "Hz",
+                    value: vm.tubeXfmrResHz,
+                    range: TUBE_XFMR_RES_MIN...TUBE_XFMR_RES_MAX,
+                    scrollStep: 1,
+                    maxDecimals: 0,
+                    ends: ("30 Hz", "150 Hz"),
+                    help: "Where the loudspeaker resonates in its enclosure, which is where the bell sits. Q is fixed at 0.707, so the bump is broad. 85 Hz suits a typical small to medium woofer; larger drivers sit lower.",
+                    set: { vm.setTubeXfmrRes($0) }
+                )
             }
         }
     }
@@ -982,9 +911,9 @@ private struct TubeIconShape: Shape {
 /// The firmware's static waveshaper (spec §1), evaluated in Double for the
 /// graph.  It is the real curve rather than a sketch: drive, bias, the two knees,
 /// the hardness blend, the rest-point offset, mix and trim.  What it leaves out
-/// is everything with memory - sag, the DC blocker and the transformer - which
+/// is everything with memory - sag, the DC blocker and the output stage - which
 /// is why the graph is labelled a transfer curve and not a frequency response.
-struct TubeShaper {
+struct TubeShaper: Equatable {
     let m: Double
     let b: Double
     let ratioN: Double
@@ -1002,8 +931,11 @@ struct TubeShaper {
         c1 = 1.5 + 0.375 * h
         c3 = -0.5 - 0.75 * h
         c5 = 0.375 * h
-        sP = 1 / c1
-        sN = pow(10, Double(asymDB) / 20) / c1
+        // The firmware carries 1/m makeup gain in the half scales, so drive
+        // moves the knee rather than the level and clean material keeps unity
+        // small-signal gain at every drive and hardness.
+        sP = 1 / (c1 * m)
+        sN = pow(10, Double(asymDB) / 20) / (c1 * m)
         let mix = Double(mixPct) / 100
         dryW = 1 - mix
         wetW = mix * pow(10, Double(trimDB) / 20)
@@ -1060,6 +992,42 @@ struct TubeShaper {
     }
 }
 
+/// SwiftUI retains this subtree while its shaper is unchanged, so unrelated
+/// settings updates never repeat the harmonic analysis.
+private struct TubeHarmonicsReadout: View, Equatable {
+    let shaper: TubeShaper
+
+    /// The second and third harmonic a full-scale sine comes out with, as the
+    /// graph's caption.  They are the two numbers the character controls trade
+    /// against each other: bias and asymmetry raise the even one, drive and
+    /// hardness the odd one.
+    var body: some View {
+        let h = shaper.harmonics()
+        return HStack(spacing: 16) {
+            Text("AT FULL SCALE")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.secondary)
+            Spacer()
+            harmonicValue("2nd", h.second)
+            harmonicValue("3rd", h.third)
+        }
+        .help("Level of the second and third harmonic relative to the fundamental, for a full-scale sine through the static curve after mix and trim. Sag lowers the drive on sustained loud passages and the output stage adds its own low-frequency lift, so the running figures sit somewhat lower.")
+    }
+
+    private func harmonicValue(_ label: String, _ db: Double) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Text(db <= -100 ? "none" : String(format: "%.0f dB", db))
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundColor(db > -100 ? .primary : .secondary)
+                .frame(width: 42, alignment: .leading)
+        }
+    }
+
+}
+
 // MARK: - Transfer Curve Visualization
 
 /// Output against input over one full-scale swing, with the straight line a
@@ -1067,7 +1035,7 @@ struct TubeShaper {
 /// either knee are shaded: that is where the curve goes flat and the harmonics
 /// come from.  Asymmetry shows as the two shaded regions starting at different
 /// distances from the centre, bias as the curve's bend being off-centre.
-private struct TubeTransferView: View {
+private struct TubeTransferView: View, Equatable {
     let shaper: TubeShaper
     let isEnabled: Bool
 

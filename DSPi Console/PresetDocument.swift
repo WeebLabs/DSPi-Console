@@ -275,18 +275,17 @@ struct PresetDocument: Codable {
         var enabled = false
         var outputMask: Int = Int(TUBE_DEFAULT_OUTPUT_MASK)
         var tubeType: Int = TUBE_DEFAULT_TUBE_TYPE
-        var driveDb: Float = 6
-        var biasPct: Float = 30
-        var asymDb: Float = 3
-        var hardnessPct: Float = 40
-        var sagPct: Float = 30
+        var driveDb: Float = TUBE_DEFAULT_DRIVE_DB
+        var biasPct: Float = TUBE_DEFAULT_BIAS_PCT
+        var asymDb: Float = TUBE_DEFAULT_ASYM_DB
+        var hardnessPct: Float = TUBE_DEFAULT_HARDNESS_PCT
+        var sagPct: Float = TUBE_DEFAULT_SAG_PCT
         var rectifier: Int = TUBE_DEFAULT_RECTIFIER
         var xfmrEnabled = false
-        var xfmrLfHz: Float = 80
-        var xfmrSatPct: Float = 30
-        var xfmrHfHz: Float = 20000
-        var mixPct: Float = 100
-        var trimDb: Float = 0
+        var xfmrDamping: Float = TUBE_DEFAULT_XFMR_DAMPING
+        var xfmrResHz: Float = TUBE_DEFAULT_XFMR_RES_HZ
+        var mixPct: Float = TUBE_DEFAULT_MIX_PCT
+        var trimDb: Float = TUBE_DEFAULT_TRIM_DB
 
         init() {}
 
@@ -295,18 +294,17 @@ struct PresetDocument: Codable {
             enabled = c.value(.enabled, false)
             outputMask = c.value(.outputMask, Int(TUBE_DEFAULT_OUTPUT_MASK))
             tubeType = c.value(.tubeType, TUBE_DEFAULT_TUBE_TYPE)
-            driveDb = c.value(.driveDb, 6)
-            biasPct = c.value(.biasPct, 30)
-            asymDb = c.value(.asymDb, 3)
-            hardnessPct = c.value(.hardnessPct, 40)
-            sagPct = c.value(.sagPct, 30)
+            driveDb = c.value(.driveDb, TUBE_DEFAULT_DRIVE_DB)
+            biasPct = c.value(.biasPct, TUBE_DEFAULT_BIAS_PCT)
+            asymDb = c.value(.asymDb, TUBE_DEFAULT_ASYM_DB)
+            hardnessPct = c.value(.hardnessPct, TUBE_DEFAULT_HARDNESS_PCT)
+            sagPct = c.value(.sagPct, TUBE_DEFAULT_SAG_PCT)
             rectifier = c.value(.rectifier, TUBE_DEFAULT_RECTIFIER)
             xfmrEnabled = c.value(.xfmrEnabled, false)
-            xfmrLfHz = c.value(.xfmrLfHz, 80)
-            xfmrSatPct = c.value(.xfmrSatPct, 30)
-            xfmrHfHz = c.value(.xfmrHfHz, 20000)
-            mixPct = c.value(.mixPct, 100)
-            trimDb = c.value(.trimDb, 0)
+            xfmrDamping = c.value(.xfmrDamping, TUBE_DEFAULT_XFMR_DAMPING)
+            xfmrResHz = c.value(.xfmrResHz, TUBE_DEFAULT_XFMR_RES_HZ)
+            mixPct = c.value(.mixPct, TUBE_DEFAULT_MIX_PCT)
+            trimDb = c.value(.trimDb, TUBE_DEFAULT_TRIM_DB)
         }
     }
 

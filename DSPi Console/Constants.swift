@@ -260,15 +260,12 @@ let SUBHARM_BOOST_Q: Float      = 0.9
 let SUBHARM_DIVIDER_GAIN: Float = 0.849
 
 // Tube Modeller ("tube", V31): valve-style harmonic colour, sag compression and an
-// optional output-transformer stage, per output channel through a 16-bit mask
-// like psybass.  Unlike every other module it has one indexed SET/GET pair:
-// wValue carries the parameter index and every payload is a float32, including
-// the bools, the mask and the enums.  See tube_preamp_spec.md.
+// optional output stage, per output channel through a 16-bit mask like psybass.
+// Unlike every other module it has one indexed SET/GET pair: wValue carries the
+// parameter index and every payload is a float32, including the bools, the mask
+// and the enums.  See tube_preamp_spec.md.
 let REQ_SET_TUBE_PARAM: UInt8 = 0x3E
 let REQ_GET_TUBE_PARAM: UInt8 = 0x3F
-/// Read-only: per-output decaying peak of how hard the shaper is driven, one
-/// uint16 LE each on the 0..32767 status-peaks scale (32767 = fully clipped).
-let REQ_GET_TUBE_METER: UInt8 = 0x81
 
 /// Parameter indices (wValue low byte), in wire order.  An out-of-range index
 /// makes a SET a no-op and a GET STALL.
@@ -282,16 +279,18 @@ let TUBE_PARAM_HARDNESS_PCT: UInt16 = 6
 let TUBE_PARAM_SAG_PCT: UInt16      = 7
 let TUBE_PARAM_RECTIFIER: UInt16    = 8
 let TUBE_PARAM_XFMR_ENABLED: UInt16 = 9
-let TUBE_PARAM_XFMR_LF_HZ: UInt16   = 10
-let TUBE_PARAM_XFMR_SAT_PCT: UInt16 = 11
-let TUBE_PARAM_XFMR_HF_HZ: UInt16   = 12
-let TUBE_PARAM_MIX_PCT: UInt16      = 13
-let TUBE_PARAM_TRIM_DB: UInt16      = 14
-let TUBE_NUM_PARAMS: UInt16         = 15
+let TUBE_PARAM_XFMR_DAMPING: UInt16 = 10
+let TUBE_PARAM_XFMR_RES_HZ: UInt16  = 11
+let TUBE_PARAM_MIX_PCT: UInt16      = 12
+let TUBE_PARAM_TRIM_DB: UInt16      = 13
+let TUBE_NUM_PARAMS: UInt16         = 14
 
 /// Parameter ranges (spec §2).  The firmware clamps silently; the app clamps the
 /// same way so its state matches without a read-back.
-let TUBE_DRIVE_MIN: Float    = 0.0
+/// The -6 dB floor puts the knee 6 dB above full scale, and is also a
+/// fixed-point constraint: the negative-half scale reaches 5.3 there with
+/// maximum asymmetry, which is as much as the RP2040 Q28 budget allows.
+let TUBE_DRIVE_MIN: Float    = -6.0
 let TUBE_DRIVE_MAX: Float    = 24.0
 let TUBE_BIAS_MIN: Float     = -100.0
 let TUBE_BIAS_MAX: Float     = 100.0
@@ -301,31 +300,41 @@ let TUBE_HARDNESS_MIN: Float = 0.0
 let TUBE_HARDNESS_MAX: Float = 100.0
 let TUBE_SAG_MIN: Float      = 0.0
 let TUBE_SAG_MAX: Float      = 100.0
-let TUBE_XFMR_LF_MIN: Float  = 20.0
-let TUBE_XFMR_LF_MAX: Float  = 300.0
-let TUBE_XFMR_SAT_MIN: Float = 0.0
-let TUBE_XFMR_SAT_MAX: Float = 100.0
-/// The HF rolloff's top is not a corner but a bypass: the firmware sets the
-/// one-pole coefficient to exactly 1.0 there.
-let TUBE_XFMR_HF_MIN: Float  = 2000.0
-let TUBE_XFMR_HF_MAX: Float  = 20000.0
+/// Damping factor of the modelled amplifier: the speaker's nominal impedance
+/// over the amplifier's source impedance.  It sets both the bell at resonance
+/// and the lift at the top, so 1 is the loosest valve amp and 20 is near flat.
+let TUBE_XFMR_DAMPING_MIN: Float = 1.0
+let TUBE_XFMR_DAMPING_MAX: Float = 20.0
+/// Where the loudspeaker resonates in its enclosure, which is where the bell
+/// sits.  Q is fixed at 0.707, so the bump is broad.
+let TUBE_XFMR_RES_MIN: Float = 30.0
+let TUBE_XFMR_RES_MAX: Float = 150.0
 let TUBE_MIX_MIN: Float      = 0.0
 let TUBE_MIX_MAX: Float      = 100.0
 let TUBE_TRIM_MIN: Float     = -12.0
 let TUBE_TRIM_MAX: Float     = 12.0
 
-/// Factory defaults (spec §2; the character knobs are the 12AX7 row).
+/// Factory defaults (spec §2; the character knobs are the 12AX7 row).  They are
+/// chosen to be clean rather than an obvious effect: at -6 dB drive the knee
+/// sits 6 dB above full scale, so enabling the module is level-neutral and adds
+/// about 0.5 % second-harmonic-led distortion at -12 dBFS.
 let TUBE_DEFAULT_TUBE_TYPE: Int      = 1
 let TUBE_DEFAULT_RECTIFIER: Int      = 1
 let TUBE_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
+let TUBE_DEFAULT_DRIVE_DB: Float     = -6.0
+let TUBE_DEFAULT_BIAS_PCT: Float     = 10.0
+let TUBE_DEFAULT_ASYM_DB: Float      = 3.0
+let TUBE_DEFAULT_HARDNESS_PCT: Float = 40.0
+let TUBE_DEFAULT_SAG_PCT: Float      = 15.0
+let TUBE_DEFAULT_XFMR_DAMPING: Float = 2.0
+let TUBE_DEFAULT_XFMR_RES_HZ: Float  = 85.0
+let TUBE_DEFAULT_MIX_PCT: Float      = 100.0
+let TUBE_DEFAULT_TRIM_DB: Float      = 0.0
 
 let TUBE_TYPE_CUSTOM: Int = 0
 let TUBE_TYPE_MAX: Int    = 16
 let TUBE_RECT_SOLID_STATE: Int = 0
 let TUBE_RECT_MAX: Int         = 3
-
-/// Full-scale value of one REQ_GET_TUBE_METER entry (the status-peaks scale).
-let TUBE_METER_FULL_SCALE: Float = 32767.0
 
 /// One tube-type row (spec §2.3).  Selecting a type makes the firmware copy
 /// these four values into the character knobs; the app mirrors the copy so the
@@ -337,8 +346,9 @@ struct TubeTypeRow {
     let asymDB: Float
     let hardnessPct: Float
     let sagPct: Float
-    /// Push-pull power stages cancel even harmonics, so their character comes
-    /// from hardness, sag and the transformer; the UI suggests enabling it.
+    /// Push-pull power stages cancel even harmonics by construction, so their
+    /// character comes from hardness, sag and the output stage; the UI suggests
+    /// enabling it.
     var pushPull: Bool = false
 
     /// The first of the equivalent names, short enough for a chip.
@@ -346,25 +356,28 @@ struct TubeTypeRow {
 }
 
 /// Indexed by `tube_type`; index 0 is Custom and carries no row.  Rows never
-/// renumber in the firmware, so the index is safe to persist.
+/// renumber in the firmware, so the index is safe to persist.  The values are
+/// scaled for a clean default: asymmetry and hardness carry each tube's
+/// identity and only act at the knee, so drive brings the character out, while
+/// bias and sag stay low so the default stays transparent.
 let TUBE_TYPE_ROWS: [TubeTypeRow?] = [
     nil,
-    TubeTypeRow(name: "12AX7 / ECC83",       style: "High-gain preamp triode",              biasPct: 30, asymDB: 3, hardnessPct: 40, sagPct: 30),
-    TubeTypeRow(name: "5751",                style: "Cooler 12AX7",                         biasPct: 25, asymDB: 3, hardnessPct: 35, sagPct: 25),
-    TubeTypeRow(name: "12AT7 / ECC81",       style: "Medium-gain driver, more odd-order",   biasPct: 15, asymDB: 2, hardnessPct: 55, sagPct: 20),
-    TubeTypeRow(name: "12AY7",               style: "Tweed front end, gentle",              biasPct: 20, asymDB: 4, hardnessPct: 25, sagPct: 30),
-    TubeTypeRow(name: "12AU7 / ECC82",       style: "Clean line stage",                     biasPct: 15, asymDB: 5, hardnessPct: 20, sagPct: 15),
-    TubeTypeRow(name: "6SN7",                style: "Octal hi-fi line stage, sweet",        biasPct: 20, asymDB: 6, hardnessPct: 15, sagPct: 20),
-    TubeTypeRow(name: "6SL7",                style: "Octal high-mu, rounder knee",          biasPct: 30, asymDB: 3, hardnessPct: 30, sagPct: 30),
-    TubeTypeRow(name: "6DJ8 / ECC88 / 6922", style: "Clean, hard when pushed",              biasPct: 10, asymDB: 2, hardnessPct: 60, sagPct: 10),
-    TubeTypeRow(name: "EF86 / 6267",         style: "Pentode preamp, symmetric bite",       biasPct: 5,  asymDB: 0, hardnessPct: 75, sagPct: 25),
-    TubeTypeRow(name: "6SJ7",                style: "Octal pentode, softer than EF86",      biasPct: 8,  asymDB: 1, hardnessPct: 65, sagPct: 30),
-    TubeTypeRow(name: "EL84 / 6BQ5",         style: "Push-pull power, chimey",              biasPct: 0,  asymDB: 0, hardnessPct: 50, sagPct: 45, pushPull: true),
-    TubeTypeRow(name: "EL34",                style: "Push-pull power, mid crunch, deep sag", biasPct: 0, asymDB: 0, hardnessPct: 60, sagPct: 55, pushPull: true),
-    TubeTypeRow(name: "6L6 / 5881",          style: "Push-pull power, tight",               biasPct: 0,  asymDB: 0, hardnessPct: 55, sagPct: 35, pushPull: true),
-    TubeTypeRow(name: "6V6",                 style: "Push-pull power, early breakup, heavy sag", biasPct: 0,  asymDB: 0, hardnessPct: 35, sagPct: 60, pushPull: true),
-    TubeTypeRow(name: "KT88 / 6550",         style: "Push-pull hi-fi power, near linear",   biasPct: 0,  asymDB: 0, hardnessPct: 45, sagPct: 20, pushPull: true),
-    TubeTypeRow(name: "300B / 2A3",          style: "Single-ended DHT, pure even harmonics", biasPct: 35, asymDB: 6, hardnessPct: 10, sagPct: 25),
+    TubeTypeRow(name: "12AX7 / ECC83",       style: "High-gain preamp triode",              biasPct: 10, asymDB: 3, hardnessPct: 40, sagPct: 15),
+    TubeTypeRow(name: "5751",                style: "Cooler 12AX7",                         biasPct: 8,  asymDB: 3, hardnessPct: 35, sagPct: 12),
+    TubeTypeRow(name: "12AT7 / ECC81",       style: "Medium-gain driver, more odd-order",   biasPct: 5,  asymDB: 2, hardnessPct: 55, sagPct: 10),
+    TubeTypeRow(name: "12AY7",               style: "Tweed front end, gentle",              biasPct: 7,  asymDB: 4, hardnessPct: 25, sagPct: 15),
+    TubeTypeRow(name: "12AU7 / ECC82",       style: "Clean line stage",                     biasPct: 5,  asymDB: 5, hardnessPct: 20, sagPct: 8),
+    TubeTypeRow(name: "6SN7",                style: "Octal hi-fi line stage, sweet",        biasPct: 7,  asymDB: 6, hardnessPct: 15, sagPct: 10),
+    TubeTypeRow(name: "6SL7",                style: "Octal high-mu, rounder knee",          biasPct: 10, asymDB: 3, hardnessPct: 30, sagPct: 15),
+    TubeTypeRow(name: "6DJ8 / ECC88 / 6922", style: "Clean, hard when pushed",              biasPct: 3,  asymDB: 2, hardnessPct: 60, sagPct: 5),
+    TubeTypeRow(name: "EF86 / 6267",         style: "Pentode preamp, symmetric bite",       biasPct: 2,  asymDB: 0, hardnessPct: 75, sagPct: 12),
+    TubeTypeRow(name: "6SJ7",                style: "Octal pentode, softer than EF86",      biasPct: 3,  asymDB: 1, hardnessPct: 65, sagPct: 15),
+    TubeTypeRow(name: "EL84 / 6BQ5",         style: "Push-pull power, chimey",              biasPct: 0,  asymDB: 0, hardnessPct: 50, sagPct: 25, pushPull: true),
+    TubeTypeRow(name: "EL34",                style: "Push-pull power, mid crunch, deep sag", biasPct: 0, asymDB: 0, hardnessPct: 60, sagPct: 30, pushPull: true),
+    TubeTypeRow(name: "6L6 / 5881",          style: "Push-pull power, tight",               biasPct: 0,  asymDB: 0, hardnessPct: 55, sagPct: 18, pushPull: true),
+    TubeTypeRow(name: "6V6",                 style: "Push-pull power, early breakup, heavy sag", biasPct: 0,  asymDB: 0, hardnessPct: 35, sagPct: 30, pushPull: true),
+    TubeTypeRow(name: "KT88 / 6550",         style: "Push-pull hi-fi power, near linear",   biasPct: 0,  asymDB: 0, hardnessPct: 45, sagPct: 10, pushPull: true),
+    TubeTypeRow(name: "300B / 2A3",          style: "Single-ended DHT, pure even harmonics", biasPct: 12, asymDB: 6, hardnessPct: 10, sagPct: 12),
 ]
 
 /// Display name for a tube_type value, including Custom.
@@ -683,9 +696,9 @@ let BULK_SUBHARM_OFFSET: Int            = 5944
 /// Bytes in WireSubharmParams (V30).
 let WIRE_SUBHARM_PARAMS_SIZE: Int       = 36
 /// WireTubeParams (V31, 48 bytes): enabled (+0), tube_type (+1), rectifier (+2),
-/// xfmr_enabled (+3), output_mask u16 (+4), two reserved bytes, then ten floats
-/// drive/bias/asym/hardness/sag/xfmr_lf/xfmr_sat/xfmr_hf/mix/trim (+8..+44).
-/// The meter is not on the wire - read it with REQ_GET_TUBE_METER.
+/// xfmr_enabled (+3), output_mask u16 (+4), two reserved bytes, then nine floats
+/// drive/bias/asym/hardness/sag/xfmr_damping/xfmr_res/mix/trim (+8..+40) and a
+/// reserved float (+44) that holds the section at its V31 size.
 let BULK_TUBE_OFFSET: Int               = 5980
 /// Bytes in WireTubeParams.  It is the last section, so this takes the image to
 /// its full size.
@@ -1296,7 +1309,7 @@ let CS_NOUN_AUX: Int                = 68   // bool: auxiliary output on/off
 let CS_NOUN_AUX_LEVEL: Int          = 69   // continuous percent 0..100 (8.8, any step)
 // Caps v19 (tube preamp spec §6): each dispatches through REQ_SET_TUBE_PARAM.
 let CS_NOUN_TUBE: Int               = 70   // bool: tube modeller enable
-let CS_NOUN_TUBE_DRIVE: Int         = 71   // continuous dB 0..24
+let CS_NOUN_TUBE_DRIVE: Int         = 71   // continuous dB -6..24
 let CS_NOUN_TUBE_TYPE: Int          = 72   // enum 0..16 (0 = Custom)
 let CS_NOUN_TUBE_MIX: Int           = 73   // continuous percent 0..100 (dry/wet)
 /// `CS_NOUN_MACRO` live value while no macro is running (also

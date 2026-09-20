@@ -11,7 +11,6 @@ final class TubeWireTests: XCTestCase {
     func testRequestCodes() {
         XCTAssertEqual(REQ_SET_TUBE_PARAM, 0x3E)
         XCTAssertEqual(REQ_GET_TUBE_PARAM, 0x3F)
-        XCTAssertEqual(REQ_GET_TUBE_METER, 0x81)
         XCTAssertEqual(TUBE_DEFAULT_OUTPUT_MASK, 0xFFFF)
     }
 
@@ -35,12 +34,11 @@ final class TubeWireTests: XCTestCase {
         XCTAssertEqual(TUBE_PARAM_SAG_PCT, 7)
         XCTAssertEqual(TUBE_PARAM_RECTIFIER, 8)
         XCTAssertEqual(TUBE_PARAM_XFMR_ENABLED, 9)
-        XCTAssertEqual(TUBE_PARAM_XFMR_LF_HZ, 10)
-        XCTAssertEqual(TUBE_PARAM_XFMR_SAT_PCT, 11)
-        XCTAssertEqual(TUBE_PARAM_XFMR_HF_HZ, 12)
-        XCTAssertEqual(TUBE_PARAM_MIX_PCT, 13)
-        XCTAssertEqual(TUBE_PARAM_TRIM_DB, 14)
-        XCTAssertEqual(TUBE_NUM_PARAMS, 15)
+        XCTAssertEqual(TUBE_PARAM_XFMR_DAMPING, 10)
+        XCTAssertEqual(TUBE_PARAM_XFMR_RES_HZ, 11)
+        XCTAssertEqual(TUBE_PARAM_MIX_PCT, 12)
+        XCTAssertEqual(TUBE_PARAM_TRIM_DB, 13)
+        XCTAssertEqual(TUBE_NUM_PARAMS, 14)
     }
 
     /// The row table is the spec's own (§2.3); the app mirrors a type SET from
@@ -50,16 +48,16 @@ final class TubeWireTests: XCTestCase {
         XCTAssertNil(TUBE_TYPE_ROWS[TUBE_TYPE_CUSTOM])
         let ax7 = try XCTUnwrap(TUBE_TYPE_ROWS[1])
         XCTAssertEqual(ax7.name, "12AX7 / ECC83")
-        XCTAssertEqual(ax7.biasPct, 30)
+        XCTAssertEqual(ax7.biasPct, 10)
         XCTAssertEqual(ax7.asymDB, 3)
         XCTAssertEqual(ax7.hardnessPct, 40)
-        XCTAssertEqual(ax7.sagPct, 30)
+        XCTAssertEqual(ax7.sagPct, 15)
         let dht = try XCTUnwrap(TUBE_TYPE_ROWS[16])
         XCTAssertEqual(dht.name, "300B / 2A3")
-        XCTAssertEqual(dht.biasPct, 35)
+        XCTAssertEqual(dht.biasPct, 12)
         XCTAssertEqual(dht.asymDB, 6)
         XCTAssertEqual(dht.hardnessPct, 10)
-        XCTAssertEqual(dht.sagPct, 25)
+        XCTAssertEqual(dht.sagPct, 12)
         // Exactly the five push-pull power stages are flagged, and they are the
         // rows with neither bias nor asymmetry.
         let pushPull = (1...TUBE_TYPE_MAX).filter { TUBE_TYPE_ROWS[$0]?.pushPull == true }
@@ -94,7 +92,7 @@ final class TubeWireTests: XCTestCase {
         section[2] = 3                                 // rectifier = 5Y3
         section[3] = 0x01                              // xfmr_enabled
         section[4] = 0x0F; section[5] = 0x01           // output_mask = 0x010F LE
-        let floats: [Float] = [12, -40, 6.5, 70, 55, 120, 80, 6000, 75, -3]
+        let floats: [Float] = [12, -40, 6.5, 70, 55, 6, 120, 75, -3, 0]
         for (i, v) in floats.enumerated() {
             var f = v
             withUnsafeBytes(of: &f) { section.replaceSubrange(8 + i * 4 ..< 12 + i * 4, with: $0) }
@@ -113,11 +111,11 @@ final class TubeWireTests: XCTestCase {
         XCTAssertEqual(f(16), 6.5)      // asym_db
         XCTAssertEqual(f(20), 70)       // hardness_pct
         XCTAssertEqual(f(24), 55)       // sag_pct
-        XCTAssertEqual(f(28), 120)      // xfmr_lf_hz
-        XCTAssertEqual(f(32), 80)       // xfmr_sat_pct
-        XCTAssertEqual(f(36), 6000)     // xfmr_hf_hz
-        XCTAssertEqual(f(40), 75)       // mix_pct
-        XCTAssertEqual(f(44), -3)       // trim_db
+        XCTAssertEqual(f(28), 6)        // xfmr_damping
+        XCTAssertEqual(f(32), 120)      // xfmr_res_hz
+        XCTAssertEqual(f(36), 75)       // mix_pct
+        XCTAssertEqual(f(40), -3)       // trim_db
+        XCTAssertEqual(f(44), 0)        // reserved_f, holds the section at 48 bytes
     }
 
     // MARK: - Feature detection (spec §6)
@@ -139,16 +137,15 @@ final class TubeWireTests: XCTestCase {
         XCTAssertFalse(vm.tubeEnabled)
         XCTAssertEqual(vm.tubeOutputMask, 0xFFFF)
         XCTAssertEqual(vm.tubeType, 1)
-        XCTAssertEqual(vm.tubeDriveDB, 6)
-        XCTAssertEqual(vm.tubeBiasPct, 30)
+        XCTAssertEqual(vm.tubeDriveDB, -6)
+        XCTAssertEqual(vm.tubeBiasPct, 10)
         XCTAssertEqual(vm.tubeAsymDB, 3)
         XCTAssertEqual(vm.tubeHardnessPct, 40)
-        XCTAssertEqual(vm.tubeSagPct, 30)
+        XCTAssertEqual(vm.tubeSagPct, 15)
         XCTAssertEqual(vm.tubeRectifier, 1)
         XCTAssertFalse(vm.tubeXfmrEnabled)
-        XCTAssertEqual(vm.tubeXfmrLfHz, 80)
-        XCTAssertEqual(vm.tubeXfmrSatPct, 30)
-        XCTAssertEqual(vm.tubeXfmrHfHz, 20000)
+        XCTAssertEqual(vm.tubeXfmrDamping, 2)
+        XCTAssertEqual(vm.tubeXfmrResHz, 85)
         XCTAssertEqual(vm.tubeMixPct, 100)
         XCTAssertEqual(vm.tubeTrimDB, 0)
     }
@@ -163,9 +160,9 @@ final class TubeWireTests: XCTestCase {
         XCTAssertEqual(vm.tubeBiasPct, 0)
         XCTAssertEqual(vm.tubeAsymDB, 0)
         XCTAssertEqual(vm.tubeHardnessPct, 60)
-        XCTAssertEqual(vm.tubeSagPct, 55)
-        // Drive, mix, the rectifier and the transformer are not part of a row.
-        XCTAssertEqual(vm.tubeDriveDB, 6)
+        XCTAssertEqual(vm.tubeSagPct, 30)
+        // Drive, mix, the rectifier and the output stage are not part of a row.
+        XCTAssertEqual(vm.tubeDriveDB, TUBE_DEFAULT_DRIVE_DB)
         XCTAssertEqual(vm.tubeRectifier, 1)
     }
 
@@ -175,7 +172,7 @@ final class TubeWireTests: XCTestCase {
         vm.setTubeType(16)
         vm.setTubeType(TUBE_TYPE_CUSTOM)
         XCTAssertEqual(vm.tubeType, TUBE_TYPE_CUSTOM)
-        XCTAssertEqual(vm.tubeBiasPct, 35)
+        XCTAssertEqual(vm.tubeBiasPct, 12)
         XCTAssertEqual(vm.tubeAsymDB, 6)
     }
 
@@ -184,7 +181,7 @@ final class TubeWireTests: XCTestCase {
     func testCharacterEditDropsToCustomOnlyOnChange() {
         let vm = DSPViewModel()
         vm.setTubeType(1)
-        vm.setTubeBias(30)       // same as the 12AX7 row
+        vm.setTubeBias(10)       // same as the 12AX7 row
         XCTAssertEqual(vm.tubeType, 1)
         vm.setTubeHardness(41)
         XCTAssertEqual(vm.tubeType, TUBE_TYPE_CUSTOM)
@@ -205,10 +202,12 @@ final class TubeWireTests: XCTestCase {
     func testClamping() {
         let vm = DSPViewModel()
         vm.setTubeDrive(40);        XCTAssertEqual(vm.tubeDriveDB, TUBE_DRIVE_MAX)
-        vm.setTubeDrive(-3);        XCTAssertEqual(vm.tubeDriveDB, TUBE_DRIVE_MIN)
+        vm.setTubeDrive(-20);       XCTAssertEqual(vm.tubeDriveDB, TUBE_DRIVE_MIN)
         vm.setTubeBias(-500);       XCTAssertEqual(vm.tubeBiasPct, TUBE_BIAS_MIN)
-        vm.setTubeXfmrLf(5);        XCTAssertEqual(vm.tubeXfmrLfHz, TUBE_XFMR_LF_MIN)
-        vm.setTubeXfmrHf(50000);    XCTAssertEqual(vm.tubeXfmrHfHz, TUBE_XFMR_HF_MAX)
+        vm.setTubeXfmrDamping(0);   XCTAssertEqual(vm.tubeXfmrDamping, TUBE_XFMR_DAMPING_MIN)
+        vm.setTubeXfmrDamping(99);  XCTAssertEqual(vm.tubeXfmrDamping, TUBE_XFMR_DAMPING_MAX)
+        vm.setTubeXfmrRes(5);       XCTAssertEqual(vm.tubeXfmrResHz, TUBE_XFMR_RES_MIN)
+        vm.setTubeXfmrRes(5000);    XCTAssertEqual(vm.tubeXfmrResHz, TUBE_XFMR_RES_MAX)
         vm.setTubeMix(150);         XCTAssertEqual(vm.tubeMixPct, TUBE_MIX_MAX)
         vm.setTubeTrim(-20);        XCTAssertEqual(vm.tubeTrimDB, TUBE_TRIM_MIN)
         vm.setTubeType(99);         XCTAssertEqual(vm.tubeType, TUBE_TYPE_MAX)
@@ -229,14 +228,34 @@ final class TubeWireTests: XCTestCase {
 
     // MARK: - Shaper model (the graph and the harmonics readout)
 
-    /// Small-signal gain is unity at every hardness (spec §2.7), so the curve
-    /// has slope 1 through the rest point whatever the knee.
+    /// Small-signal gain is unity at every hardness AND every drive (spec §2.4
+    /// and §2.7): the shaper carries 1/m makeup gain, so drive moves the knee
+    /// rather than the level.  Without the makeup the curve would leave the
+    /// graph by 24 dB at full drive.
     func testShaperSmallSignalGainIsUnity() {
         for hardness in [Float(0), 40, 100] {
-            let s = TubeShaper(driveDB: 0, biasPct: 0, asymDB: 0, hardnessPct: hardness, mixPct: 100, trimDB: 0)
-            let dx = 1e-4
-            XCTAssertEqual((s.output(dx) - s.output(-dx)) / (2 * dx), 1.0, accuracy: 1e-3)
+            for drive in [TUBE_DRIVE_MIN, 0, 12, TUBE_DRIVE_MAX] {
+                let s = TubeShaper(driveDB: drive, biasPct: 0, asymDB: 0,
+                                   hardnessPct: hardness, mixPct: 100, trimDB: 0)
+                let dx = 1e-6
+                XCTAssertEqual((s.output(dx) - s.output(-dx)) / (2 * dx), 1.0, accuracy: 1e-3,
+                               "hardness \(hardness), drive \(drive)")
+            }
         }
+    }
+
+    /// The positive-half ceiling is 1/(c1 m): +2.5 dBFS at the -6 dB default
+    /// and 1 dB lower per dB of drive above 0 (spec §7, headroom).
+    func testShaperCeilingFollowsDrive() {
+        func ceiling(_ drive: Float) -> Double {
+            let s = TubeShaper(driveDB: drive, biasPct: 0, asymDB: 0, hardnessPct: 0,
+                               mixPct: 100, trimDB: 0)
+            // Well past the knee at every drive, so this is the clipped value.
+            return s.output(10)
+        }
+        XCTAssertEqual(ceiling(TUBE_DRIVE_MIN), 1.333, accuracy: 0.01)
+        XCTAssertEqual(ceiling(0), 0.667, accuracy: 0.01)
+        XCTAssertEqual(ceiling(6), 0.334, accuracy: 0.01)
     }
 
     /// Silence stays silence: the rest-point offset is removed (spec §1, v0).
@@ -286,9 +305,8 @@ final class TubeWireTests: XCTestCase {
         block.sagPct = 10
         block.rectifier = 3
         block.xfmrEnabled = true
-        block.xfmrLfHz = 150
-        block.xfmrSatPct = 60
-        block.xfmrHfHz = 7000
+        block.xfmrDamping = 12
+        block.xfmrResHz = 45
         block.mixPct = 50
         block.trimDb = -4
         doc.tube = block
@@ -305,9 +323,8 @@ final class TubeWireTests: XCTestCase {
         XCTAssertEqual(t.sagPct, 10)
         XCTAssertEqual(t.rectifier, 3)
         XCTAssertTrue(t.xfmrEnabled)
-        XCTAssertEqual(t.xfmrLfHz, 150)
-        XCTAssertEqual(t.xfmrSatPct, 60)
-        XCTAssertEqual(t.xfmrHfHz, 7000)
+        XCTAssertEqual(t.xfmrDamping, 12)
+        XCTAssertEqual(t.xfmrResHz, 45)
         XCTAssertEqual(t.mixPct, 50)
         XCTAssertEqual(t.trimDb, -4)
 
@@ -367,7 +384,7 @@ final class TubeWireTests: XCTestCase {
         }
     }
 
-    /// The bulk tube section agrees with the fifteen indexed GETs.
+    /// The bulk tube section agrees with the fourteen indexed GETs.
     func testBulkAgreesWithIndexedGets() throws {
         let usb = try requireTube()
         guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
@@ -383,9 +400,9 @@ final class TubeWireTests: XCTestCase {
         XCTAssertEqual(snap[TUBE_PARAM_XFMR_ENABLED], all[o + 3] != 0 ? 1 : 0)
         XCTAssertEqual(snap[TUBE_PARAM_OUTPUT_MASK], Float(UInt16(all[o + 4]) | (UInt16(all[o + 5]) << 8)))
         let floatIndices: [UInt16] = [TUBE_PARAM_DRIVE_DB, TUBE_PARAM_BIAS_PCT, TUBE_PARAM_ASYM_DB,
-                                      TUBE_PARAM_HARDNESS_PCT, TUBE_PARAM_SAG_PCT, TUBE_PARAM_XFMR_LF_HZ,
-                                      TUBE_PARAM_XFMR_SAT_PCT, TUBE_PARAM_XFMR_HF_HZ, TUBE_PARAM_MIX_PCT,
-                                      TUBE_PARAM_TRIM_DB]
+                                      TUBE_PARAM_HARDNESS_PCT, TUBE_PARAM_SAG_PCT,
+                                      TUBE_PARAM_XFMR_DAMPING, TUBE_PARAM_XFMR_RES_HZ,
+                                      TUBE_PARAM_MIX_PCT, TUBE_PARAM_TRIM_DB]
         for (i, idx) in floatIndices.enumerated() {
             XCTAssertEqual(snap[idx] ?? .nan, bf(8 + i * 4), accuracy: 0.001, "param \(idx)")
         }
@@ -430,9 +447,9 @@ final class TubeWireTests: XCTestCase {
         defer { restore(usb, snap) }
 
         setParam(usb, TUBE_PARAM_TUBE_TYPE, 1)
-        setParam(usb, TUBE_PARAM_SAG_PCT, 30)       // the 12AX7 value
+        setParam(usb, TUBE_PARAM_SAG_PCT, 15)       // the 12AX7 value
         XCTAssertEqual(getParam(usb, TUBE_PARAM_TUBE_TYPE), 1)
-        setParam(usb, TUBE_PARAM_SAG_PCT, 31)
+        setParam(usb, TUBE_PARAM_SAG_PCT, 16)
         XCTAssertEqual(getParam(usb, TUBE_PARAM_TUBE_TYPE), Float(TUBE_TYPE_CUSTOM))
     }
 
@@ -444,22 +461,14 @@ final class TubeWireTests: XCTestCase {
 
         setParam(usb, TUBE_PARAM_DRIVE_DB, 99)
         XCTAssertEqual(getParam(usb, TUBE_PARAM_DRIVE_DB), TUBE_DRIVE_MAX)
-        setParam(usb, TUBE_PARAM_XFMR_HF_HZ, 100)
-        XCTAssertEqual(getParam(usb, TUBE_PARAM_XFMR_HF_HZ), TUBE_XFMR_HF_MIN)
+        setParam(usb, TUBE_PARAM_DRIVE_DB, -99)
+        XCTAssertEqual(getParam(usb, TUBE_PARAM_DRIVE_DB), TUBE_DRIVE_MIN)
+        setParam(usb, TUBE_PARAM_XFMR_DAMPING, 100)
+        XCTAssertEqual(getParam(usb, TUBE_PARAM_XFMR_DAMPING), TUBE_XFMR_DAMPING_MAX)
+        setParam(usb, TUBE_PARAM_XFMR_RES_HZ, 1)
+        XCTAssertEqual(getParam(usb, TUBE_PARAM_XFMR_RES_HZ), TUBE_XFMR_RES_MIN)
         setParam(usb, TUBE_PARAM_RECTIFIER, 7)
         XCTAssertEqual(getParam(usb, TUBE_PARAM_RECTIFIER), Float(TUBE_RECT_MAX))
     }
 
-    /// The meter is one uint16 per output channel, inside 0..32767.
-    func testMeterShape() throws {
-        let usb = try requireTube()
-        guard let d = usb.getControlRequest(request: REQ_GET_TUBE_METER, value: 0, index: 0, length: 18),
-              d.count >= 10 else {
-            throw XCTSkip("Tube meter GET returned nothing.")
-        }
-        XCTAssertTrue(d.count == 10 || d.count == 18, "expected 5 or 9 entries, got \(d.count / 2)")
-        for i in stride(from: 0, to: d.count, by: 2) {
-            XCTAssertLessThanOrEqual(UInt16(d[i]) | (UInt16(d[i + 1]) << 8), 32767)
-        }
-    }
 }

@@ -83,9 +83,8 @@ struct PresetSnapshot: Equatable {
     let tubeSagPct: Float
     let tubeRectifier: Int
     let tubeXfmrEnabled: Bool
-    let tubeXfmrLfHz: Float
-    let tubeXfmrSatPct: Float
-    let tubeXfmrHfHz: Float
+    let tubeXfmrDamping: Float
+    let tubeXfmrResHz: Float
     let tubeMixPct: Float
     let tubeTrimDB: Float
     let upmixEnabled: Bool
@@ -334,18 +333,13 @@ extension PresetSnapshot {
             changes.append(.init(category: "Tube", description: "Tube rectifier: \(tubeRectifierName(old.tubeRectifier)) → \(tubeRectifierName(new.tubeRectifier))"))
         }
         if old.tubeXfmrEnabled != new.tubeXfmrEnabled {
-            changes.append(.init(category: "Tube", description: "Tube transformer: \(new.tubeXfmrEnabled ? "enabled" : "disabled")"))
+            changes.append(.init(category: "Tube", description: "Tube output stage: \(new.tubeXfmrEnabled ? "enabled" : "disabled")"))
         }
-        if old.tubeXfmrLfHz != new.tubeXfmrLfHz {
-            changes.append(.init(category: "Tube", description: "Tube transformer low split: \(formatVal(old.tubeXfmrLfHz)) → \(formatVal(new.tubeXfmrLfHz)) Hz"))
+        if old.tubeXfmrDamping != new.tubeXfmrDamping {
+            changes.append(.init(category: "Tube", description: "Tube damping factor: \(formatVal(old.tubeXfmrDamping)) → \(formatVal(new.tubeXfmrDamping))"))
         }
-        if old.tubeXfmrSatPct != new.tubeXfmrSatPct {
-            changes.append(.init(category: "Tube", description: "Tube transformer saturation: \(formatVal(old.tubeXfmrSatPct))% → \(formatVal(new.tubeXfmrSatPct))%"))
-        }
-        if old.tubeXfmrHfHz != new.tubeXfmrHfHz {
-            // The top of the range is a bypass rather than a 20 kHz corner.
-            func hfText(_ hz: Float) -> String { hz >= TUBE_XFMR_HF_MAX ? "off" : "\(formatVal(hz)) Hz" }
-            changes.append(.init(category: "Tube", description: "Tube transformer HF rolloff: \(hfText(old.tubeXfmrHfHz)) → \(hfText(new.tubeXfmrHfHz))"))
+        if old.tubeXfmrResHz != new.tubeXfmrResHz {
+            changes.append(.init(category: "Tube", description: "Tube speaker resonance: \(formatVal(old.tubeXfmrResHz)) → \(formatVal(new.tubeXfmrResHz)) Hz"))
         }
         if old.tubeMixPct != new.tubeMixPct {
             changes.append(.init(category: "Tube", description: "Tube mix: \(formatVal(old.tubeMixPct))% → \(formatVal(new.tubeMixPct))%"))

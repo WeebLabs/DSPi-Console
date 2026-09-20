@@ -1385,9 +1385,9 @@ extension DSPViewModel {
         }
     }
 
-    // MARK: - Tube Modeller (V31, cmds 0x3E/0x3F/0x81)
+    // MARK: - Tube Modeller (V31, cmds 0x3E/0x3F)
 
-    // One indexed SET/GET pair carries all fifteen parameters as float32, the
+    // One indexed SET/GET pair carries all fourteen parameters as float32, the
     // bools, mask and enums included.  Every SET is fire-and-forget and updates
     // app state first; the app clamps exactly as the firmware does, and mirrors
     // the two cross-field rules (a type loads its row, a character edit drops the
@@ -1491,22 +1491,16 @@ extension DSPViewModel {
         sendTubeParam(TUBE_PARAM_XFMR_ENABLED, enabled ? 1 : 0)
     }
 
-    func setTubeXfmrLf(_ hz: Float) {
-        let v = Self.clampTube(hz, TUBE_XFMR_LF_MIN, TUBE_XFMR_LF_MAX)
-        self.tubeXfmrLfHz = v
-        sendTubeParam(TUBE_PARAM_XFMR_LF_HZ, v)
+    func setTubeXfmrDamping(_ df: Float) {
+        let v = Self.clampTube(df, TUBE_XFMR_DAMPING_MIN, TUBE_XFMR_DAMPING_MAX)
+        self.tubeXfmrDamping = v
+        sendTubeParam(TUBE_PARAM_XFMR_DAMPING, v)
     }
 
-    func setTubeXfmrSat(_ pct: Float) {
-        let v = Self.clampTube(pct, TUBE_XFMR_SAT_MIN, TUBE_XFMR_SAT_MAX)
-        self.tubeXfmrSatPct = v
-        sendTubeParam(TUBE_PARAM_XFMR_SAT_PCT, v)
-    }
-
-    func setTubeXfmrHf(_ hz: Float) {
-        let v = Self.clampTube(hz, TUBE_XFMR_HF_MIN, TUBE_XFMR_HF_MAX)
-        self.tubeXfmrHfHz = v
-        sendTubeParam(TUBE_PARAM_XFMR_HF_HZ, v)
+    func setTubeXfmrRes(_ hz: Float) {
+        let v = Self.clampTube(hz, TUBE_XFMR_RES_MIN, TUBE_XFMR_RES_MAX)
+        self.tubeXfmrResHz = v
+        sendTubeParam(TUBE_PARAM_XFMR_RES_HZ, v)
     }
 
     func setTubeMix(_ pct: Float) {
@@ -1519,23 +1513,6 @@ extension DSPViewModel {
         let v = Self.clampTube(db, TUBE_TRIM_MIN, TUBE_TRIM_MAX)
         self.tubeTrimDB = v
         sendTubeParam(TUBE_PARAM_TRIM_DB, v)
-    }
-
-    /// Reads the per-output saturation meter: one uint16 LE per output on the
-    /// 0..32767 status-peaks scale, normalized to 0..1.  A short read keeps the
-    /// entries that did arrive.
-    func fetchTubeMeter() {
-        let want = numOutputChannels
-        guard want > 0 else { return }
-        guard let d = usb.getControlRequest(request: REQ_GET_TUBE_METER, value: 0, index: 0,
-                                            length: UInt16(want * 2)), d.count >= 2 else { return }
-        var levels: [Float] = []
-        levels.reserveCapacity(min(want, d.count / 2))
-        for i in 0..<min(want, d.count / 2) {
-            let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
-            levels.append(Float(raw) / TUBE_METER_FULL_SCALE)
-        }
-        DispatchQueue.main.async { self.tubeSaturationMeter = levels }
     }
 
     // MARK: - Stereo Upmixer (V25, cmds 0x4A-0x4E)
@@ -3614,7 +3591,7 @@ extension DSPViewModel {
         let tbOutputMask = UInt16(data[BULK_TUBE_OFFSET + 4]) | (UInt16(data[BULK_TUBE_OFFSET + 5]) << 8)
         func tbF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: BULK_TUBE_OFFSET + off, as: Float.self) } }
         let tbDrive = tbF(8), tbBias = tbF(12), tbAsym = tbF(16), tbHardness = tbF(20), tbSag = tbF(24)
-        let tbXfmrLf = tbF(28), tbXfmrSat = tbF(32), tbXfmrHf = tbF(36), tbMix = tbF(40), tbTrim = tbF(44)
+        let tbXfmrDamping = tbF(28), tbXfmrRes = tbF(32), tbMix = tbF(36), tbTrim = tbF(40)
 
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
@@ -3667,9 +3644,8 @@ extension DSPViewModel {
             self.tubeSagPct = tbSag
             self.tubeRectifier = tbRectifier
             self.tubeXfmrEnabled = tbXfmrEnabled
-            self.tubeXfmrLfHz = tbXfmrLf
-            self.tubeXfmrSatPct = tbXfmrSat
-            self.tubeXfmrHfHz = tbXfmrHf
+            self.tubeXfmrDamping = tbXfmrDamping
+            self.tubeXfmrResHz = tbXfmrRes
             self.tubeMixPct = tbMix
             self.tubeTrimDB = tbTrim
 

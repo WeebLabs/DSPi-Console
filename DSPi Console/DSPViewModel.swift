@@ -1342,7 +1342,7 @@ class DSPViewModel: ObservableObject {
     @Published var subharmSubMeter: [Float] = []
 
     // Tube Modeller (V31): valve-style waveshaper with supply sag and an optional
-    // transformer stage, per output channel selected by `tubeOutputMask`.  The
+    // output stage, per output channel selected by `tubeOutputMask`.  The
     // defaults are the firmware's (the 12AX7 row), so an unconnected app and a
     // fresh device agree before the first bulk read.
     @Published var tubeEnabled: Bool = false
@@ -1350,22 +1350,17 @@ class DSPViewModel: ObservableObject {
     /// 0 = Custom, 1..16 = a row of TUBE_TYPE_ROWS.  Selecting a row loads the
     /// four character knobs; editing one of them drops the type back to Custom.
     @Published var tubeType: Int = TUBE_DEFAULT_TUBE_TYPE
-    @Published var tubeDriveDB: Float = 6.0         // 0..24 dB
-    @Published var tubeBiasPct: Float = 30.0        // -100..+100 %
-    @Published var tubeAsymDB: Float = 3.0          // -12..+12 dB
-    @Published var tubeHardnessPct: Float = 40.0    // 0..100 %
-    @Published var tubeSagPct: Float = 30.0         // 0..100 %
+    @Published var tubeDriveDB: Float = TUBE_DEFAULT_DRIVE_DB          // -6..24 dB
+    @Published var tubeBiasPct: Float = TUBE_DEFAULT_BIAS_PCT          // -100..+100 %
+    @Published var tubeAsymDB: Float = TUBE_DEFAULT_ASYM_DB            // -12..+12 dB
+    @Published var tubeHardnessPct: Float = TUBE_DEFAULT_HARDNESS_PCT  // 0..100 %
+    @Published var tubeSagPct: Float = TUBE_DEFAULT_SAG_PCT            // 0..100 %
     @Published var tubeRectifier: Int = TUBE_DEFAULT_RECTIFIER
     @Published var tubeXfmrEnabled: Bool = false
-    @Published var tubeXfmrLfHz: Float = 80.0       // 20..300 Hz
-    @Published var tubeXfmrSatPct: Float = 30.0     // 0..100 %
-    @Published var tubeXfmrHfHz: Float = 20000.0    // 2k..20k Hz (20k = bypass)
-    @Published var tubeMixPct: Float = 100.0        // 0..100 %
-    @Published var tubeTrimDB: Float = 0.0          // -12..+12 dB
-    /// Decaying peak of the shaper drive per output (0x81), normalized to 0..1;
-    /// 1 means the stage is fully clipped.  Polled only while the tube window is
-    /// open; empty when never read.
-    @Published var tubeSaturationMeter: [Float] = []
+    @Published var tubeXfmrDamping: Float = TUBE_DEFAULT_XFMR_DAMPING  // 1..20
+    @Published var tubeXfmrResHz: Float = TUBE_DEFAULT_XFMR_RES_HZ     // 30..150 Hz
+    @Published var tubeMixPct: Float = TUBE_DEFAULT_MIX_PCT            // 0..100 %
+    @Published var tubeTrimDB: Float = TUBE_DEFAULT_TRIM_DB            // -12..+12 dB
 
     // Stereo Upmixer (V25): derives Centre + Ls/Rs matrix source rows from a
     // stereo input.  These mirror UpmixConfigPacket (spec §6.1); defaults match
@@ -2128,7 +2123,7 @@ class DSPViewModel: ObservableObject {
     /// individual GETs STALL on V29 firmware and the UI hides these controls.
     var firmwareSupportsSubharmExtended: Bool { firmwareWireFormatVersion >= 30 }
 
-    /// Tube Modeller (cmds 0x3E/0x3F/0x81) shipped in wire format V31, which
+    /// Tube Modeller (cmds 0x3E/0x3F) shipped in wire format V31, which
     /// appends WireTubeParams to the bulk layout.  Both platforms run it.
     var firmwareSupportsTube: Bool { firmwareWireFormatVersion >= 31 }
 
@@ -2940,9 +2935,8 @@ class DSPViewModel: ObservableObject {
             tubeSagPct: tubeSagPct,
             tubeRectifier: tubeRectifier,
             tubeXfmrEnabled: tubeXfmrEnabled,
-            tubeXfmrLfHz: tubeXfmrLfHz,
-            tubeXfmrSatPct: tubeXfmrSatPct,
-            tubeXfmrHfHz: tubeXfmrHfHz,
+            tubeXfmrDamping: tubeXfmrDamping,
+            tubeXfmrResHz: tubeXfmrResHz,
             tubeMixPct: tubeMixPct,
             tubeTrimDB: tubeTrimDB,
             upmixEnabled: upmixEnabled,

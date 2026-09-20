@@ -352,50 +352,6 @@ struct LoudnessView: View {
     }
 }
 
-// MARK: - Custom Slider
-
-struct CustomSlider: View {
-    @Binding var value: Float
-    let range: ClosedRange<Float>
-    var disabled: Bool = false
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                // Track
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(height: 3)
-                
-                // Active Track
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(disabled ? Color.gray.opacity(0.3) : Color.accentColor)
-                    .frame(width: max(0, min(geometry.size.width, geometry.size.width * CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)))), height: 3)
-                
-                // Thumb
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 12, height: 12)
-                    .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
-                    .offset(x: max(0, min(geometry.size.width - 12, geometry.size.width * CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)) - 6)))
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { gesture in
-                                if !disabled {
-                                    let percent = min(max(0, gesture.location.x / geometry.size.width), 1)
-                                    let newValue = range.lowerBound + Float(percent) * (range.upperBound - range.lowerBound)
-                                    value = newValue
-                                }
-                            }
-                    )
-            }
-            .frame(height: 12)
-        }
-        .frame(height: 12)
-        .opacity(disabled ? 0.5 : 1.0)
-    }
-}
-
 // MARK: - Info Row
 
 private struct InfoRow: View {
