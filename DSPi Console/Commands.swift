@@ -1382,7 +1382,7 @@ extension DSPViewModel {
             let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
             levels.append(Float(raw) / SUBHARM_METER_FULL_SCALE)
         }
-        DispatchQueue.main.async { self.subharm.subMeter = levels }
+        DispatchQueue.main.async { self.subharm.meter.levels = levels }
     }
 
     /// Reads back the two subharm values the bulk image does not carry: solo,
@@ -1670,13 +1670,13 @@ extension DSPViewModel {
         let lsGain = d.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt16.self) }
         let rsGain = d.withUnsafeBytes { $0.load(fromByteOffset: 10, as: UInt16.self) }
         DispatchQueue.main.async {
-            self.upmix.active = active
-            self.upmix.parkedReason = parked
-            self.upmix.corr = Float(corr) / 16384.0        // Q14, [-1, +1]
-            self.upmix.balance = Float(balance) / 16384.0  // Q14, 0..1
-            self.upmix.centerGain = Float(centerGain) / 32767.0  // Q15, 0..1
-            self.upmix.lsGain = Float(lsGain) / 32767.0
-            self.upmix.rsGain = Float(rsGain) / 32767.0
+            self.upmix.telemetry.active = active
+            self.upmix.telemetry.parkedReason = parked
+            self.upmix.telemetry.corr = Float(corr) / 16384.0        // Q14, [-1, +1]
+            self.upmix.telemetry.balance = Float(balance) / 16384.0  // Q14, 0..1
+            self.upmix.telemetry.centerGain = Float(centerGain) / 32767.0  // Q15, 0..1
+            self.upmix.telemetry.lsGain = Float(lsGain) / 32767.0
+            self.upmix.telemetry.rsGain = Float(rsGain) / 32767.0
         }
     }
 

@@ -22,7 +22,13 @@ class UpmixerWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "Stereo Upmixer"
-            window?.contentView = NSHostingView(rootView: view)
+            let hosting = NSHostingView(rootView: view)
+            // The window's size limits are set here, not derived from the
+            // tree: left at its defaults the hosting view re-measures the
+            // whole tree for them on every display cycle, which is most of
+            // what a meter reading or a drag used to cost in this window.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.contentMinSize = NSSize(width: 400, height: 400)
@@ -169,79 +175,21 @@ struct UpmixerView: View {
     // MARK: - Status / telemetry
 
     /// A one-line banner explaining why the upmixer is not running, plus live
-    /// meters for correlation and the derived-channel steering gains.
+    /// meters for correlation and the derived-channel steering gains. In its
+    /// own hosting view: the telemetry is polled at 16 Hz while the window is
+    /// open, and on the window's own tree each reading re-laid out everything
+    /// (11 ms). Only the pane observes it; the rows it does not need are kept
+    /// at zero opacity rather than removed, so its height never changes.
     private var statusSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("STATUS")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
-                Text(statusText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(upmix.active ? .primary : .secondary)
-                Spacer()
+            LiveGraphHost {
+                UpmixStatusPane(isConnected: vm.isDeviceConnected, centreOff: centreOff,
+                                surroundOn: surroundOn, telemetry: upmix.telemetry)
             }
-
-            if upmix.active {
-                telemetryGauge(label: "Correlation", value: (upmix.corr + 1) / 2,
-                               display: String(format: "%+.2f", upmix.corr), color: .accentColor)
-                if !centreOff {
-                    telemetryGauge(label: "Centre gain", value: upmix.centerGain,
-                                   display: String(format: "%.0f%%", upmix.centerGain * 100), color: .green)
-                }
-                if surroundOn {
-                    telemetryGauge(label: "Ls gain", value: upmix.lsGain,
-                                   display: String(format: "%.0f%%", upmix.lsGain * 100), color: .purple)
-                    telemetryGauge(label: "Rs gain", value: upmix.rsGain,
-                                   display: String(format: "%.0f%%", upmix.rsGain * 100), color: .pink)
-                }
-            }
-        }
-    }
-
-    private var statusText: String {
-        if !vm.isDeviceConnected { return "No device connected" }
-        if upmix.active { return "Active - processing audio" }
-        switch upmix.parkedReason {
-        case UPMIX_PARKED_DISABLED:      return "Idle: upmixer disabled"
-        case UPMIX_PARKED_NOT_STEREO:    return "Idle: input is not stereo"
-        case UPMIX_PARKED_RATE_TOO_HIGH: return "Idle: sample rate above 48 kHz"
-        default:                         return "Idle"
-        }
-    }
-
-    private var statusColor: Color {
-        if !vm.isDeviceConnected { return .secondary }
-        return upmix.active ? .green : .orange
-    }
-
-    private func telemetryGauge(label: String, value: Float, display: String, color: Color) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .frame(width: 76, alignment: .leading)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.secondary.opacity(0.15))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(color)
-                        .frame(width: max(0, min(1, CGFloat(value))) * geo.size.width)
-                        // Glide between the ~16.7 Hz telemetry samples instead of
-                        // snapping, matching the main window's HorizontalMeterBar.
-                        .animation(.linear(duration: 0.06), value: value)
-                }
-            }
-            .frame(height: 6)
-            Text(display)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 44, alignment: .trailing)
         }
     }
 
@@ -468,4 +416,86 @@ struct UpmixerView: View {
             set: { set(min(max($0, range.lowerBound), range.upperBound)) }
         )
     }
+}
+
+// MARK: - Status Pane
+
+/// The status banner and telemetry gauges. Lives in a `LiveGraphHost` and is
+/// the only view that observes `UpmixTelemetry`, so a reading costs the layout
+/// of this pane alone.
+private struct UpmixStatusPane: View {
+    let isConnected: Bool
+    let centreOff: Bool
+    let surroundOn: Bool
+    @ObservedObject var telemetry: UpmixTelemetry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(statusText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(telemetry.active ? .primary : .secondary)
+                Spacer()
+            }
+
+            telemetryGauge(label: "Correlation", value: (telemetry.corr + 1) / 2,
+                           display: String(format: "%+.2f", telemetry.corr), color: .accentColor)
+                .opacity(telemetry.active ? 1 : 0)
+            telemetryGauge(label: "Centre gain", value: telemetry.centerGain,
+                           display: String(format: "%.0f%%", telemetry.centerGain * 100), color: .green)
+                .opacity(telemetry.active && !centreOff ? 1 : 0)
+            telemetryGauge(label: "Ls gain", value: telemetry.lsGain,
+                           display: String(format: "%.0f%%", telemetry.lsGain * 100), color: .purple)
+                .opacity(telemetry.active && surroundOn ? 1 : 0)
+            telemetryGauge(label: "Rs gain", value: telemetry.rsGain,
+                           display: String(format: "%.0f%%", telemetry.rsGain * 100), color: .pink)
+                .opacity(telemetry.active && surroundOn ? 1 : 0)
+        }
+    }
+
+    private var statusText: String {
+        if !isConnected { return "No device connected" }
+        if telemetry.active { return "Active - processing audio" }
+        switch telemetry.parkedReason {
+        case UPMIX_PARKED_DISABLED:      return "Idle: upmixer disabled"
+        case UPMIX_PARKED_NOT_STEREO:    return "Idle: input is not stereo"
+        case UPMIX_PARKED_RATE_TOO_HIGH: return "Idle: sample rate above 48 kHz"
+        default:                         return "Idle"
+        }
+    }
+
+    private var statusColor: Color {
+        if !isConnected { return .secondary }
+        return telemetry.active ? .green : .orange
+    }
+
+    private func telemetryGauge(label: String, value: Float, display: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .frame(width: 76, alignment: .leading)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.secondary.opacity(0.15))
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color)
+                        .frame(width: max(0, min(1, CGFloat(value))) * geo.size.width)
+                        // Glide between the ~16.7 Hz telemetry samples instead of
+                        // snapping, matching the main window's HorizontalMeterBar.
+                        .animation(.linear(duration: 0.06), value: value)
+                }
+            }
+            .frame(height: 6)
+            Text(display)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(width: 44, alignment: .trailing)
+        }
+    }
+
 }

@@ -112,10 +112,17 @@ final class SubharmParameters: ObservableObject {
     /// derived from enable, the band levels, the boost and the ceiling, and
     /// nothing else - not the mask, the pair link or the sample rate.
     @Published var headroomDB: Float = 0.0
-    /// Decaying peak of the synthesized sub per output channel (0x1F), normalized
-    /// to 0..1 like `SystemStatus.peaks` so one meter widget drives either.
-    /// Polled only while the subharm window is open; empty when never read.
-    @Published var subMeter: [Float] = []
+    /// The live sub meter, polled at 10 Hz while the window is open. Its own
+    /// object so a reading re-renders the output chips alone: on this object
+    /// it re-laid out the whole window, 33 ms a time.
+    let meter = SubharmMeter()
+}
+
+/// Decaying peak of the synthesized sub per output channel (0x1F), normalized
+/// to 0..1 like `SystemStatus.peaks` so one meter widget drives either. Empty
+/// when never read. Observed only by the chips inside their `LiveGraphHost`.
+final class SubharmMeter: ObservableObject {
+    @Published var levels: [Float] = []
 }
 
 /// Volume Leveller parameters (firmware factory defaults, overwritten on
@@ -153,8 +160,17 @@ final class UpmixParameters: ObservableObject {
     /// 0.5 dB steps (config byte presence_q1 = dB x 2); the app keeps the dB value.
     @Published var presenceDB: Float = 0.0           // -12..+12 dB
 
-    // Live telemetry (REQ_UPMIX_GET_STATUS, spec §6.3). Polled only while the
-    // upmixer window is open (`statusPolling`).
+    /// Live telemetry, its own object so a reading re-renders the status
+    /// gauges alone (11 ms of whole-window layout a time otherwise).
+    let telemetry = UpmixTelemetry()
+    /// Set by the upmixer window while visible so the shared poll timer fetches
+    /// UpmixStatus (~16 Hz); left false everywhere else to avoid the extra I/O.
+    @Published var statusPolling: Bool = false
+}
+
+/// REQ_UPMIX_GET_STATUS (spec §6.3), polled only while the upmixer window is
+/// open. Observed only by the status pane inside its `LiveGraphHost`.
+final class UpmixTelemetry: ObservableObject {
     @Published var active: Bool = false
     @Published var parkedReason: UInt8 = UPMIX_PARKED_DISABLED
     @Published var corr: Float = 0.0          // smoothed L/R correlation, -1..+1
@@ -162,7 +178,4 @@ final class UpmixParameters: ObservableObject {
     @Published var centerGain: Float = 0.0    // live centre extraction gain, 0..1
     @Published var lsGain: Float = 0.0        // live Ls steering gain, 0..1
     @Published var rsGain: Float = 0.0        // live Rs steering gain, 0..1
-    /// Set by the upmixer window while visible so the shared poll timer fetches
-    /// UpmixStatus (~16 Hz); left false everywhere else to avoid the extra I/O.
-    @Published var statusPolling: Bool = false
 }

@@ -261,6 +261,61 @@ private struct LiveMeterBar: NSViewRepresentable {
     }
 }
 
+/// The Subharmonic Synth's per-output sub meter, following `SubharmMeter`
+/// itself as `LiveMeterBar` follows `DSPMeterModel`: the chip that owns it
+/// does not observe the meter, so a reading moves this layer and re-evaluates
+/// no SwiftUI view at all. (Observed through SwiftUI, a reading cost the
+/// layout of the whole chip row, about 10 ms, ten times a second.)
+struct SubharmLiveMeterBar: NSViewRepresentable {
+    let meter: SubharmMeter
+    let channel: Int
+    /// A masked-off output is never metered by the firmware; its rail stays
+    /// empty rather than showing a stale reading.
+    let enabled: Bool
+    let color: Color
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> MeterBarNSView {
+        let view = MeterBarNSView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: MeterBarNSView, context: Context) {
+        view.color = NSColor(color)
+        context.coordinator.follow(meter, channel: channel, enabled: enabled, view: view)
+    }
+
+    static func dismantleNSView(_ view: MeterBarNSView, coordinator: Coordinator) {
+        coordinator.subscription = nil
+    }
+
+    final class Coordinator {
+        var subscription: AnyCancellable?
+        private weak var meter: SubharmMeter?
+        private var channel = -1
+        private var enabled = false
+
+        func follow(_ meter: SubharmMeter, channel: Int, enabled: Bool, view: MeterBarNSView) {
+            guard meter !== self.meter || channel != self.channel || enabled != self.enabled else { return }
+            self.meter = meter
+            self.channel = channel
+            self.enabled = enabled
+            guard enabled else {
+                subscription = nil
+                view.set(level: 0, clipping: false)
+                return
+            }
+            // @Published delivers the new value before storing it, so the
+            // level is read from the event rather than from the model.
+            subscription = meter.$levels.sink { [weak view] levels in
+                view?.set(level: channel < levels.count ? levels[channel] : 0, clipping: false)
+            }
+        }
+    }
+}
+
 struct CpuMeter: View {
     var core: Int
     var load: Int

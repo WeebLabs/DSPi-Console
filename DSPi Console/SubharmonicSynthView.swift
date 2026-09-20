@@ -23,7 +23,13 @@ class SubharmonicSynthWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "Subharmonic Synthesizer"
-            window?.contentView = NSHostingView(rootView: view)
+            let hosting = NSHostingView(rootView: view)
+            // The window's size limits are set here, not derived from the
+            // tree: left at its defaults the hosting view re-measures the
+            // whole tree for them on every display cycle, which is most of
+            // what a meter reading or a drag used to cost in this window.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.contentMinSize = NSSize(width: 740, height: 612)
@@ -580,16 +586,22 @@ struct SubharmonicSynthView: View {
                 .disabled(!vm.isDeviceConnected)
             }
 
-            HStack(spacing: 6) {
-                ForEach(0..<outputCount, id: \.self) { out in
-                    outputChip(
-                        out: out,
-                        on: subharm.outputMask & (UInt16(1) << out) != 0
-                    ) {
+            // In its own hosting view: the meter under each chip is polled at
+            // 10 Hz while the window is open, and on the window's own tree each
+            // reading re-laid out everything (33 ms). Only the chips observe it.
+            LiveGraphHost(flexibleHeight: true) {
+                SubharmChipsPane(
+                    outputCount: outputCount,
+                    mask: subharm.outputMask,
+                    extended: extended,
+                    isEnabled: vm.isDeviceConnected,
+                    names: (0..<outputCount).map(outputName),
+                    meter: subharm.meter,
+                    toggle: { out in
                         vm.setSubharmOutputChannel(out, enabled: subharm.outputMask & (UInt16(1) << out) == 0)
-                    }
-                }
+                    })
             }
+            .frame(height: extended ? 32 : 26)
             .help("Select the outputs that can actually play 24 to 80 Hz. Subharm runs before the crossover, so a satellite with a highpass loses the sub again - mask it off and save the CPU instead.")
 
             if extended {
@@ -599,44 +611,6 @@ struct SubharmonicSynthView: View {
         }
     }
 
-    private func outputChip(out: Int, on: Bool, action: @escaping () -> Void) -> some View {
-        VStack(spacing: 3) {
-            Button(action: action) {
-                Text("\(out + 1)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .foregroundColor(on ? .white : .primary.opacity(0.6))
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            if extended {
-                // A masked-off output is never metered by the firmware, so its
-                // rail stays empty rather than showing a stale reading.  The
-                // bar is the synthesized sub on its own, not the output.
-                HorizontalMeterBar(
-                    level: on ? subMeterLevel(out) : Float(0),
-                    color: .accentColor
-                )
-                .frame(height: 3)
-                .opacity(on ? 1 : 0.25)
-            }
-        }
-        .help(outputName(out))
-        .disabled(!vm.isDeviceConnected)
-        .animation(.easeInOut(duration: 0.12), value: on)
-    }
-
-    private func subMeterLevel(_ out: Int) -> Float {
-        out < subharm.subMeter.count ? subharm.subMeter[out] : 0
-    }
 
     private var linkPairsRow: some View {
         HStack {
@@ -704,6 +678,58 @@ struct SubharmonicSynthView: View {
 /// full-scale band, and the ceiling line sit where it actually bites.  What no
 /// still picture can show is the divider's defining property, that the sub's
 /// envelope follows the note that made it.
+/// The output chips with their sub meters. Nothing here observes the meter:
+/// each bar follows `SubharmMeter` itself (`SubharmLiveMeterBar`), so a
+/// reading re-evaluates no SwiftUI view. The `LiveGraphHost` around the row
+/// keeps a mask change from re-laying out the window.
+private struct SubharmChipsPane: View {
+    let outputCount: Int
+    let mask: UInt16
+    let extended: Bool
+    let isEnabled: Bool
+    let names: [String]
+    let meter: SubharmMeter
+    let toggle: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<outputCount, id: \.self) { out in
+                chip(out: out, on: mask & (UInt16(1) << out) != 0) { toggle(out) }
+            }
+        }
+    }
+
+    private func chip(out: Int, on: Bool, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 3) {
+            Button(action: action) {
+                Text("\(out + 1)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .foregroundColor(on ? .white : .primary.opacity(0.6))
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(on ? Color.accentColor : Color.secondary.opacity(0.12))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(on ? 0 : 0.08), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            if extended {
+                // The bar is the synthesized sub on its own, not the output.
+                SubharmLiveMeterBar(meter: meter, channel: out, enabled: on, color: .accentColor)
+                    .frame(height: 3)
+                    .opacity(on ? 1 : 0.25)
+            }
+        }
+        .help(out < names.count ? names[out] : "Out \(out + 1)")
+        .disabled(!isEnabled)
+        .animation(.easeInOut(duration: 0.12), value: on)
+    }
+}
+
 enum SubharmGraphKey: Hashable { case lowDB, highDB, topDB, boostDB, ceilingDB }
 
 /// The band graph, resolving live overrides over the committed values. Lives

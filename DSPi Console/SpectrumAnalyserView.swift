@@ -1494,7 +1494,13 @@ class SpectrumAnalyserWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "Spectrum Analyser"
-            window?.contentView = NSHostingView(rootView: view)
+            let hosting = NSHostingView(rootView: view)
+            // The window's size limits are set here, not derived from the
+            // tree: left at its defaults the hosting view re-measures the
+            // whole tree for them on every display cycle, which is most of
+            // what a meter reading or a drag used to cost in this window.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.contentMinSize = NSSize(width: 620, height: 420)
