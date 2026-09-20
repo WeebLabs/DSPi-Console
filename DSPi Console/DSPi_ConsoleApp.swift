@@ -7571,6 +7571,7 @@ struct HardwareSettingsTab: View {
     var section: Page = .outputs
 
     @ObservedObject private var vm = AppState.shared.viewModel
+    @ObservedObject private var telemetry = AppState.shared.viewModel.telemetry
     @State private var statusMessage: String?
     @State private var statusIsError = false
 
@@ -7602,14 +7603,14 @@ struct HardwareSettingsTab: View {
     private static let defaultDataPins: [UInt8] = [6, 7, 8, 9]
 
     private var mck256UnsupportedAtCurrentRate: Bool {
-        vm.sampleRateHz >= 96000
+        telemetry.sampleRateHz >= 96000
     }
 
     private var sampleRateLabel: String {
-        if vm.sampleRateHz == 0 {
+        if telemetry.sampleRateHz == 0 {
             return "unknown sample rate"
         }
-        return String(format: "%.1f kHz", Double(vm.sampleRateHz) / 1000.0)
+        return String(format: "%.1f kHz", Double(telemetry.sampleRateHz) / 1000.0)
     }
 
     private var visiblePinOutputs: [PinOutput] {

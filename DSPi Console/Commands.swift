@@ -236,7 +236,9 @@ extension DSPViewModel {
               data.count >= 4 else { return }
         let rate = data.withUnsafeBytes { $0.load(as: UInt32.self) }
         DispatchQueue.main.async {
-            self.sampleRateHz = rate
+            // @Published fires on assignment, not on change; the rate repeats
+            // on every poll, so only publish when it actually moves.
+            if self.telemetry.sampleRateHz != rate { self.telemetry.sampleRateHz = rate }
             // Keep UI consistent with firmware/runtime policy:
             // 256x MCK is not available at 96 kHz.
             if rate >= 96000, self.mckMultiplier == 256 {

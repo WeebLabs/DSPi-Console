@@ -1330,7 +1330,6 @@ class DSPViewModel: ObservableObject {
     @Published var mckEnabled: Bool = false
     @Published var mckPin: UInt8 = 13
     @Published var mckMultiplier: Int = 128   // 128 or 256
-    @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
     // Input source state
     @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S, 4/5/6=SPDIF2/3/4
@@ -2164,6 +2163,7 @@ class DSPViewModel: ObservableObject {
 
     // Live Data
     let meters = DSPMeterModel()
+    let telemetry = DeviceTelemetry()
     let outputGainPreview = OutputGainPreview()
 
     /// The device's spectrum analyser.  Its own observable, because it
