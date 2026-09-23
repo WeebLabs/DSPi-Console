@@ -496,11 +496,24 @@ private enum ParamOffsetDecoder {
             case 16: return ("tube.asym_db", fmtFloat(payload, suffix: " dB"))
             case 20: return ("tube.hardness_pct", fmtFloat(payload, suffix: "%"))
             case 24: return ("tube.sag_pct", fmtFloat(payload, suffix: "%"))
-            case 28: return ("tube.xfmr_lf_hz", fmtFloat(payload, suffix: " Hz"))
-            case 32: return ("tube.xfmr_sat_pct", fmtFloat(payload, suffix: "%"))
-            case 36: return ("tube.xfmr_hf_hz", fmtFloat(payload, suffix: " Hz"))
-            case 40: return ("tube.mix_pct", fmtFloat(payload, suffix: "%"))
-            case 44: return ("tube.trim_db", fmtFloat(payload, suffix: " dB"))
+            case 28: return ("tube.xfmr_damping", fmtFloat(payload))
+            case 32: return ("tube.xfmr_res_hz", fmtFloat(payload, suffix: " Hz"))
+            case 36: return ("tube.mix_pct", fmtFloat(payload, suffix: "%"))
+            case 40: return ("tube.trim_db", fmtFloat(payload, suffix: " dB"))
+            default: break
+            }
+        }
+
+        // Output Limiter (6028..6135) - WireLimiterParams, one 12-byte record per
+        // output.  An all-outputs SET notifies every output's record separately.
+        if off >= BULK_LIMITER_OFFSET && off < BULK_LIMITER_OFFSET + WIRE_LIMITER_PARAMS_SIZE {
+            let rel = off - BULK_LIMITER_OFFSET
+            let out = rel / WIRE_LIMITER_OUTPUT_SIZE
+            switch rel % WIRE_LIMITER_OUTPUT_SIZE {
+            case 0: return ("limiter[\(out)].enabled", fmtBool(payload))
+            case 1: return ("limiter[\(out)].link_group", limiterLinkGroupName(Int(payload.first ?? 0)))
+            case 4: return ("limiter[\(out)].threshold_db", fmtFloat(payload, suffix: " dBFS"))
+            case 8: return ("limiter[\(out)].release_ms", fmtFloat(payload, suffix: " ms"))
             default: break
             }
         }

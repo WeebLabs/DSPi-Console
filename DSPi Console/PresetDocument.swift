@@ -372,6 +372,9 @@ struct PresetDocument: Codable {
         /// additive: post-matrix output delay (REQ_SET_OUTPUT_DELAY), which is a
         /// separate value from `delayMs` and which the Windows document omits.
         var outputDelayMs: Float?
+        /// additive: this output's limiter (V32+).  Absent on inputs and when
+        /// the source device had no limiter, which leaves the device's alone.
+        var limiter: LimiterBlock?
 
         var eq: [BandBlock] = []
         /// Crossover bands 0..3.  Empty for inputs and for pre-V11 sources.
@@ -392,8 +395,36 @@ struct PresetDocument: Codable {
             muted = c.value(.muted, false)
             enabled = c.value(.enabled, true)
             outputDelayMs = c.value(.outputDelayMs, nil)
+            limiter = c.value(.limiter, nil)
             eq = c.value(.eq, [])
             crossover = c.value(.crossover, [])
+        }
+    }
+
+    /// One output's limiter, as the firmware holds it.  Defaults are the
+    /// firmware's factory values.
+    struct LimiterBlock: Codable {
+        var enabled = false
+        var thresholdDb: Float = LIMITER_DEFAULT_THRESHOLD_DB
+        var releaseMs: Float = LIMITER_DEFAULT_RELEASE_MS
+        /// 0 = unlinked, 1..4.
+        var linkGroup: Int = 0
+
+        init() {}
+
+        init(_ s: LimiterOutputSettings) {
+            enabled = s.enabled
+            thresholdDb = s.thresholdDB
+            releaseMs = s.releaseMs
+            linkGroup = s.linkGroup
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = c.value(.enabled, false)
+            thresholdDb = c.value(.thresholdDb, LIMITER_DEFAULT_THRESHOLD_DB)
+            releaseMs = c.value(.releaseMs, LIMITER_DEFAULT_RELEASE_MS)
+            linkGroup = c.value(.linkGroup, 0)
         }
     }
 

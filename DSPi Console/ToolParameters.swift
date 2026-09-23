@@ -44,6 +44,43 @@ final class TubeParameters: ObservableObject {
     @Published var trimDB: Float = TUBE_DEFAULT_TRIM_DB            // -12..+12 dB
 }
 
+/// One output's limiter settings (spec §3). Defaults are the firmware's.
+struct LimiterOutputSettings: Equatable {
+    var enabled = false
+    var thresholdDB: Float = LIMITER_DEFAULT_THRESHOLD_DB   // -30..0 dBFS
+    var releaseMs: Float = LIMITER_DEFAULT_RELEASE_MS       // 10..1000 ms
+    /// 0 = unlinked, 1..4 = link group.
+    var linkGroup: Int = 0
+}
+
+/// Output Limiter (V32). There is no master switch: every output has its own,
+/// so all of it lives here. Always one entry per wire slot, so an index from
+/// the bulk image or a preset file is valid whatever the platform; only
+/// `numOutputChannels` of them are ever shown.
+final class LimiterParameters: ObservableObject {
+    @Published var outputs = [LimiterOutputSettings](repeating: LimiterOutputSettings(),
+                                                     count: WIRE_MAX_OUTPUT_CHANNELS) {
+        didSet { anyEnabled = outputs.contains { $0.enabled } }
+    }
+    /// Stored rather than computed so the poll timer can read it off the main
+    /// thread without walking an array the main thread may be replacing.
+    private(set) var anyEnabled = false
+    /// Views on screen that show live readings (the output page's limiter
+    /// cell, the settings popover). The shared poll timer reads the meter only
+    /// while this is above zero. Main thread only writes it.
+    var watchers = 0
+    /// Gain reduction per output, polled while `watchers` is above zero. Its
+    /// own object so a reading re-renders the limiter cell alone.
+    let meter = LimiterMeter()
+}
+
+/// Gain reduction applied in the last packet, per output, in dB (0 = none).
+/// Empty when never read. Observed only by the output page's limiter cell,
+/// inside its own `LiveGraphHost`.
+final class LimiterMeter: ObservableObject {
+    @Published var reductionDB: [Float] = []
+}
+
 /// Loudness compensation parameters. `loudnessEnabled` stays on the view model.
 final class LoudnessParameters: ObservableObject {
     @Published var refSPL: Float = 83.0

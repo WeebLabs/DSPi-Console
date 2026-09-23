@@ -758,6 +758,35 @@ struct ChannelSettingsView: View {
     @State private var localDelay: Float = 0
     @State private var isDraggingGain = false
     @State private var isDraggingDelay = false
+    @State private var showLimiterSettings = false
+
+    /// Height of each icon's slot when mute shares the column with the
+    /// limiter.  Also the click target, so it is kept generous.
+    private let iconSlot: CGFloat = 22
+
+    /// A click toggles the limiter and a right-click opens the settings
+    /// popover, as the sidebar module icons do.  In its own hosting view because the icon follows the meter,
+    /// polled at about 16 Hz, and a reading must not re-lay out the page.
+    private var limiterCell: some View {
+        LiveGraphHost(flexibleHeight: true) {
+            OutputLimiterCell(
+                limiter: vm.limiter,
+                meter: vm.limiter.meter,
+                output: outputIndex,
+                isConnected: vm.isDeviceConnected,
+                onToggle: {
+                    let on = outputIndex < vm.limiter.outputs.count && vm.limiter.outputs[outputIndex].enabled
+                    vm.setLimiterEnabled(output: outputIndex, !on)
+                },
+                onSettings: { showLimiterSettings = true })
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .popover(isPresented: $showLimiterSettings, arrowEdge: .bottom) {
+            OutputLimiterSettings(vm: vm, limiter: vm.limiter, output: outputIndex)
+        }
+        .onAppear { vm.limiter.watchers += 1 }
+        .onDisappear { vm.limiter.watchers -= 1 }
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -832,18 +861,47 @@ struct ChannelSettingsView: View {
 
             Divider()
 
-            // MUTE — fills full height and centers its icon, otherwise the
-            // top-aligned HStack would pin it to the top of the row.
-            Toggle(isOn: $isMuted) {
-                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.title2)
-                    .foregroundColor(isMuted ? .red : .secondary)
+            // MUTE over the output limiter, so the limiter costs the page no
+            // vertical space.  The two icons sit in equal fixed-height slots
+            // with equal gaps above, between and below them; centring each in
+            // half the column left twice the gap between them.  The icons'
+            // colours carry the state; a tinted half would read as a divider.
+            // Without limiter firmware, mute keeps the whole column and its
+            // tint as before.
+            VStack(spacing: 0) {
+                let split = vm.firmwareSupportsLimiter
+                if split { Spacer(minLength: 0) }
+                // Without the split it fills the height and centres its icon,
+                // otherwise the top-aligned HStack would pin it to the top.
+                Toggle(isOn: $isMuted) {
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(split ? .title3 : .title2)
+                        .foregroundColor(isMuted ? .red : .secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .frame(height: split ? iconSlot : nil)
+                .frame(maxHeight: split ? nil : .infinity)
+                .offset(y: split ? 1 : 0)
+
+                if split {
+                    Spacer(minLength: 0)
+                    // Equal slots do not give equal gaps between the ink: the
+                    // gauge sits low in its slot (the dial is open at the
+                    // bottom) and is taller than the speaker.  This offset and
+                    // the speaker's 1 pt, measured from a render, even
+                    // the three gaps to within half a point.
+                    limiterCell
+                        .frame(height: iconSlot)
+                        .offset(y: -2)
+                    Spacer(minLength: 0)
+                }
             }
-            .toggleStyle(.button)
-            .buttonStyle(.plain)
             .frame(width: 60)
-            .frame(maxHeight: .infinity)
-            .background(isMuted ? Color.red.opacity(0.1) : Color.clear)
+            .background(isMuted && !vm.firmwareSupportsLimiter ? Color.red.opacity(0.1) : Color.clear)
         }
         .frame(height: 68)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))

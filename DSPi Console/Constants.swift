@@ -407,6 +407,47 @@ func tubeRectifierName(_ rect: Int) -> String {
     rect >= 0 && rect < TUBE_RECTIFIER_ROWS.count ? TUBE_RECTIFIER_ROWS[rect].name : "Rectifier \(rect)"
 }
 
+// Output Limiter (V32): a brickwall lookahead peak limiter on every output, each
+// with its own enable, threshold, release and link group.  One opcode carries
+// everything: OUT sets, IN gets, wValue = (output << 8) | index, payload float32
+// for every parameter.  See output_limiter_spec.md.
+let REQ_LIMITER: UInt8 = 0x81
+
+/// Parameter indices (wValue low byte).  A bad index or output STALLs a GET and
+/// is a silent no-op on a SET.
+let LIMITER_PARAM_ENABLED: UInt8      = 0
+let LIMITER_PARAM_THRESHOLD_DB: UInt8 = 1
+let LIMITER_PARAM_RELEASE_MS: UInt8   = 2
+let LIMITER_PARAM_LINK_GROUP: UInt8   = 3
+let LIMITER_NUM_PARAMS: UInt8         = 4
+/// Read-only GET blocks, output byte ignored.  The meter is one uint16 LE per
+/// output, gain reduction in 0.01 dB; the status is engaged, lookahead samples,
+/// block samples, output count.  Reading the status block feature-detects.
+let LIMITER_GET_METER: UInt8  = 0x80
+let LIMITER_GET_STATUS: UInt8 = 0x81
+/// Output byte that makes a SET apply to every output.
+let LIMITER_ALL_OUTPUTS: UInt8 = 0xFF
+
+let LIMITER_THRESHOLD_MIN: Float = -30.0
+let LIMITER_THRESHOLD_MAX: Float = 0.0
+let LIMITER_RELEASE_MIN: Float   = 10.0
+let LIMITER_RELEASE_MAX: Float   = 1000.0
+/// 0 = unlinked; outputs sharing a group 1..4 apply the deepest reduction any
+/// participating member needs.
+let LIMITER_LINK_GROUP_MAX: Int  = 4
+/// -1 dBFS leaves room for inter-sample overshoot in a DAC (spec §7).
+let LIMITER_DEFAULT_THRESHOLD_DB: Float = -1.0
+let LIMITER_DEFAULT_RELEASE_MS: Float   = 100.0
+/// Fixed by the algorithm: the audio is delayed two 16-sample decision blocks
+/// on every output while any limiter is on, and not at all otherwise.
+let LIMITER_LOOKAHEAD_SAMPLES: Int = 32
+let LIMITER_BLOCK_SAMPLES: Int     = 16
+
+/// Display name for a link_group value.
+func limiterLinkGroupName(_ group: Int) -> String {
+    group == 0 ? "Unlinked" : "Group \(group)"
+}
+
 // Stereo Upmixer (V25): derives Centre + Left/Right Surround as ordinary matrix
 // source rows (2 = C, 3 = Ls, 4 = Rs) from a plain stereo input.  RP2350 only;
 // on RP2040 the SETs STALL and the GETs return all-zero payloads.  See
@@ -587,6 +628,9 @@ let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 // Bulk parameter transfer request codes
 let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
 let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
+/// Wire format V32 (Output Limiter): appends a 108-byte WireLimiterParams
+/// section at offset 6028, one 12-byte record per output slot, growing the flat
+/// layout from 6028 to 6136 bytes.  Present on both platforms.
 /// Wire format V31 (Tube Modeller): appends a 48-byte WireTubeParams section at
 /// offset 5980, growing the flat layout from 5980 to 6028 bytes.  Present on
 /// both platforms (float kernel on RP2350, Q28 on RP2040).
@@ -636,11 +680,12 @@ let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 31
-/// Full V31 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+let WIRE_FORMAT_VERSION: Int            = 32
+/// Full V32 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
 /// V26/V27/V28 all reused bytes inside existing sections; V29 appended the
-/// subharm section, V30 grew it from 16 to 36 bytes and V31 appended tube.
-let BULK_PARAMS_SIZE: UInt16            = 6028
+/// subharm section, V30 grew it from 16 to 36 bytes, V31 appended tube and V32
+/// appended the limiter.
+let BULK_PARAMS_SIZE: UInt16            = 6136
 let WIRE_BULK_PARAMS_V19_SIZE: Int      = 5876
 
 // --- V16 absolute section offsets (see 8-channel-usb-input spec §9) ---
@@ -700,9 +745,18 @@ let WIRE_SUBHARM_PARAMS_SIZE: Int       = 36
 /// drive/bias/asym/hardness/sag/xfmr_damping/xfmr_res/mix/trim (+8..+40) and a
 /// reserved float (+44) that holds the section at its V31 size.
 let BULK_TUBE_OFFSET: Int               = 5980
-/// Bytes in WireTubeParams.  It is the last section, so this takes the image to
-/// its full size.
+/// Bytes in WireTubeParams.
 let WIRE_TUBE_PARAMS_SIZE: Int          = 48
+/// WireLimiterParams (V32): one WireLimiterOutput per output slot - enabled
+/// (+0), link_group (+1), two reserved bytes, threshold_db (+4), release_ms
+/// (+8).  Records past the device's output count are zero.
+let BULK_LIMITER_OFFSET: Int            = 6028
+let WIRE_LIMITER_OUTPUT_SIZE: Int       = 12
+/// Output slots in the wire layout (RP2350 max: eight S/PDIF or I2S, one PDM).
+let WIRE_MAX_OUTPUT_CHANNELS: Int       = 9
+/// Bytes in WireLimiterParams.  It is the last section, so this takes the image
+/// to its full size.
+let WIRE_LIMITER_PARAMS_SIZE: Int       = WIRE_LIMITER_OUTPUT_SIZE * WIRE_MAX_OUTPUT_CHANNELS
 
 /// Bytes per WireCrosspoint (enabled, phase_invert, reserved[2], gain_db).
 let WIRE_CROSSPOINT_SIZE: Int           = 8

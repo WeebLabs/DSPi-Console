@@ -73,15 +73,15 @@ final class TubeWireTests: XCTestCase {
 
     // MARK: - Wire layout (spec §4)
 
-    /// V31 appends WireTubeParams (48 bytes) as the final section at 5980,
-    /// taking the flat layout from 5980 to 6028 bytes.
+    /// V31 appended WireTubeParams (48 bytes) at 5980, taking the flat layout
+    /// from 5980 to 6028 bytes.  V32 appended the limiter after it.
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 31)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 6028)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_TUBE_OFFSET, 5980)
         XCTAssertEqual(WIRE_TUBE_PARAMS_SIZE, 48)
         XCTAssertEqual(BULK_SUBHARM_OFFSET + WIRE_SUBHARM_PARAMS_SIZE, BULK_TUBE_OFFSET)
-        XCTAssertEqual(BULK_TUBE_OFFSET + WIRE_TUBE_PARAMS_SIZE, Int(BULK_PARAMS_SIZE))
+        XCTAssertEqual(BULK_TUBE_OFFSET + WIRE_TUBE_PARAMS_SIZE, BULK_LIMITER_OFFSET)
     }
 
     /// Encodes a section and decodes it at the offsets `fetchAllParams` uses.
@@ -389,7 +389,7 @@ final class TubeWireTests: XCTestCase {
         let usb = try requireTube()
         guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
-            throw XCTSkip("Bulk image is not wire format V31.")
+            throw XCTSkip("Bulk image is not the current wire format.")
         }
         let o = BULK_TUBE_OFFSET
         func bf(_ off: Int) -> Float { all.withUnsafeBytes { $0.load(fromByteOffset: o + off, as: Float.self) } }

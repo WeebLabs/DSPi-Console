@@ -1537,6 +1537,149 @@ extension DSPViewModel {
         sendTubeParam(TUBE_PARAM_TRIM_DB, v)
     }
 
+    // MARK: - Output Limiter (V32, cmd 0x81)
+
+    // One opcode, wValue = (output << 8) | index, float32 payload for every
+    // parameter.  SETs are fire-and-forget and update app state first, clamped
+    // and rounded exactly as the firmware does, because notifications for our
+    // own writes are filtered out and would never correct us.
+
+    private func sendLimiterParam(output: UInt8, _ index: UInt8, _ value: Float) {
+        var val = value
+        let data = Data(bytes: &val, count: 4)
+        usb.sendControlRequest(request: REQ_LIMITER, value: (UInt16(output) << 8) | UInt16(index),
+                               index: 0, data: data)
+    }
+
+    /// Reads one parameter; nil when the GET STALLs (bad output or index, or
+    /// firmware older than V32).
+    func fetchLimiterParam(output: Int, _ index: UInt8) -> Float? {
+        guard output >= 0, output < 0xFF,
+              let d = usb.getControlRequest(request: REQ_LIMITER,
+                                            value: (UInt16(output) << 8) | UInt16(index),
+                                            index: 0, length: 4),
+              d.count >= 4 else { return nil }
+        return d.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
+    static func clampLimiterThreshold(_ db: Float) -> Float {
+        min(max(db, LIMITER_THRESHOLD_MIN), LIMITER_THRESHOLD_MAX)
+    }
+
+    static func clampLimiterRelease(_ ms: Float) -> Float {
+        min(max(ms, LIMITER_RELEASE_MIN), LIMITER_RELEASE_MAX)
+    }
+
+    /// The firmware rounds to the nearest group after clamping.
+    static func clampLimiterLinkGroup(_ group: Int) -> Int {
+        min(max(group, 0), LIMITER_LINK_GROUP_MAX)
+    }
+
+    private func isLimiterOutput(_ output: Int) -> Bool {
+        output >= 0 && output < min(numOutputChannels, limiter.outputs.count)
+    }
+
+    /// Device-only live send for a threshold or release drag.  Publishes
+    /// nothing; `ParameterRow` commits once on release through the setter.
+    func sendLimiterParamToDevice(output: Int, _ index: UInt8, _ value: Float) {
+        guard isLimiterOutput(output) else { return }
+        let v = index == LIMITER_PARAM_RELEASE_MS ? Self.clampLimiterRelease(value)
+                                                  : Self.clampLimiterThreshold(value)
+        sendLimiterParam(output: UInt8(output), index, v)
+    }
+
+    func setLimiterEnabled(output: Int, _ enabled: Bool) {
+        guard isLimiterOutput(output) else { return }
+        limiter.outputs[output].enabled = enabled
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_ENABLED, enabled ? 1 : 0)
+    }
+
+    func setLimiterThreshold(output: Int, _ db: Float) {
+        guard isLimiterOutput(output), !db.isNaN else { return }
+        let v = Self.clampLimiterThreshold(db)
+        limiter.outputs[output].thresholdDB = v
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_THRESHOLD_DB, v)
+    }
+
+    func setLimiterRelease(output: Int, _ ms: Float) {
+        guard isLimiterOutput(output), !ms.isNaN else { return }
+        let v = Self.clampLimiterRelease(ms)
+        limiter.outputs[output].releaseMs = v
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_RELEASE_MS, v)
+    }
+
+    func setLimiterLinkGroup(output: Int, _ group: Int) {
+        guard isLimiterOutput(output) else { return }
+        let g = Self.clampLimiterLinkGroup(group)
+        limiter.outputs[output].linkGroup = g
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_LINK_GROUP, Float(g))
+    }
+
+    /// Writes one output's settings to every output with a single SET per
+    /// parameter (output 0xFF), which is what the firmware's all-outputs form
+    /// is for.  The link group is left alone: copying it would link every
+    /// output into one group.
+    func copyLimiterToAllOutputs(from output: Int) {
+        guard isLimiterOutput(output) else { return }
+        let src = limiter.outputs[output]
+        var outs = limiter.outputs
+        for k in 0..<min(numOutputChannels, outs.count) {
+            outs[k].enabled = src.enabled
+            outs[k].thresholdDB = src.thresholdDB
+            outs[k].releaseMs = src.releaseMs
+        }
+        limiter.outputs = outs
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_THRESHOLD_DB, src.thresholdDB)
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_RELEASE_MS, src.releaseMs)
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_ENABLED, src.enabled ? 1 : 0)
+    }
+
+    /// Switches every output's limiter on or off with one all-outputs SET.
+    func setLimiterEnabledOnAll(_ enabled: Bool) {
+        guard firmwareSupportsLimiter else { return }
+        var outs = limiter.outputs
+        for k in 0..<min(numOutputChannels, outs.count) { outs[k].enabled = enabled }
+        limiter.outputs = outs
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_ENABLED, enabled ? 1 : 0)
+    }
+
+    /// Sets the link group of every output at once, one SET each.  `groups`
+    /// shorter than the output count leaves the rest unlinked.
+    func setLimiterLinkGroups(_ groups: [Int]) {
+        for k in 0..<min(numOutputChannels, limiter.outputs.count) {
+            setLimiterLinkGroup(output: k, k < groups.count ? groups[k] : 0)
+        }
+    }
+
+    /// Polls the gain-reduction meter (0x80) when `meter` is set, and clears
+    /// it once otherwise.  Called from the shared poll timer, off the main
+    /// thread.  Publishes only what changed.
+    func pollLimiter(meter: Bool) {
+        guard firmwareSupportsLimiter else { return }
+        let want = numOutputChannels
+        guard want > 0 else { return }
+        guard meter else {
+            // Nothing can be limiting; clear the bars once rather than polling.
+            DispatchQueue.main.async {
+                if self.limiter.meter.reductionDB.contains(where: { $0 != 0 }) {
+                    self.limiter.meter.reductionDB = []
+                }
+            }
+            return
+        }
+        guard let d = usb.getControlRequest(request: REQ_LIMITER, value: UInt16(LIMITER_GET_METER),
+                                            index: 0, length: UInt16(want * 2)), d.count >= 2 else { return }
+        var gr: [Float] = []
+        gr.reserveCapacity(min(want, d.count / 2))
+        for i in 0..<min(want, d.count / 2) {
+            let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
+            gr.append(Float(raw) / 100)
+        }
+        DispatchQueue.main.async {
+            if self.limiter.meter.reductionDB != gr { self.limiter.meter.reductionDB = gr }
+        }
+    }
+
     // MARK: - Stereo Upmixer (V25, cmds 0x4A-0x4E)
 
     /// Sends one upmix parameter as a 4-byte LE float via REQ_UPMIX_SET_PARAM
@@ -3351,8 +3494,8 @@ extension DSPViewModel {
         // accepted.  A short or wrong-version payload means incompatible
         // firmware - the device is still connected, so don't disconnect (avoids
         // a reconnect loop); just record the version so the UI can react.
-        // Requiring the full V31 size keeps the last section (tube, offset
-        // 5980..6027) in range along with every section before it.
+        // Requiring the full V32 size keeps the last section (limiter, offset
+        // 6028..6135) in range along with every section before it.
         guard data.count >= Int(BULK_PARAMS_SIZE), Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
@@ -3620,6 +3763,21 @@ extension DSPViewModel {
         let tbDrive = tbF(8), tbBias = tbF(12), tbAsym = tbF(16), tbHardness = tbF(20), tbSag = tbF(24)
         let tbXfmrDamping = tbF(28), tbXfmrRes = tbF(32), tbMix = tbF(36), tbTrim = tbF(40)
 
+        // --- Output Limiter (offset 6028, WireLimiterParams 108 bytes) ---
+        // One record per wire slot; slots past this device's outputs are zero
+        // and are read as defaults rather than as a -0 dBFS, 0 ms limiter.
+        var lmOutputs = [LimiterOutputSettings](repeating: LimiterOutputSettings(),
+                                                count: WIRE_MAX_OUTPUT_CHANNELS)
+        for k in 0..<min(numOutCh, WIRE_MAX_OUTPUT_CHANNELS) {
+            let o = BULK_LIMITER_OFFSET + k * WIRE_LIMITER_OUTPUT_SIZE
+            func lmF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: o + off, as: Float.self) } }
+            lmOutputs[k] = LimiterOutputSettings(
+                enabled: data[o] != 0,
+                thresholdDB: Self.clampLimiterThreshold(lmF(4)),
+                releaseMs: Self.clampLimiterRelease(lmF(8)),
+                linkGroup: Self.clampLimiterLinkGroup(Int(data[o + 1])))
+        }
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -3675,6 +3833,8 @@ extension DSPViewModel {
             self.tube.xfmrResHz = tbXfmrRes
             self.tube.mixPct = tbMix
             self.tube.trimDB = tbTrim
+
+            self.limiter.outputs = lmOutputs
 
             self.upmixEnabled = umEnabled
             self.upmix.centerMode = umCenterMode
@@ -4140,7 +4300,7 @@ extension DSPViewModel {
     /// The listed offsets are decoded in place: EQ and crossover bands, channel
     /// names, dac_hw_mute, user volume, LG, and the input / I2S / ADAT config.
     /// Anything else - the DSP feature blocks (loudness, crossfeed, leveller,
-    /// psybass, subharm, tube, upmixer, preamp, output gain / mute / delay) - falls through to
+    /// psybass, subharm, tube, limiter, upmixer, preamp, output gain / mute / delay) - falls through to
     /// a coalesced full re-read instead, which costs one bulk transfer but
     /// needs no per-block decoder here and cannot drift out of step with the
     /// wire format.  That path is what lets a bound pot or IR button move those

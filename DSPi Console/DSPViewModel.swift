@@ -1297,6 +1297,11 @@ class DSPViewModel: ObservableObject {
     @Published var tubeEnabled: Bool = false
     let tube = TubeParameters()
 
+    // Output Limiter (V32): per-output enable, threshold, release and link
+    // group, plus the polled engage state and meter.  No master switch, so
+    // nothing lives on the view model itself.
+    let limiter = LimiterParameters()
+
     // Stereo Upmixer (V25): derives Centre + Ls/Rs matrix source rows from a
     // stereo input.  These mirror UpmixConfigPacket (spec §6.1); defaults match
     // the firmware factory defaults so a fresh device and the app agree before
@@ -2027,6 +2032,10 @@ class DSPViewModel: ObservableObject {
     /// appends WireTubeParams to the bulk layout.  Both platforms run it.
     var firmwareSupportsTube: Bool { firmwareWireFormatVersion >= 31 }
 
+    /// Output Limiter (REQ_LIMITER 0x81) shipped in wire format V32, which
+    /// appends WireLimiterParams to the bulk layout.  Both platforms run it.
+    var firmwareSupportsLimiter: Bool { firmwareWireFormatVersion >= 32 }
+
     /// Stereo Upmixer (cmds 0x4A-0x4E) shipped in wire format V25 and gained the
     /// presence control in V26; the app is a V26 client (strict version match on
     /// the bulk image), so the whole feature is gated on V26.  RP2350 only: on
@@ -2668,6 +2677,10 @@ class DSPViewModel: ObservableObject {
             // 60 ms is already a faster cadence than the device refreshes a
             // channel at.
             if self.rta.isWatching { self.rta.tick() }
+            // Limiter meter while its icon is on screen and any limiter is on.
+            if self.limiter.watchers > 0 && self.firmwareSupportsLimiter {
+                self.pollLimiter(meter: self.limiter.anyEnabled)
+            }
         }
         timer.resume()
         pollTimer = timer
@@ -2840,6 +2853,7 @@ class DSPViewModel: ObservableObject {
             tubeXfmrResHz: tube.xfmrResHz,
             tubeMixPct: tube.mixPct,
             tubeTrimDB: tube.trimDB,
+            limiterOutputs: limiter.outputs,
             upmixEnabled: upmixEnabled,
             upmixCenterMode: upmix.centerMode,
             upmixSurroundMode: upmix.surroundMode,

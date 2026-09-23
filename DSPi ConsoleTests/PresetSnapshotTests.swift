@@ -25,7 +25,8 @@ final class PresetSnapshotTests: XCTestCase {
         outputSlotTypes: [UInt8] = [0, 0, 0, 0],
         spdifRxPin: UInt8 = 11,
         adatEnabled: Bool? = nil,
-        adatPin: UInt8? = nil
+        adatPin: UInt8? = nil,
+        limiterOutputs: [LimiterOutputSettings] = LimiterParameters().outputs
     ) -> PresetSnapshot {
         PresetSnapshot(
             preampDB: preampDB,
@@ -76,6 +77,7 @@ final class PresetSnapshotTests: XCTestCase {
             tubeXfmrResHz: TUBE_DEFAULT_XFMR_RES_HZ,
             tubeMixPct: 100,
             tubeTrimDB: 0,
+            limiterOutputs: limiterOutputs,
             upmixEnabled: false,
             upmixCenterMode: UPMIX_CENTER_MODE_ADAPTIVE,
             upmixSurroundMode: UPMIX_SURROUND_MODE_ADAPTIVE,
@@ -175,6 +177,20 @@ final class PresetSnapshotTests: XCTestCase {
         let newI = makeSnapshot(masterVolumeDB: -10, masterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT)
         XCTAssertFalse(PresetSnapshot.diff(from: oldI, to: newI, channelNames: names).hasChanges,
                        "master volume change should be ignored in INDEPENDENT mode")
+    }
+
+    func testLimiterChangeIsDetectedPerOutput() {
+        // RP2040, so output 1 is unified channel 3 ("Out R") in `names`.
+        let old = makeSnapshot(platformName: "RP2040")
+        var outs = LimiterParameters().outputs
+        outs[1].enabled = true
+        outs[1].thresholdDB = -3
+        let diff = PresetSnapshot.diff(from: old, to: makeSnapshot(platformName: "RP2040", limiterOutputs: outs), channelNames: names)
+        XCTAssertEqual(diff.changes.filter { $0.category == "Limiter" }.count, 2)
+        XCTAssertTrue(diff.changes.allSatisfy { $0.description.hasPrefix("Out R limiter") },
+                      "\(diff.changes.map(\.description))")
+        XCTAssertFalse(PresetSnapshot.diff(from: old, to: makeSnapshot(platformName: "RP2040"),
+                                           channelNames: names).hasChanges)
     }
 
     func testAdatChangeGatedByOutputConfigMode() {

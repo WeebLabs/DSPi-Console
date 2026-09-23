@@ -183,6 +183,9 @@ extension PresetDocument {
             block.muted = vm.outputMuted[output]
             block.enabled = vm.outputEnabled[output]
             block.outputDelayMs = vm.outputDelayMS[output]
+            if vm.firmwareSupportsLimiter, output < vm.limiter.outputs.count {
+                block.limiter = LimiterBlock(vm.limiter.outputs[output])
+            }
             block.crossover = (vm.xoverData[eqCh] ?? []).map { BandBlock($0) }
         }
 
@@ -439,6 +442,18 @@ enum PresetDocumentApply {
             // Additive field: a document written by a build (or a platform) that
             // doesn't carry the post-matrix delay leaves it alone.
             if let delay = block.outputDelayMs { vm.setOutputDelay(output: output, ms: delay) }
+            // Additive too.  The enable goes last so the limiter engages on the
+            // document's threshold rather than on the one it replaces.
+            if let lm = block.limiter {
+                if vm.firmwareSupportsLimiter {
+                    vm.setLimiterThreshold(output: output, lm.thresholdDb)
+                    vm.setLimiterRelease(output: output, lm.releaseMs)
+                    vm.setLimiterLinkGroup(output: output, lm.linkGroup)
+                    vm.setLimiterEnabled(output: output, lm.enabled)
+                } else {
+                    report.skip("Output limiter (not supported by this firmware)")
+                }
+            }
         }
 
         // A document that carries no bands for this channel leaves its EQ alone
