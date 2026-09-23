@@ -80,6 +80,11 @@ final class PeqGraphSnapshotTests: XCTestCase {
         host.peqSelection.selected = [1, 2, 5]
         view.hoverForTesting(CGPoint(x: g.x(380), y: g.y(-6.5)))
         try shoot("4-multi")
+
+        // A second-order low cut: frequency and Q only.
+        host.peqSelection.selected = []
+        view.hoverForTesting(CGPoint(x: g.x(32), y: g.y(20 * log10(0.9))))
+        try shoot("6-cut")
     }
 
     /// The band list's bypass controls in band colours: enabled on the top
@@ -183,13 +188,15 @@ final class PeqGraphSnapshotTests: XCTestCase {
             ctx.setAlpha(sub.alphaValue)
             ctx.translateBy(x: sub.frame.minX, y: sub.frame.maxY)
             ctx.scaleBy(x: 1, y: -1)
-            let path = CGPath(roundedRect: CGRect(origin: .zero, size: sub.frame.size), cornerWidth: 9, cornerHeight: 9, transform: nil)
-            if sub is PeqBandHUD {
-                ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 8, color: CGColor(gray: 0, alpha: 0.45))
-                ctx.setFillColor(CGColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 0.94))
+            let path = CGPath(roundedRect: CGRect(origin: .zero, size: sub.frame.size), cornerWidth: 10, cornerHeight: 10, transform: nil)
+            if sub is PeqFrostedPanel {
+                // The live panel blurs the graph; an offscreen capture cannot,
+                // so approximate its frosted tint.
+                ctx.setShadow(offset: CGSize(width: 0, height: -3), blur: 10, color: CGColor(gray: 0, alpha: 0.35))
+                ctx.setFillColor(CGColor(srgbRed: 0.16, green: 0.16, blue: 0.17, alpha: 0.9))
                 ctx.addPath(path); ctx.fillPath()
                 ctx.setShadow(offset: .zero, blur: 0)
-                ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.11))
+                ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.10))
                 ctx.addPath(path); ctx.strokePath()
             }
             ctx.draw(image, in: CGRect(origin: .zero, size: sub.frame.size))

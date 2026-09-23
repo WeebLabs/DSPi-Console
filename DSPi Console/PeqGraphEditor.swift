@@ -1236,16 +1236,7 @@ final class PeqGraphEditorView: NSView {
             guard let self, let b = self.hudBand else { return }
             self.toggleBypass(self.targets(for: b))
         }
-        hud.onDelete = { [weak self] in
-            guard let self, let b = self.hudBand else { return }
-            self.deleteBands(self.targets(for: b))
-        }
         hud.onShapeButton = { [weak self] in self?.toggleStrip() }
-        hud.onMenu = { [weak self] anchorView in
-            guard let self, let b = self.hudBand else { return }
-            let menu = self.bandMenu(for: b)
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchorView.bounds.maxY + 2), in: anchorView)
-        }
         hud.onEditingChanged = { [weak self] editing in
             guard let self else { return }
             if !editing { self.scheduleHUDHide() }
@@ -1337,7 +1328,7 @@ final class PeqGraphEditorView: NSView {
         guard let b = hudBand, isBand(b) else { return }
         let p = current(b)
         let node = nodePoint(p)
-        let size = PeqBandHUD.size
+        let size = hud.preferredSize
         let margin: CGFloat = 4
         let gap: CGFloat = 16
         let area = bounds.insetBy(dx: margin, dy: margin)

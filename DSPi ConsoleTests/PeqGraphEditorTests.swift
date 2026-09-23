@@ -213,6 +213,16 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(PeqValueText.parseNumber("Q 2", unit: ""), 2)
     }
 
+    /// The chip shows two decimals, truncated, never rounded up.
+    func testChipValuesTruncateToTwoDecimals() {
+        XCTAssertEqual(PeqBandHUD.truncated(4.999), "4.99")
+        XCTAssertEqual(PeqBandHUD.truncated(Double(Float(1.1))), "1.10")
+        XCTAssertEqual(PeqBandHUD.truncated(-6.506, sign: true), "-6.50")
+        XCTAssertEqual(PeqBandHUD.truncated(5, sign: true), "+5.00")
+        XCTAssertEqual(PeqBandHUD.truncated(-0.004, sign: true), "+0.00")
+        XCTAssertEqual(PeqBandHUD.truncated(1799.99 / 1000), "1.79")
+    }
+
     // MARK: - Editor interaction
 
     private final class RecordingHost: PeqGraphEditorHost {
