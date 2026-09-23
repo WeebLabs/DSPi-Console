@@ -776,6 +776,8 @@ struct ChannelSettingsView: View {
                 isConnected: vm.isDeviceConnected,
                 onToggle: {
                     let on = outputIndex < vm.limiter.outputs.count && vm.limiter.outputs[outputIndex].enabled
+                    // Part of the output configuration in independent mode.
+                    SettingsSaveCoordinator.shared.beginOutputEdit()
                     vm.setLimiterEnabled(output: outputIndex, !on)
                 },
                 onSettings: { showLimiterSettings = true })

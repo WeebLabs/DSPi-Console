@@ -374,6 +374,8 @@ struct PresetDocument: Codable {
         var outputDelayMs: Float?
         /// additive: this output's limiter (V32+).  Absent on inputs and when
         /// the source device had no limiter, which leaves the device's alone.
+        /// Applied with the hardware I/O option, as the firmware keeps it with
+        /// the output configuration.
         var limiter: LimiterBlock?
 
         var eq: [BandBlock] = []

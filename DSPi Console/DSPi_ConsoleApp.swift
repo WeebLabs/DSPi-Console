@@ -910,6 +910,7 @@ struct GlobalSettingsDraft: Equatable {
 /// clocks, S/PDIF RX). These edits apply live to RAM; this captures a baseline
 /// so we can detect/revert changes that haven't been flashed yet.
 struct OutputConfigSnapshot: Equatable {
+    var limiterOutputs: [LimiterOutputSettings]
     var outputPins: [UInt8]
     var outputSlotTypes: [UInt8]
     var i2sBckPin: UInt8
@@ -935,8 +936,9 @@ struct OutputConfigSnapshot: Equatable {
 ///
 ///  - Global parameters: staged in `globalDraft` and not applied until saved
 ///    (the firmware setters apply + persist on Save).
-///  - Output config (independent mode only): pin/type/clock/RX edits apply
-///    LIVE to RAM as they're made; "dirty" means they haven't been flashed yet.
+///  - Output config (independent mode only): pin/type/clock/RX and output
+///    limiter edits apply LIVE to RAM as they're made; "dirty" means they
+///    haven't been flashed yet.
 ///    Save calls `saveOutputConfig()`; Revert re-applies the captured baseline.
 ///
 /// One Save / one Revert acts on whatever is pending. Dirtiness is gated on
@@ -1022,6 +1024,7 @@ final class SettingsSaveCoordinator: ObservableObject {
 
     private static func snapshot(_ vm: DSPViewModel) -> OutputConfigSnapshot {
         OutputConfigSnapshot(
+            limiterOutputs: vm.limiter.outputs,
             outputPins: vm.outputPins,
             outputSlotTypes: vm.outputSlotTypes,
             i2sBckPin: vm.i2sBckPin,
@@ -1232,6 +1235,19 @@ final class SettingsSaveCoordinator: ObservableObject {
                 }
                 DispatchQueue.main.async {
                     guard stillCurrent() else { return }
+                    // Output limiters last, on main: their setters publish.
+                    // Enable goes last so a limiter re-engages on its restored
+                    // threshold rather than on the one it replaces.
+                    if vm.firmwareSupportsLimiter {
+                        for k in 0..<min(vm.numOutputChannels, base.limiterOutputs.count)
+                        where vm.limiter.outputs[k] != base.limiterOutputs[k] {
+                            let b = base.limiterOutputs[k]
+                            vm.setLimiterThreshold(output: k, b.thresholdDB)
+                            vm.setLimiterRelease(output: k, b.releaseMs)
+                            vm.setLimiterLinkGroup(output: k, b.linkGroup)
+                            vm.setLimiterEnabled(output: k, b.enabled)
+                        }
+                    }
                     self.outputConfigDirty = false
                 }
             }
@@ -9782,7 +9798,7 @@ struct FileMenuActions {
 
         let volumeCheck = NSButton(checkboxWithTitle: "Volume levels (master and listening volume)",
                                    target: nil, action: nil)
-        let ioCheck = NSButton(checkboxWithTitle: "Hardware I/O (GPIO pins, clocks, ADAT, inputs)",
+        let ioCheck = NSButton(checkboxWithTitle: "Hardware I/O (GPIO pins, clocks, ADAT, inputs, output limiters)",
                                target: nil, action: nil)
 
         let accessory = NSStackView(views: [volumeCheck, ioCheck])
@@ -9860,10 +9876,10 @@ struct FileMenuActions {
     }
 
     /// Persist the device's current live output configuration (output pins,
-    /// output types, I2S clocks, S/PDIF RX pin) to its independent (directory)
-    /// storage so it survives a reboot. Relevant in INDEPENDENT mode, where
-    /// per-field edits apply live but only persist after an explicit save.
-    /// Runs on a background queue because the underlying USB control transfer
+    /// output types, I2S clocks, S/PDIF RX pin, output limiters) to its
+    /// independent (directory) storage so it survives a reboot. Relevant in
+    /// INDEPENDENT mode, where per-field edits apply live but only persist
+    /// after an explicit save. Runs on a background queue because the underlying USB control transfer
     /// is synchronous.
     static func saveOutputConfig() {
         let vm = AppState.shared.viewModel

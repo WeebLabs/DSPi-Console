@@ -244,8 +244,9 @@ struct PresetApplyOptions {
     /// system would otherwise change how loud the room gets on import.
     var volumeLevels = false
 
-    /// GPIO pin assignments, clocking, ADAT and the S/PDIF & I2S input wiring.
-    /// Off by default - these describe a board, not a listening setup.
+    /// GPIO pin assignments, clocking, ADAT, the S/PDIF & I2S input wiring and
+    /// the output limiters.  Off by default - these describe a board, not a
+    /// listening setup.
     var hardwareIO = false
 }
 
@@ -321,6 +322,7 @@ enum PresetDocumentApply {
         }
         if options.hardwareIO {
             steps.append(Step(blocking: true) { applyIO(doc, vm: vm, report: report) })
+            steps.append(Step(blocking: false) { applyLimiters(byRef, vm: vm, report: report) })
         }
 
         // The device ends up holding the document but nothing is written to
@@ -417,6 +419,33 @@ enum PresetDocumentApply {
         return steps
     }
 
+    /// Output limiters, from each output's block.  They follow the firmware's
+    /// output_config_mode like the pins - a limiter protects the hardware on an
+    /// output - so they come with the hardware I/O option rather than with the
+    /// audio processing.  In independent mode the import leaves them live but
+    /// unsaved, so it marks the output configuration dirty.  Additive: a block
+    /// without a limiter leaves that output's alone.
+    private static func applyLimiters(_ byRef: [PresetChannelRef: PresetDocument.ChannelBlock],
+                                      vm: DSPViewModel, report: PresetApplyReport) {
+        let blocks = (0..<vm.numOutputChannels).compactMap { out in
+            byRef[.output(out)]?.limiter.map { (out, $0) }
+        }
+        guard !blocks.isEmpty else { return }
+        guard vm.firmwareSupportsLimiter else {
+            report.skip("Output limiter (not supported by this firmware)")
+            return
+        }
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        for (output, lm) in blocks {
+            // Enable last, so a limiter engages on the document's threshold
+            // rather than on the one it replaces.
+            vm.setLimiterThreshold(output: output, lm.thresholdDb)
+            vm.setLimiterRelease(output: output, lm.releaseMs)
+            vm.setLimiterLinkGroup(output: output, lm.linkGroup)
+            vm.setLimiterEnabled(output: output, lm.enabled)
+        }
+    }
+
     private static func preamp(_ doc: PresetDocument, input: Int) -> Float {
         input < doc.global.inputPreampsDb.count ? doc.global.inputPreampsDb[input] : 0
     }
@@ -442,18 +471,6 @@ enum PresetDocumentApply {
             // Additive field: a document written by a build (or a platform) that
             // doesn't carry the post-matrix delay leaves it alone.
             if let delay = block.outputDelayMs { vm.setOutputDelay(output: output, ms: delay) }
-            // Additive too.  The enable goes last so the limiter engages on the
-            // document's threshold rather than on the one it replaces.
-            if let lm = block.limiter {
-                if vm.firmwareSupportsLimiter {
-                    vm.setLimiterThreshold(output: output, lm.thresholdDb)
-                    vm.setLimiterRelease(output: output, lm.releaseMs)
-                    vm.setLimiterLinkGroup(output: output, lm.linkGroup)
-                    vm.setLimiterEnabled(output: output, lm.enabled)
-                } else {
-                    report.skip("Output limiter (not supported by this firmware)")
-                }
-            }
         }
 
         // A document that carries no bands for this channel leaves its EQ alone

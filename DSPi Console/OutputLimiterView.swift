@@ -131,6 +131,14 @@ struct OutputLimiterSettings: View {
         return idx < vm.channelNames.count ? vm.channelNames[idx] : "Out \(out + 1)"
     }
 
+    /// Every committed change goes through here.  In independent mode the
+    /// limiter is part of the output configuration, so an edit must mark it
+    /// unsaved (and capture the revert baseline) before it lands.
+    private func edit(_ change: () -> Void) {
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        change()
+    }
+
     var body: some View {
         let s = output < limiter.outputs.count ? limiter.outputs[output] : LimiterOutputSettings()
         VStack(alignment: .leading, spacing: 14) {
@@ -146,7 +154,7 @@ struct OutputLimiterSettings: View {
                 Spacer()
                 Toggle("", isOn: Binding(
                     get: { s.enabled },
-                    set: { vm.setLimiterEnabled(output: output, $0) }
+                    set: { on in edit { vm.setLimiterEnabled(output: output, on) } }
                 ))
                 .toggleStyle(.switch)
                 .labelsHidden()
@@ -166,7 +174,7 @@ struct OutputLimiterSettings: View {
                 isEnabled: vm.isDeviceConnected,
                 help: "The limiter runs after every gain stage, so this is the absolute level leaving the device. The -1 dBFS default leaves room for the small overshoot a DAC can produce between samples.",
                 live: { vm.sendLimiterParamToDevice(output: output, LIMITER_PARAM_THRESHOLD_DB, $0) },
-                set: { vm.setLimiterThreshold(output: output, $0) }
+                set: { v in edit { vm.setLimiterThreshold(output: output, v) } }
             )
 
             ParameterRow(
@@ -181,7 +189,7 @@ struct OutputLimiterSettings: View {
                 isEnabled: vm.isDeviceConnected,
                 help: "The gain recovers 8.7 dB per release time. Short releases keep the level up but can be heard pumping on dense material; long ones are smoother but hold the level down for longer after a peak. Attack is fixed at 16 samples and always completes before the peak arrives.",
                 live: { vm.sendLimiterParamToDevice(output: output, LIMITER_PARAM_RELEASE_MS, $0) },
-                set: { vm.setLimiterRelease(output: output, $0) }
+                set: { v in edit { vm.setLimiterRelease(output: output, v) } }
             )
 
             linkSection(group: s.linkGroup)
@@ -189,15 +197,15 @@ struct OutputLimiterSettings: View {
             Divider()
 
             HStack {
-                Button("Copy to all outputs") { vm.copyLimiterToAllOutputs(from: output) }
+                Button("Copy to all outputs") { edit { vm.copyLimiterToAllOutputs(from: output) } }
                     .controlSize(.small)
                     .help("Give every output this output's threshold, release and on/off state. Link groups are left as they are.")
                 Spacer()
                 Menu {
-                    Button("Link all stereo pairs") { vm.setLimiterLinkGroups(stereoPairGroups) }
-                    Button("Unlink all outputs") { vm.setLimiterLinkGroups([]) }
+                    Button("Link all stereo pairs") { edit { vm.setLimiterLinkGroups(stereoPairGroups) } }
+                    Button("Unlink all outputs") { edit { vm.setLimiterLinkGroups([]) } }
                     Divider()
-                    Button("Switch every limiter off") { vm.setLimiterEnabledOnAll(false) }
+                    Button("Switch every limiter off") { edit { vm.setLimiterEnabledOnAll(false) } }
                 } label: {
                     Text("All outputs")
                         .font(.system(size: 11))
@@ -224,7 +232,7 @@ struct OutputLimiterSettings: View {
 
             Picker("", selection: Binding(
                 get: { group },
-                set: { vm.setLimiterLinkGroup(output: output, $0) }
+                set: { g in edit { vm.setLimiterLinkGroup(output: output, g) } }
             )) {
                 Text("Off").tag(0)
                 ForEach(1...LIMITER_LINK_GROUP_MAX, id: \.self) { g in

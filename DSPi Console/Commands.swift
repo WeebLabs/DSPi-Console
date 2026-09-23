@@ -1543,6 +1543,10 @@ extension DSPViewModel {
     // parameter.  SETs are fire-and-forget and update app state first, clamped
     // and rounded exactly as the firmware does, because notifications for our
     // own writes are filtered out and would never correct us.
+    //
+    // The settings follow output_config_mode like the pins, so in INDEPENDENT
+    // mode an edit is part of the unsaved output configuration: user-facing
+    // callers must mark it (SettingsSaveCoordinator.beginOutputEdit).
 
     private func sendLimiterParam(output: UInt8, _ index: UInt8, _ value: Float) {
         var val = value
@@ -4255,8 +4259,8 @@ extension DSPViewModel {
     /// Persist the current live output configuration into the directory's
     /// independent storage so it survives a reboot. Relevant in
     /// `OUTPUT_CONFIG_MODE_INDEPENDENT`, where per-field edits (pins, output
-    /// types, I2S clocks, S/PDIF RX pin) apply live but only persist after an
-    /// explicit save. IN-shaped action command: device responds with a 1-byte
+    /// types, I2S clocks, S/PDIF RX pin, output limiters) apply live but only
+    /// persist after an explicit save. IN-shaped action command: device responds with a 1-byte
     /// status (0 = PRESET_OK); the flash write is deferred on-device. Returns
     /// true on success, false if the device disconnected or the transfer failed.
     @discardableResult

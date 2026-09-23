@@ -351,9 +351,14 @@ extension PresetSnapshot {
             changes.append(.init(category: "Tube", description: "Tube output trim: \(formatVal(old.tubeTrimDB)) dB → \(formatVal(new.tubeTrimDB)) dB"))
         }
 
-        // Output Limiter, per output.  Output i's channel name is at i + chOut1.
+        // Output Limiter, per output.  It follows output_config_mode like the
+        // pins: a preset load restores it only in WITH_PRESET mode, so only
+        // there does a change make the preset dirty.  In INDEPENDENT mode it
+        // is saved with the output configuration instead.  Output i's channel
+        // name is at i + chOut1.
         let limiterChOut1 = new.platformName == "RP2040" ? BASE_MATRIX_INPUTS : MAX_MATRIX_INPUTS
-        for i in 0..<min(old.limiterOutputs.count, new.limiterOutputs.count) {
+        for i in 0..<min(old.limiterOutputs.count, new.limiterOutputs.count)
+        where new.outputConfigMode == OUTPUT_CONFIG_MODE_WITH_PRESET {
             let o = old.limiterOutputs[i], n = new.limiterOutputs[i]
             guard o != n else { continue }
             let name = (i + limiterChOut1) < channelNames.count ? channelNames[i + limiterChOut1] : "Output \(i)"
