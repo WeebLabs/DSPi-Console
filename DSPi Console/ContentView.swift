@@ -20,7 +20,7 @@ enum SidebarSelection: Hashable {
 /// `includeLinkwitz` is false for input channels: the Linkwitz Transform is a
 /// driver/sealed-box bass-extension tool that only makes sense on the outputs
 /// feeding physical speakers, so it's hidden from input EQ banks entirely.
-fileprivate func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = true) -> [FilterType] {
+func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = true) -> [FilterType] {
     var filters: [FilterType] = FilterType.allCases.filter { !$0.isCrossover }
 
     if vm.firmwareSupportsNotch == false {
@@ -879,7 +879,9 @@ struct ContentView: View {
                                         vm.setBandBypass(ch: m, band: band, bypass: bypass)
                                     }
                                 },
-                                onClear: nil  // handled by InputChannelHeader's Clear button
+                                onClear: nil,  // handled by InputChannelHeader's Clear button
+                                graphSelection: vm.peqSelection,
+                                liveReadouts: vm.peqLive
                             )
                         }
 
@@ -1117,7 +1119,9 @@ struct OutputChannelDetail: View {
                     onBypassToggle: { band, bypass in
                         vm.setBandBypass(ch: eqChannel, band: band, bypass: bypass)
                     },
-                    onClear: { vm.clearPEQBands(ch: eqChannel) }
+                    onClear: { vm.clearPEQBands(ch: eqChannel) },
+                    graphSelection: vm.peqSelection,
+                    liveReadouts: vm.peqLive
                 )
             case .crossover:
                 FilterListView(

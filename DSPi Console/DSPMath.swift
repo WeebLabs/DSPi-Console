@@ -498,22 +498,20 @@ class DSPMath {
         return Float(10.0 * log10(magSquaredTotal))
     }
 
+    /// |H|^2 in terms of phi = sin^2(w/2), the form RBJ recommends for
+    /// plotting: identical to evaluating 1 + a1 cos w + a2 cos 2w, but without
+    /// its cancellation.  The old form lost the resonance of low, narrow
+    /// sections (a 10 Hz, Q 20 bell read 0 dB at its peak once the denominator
+    /// fell under a 1e-15 cut-off); this one stays exact there.
     private static func magnitudeSquared(coeffs: Coeffs, freq: Double) -> Double {
-        let w = 2.0 * Double.pi * freq / sampleRate
-        let cos_w = cos(w)
-        let cos_2w = cos(2.0 * w)
-        let sin_w = sin(w)
-        let sin_2w = sin(2.0 * w)
-        let num_r = coeffs.b0 + coeffs.b1 * cos_w + coeffs.b2 * cos_2w
-        let num_i = -(coeffs.b1 * sin_w + coeffs.b2 * sin_2w)
-        let den_r = 1.0 + coeffs.a1 * cos_w + coeffs.a2 * cos_2w
-        let den_i = -(coeffs.a1 * sin_w + coeffs.a2 * sin_2w)
-        let num_mag_sq = num_r*num_r + num_i*num_i
-        let den_mag_sq = den_r*den_r + den_i*den_i
-        if den_mag_sq > 1e-15 {
-            return num_mag_sq / den_mag_sq
-        }
-        return 1.0
+        let s = sin(Double.pi * freq / sampleRate)
+        let phi = s * s
+        let (b0, b1, b2, a1, a2) = (coeffs.b0, coeffs.b1, coeffs.b2, coeffs.a1, coeffs.a2)
+        let sb = b0 + b1 + b2, sa = 1 + a1 + a2
+        let num = sb * sb - 4 * (b0 * b1 + b1 * b2 + 4 * b0 * b2) * phi + 16 * b0 * b2 * phi * phi
+        let den = sa * sa - 4 * (a1 + a1 * a2 + 4 * a2) * phi + 16 * a2 * phi * phi
+        guard den > 0 else { return 1.0 }
+        return max(num, 0) / den
     }
 
     /// Phase contribution (radians) of a single biquad section at `freq`,

@@ -2167,6 +2167,7 @@ class DSPViewModel: ObservableObject {
         // Re-selecting the same channel (a link refresh) keeps what was checked.
         didSet {
             if let ch = activeEqChannel, ch != oldValue { resetRtaPageSelection(for: ch) }
+            if activeEqChannel != oldValue { peqSelection.reset() }
         }
     }
 
@@ -2174,6 +2175,12 @@ class DSPViewModel: ObservableObject {
     let meters = DSPMeterModel()
     let telemetry = DeviceTelemetry()
     let outputGainPreview = OutputGainPreview()
+    /// Bands selected or hovered on the response graph, shared with the band
+    /// list so a row lights up with its dot.  See `PeqGraphEditorView`.
+    let peqSelection = PeqGraphSelection()
+    /// AppKit readouts that let the band list follow a graph drag without a
+    /// SwiftUI update.
+    let peqLive = PeqLiveReadouts()
 
     /// The device's spectrum analyser.  Its own observable, because it
     /// republishes at the poll rate and everything watching the view model

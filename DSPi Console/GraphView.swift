@@ -171,6 +171,39 @@ struct BodePlotView: View {
         let entries: [ChannelEntry]
     }
 
+    /// The channel whose bands are edited on the graph, or nil.  That
+    /// channel's curve, dots and band shapes are drawn by the GPU editor
+    /// overlay, so the SwiftUI curves leave it out.
+    var editedChannel: Int? {
+        guard PeqGraphEditorView.isAvailable, vm.isDeviceReady, !useOverride,
+              let ch = vm.activeEqChannel, vm.channelVisibility[ch] == true else { return nil }
+        return ch
+    }
+
+    var editorConfig: PeqGraphEditorConfig {
+        var c = PeqGraphEditorConfig()
+        c.minFreq = Double(minFreq)
+        c.maxFreq = Double(maxFreq)
+        c.dbTop = Double(dbTop)
+        c.dbBottom = Double(dbBottom)
+        guard let ch = editedChannel else { return c }
+        c.channel = ch
+        c.bands = vm.channelData[ch] ?? []
+        if ch >= vm.chOut1 {
+            let output = ch - vm.chOut1
+            c.statics = vm.xoverData[ch] ?? []
+            c.offsetDB = gainPreview.gains[output] ?? vm.outputGainDB[output]
+        }
+        c.flat = vm.bypass && ch < BASE_MATRIX_INPUTS
+        let rgb = NSColor(colorForEQChannel(ch)).usingColorSpace(.sRGB) ?? .white
+        c.curveColor = SIMD4(Float(rgb.redComponent), Float(rgb.greenComponent), Float(rgb.blueComponent), 1)
+        c.lineWidth = Float(settings.graphLineWidth)
+        c.glow = settings.showGraphGlow
+        c.availableTypes = availableFilterTypes(vm: vm, includeLinkwitz: false)
+        c.bypassSupported = vm.firmwareSupportsBandBypass
+        return c
+    }
+
     // Group visible channels by identical magnitudes
     func groupedChannels() -> [CurveGroup] {
         // No curves without a device: the cached magnitudes are the previous
@@ -179,8 +212,9 @@ struct BodePlotView: View {
         guard vm.isDeviceReady else { return [] }
         var groups: [[Double]: [ChannelEntry]] = [:]
         let activeEq = vm.activeEqChannel
+        let edited = editedChannel
         let followsSelection = !isPopOut || settings.popoutGraphFollowsSelection
-        for eqCh in 0..<vm.numChannels {
+        for eqCh in 0..<vm.numChannels where eqCh != edited {
             let visible: Bool
             if useOverride {
                 visible = visibilityOverride[eqCh] ?? false
@@ -350,7 +384,9 @@ struct BodePlotView: View {
         // vanishing between frames; the grid underneath never changes, so
         // only the data animates.
         .animation(.easeInOut(duration: 0.3), value: vm.isDeviceReady)
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.5))
+        // The card colour of the band list and channel header below it (and
+        // of the list's darker rows), so the graph reads as one of the cards.
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
         .cornerRadius(8)
         .clipped()
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
@@ -403,8 +439,10 @@ struct BodePlotView: View {
             }
             .allowsHitTesting(false)
         )
+        // Band editing, and the edited channel's curve, on the GPU.  Also
+        // owns the dB zoom strip at the left edge.
         .overlay(
-            GraphVerticalZoomHandler(settings: settings)
+            PeqGraphEditorOverlay(vm: vm, config: editorConfig)
         )
         .overlay(alignment: .topTrailing) {
             // The pop-out window gets the gear too, without the pop-out row:
@@ -529,50 +567,6 @@ class GraphResizeNSView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         isDragging = false
-    }
-}
-
-// MARK: - Vertical Zoom Handler
-
-struct GraphVerticalZoomHandler: NSViewRepresentable {
-    let settings: AppSettings
-    private let zoneWidth: CGFloat = 40
-
-    func makeNSView(context: Context) -> VerticalZoomNSView {
-        let view = VerticalZoomNSView()
-        view.settings = settings
-        view.zoneWidth = zoneWidth
-        return view
-    }
-
-    func updateNSView(_ nsView: VerticalZoomNSView, context: Context) {
-        nsView.settings = settings
-    }
-}
-
-class VerticalZoomNSView: NSView {
-    var settings: AppSettings?
-    var zoneWidth: CGFloat = 40
-
-    override func scrollWheel(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        guard location.x <= zoneWidth, let settings = settings else {
-            super.scrollWheel(with: event)
-            return
-        }
-
-        let delta = Double(event.scrollingDeltaY)
-        let sensitivity = event.hasPreciseScrollingDeltas ? 0.3 : 3.0
-        let newRange = settings.graphDBRange - delta * sensitivity
-        settings.graphDBRange = min(max(newRange, 10), 100)
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        if local.x <= zoneWidth {
-            return self
-        }
-        return nil
     }
 }
 

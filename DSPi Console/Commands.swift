@@ -324,7 +324,21 @@ extension DSPViewModel {
         p.gain = (p.gain * 1000).rounded() / 1000
         if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
+        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: eqParamPacket(ch: ch, band: band, p: p))
+        recomputeMagnitudes(for: ch)
+    }
 
+    /// Drag-time band write: the device follows, the model does not publish.
+    /// The graph editor draws the live curve itself and commits once through
+    /// `setFilter` on release, the same split as `sendOutputGainToDevice`.
+    func sendFilterToDevice(ch: Int, band: Int, p: FilterParams) {
+        var p = p
+        p.gain = (p.gain * 1000).rounded() / 1000
+        if p.gain == -0.0 { p.gain = 0.0 }
+        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: eqParamPacket(ch: ch, band: band, p: p))
+    }
+
+    private func eqParamPacket(ch: Int, band: Int, p: FilterParams) -> Data {
         // EqParamPacket layout: [ch, band, type, bypass, freq(4), q(4), gain(4)] = 16 bytes.
         // Per band_bypass_spec §5: write exactly 0 or 1 — never 0xFF.
         // For the Linkwitz Transform (type 11) append the 2-byte `qp` sidecar
@@ -342,9 +356,7 @@ extension DSPViewModel {
         if p.type == .linkwitzTransform {
             var qp16 = p.qpEncoded; data.append(&qp16, length: 2)
         }
-
-        usb.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
-        recomputeMagnitudes(for: ch)
+        return data as Data
     }
     
     func fetchFilter(ch: Int, band: Int) {

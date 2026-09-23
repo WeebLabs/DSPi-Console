@@ -1521,6 +1521,11 @@ struct FilterListView: View {
     /// EqParamPacket via onUpdate and avoids racing with in-flight edits.
     var onBypassToggle: ((Int, Bool) -> Void)? = nil
     var onClear: (() -> Void)? = nil
+    /// Set on PEQ lists whose bands are edited on the response graph: rows
+    /// then carry their band's graph colour, light up with its dot, select it
+    /// on a click of the number, and follow a graph drag live.
+    var graphSelection: PeqGraphSelection? = nil
+    var liveReadouts: PeqLiveReadouts? = nil
 
     var body: some View {
         // ScrollView contains the full list of rows.  Header and footer are
@@ -1540,7 +1545,9 @@ struct FilterListView: View {
                         onChange: { onUpdate(index, $0) },
                         onBypassToggle: { newVal in
                             onBypassToggle?(index, newVal)
-                        }
+                        },
+                        graphSelection: graphSelection,
+                        liveReadouts: index < PeqLiveReadouts.bands ? liveReadouts : nil
                     )
                 }
             }
@@ -1818,6 +1825,8 @@ struct FilterRowView: View {
     /// nil, the checkbox is rendered but its action no-ops; callers should
     /// always wire this when bypassSupported is true.
     var onBypassToggle: ((Bool) -> Void)? = nil
+    var graphSelection: PeqGraphSelection? = nil
+    var liveReadouts: PeqLiveReadouts? = nil
 
     /// Presentation state for the Linkwitz Transform parameter popover.  LT has
     /// four parameters (f0, Q0, fp, Qp) that don't fit the shared 3-column row,
@@ -1838,6 +1847,12 @@ struct FilterRowView: View {
     var isActive: Bool { params.type != .flat }
     var isBypassed: Bool { params.bypass }
 
+    private var indexColor: Color {
+        guard isActive, !isBypassed else { return .secondary.opacity(0.5) }
+        if graphSelection != nil, !bypassSupported { return PeqBandPalette.color(index) }
+        return .primary
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             // Bypass checkbox (firmware 1.1.4+).  Filled disc only when the
@@ -1848,16 +1863,23 @@ struct FilterRowView: View {
                 BypassCheckbox(
                     isActive: isActive && !isBypassed,
                     isEnabled: isActive,
+                    color: graphSelection != nil && isActive ? PeqBandPalette.color(index) : nil,
                     onToggle: { onBypassToggle?(!isBypassed) }
                 )
                 .frame(width: 18, height: 18)
             }
 
-            // Index
+            // Index.  The bypass control carries the band's graph colour;
+            // without one (firmware before per-band bypass) the number does.
             Text("\(index + 1)")
                 .font(.system(.body))
-                .foregroundColor(isActive && !isBypassed ? .primary : .secondary.opacity(0.5))
+                .foregroundColor(indexColor)
                 .frame(width: 24, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard let graphSelection, isActive else { return }
+                graphSelection.selected = [index]
+            }
 
             if isCrossoverMode {
                 crossoverRowContent
@@ -1873,9 +1895,20 @@ struct FilterRowView: View {
         .background(
             ZStack {
                 if index % 2 == 0 { Color.white.opacity(0.03) }
+                if let graphSelection {
+                    PeqRowHighlight(selection: graphSelection, band: index, isActive: isActive)
+                }
             }
         )
         .contentShape(Rectangle())
+        .onHover { hovering in
+            guard let graphSelection else { return }
+            if hovering, isActive {
+                graphSelection.listHovered = index
+            } else if graphSelection.listHovered == index {
+                graphSelection.listHovered = nil
+            }
+        }
     }
 
     // MARK: PEQ-tab row layout
@@ -1897,13 +1930,15 @@ struct FilterRowView: View {
             } else {
                 HStack(spacing: 12) {
                     // Freq
-                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
+                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10,
+                               liveReadout: liveReadouts?.freq[index]) {
                         var p = params; p.freq = $0; onChange(p)
                     }
 
                     // Gain
                     if params.type.usesGain {
-                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 3) {
+                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 3,
+                                   liveReadout: liveReadouts?.gain[index]) {
                             var p = params; p.gain = $0; onChange(p)
                         }
                     } else {
@@ -1913,7 +1948,8 @@ struct FilterRowView: View {
                     // Q (hidden for crossover and first-order PEQ types — firmware
                     // ignores Q on those).
                     if params.type.usesQ {
-                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
+                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true,
+                                   liveReadout: liveReadouts?.q[index]) {
                             var p = params; p.q = $0; onChange(p)
                         }
                     } else {
@@ -2347,24 +2383,26 @@ fileprivate enum CrossoverFamilyOption: Hashable {
 struct BypassCheckbox: View {
     let isActive: Bool
     let isEnabled: Bool
+    /// The band's graph colour, when the graph edits it; grey otherwise.
+    var color: Color? = nil
     let onToggle: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: onToggle) {
             ZStack {
-                // Active: solid accent fill with a subtle radial highlight
-                // for a glassy look.  Inactive: hollow ring on a near-clear
-                // disc so the hit area still covers the interior.
+                // Active: solid fill.  Inactive: hollow ring on a near-clear
+                // disc so the hit area still covers the interior.  A band
+                // colour tints both, so a bypassed band keeps its identity.
                 Circle()
-                    .fill(isActive ? Color(white: 0.5) : Color.white.opacity(0.001))
+                    .fill(isActive ? (color ?? Color(white: 0.5)) : Color.white.opacity(0.001))
                     .frame(width: 12, height: 12)
 
                 Circle()
                     .strokeBorder(
                         isActive
-                            ? Color(white: 0.5)
-                            : Color.secondary.opacity(0.55),
+                            ? (color ?? Color(white: 0.5))
+                            : (color?.opacity(0.6) ?? Color.secondary.opacity(0.55)),
                         lineWidth: 1.2
                     )
                     .frame(width: 12, height: 12)
@@ -2692,5 +2730,28 @@ struct SidebarIconButton: View {
         .help(tooltip)
         .frame(maxWidth: .infinity)
         .onHover { isHovered = $0 }
+    }
+}
+
+
+/// A band row's tint while its band is selected or hovered on the graph.  Its
+/// own small observer, so a selection change redraws this background and not
+/// the row.
+struct PeqRowHighlight: View {
+    @ObservedObject var selection: PeqGraphSelection
+    let band: Int
+    let isActive: Bool
+
+    var body: some View {
+        let selected = isActive && selection.selected.contains(band)
+        let hovered = isActive && selection.graphHovered == band
+        let color = PeqBandPalette.color(band)
+        HStack(spacing: 0) {
+            color.frame(width: 2).opacity(selected ? 1 : 0)
+            color.opacity(selected ? 0.13 : (hovered ? 0.07 : 0))
+        }
+        .animation(.easeOut(duration: 0.12), value: selected)
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .allowsHitTesting(false)
     }
 }
