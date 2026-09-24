@@ -1534,21 +1534,30 @@ struct FilterListView: View {
         // lets us use `.ultraThinMaterial` for a true translucent vibrancy
         // effect that picks up the row colors moving behind.
         ScrollView {
-            LazyVStack(spacing: 1) {
-                ForEach(0..<bands.count, id: \.self) { index in
-                    FilterRowView(
-                        index: index,
-                        params: bands[index],
-                        availableTypes: availableTypes,
-                        bypassSupported: bypassSupported,
-                        isCrossoverMode: isCrossoverMode,
-                        onChange: { onUpdate(index, $0) },
-                        onBypassToggle: { newVal in
-                            onBypassToggle?(index, newVal)
-                        },
-                        graphSelection: graphSelection,
-                        liveReadouts: index < PeqLiveReadouts.bands ? liveReadouts : nil
-                    )
+            // Rows are ids for the reader, so selecting a band on the graph
+            // can bring its row into view.
+            ScrollViewReader { proxy in
+                LazyVStack(spacing: 1) {
+                    ForEach(0..<bands.count, id: \.self) { index in
+                        FilterRowView(
+                            index: index,
+                            params: bands[index],
+                            availableTypes: availableTypes,
+                            bypassSupported: bypassSupported,
+                            isCrossoverMode: isCrossoverMode,
+                            onChange: { onUpdate(index, $0) },
+                            onBypassToggle: { newVal in
+                                onBypassToggle?(index, newVal)
+                            },
+                            graphSelection: graphSelection,
+                            liveReadouts: index < PeqLiveReadouts.bands ? liveReadouts : nil
+                        )
+                    }
+                }
+                .background {
+                    if let graphSelection {
+                        PeqRowScrollFollower(selection: graphSelection, proxy: proxy, rows: bands.count)
+                    }
                 }
             }
         }
@@ -2753,5 +2762,31 @@ struct PeqRowHighlight: View {
         .animation(.easeOut(duration: 0.12), value: selected)
         .animation(.easeOut(duration: 0.12), value: hovered)
         .allowsHitTesting(false)
+    }
+}
+
+
+/// Scrolls the band list just far enough to show a band newly selected on
+/// the graph; a row already in view does not move.  Its own small observer,
+/// so a selection change redraws this and not the list.
+private struct PeqRowScrollFollower: View {
+    @ObservedObject var selection: PeqGraphSelection
+    let proxy: ScrollViewProxy
+    let rows: Int
+    @State private var previous: Set<Int> = []
+
+    var body: some View {
+        Color.clear
+            .onAppear { previous = selection.selected }
+            .onChange(of: selection.selected) { selected in
+                // With several new at once (a marquee), the first in the list.
+                let added = selected.subtracting(previous).sorted()
+                previous = selected
+                guard let band = added.first, band < rows else { return }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    // A nil anchor scrolls the least needed to show the row.
+                    proxy.scrollTo(band, anchor: nil)
+                }
+            }
     }
 }

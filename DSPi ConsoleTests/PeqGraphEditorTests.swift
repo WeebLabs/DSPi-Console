@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import DSPi_Console
 
 /// On-graph PEQ editing: the single-precision response the GPU evaluates, the
@@ -221,6 +222,44 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(PeqBandHUD.truncated(5, sign: true), "+5.00")
         XCTAssertEqual(PeqBandHUD.truncated(-0.004, sign: true), "+0.00")
         XCTAssertEqual(PeqBandHUD.truncated(1799.99 / 1000), "1.79")
+    }
+
+    // MARK: - Band list
+
+    /// Selecting a band on the graph scrolls the band list to show its row,
+    /// by the least amount, and a row already in view does not move it.
+    @MainActor
+    func testBandListScrollsToABandSelectedOnTheGraph() throws {
+        let selection = PeqGraphSelection()
+        let bands = (0..<10).map { FilterParams(type: .peaking, freq: Float(100 * ($0 + 1)), q: 1, gain: 3) }
+        let list = FilterListView(bands: bands, channelId: 0, availableTypes: FilterType.allCases,
+                                  bypassSupported: true, onUpdate: { _, _ in }, graphSelection: selection)
+            .frame(width: 700, height: 220)
+            .environment(\.colorScheme, .dark)
+        let host = NSHostingView(rootView: list)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 700, height: 220),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        spin(0.3)
+        func find(_ view: NSView) -> NSScrollView? {
+            if let s = view as? NSScrollView { return s }
+            for sub in view.subviews { if let s = find(sub) { return s } }
+            return nil
+        }
+        let scroll = try XCTUnwrap(find(host))
+        let top = scroll.contentView.bounds.origin.y
+        selection.selected = [1]
+        spin(0.5)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, top, accuracy: 0.5, "a visible row does not scroll")
+        selection.selected = [9]
+        spin(0.6)
+        let scrolled = scroll.contentView.bounds.origin.y
+        XCTAssertGreaterThan(scrolled, top + 20, "the last band's row is scrolled into view")
+        selection.selected = [0]
+        spin(0.6)
+        XCTAssertLessThan(scroll.contentView.bounds.origin.y, scrolled - 20, "and back up for the first")
     }
 
     // MARK: - Editor interaction
