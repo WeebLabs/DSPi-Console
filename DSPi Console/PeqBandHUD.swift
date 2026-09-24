@@ -136,6 +136,9 @@ final class PeqHUDValueField: NSTextField {
     var onAdjust: ((PeqHUDField, CGFloat, Bool, PeqAdjustPhase) -> Void)?
     var onScroll: ((PeqHUDField, CGFloat, Bool) -> Void)?
     var onBeginEditing: ((PeqHUDField) -> Void)?
+    /// True while a scroll gesture that began on the graph is running; the
+    /// field then passes the wheel on rather than taking it.
+    var forwardsScroll: (() -> Bool)?
     private var dragStart: CGFloat = 0
     private var dragged: CGFloat = 0
     private var lastY: CGFloat = 0
@@ -200,7 +203,10 @@ final class PeqHUDValueField: NSTextField {
         onAdjust?(field, dragged, false, .ended)
     }
     override func scrollWheel(with event: NSEvent) {
-        guard !isEditable, adjustable else { super.scrollWheel(with: event); return }
+        // The chip follows its dot, so a gesture adjusting the band from the
+        // graph can slide a field under the pointer.  That gesture keeps its
+        // band: the event goes on up to the graph.
+        guard !isEditable, adjustable, forwardsScroll?() != true else { super.scrollWheel(with: event); return }
         let fine = event.modifierFlags.contains(.shift)
         let raw = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
         onScroll?(field, event.hasPreciseScrollingDeltas ? raw : raw * 8, fine)
@@ -266,6 +272,8 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
     /// Returns false when the text did not parse, which keeps the field open.
     var onText: ((PeqHUDField, String) -> Bool)?
     var onEditingChanged: ((Bool) -> Void)?
+    /// See `PeqHUDValueField.forwardsScroll`.
+    var forwardsScroll: (() -> Bool)?
 
     /// The size for the band last shown; the editor positions it.
     private(set) var preferredSize = NSSize(width: 110, height: 78)
@@ -310,6 +318,7 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
             v.alignment = .right
             v.onAdjust = { [weak self] in self?.onAdjust?($0, $1, $2, $3) }
             v.onScroll = { [weak self] in self?.onScroll?($0, $1, $2) }
+            v.forwardsScroll = { [weak self] in self?.forwardsScroll?() ?? false }
             v.onBeginEditing = { [weak self] in self?.beginEditing($0) }
             for label in [labels[i], units[i]] {
                 label.font = Self.quietFont

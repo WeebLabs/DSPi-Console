@@ -77,6 +77,8 @@ final class PeqGraphEditorView: NSView {
         static let emphasisTau: Double = 0.07
         static let commitDelay: TimeInterval = 0.45
         static let deviceInterval: TimeInterval = 1.0 / 30.0
+        /// Wheel events closer together than this belong to one gesture.
+        static let wheelSession: CFTimeInterval = 0.5
     }
 
     private enum Gesture {
@@ -147,6 +149,10 @@ final class PeqGraphEditorView: NSView {
     private var deviceDirty: Set<Int> = []
     private var commitTimer: Timer?
     private var wheelSlope: CGFloat = 0
+    private var wheelBand: Int?
+    private var wheelTime: CFTimeInterval = 0
+    private var hudWheelField: PeqHUDField?
+    private var hudWheelTime: CFTimeInterval = 0
     private var subscriptions: Set<AnyCancellable> = []
 
     override var isFlipped: Bool { true }
@@ -219,6 +225,10 @@ final class PeqGraphEditorView: NSView {
     func hoverForTesting(_ p: CGPoint) {
         pointer = p
         updateHover(at: p)
+    }
+    /// The chip's value field for `field`, to deliver events to it directly.
+    func hudFieldForTesting(_ field: PeqHUDField) -> NSView? {
+        hud.subviews.first { ($0 as? PeqHUDValueField)?.field == field }
     }
     func settleForTesting() {
         updateEmphasisTargets()
@@ -1003,21 +1013,51 @@ final class PeqGraphEditorView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         let p = location(event)
+        let raw = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
+        let delta = event.hasPreciseScrollingDeltas ? raw : raw * 8
+        // A new trackpad gesture always picks its band afresh; momentum and
+        // the rest of a gesture continue the one already picked.
+        let begins = event.phase == .began || event.phase == .mayBegin
+        if begins { hudWheelField = nil }
+        // A gesture that began on a chip field stays with that field.
+        if !begins, hudWheelActive, let field = hudWheelField {
+            scrollHUDField(field, delta: delta, fine: event.modifierFlags.contains(.shift))
+            return
+        }
+        guard handleWheel(at: p, delta: delta, modifiers: event.modifierFlags, begins: begins) else {
+            if p.x <= Tuning.zoomZone { zoom(with: event) } else { super.scrollWheel(with: event) }
+            return
+        }
+    }
+
+    /// Applies one wheel step; false when no band takes it, so the event can
+    /// zoom or scroll instead.  A scroll gesture stays with the band it
+    /// started on: Cmd-wheel gain moves the dot away from the pointer and a
+    /// cut shrinks the band's area, and looking the band up afresh on every
+    /// event lost it part-way, so the page scrolled instead and the gain
+    /// could not be brought back.
+    @discardableResult
+    func handleWheel(at p: CGPoint, delta rawDelta: CGFloat, modifiers: NSEvent.ModifierFlags,
+                     begins: Bool = false) -> Bool {
+        guard editing else { return false }
+        let now = CACurrentMediaTime()
         let target: Int? = {
-            guard editing else { return nil }
             if case .drag(let ctx) = gesture { return ctx.grabbed }
+            if !begins, let w = wheelBand, isBand(w), now - wheelTime < Tuning.wheelSession { return w }
             if let b = band(at: p) { return b }
             if let h = hudBand, !hud.isHidden, hud.frame.contains(p) { return h }
             return nil
         }()
         guard let b = target else {
-            if p.x <= Tuning.zoomZone { zoom(with: event) } else { super.scrollWheel(with: event) }
-            return
+            wheelBand = nil
+            return false
         }
-        let raw = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
-        let fine = event.modifierFlags.contains(.shift)
-        let delta = (event.hasPreciseScrollingDeltas ? raw : raw * 8) * (fine ? Tuning.fine : 1)
-        guard delta != 0 else { return }
+        wheelBand = b
+        wheelTime = now
+        hudWheelField = nil
+        let fine = modifiers.contains(.shift)
+        let delta = rawDelta * (fine ? Tuning.fine : 1)
+        guard delta != 0 else { return true }
         let bands = targets(for: b)
 
         // Each wheel step is one transformation of a band, applied to the
@@ -1025,7 +1065,7 @@ final class PeqGraphEditorView: NSView {
         // every drag movement rebuilds the band from that snapshot, so
         // changing only the live band let the next movement undo the wheel.
         let transform: (FilterParams) -> FilterParams?
-        if event.modifierFlags.contains(.command) {
+        if modifiers.contains(.command) {
             transform = { p in
                 guard p.type.usesGain else { return nil }
                 var q = p
@@ -1035,10 +1075,10 @@ final class PeqGraphEditorView: NSView {
         } else if let (shape, order) = PeqShape.of(current(b).type), shape.isCut {
             // FabFilter steps a cut's slope with the wheel.
             wheelSlope += delta
-            guard abs(wheelSlope) >= 24 else { return }
+            guard abs(wheelSlope) >= 24 else { return true }
             let newOrder = wheelSlope > 0 ? 2 : 1
             wheelSlope = 0
-            guard newOrder != order, let type = shape.type(order: newOrder), available.contains(type) else { return }
+            guard newOrder != order, let type = shape.type(order: newOrder), available.contains(type) else { return true }
             transform = { p in
                 guard let (s, _) = PeqShape.of(p.type), s.isCut, let t = s.type(order: newOrder) else { return nil }
                 var q = p.retyped(to: t)
@@ -1068,6 +1108,7 @@ final class PeqGraphEditorView: NSView {
         }
         if hovered == nil { setHovered(b) }
         showHUD(for: b)
+        return true
     }
 
     private func zoom(with event: NSEvent) {
@@ -1260,16 +1301,35 @@ final class PeqGraphEditorView: NSView {
         }
         hud.onText = { [weak self] field, text in self?.applyTypedValue(field, text) ?? false }
         hud.onAdjust = { [weak self] field, delta, fine, phase in self?.adjustFromHUD(field, delta, phase) }
-        hud.onScroll = { [weak self] field, delta, fine in
-            guard let self, let b = self.hudBand else { return }
-            let d = delta * (fine ? Tuning.fine : 1)
-            if let p = self.adjusted(self.current(b), field, by: d * 0.5) { self.setLiveThenCommit([b: p]) }
-        }
+        hud.onScroll = { [weak self] field, delta, fine in self?.scrollHUDField(field, delta: delta, fine: fine) }
+        hud.forwardsScroll = { [weak self] in self?.graphWheelActive ?? false }
         strip.onPick = { [weak self] shape, order in
             guard let self, let b = self.hudBand else { return }
             self.setShape(self.targets(for: b), shape: shape, order: order)
             self.closeStrip()
         }
+    }
+
+    /// A scroll gesture on a chip field keeps that field, even when adjusting
+    /// it moves the dot, the chip follows, and another row (or the graph)
+    /// ends up under the pointer.
+    private func scrollHUDField(_ field: PeqHUDField, delta: CGFloat, fine: Bool) {
+        guard let b = hudBand else { return }
+        let now = CACurrentMediaTime()
+        let locked = hudWheelActive ? (hudWheelField ?? field) : field
+        hudWheelField = locked
+        hudWheelTime = now
+        wheelBand = nil
+        let d = delta * (fine ? Tuning.fine : 1)
+        if let p = adjusted(current(b), locked, by: d * 0.5) { setLiveThenCommit([b: p]) }
+    }
+
+    private var graphWheelActive: Bool {
+        wheelBand != nil && CACurrentMediaTime() - wheelTime < Tuning.wheelSession
+    }
+
+    private var hudWheelActive: Bool {
+        hudWheelField != nil && hudBand != nil && CACurrentMediaTime() - hudWheelTime < Tuning.wheelSession
     }
 
     private func adjusted(_ p: FilterParams, _ field: PeqHUDField, by delta: CGFloat) -> FilterParams? {

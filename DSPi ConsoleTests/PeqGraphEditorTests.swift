@@ -376,6 +376,49 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertGreaterThan(p.freq, 1000, "and the drag still moved the band")
     }
 
+    /// Cmd-wheel gain moves the dot away from the pointer; the gesture must
+    /// stay with its band so the gain can come back up.
+    @MainActor
+    func testCommandWheelGainStaysWithItsBand() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 4, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(3))
+        // Down 9 dB: the dot, and the narrow band's area, leave the pointer.
+        for _ in 0..<18 { XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command)) }
+        spin(0.3) // a pause within the gesture, shorter than its timeout
+        // Back up two thirds of the way from the same pointer position.
+        for _ in 0..<12 { XCTAssertTrue(rig.view.handleWheel(at: dot, delta: 10, modifiers: .command)) }
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.gain, 0, accuracy: 0.01, "down 9 dB then up 6 dB, all on the one band")
+    }
+
+    /// The chip follows its dot, so Cmd-wheel gain can slide a chip field
+    /// under the pointer.  The gesture must keep adjusting gain, not that
+    /// field.
+    @MainActor
+    func testGraphWheelGestureIgnoresChipFieldSlidingUnderPointer() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(6))
+        rig.view.hoverForTesting(dot)
+        XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command))
+        // The next event of the same gesture lands on the chip's Width field.
+        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                       wheel1: -10, wheel2: 0, wheel3: 0))
+        cg.flags = .maskCommand
+        let wheel = try XCTUnwrap(NSEvent(cgEvent: cg))
+        try XCTUnwrap(rig.view.hudFieldForTesting(.q)).scrollWheel(with: wheel)
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.q, 2, "Width was not touched")
+        XCTAssertLessThan(p.gain, 5.6, "both steps went to the gain")
+    }
+
     @MainActor
     func testCommandDragChangesOnlyQ() throws {
         var bands = Array(repeating: FilterParams(), count: 10)
