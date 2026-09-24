@@ -7417,8 +7417,8 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_TUBE_TYPE:
             return tubeTypeName(value)
         case CS_NOUN_FILTER_TYPE:
-            let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "Low Pass",
-                         "High Pass", "Notch", "All Pass", "All Pass (1st)",
+            let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "High Cut",
+                         "Low Cut", "Notch", "All Pass", "All Pass (1st)",
                          "Low Shelf (1st)", "High Shelf (1st)"]
             return (value >= 0 && value < names.count) ? names[value] : "Type \(value)"
         default:

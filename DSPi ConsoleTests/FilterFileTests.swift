@@ -61,6 +61,21 @@ final class FilterFileTests: XCTestCase {
         }
     }
 
+    /// The app labels PEQ passes as cuts, but files keep REW's pass codes so
+    /// REW and older builds still read them.
+    func testPEQPassesShowAsCutsButExportAsPasses() {
+        let expected: [(FilterType, label: String, code: String)] = [
+            (.lowPass, "HC", "LP"), (.highPass, "LC", "HP"),
+            (.lowPass1, "HC1", "LP1"), (.highPass1, "LC1", "HP1"),
+        ]
+        for (type, label, code) in expected {
+            XCTAssertEqual(type.shortLabel, label)
+            XCTAssertEqual(type.fileCode, code)
+            XCTAssertEqual(FilterType(fileCode: code), type)
+        }
+        XCTAssertEqual(FilterType.lr4_lp.shortLabel, "LR4 LP", "crossovers keep LP and HP")
+    }
+
     func testBypassRoundTrips() {
         var band = FilterParams(type: .peaking, freq: 100, q: 1, gain: 3)
         band.bypass = true

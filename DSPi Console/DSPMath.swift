@@ -168,15 +168,17 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .peaking: return "PK"
         case .lowShelf: return "LS"
         case .highShelf: return "HS"
-        case .lowPass: return "LP"
-        case .highPass: return "HP"
+        // PEQ passes are shown as cuts, as their names are: a low pass is a
+        // high cut.  Crossovers keep LP and HP.
+        case .lowPass: return "HC"
+        case .highPass: return "LC"
         case .notch: return "NT"
         case .allPass: return "AP"
         case .allPass1: return "AP1"
         case .lowShelf1: return "LS1"
         case .highShelf1: return "HS1"
-        case .lowPass1: return "LP1"
-        case .highPass1: return "HP1"
+        case .lowPass1: return "HC1"
+        case .highPass1: return "LC1"
         case .linkwitzTransform: return "LT"
         case .lr2_lp: return "LR2 LP"
         case .lr2_hp: return "LR2 HP"
@@ -283,8 +285,16 @@ enum FilterType: Int, CaseIterable, Identifiable {
     /// re-import can't mistake them for a plain "LP".  nil for `.flat`, which is
     /// written as "OFF" instead of a type.
     var fileCode: String? {
-        guard self != .flat else { return nil }
-        return isCrossover ? shortLabel.replacingOccurrences(of: " ", with: "") : shortLabel
+        switch self {
+        case .flat: return nil
+        // Files keep REW's pass codes, which older builds also read; only the
+        // app's labels call these cuts.
+        case .lowPass: return "LP"
+        case .highPass: return "HP"
+        case .lowPass1: return "LP1"
+        case .highPass1: return "HP1"
+        default: return isCrossover ? shortLabel.replacingOccurrences(of: " ", with: "") : shortLabel
+        }
     }
 
     /// Resolve a filter-file token back to a type, accepting the aliases other

@@ -98,15 +98,14 @@ enum PeqShape: Int, CaseIterable {
     var isCut: Bool { self == .lowCut || self == .highCut }
 
     /// The two-letter code the rest of the app shows for this shape
-    /// (`FilterType.shortLabel`, without its order suffix): cuts are the
-    /// app's high and low passes.
+    /// (`FilterType.shortLabel`, without its order suffix).
     var code: String {
         switch self {
         case .bell: return "PK"
         case .lowShelf: return "LS"
-        case .lowCut: return "HP"
+        case .lowCut: return "LC"
         case .highShelf: return "HS"
-        case .highCut: return "LP"
+        case .highCut: return "HC"
         case .notch: return "NT"
         case .allPass: return "AP"
         }
