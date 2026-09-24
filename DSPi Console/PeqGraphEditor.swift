@@ -1019,13 +1019,18 @@ final class PeqGraphEditorView: NSView {
         let delta = (event.hasPreciseScrollingDeltas ? raw : raw * 8) * (fine ? Tuning.fine : 1)
         guard delta != 0 else { return }
         let bands = targets(for: b)
-        var changes: [Int: FilterParams] = [:]
 
+        // Each wheel step is one transformation of a band, applied to the
+        // live band and, mid-drag, to the drag's starting snapshot too:
+        // every drag movement rebuilds the band from that snapshot, so
+        // changing only the live band let the next movement undo the wheel.
+        let transform: (FilterParams) -> FilterParams?
         if event.modifierFlags.contains(.command) {
-            for i in bands where current(i).type.usesGain {
-                var q = current(i)
-                q.gain = Float(PeqLimits.clamp(Double(q.gain) + Double(delta) * 0.05, PeqLimits.gain))
-                changes[i] = q
+            transform = { p in
+                guard p.type.usesGain else { return nil }
+                var q = p
+                q.gain = Float(PeqLimits.clamp(Double(p.gain) + Double(delta) * 0.05, PeqLimits.gain))
+                return q
             }
         } else if let (shape, order) = PeqShape.of(current(b).type), shape.isCut {
             // FabFilter steps a cut's slope with the wheel.
@@ -1034,21 +1039,33 @@ final class PeqGraphEditorView: NSView {
             let newOrder = wheelSlope > 0 ? 2 : 1
             wheelSlope = 0
             guard newOrder != order, let type = shape.type(order: newOrder), available.contains(type) else { return }
-            for i in bands {
-                guard let (s, _) = PeqShape.of(current(i).type), s.isCut, let t = s.type(order: newOrder) else { continue }
-                var q = current(i).retyped(to: t)
+            transform = { p in
+                guard let (s, _) = PeqShape.of(p.type), s.isCut, let t = s.type(order: newOrder) else { return nil }
+                var q = p.retyped(to: t)
                 if t.usesQ { q.q = 0.707 }
-                changes[i] = q
+                return q
             }
         } else {
             let factor = pow(2, Double(delta) / 100)
-            for i in bands where current(i).type.usesQ {
-                var q = current(i)
-                q.q = Float(PeqLimits.clamp(Double(q.q) * factor, PeqLimits.q))
-                changes[i] = q
+            transform = { p in
+                guard p.type.usesQ else { return nil }
+                var q = p
+                q.q = Float(PeqLimits.clamp(Double(p.q) * factor, PeqLimits.q))
+                return q
             }
         }
-        if case .drag = gesture { setLive(changes) } else { setLiveThenCommit(changes) }
+
+        var changes: [Int: FilterParams] = [:]
+        for i in bands { if let changed = transform(current(i)) { changes[i] = changed } }
+        if case .drag(var ctx) = gesture {
+            for (i, start) in ctx.start where changes[i] != nil {
+                if let changed = transform(start) { ctx.start[i] = changed }
+            }
+            gesture = .drag(ctx)
+            setLive(changes)
+        } else {
+            setLiveThenCommit(changes)
+        }
         if hovered == nil { setHovered(b) }
         showHUD(for: b)
     }

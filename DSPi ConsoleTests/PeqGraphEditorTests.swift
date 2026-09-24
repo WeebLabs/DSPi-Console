@@ -353,6 +353,29 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(moved.params.q, 1.5, "a plain drag leaves Q alone")
     }
 
+    /// Scrolling Q in the middle of a drag must survive further movement:
+    /// the drag rebuilds the band from its starting snapshot each event.
+    @MainActor
+    func testWheelQDuringDragSurvivesMovement() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1.5, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(3))
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, dot))
+        rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, CGPoint(x: dot.x + 10, y: dot.y)))
+        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                       wheel1: 100, wheel2: 0, wheel3: 0))
+        let wheel = try XCTUnwrap(NSEvent(cgEvent: cg))
+        rig.view.scrollWheel(with: wheel)
+        rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, CGPoint(x: dot.x + 30, y: dot.y - 10)))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, CGPoint(x: dot.x + 30, y: dot.y - 10)))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertGreaterThan(p.q, 1.6, "the scrolled Q is kept after the drag moves on")
+        XCTAssertGreaterThan(p.freq, 1000, "and the drag still moved the band")
+    }
+
     @MainActor
     func testCommandDragChangesOnlyQ() throws {
         var bands = Array(repeating: FilterParams(), count: 10)
