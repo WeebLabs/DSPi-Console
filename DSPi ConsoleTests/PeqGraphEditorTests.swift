@@ -334,14 +334,45 @@ final class PeqGraphEditorTests: XCTestCase {
         rig.view.keyDown(with: e)
     }
 
+    /// A trackpad-style scroll event with its amounts set explicitly, not
+    /// left for the system to derive, so the delta the editor reads is fixed.
+    private func scrollEvent(points: Int64, flags: CGEventFlags = []) throws -> NSEvent {
+        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                       wheel1: Int32(points), wheel2: 0, wheel3: 0))
+        cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        cg.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: points)
+        cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: 0)
+        cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
+        cg.flags = flags
+        let event = try XCTUnwrap(NSEvent(cgEvent: cg))
+        XCTAssertEqual(event.scrollingDeltaY, CGFloat(points), "the event carries the delta it was given")
+        return event
+    }
+
     private func spin(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
 
+    private func doubleClick(_ rig: Rig, _ p: CGPoint) {
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p))
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p, clicks: 2))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p, clicks: 2))
+    }
+
     @MainActor
-    func testClickOnEmptyGraphCreatesTheBandUnderThePointer() throws {
+    func testSingleClickOnEmptyGraphCreatesNothing() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        click(rig, CGPoint(x: 400, y: 90))
+        XCTAssertTrue(rig.host.commits.isEmpty, "a single click never creates a band")
+    }
+
+    @MainActor
+    func testDoubleClickOnEmptyGraphCreatesTheBandUnderThePointer() throws {
         let rig = try makeRig()
         defer { rig.window.orderOut(nil) }
         let p = CGPoint(x: 400, y: 90)
-        click(rig, p)
+        doubleClick(rig, p)
+        XCTAssertEqual(rig.host.commits.count, 1, "exactly one band")
         let created = try XCTUnwrap(rig.host.commits.last?.first)
         XCTAssertEqual(created.band, 0, "the first free slot")
         XCTAssertEqual(created.params.type, .peaking)
@@ -404,9 +435,7 @@ final class PeqGraphEditorTests: XCTestCase {
         let dot = CGPoint(x: g.x(1000), y: g.y(3))
         rig.view.mouseDown(with: mouse(.leftMouseDown, rig, dot))
         rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, CGPoint(x: dot.x + 10, y: dot.y)))
-        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
-                                       wheel1: 100, wheel2: 0, wheel3: 0))
-        let wheel = try XCTUnwrap(NSEvent(cgEvent: cg))
+        let wheel = try scrollEvent(points: 100)
         rig.view.scrollWheel(with: wheel)
         rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, CGPoint(x: dot.x + 30, y: dot.y - 10)))
         rig.view.mouseUp(with: mouse(.leftMouseUp, rig, CGPoint(x: dot.x + 30, y: dot.y - 10)))
@@ -447,15 +476,69 @@ final class PeqGraphEditorTests: XCTestCase {
         rig.view.hoverForTesting(dot)
         XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command))
         // The next event of the same gesture lands on the chip's Width field.
-        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
-                                       wheel1: -10, wheel2: 0, wheel3: 0))
-        cg.flags = .maskCommand
-        let wheel = try XCTUnwrap(NSEvent(cgEvent: cg))
+        let wheel = try scrollEvent(points: -10, flags: .maskCommand)
         try XCTUnwrap(rig.view.hudFieldForTesting(.q)).scrollWheel(with: wheel)
         spin(0.7)
         let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
         XCTAssertEqual(p.q, 2, "Width was not touched")
         XCTAssertLessThan(p.gain, 5.6, "both steps went to the gain")
+    }
+
+    /// Option held on a dot: a drag locks to one axis, a click bypasses.
+    @MainActor
+    func testOptionDragLocksToOneAxis() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(3))
+        // Mostly sideways, a little down: the lock takes frequency only.
+        drag(rig, from: dot, to: CGPoint(x: dot.x + 60, y: dot.y + 12), .option)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertGreaterThan(p.freq, 1100)
+        XCTAssertEqual(p.gain, 3, "the vertical part of the drag was locked out")
+        XCTAssertTrue(rig.host.bypasses.isEmpty, "a drag is not a bypass click")
+    }
+
+    /// Shift held on a dot: a drag is fine adjustment, not a range select.
+    @MainActor
+    func testShiftDragIsFine() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(0))
+        drag(rig, from: dot, to: CGPoint(x: dot.x, y: g.y(10)), .shift)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(Double(p.gain), 10 * 0.12, accuracy: 0.15, "fine drag moves about an eighth as far")
+    }
+
+    @MainActor
+    func testNotchDragMovesFrequencyOnly() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .notch, freq: 1000, q: 3, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(0))
+        drag(rig, from: dot, to: CGPoint(x: dot.x + 40, y: dot.y - 50))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertGreaterThan(p.freq, 1050)
+        XCTAssertEqual(p.q, 3, "vertical movement does not touch a notch's Q")
+    }
+
+    @MainActor
+    func testWheelOnACutChangesQNotSlope() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .highPass, freq: 100, q: 0.707, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(100), y: rig.geometry.y(20 * log10(0.707)))
+        for _ in 0..<5 { XCTAssertTrue(rig.view.handleWheel(at: dot, delta: 20, modifiers: [])) }
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.type, .highPass, "still second order")
+        XCTAssertGreaterThan(p.q, 0.9, "the wheel raised Q")
     }
 
     @MainActor

@@ -307,7 +307,7 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
         super.init(cornerRadius: 8)
         shapeButton.imagePosition = .imageLeading
         shapeButton.imageHugsTitle = true
-        shapeButton.toolTip = "Shape and slope (Command-Option-click the dot cycles shapes)"
+        shapeButton.toolTip = "Shape and slope"
         power.handler = { [weak self] in self?.onBypass?() }
         shapeButton.handler = { [weak self] in self?.onShapeButton?() }
         ruleLine.wantsLayer = true

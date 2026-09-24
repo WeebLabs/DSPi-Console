@@ -126,7 +126,7 @@ enum PeqNodeRole: Equatable {
     /// which is 20 log10(Q), so following the cursor changes Q.
     case resonance
     /// Fixed height (0 dB for a notch or all-pass, the cutoff level of a
-    /// first-order cut).  Vertical drags change Q when the type has one.
+    /// first-order cut).  A drag moves frequency only; Q is the wheel's.
     case fixed(db: Double)
     /// Shown and selectable, but not dragged (the Linkwitz Transform, whose
     /// four values are edited in its own panel).

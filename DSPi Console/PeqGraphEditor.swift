@@ -13,20 +13,23 @@ import simd
 // `BodePlotView` then leaves out of its own drawing.
 //
 // Mouse (Command is FabFilter's Ctrl):
-//   hover empty graph     a faint dot where a click would create a band
-//   click empty graph     create it (deselects instead while bands are selected)
-//   double-click / Cmd-click empty graph   always create
+//   hover empty graph     a faint dot where a double-click would create a band
+//   double-click / Cmd-click empty graph   create it
+//   click empty graph     deselect
 //   drag the curve        pull a new bell (shelf near either end) out of it
 //   drag empty graph      marquee selection
 //   click a dot or lobe   select; Cmd toggles, Shift selects a range
-//   drag a dot            frequency and gain (or Q for cuts) of the selection
+//   drag a dot            frequency and gain (Q for second-order cuts;
+//                         frequency only for notches, all-passes and
+//                         first-order cuts, whose dots sit at a fixed level)
 //   Cmd-drag              Q of the selection
 //   Shift-drag            fine;  Option-drag  lock to one axis
-//   Option-click          bypass; Cmd-Option-click cycle shape;
-//   Option-Shift-click    cycle slope
+//   Option-click          bypass
 //   double-click a dot    type values (Tab moves between them)
-//   wheel over a band     Q (slope for cuts); Cmd-wheel gain; Shift fine
+//   wheel over a band     Q; Cmd-wheel gain; Shift fine
 //   right-click           band or graph menu
+// A modifier held on a dot means a click if the mouse comes up where it went
+// down, and a drag modifier (fine, axis lock) if it moves first.
 // Keys: Delete removes the selection, Escape deselects, Cmd-A selects all,
 // arrows move frequency and gain (Option-arrows Q), Tab steps through bands.
 
@@ -140,7 +143,6 @@ final class PeqGraphEditorView: NSView {
     private var gesture = Gesture.idle
     private var emphasis = [Emphasis](repeating: Emphasis(), count: PeqGraphRenderer.bandRows)
     private var lastFrame: CFTimeInterval = 0
-    private var lastCreation: CFTimeInterval = 0
 
     private var hudBand: Int?
     private var hudHideTimer: Timer?
@@ -148,7 +150,6 @@ final class PeqGraphEditorView: NSView {
     private var deviceTimer: Timer?
     private var deviceDirty: Set<Int> = []
     private var commitTimer: Timer?
-    private var wheelSlope: CGFloat = 0
     private var wheelBand: Int?
     private var wheelTime: CFTimeInterval = 0
     private var hudWheelField: PeqHUDField?
@@ -629,7 +630,6 @@ final class PeqGraphEditorView: NSView {
     private func createBand(_ p: FilterParams, select: Bool = true) -> Int? {
         guard let slot = freeSlot else { NSSound.beep(); return nil }
         commitNow([slot: p])
-        lastCreation = CACurrentMediaTime()
         if select {
             setSelection([slot])
             anchor = slot
@@ -684,21 +684,6 @@ final class PeqGraphEditorView: NSView {
             if let t = shape.type(order: 1), available.contains(t) { return (shape, 1) }
             return nil
         }
-    }
-
-    private func cycleShape(_ b: Int) {
-        guard let (shape, order) = PeqShape.of(current(b).type) else { return }
-        let shapes = availableShapes()
-        guard let i = shapes.firstIndex(where: { $0.0 == shape }) else { return }
-        let next = shapes[(i + 1) % shapes.count]
-        let keep = next.0.type(order: order).map(available.contains) == true ? order : next.1
-        setShape(targets(for: b), shape: next.0, order: keep)
-    }
-
-    private func cycleOrder(_ b: Int) {
-        guard let (shape, order) = PeqShape.of(current(b).type),
-              let other = shape.type(order: 3 - order), available.contains(other) else { NSSound.beep(); return }
-        setShape(targets(for: b), shape: shape, order: 3 - order)
     }
 
     /// FabFilter applies a band action to the whole selection when the band
@@ -796,9 +781,7 @@ final class PeqGraphEditorView: NSView {
             if let b = node(at: p) ?? lobe(at: p) {
                 showHUD(for: b)
                 hud.beginEditing(.freq)
-            } else if CACurrentMediaTime() - lastCreation > NSEvent.doubleClickInterval {
-                // The first click may already have made this band; then the
-                // second one does nothing.
+            } else {
                 createBand(PeqCreation.band(at: p, in: geometry, available: available, fromCurve: false))
             }
             gesture = .idle
@@ -806,25 +789,9 @@ final class PeqGraphEditorView: NSView {
         }
 
         if let b = band(at: p) {
-            if mods.contains(.option) {
-                if mods.contains(.command) { cycleShape(b) }
-                else if mods.contains(.shift) { cycleOrder(b) }
-                else { toggleBypass(targets(for: b)) }
-                gesture = .idle
-                return
-            }
-            if mods.contains(.shift), !mods.contains(.command) {
-                let order = frequencyOrder(graphBands)
-                if let a = anchor, let i = order.firstIndex(of: a), let j = order.firstIndex(of: b) {
-                    setSelection(Set(order[min(i, j)...max(i, j)]))
-                } else {
-                    setSelection([b])
-                    anchor = b
-                }
-                gesture = .idle
-                return
-            }
-            if !mods.contains(.command), !selection.contains(b) {
+            // Modified presses wait for mouse-up (a click) or movement (a
+            // drag) before doing anything, so Option and Shift can mean both.
+            if mods.isDisjoint(with: [.command, .option, .shift]), !selection.contains(b) {
                 setSelection([b])
                 anchor = b
             }
@@ -851,7 +818,12 @@ final class PeqGraphEditorView: NSView {
             var bands = selection.contains(b) ? selection : [b]
             if mods.contains(.command) { bands.insert(b) }
             if case .locked = role(current(b)) { gesture = .idle; return }
-            if mods.contains(.command), !selection.contains(b) { setSelection(selection.union([b])) }
+            if mods.contains(.command), !selection.contains(b) {
+                setSelection(selection.union([b]))
+            } else if !selection.contains(b) {
+                setSelection([b])
+                anchor = b
+            }
             beginDrag(grabbed: b, bands: bands, at: start, qMode: mods.contains(.command), lock: mods.contains(.option))
             continueDrag(to: p, event: event)
         case .background(let start, let onCurve, let mods):
@@ -867,7 +839,6 @@ final class PeqGraphEditorView: NSView {
                 if slot < shown.count { shown[slot] = band }
                 setSelection([slot])
                 anchor = slot
-                lastCreation = CACurrentMediaTime()
                 beginDrag(grabbed: slot, bands: [slot], at: start, qMode: false, lock: mods.contains(.option))
                 continueDrag(to: p, event: event)
             } else {
@@ -890,21 +861,29 @@ final class PeqGraphEditorView: NSView {
         let p = location(event)
         switch gesture {
         case .press(let b, _, let mods):
-            if mods.contains(.command) {
+            // Released without moving: a click.
+            if mods.contains(.option) {
+                toggleBypass(targets(for: b))
+            } else if mods.contains(.command) {
                 setSelection(selection.symmetricDifference([b]))
                 anchor = b
+            } else if mods.contains(.shift) {
+                let order = frequencyOrder(graphBands)
+                if let a = anchor, let i = order.firstIndex(of: a), let j = order.firstIndex(of: b) {
+                    setSelection(Set(order[min(i, j)...max(i, j)]))
+                } else {
+                    setSelection([b])
+                    anchor = b
+                }
             } else {
                 setSelection([b])
                 anchor = b
             }
-        case .background(let start, _, _):
-            // FabFilter Pro-Q 4: a click on empty graph deselects when bands
-            // are selected, and otherwise creates the previewed band.
-            if !selection.isEmpty {
-                setSelection([])
-            } else if event.clickCount < 2 {
-                createBand(PeqCreation.band(at: start, in: geometry, available: available, fromCurve: false))
-            }
+        case .background:
+            // A single click on empty graph only deselects; creating a band
+            // takes a double-click (or Cmd-click), so a click to focus or
+            // dismiss never adds one by accident.
+            setSelection([])
         case .drag:
             commitLive()
             NSCursor.openHand.set()
@@ -978,7 +957,10 @@ final class PeqGraphEditorView: NSView {
             let db = r0.db(for: g0) + dbDelta
             g.q = Float(PeqLimits.clamp(pow(10, db / 20), PeqLimits.q))
         case .fixed:
-            if g0.type.usesQ { g.q = Float(PeqLimits.clamp(Double(g0.q) * qFactor, PeqLimits.q)) }
+            // The dot sits at a fixed level (a notch or all-pass on 0 dB, a
+            // first-order cut at its corner), so it cannot follow the pointer
+            // vertically; a drag moves frequency only.  Q is the wheel's.
+            break
         case .locked:
             return [:]
         }
@@ -1072,20 +1054,9 @@ final class PeqGraphEditorView: NSView {
                 q.gain = Float(PeqLimits.clamp(Double(p.gain) + Double(delta) * 0.05, PeqLimits.gain))
                 return q
             }
-        } else if let (shape, order) = PeqShape.of(current(b).type), shape.isCut {
-            // FabFilter steps a cut's slope with the wheel.
-            wheelSlope += delta
-            guard abs(wheelSlope) >= 24 else { return true }
-            let newOrder = wheelSlope > 0 ? 2 : 1
-            wheelSlope = 0
-            guard newOrder != order, let type = shape.type(order: newOrder), available.contains(type) else { return true }
-            transform = { p in
-                guard let (s, _) = PeqShape.of(p.type), s.isCut, let t = s.type(order: newOrder) else { return nil }
-                var q = p.retyped(to: t)
-                if t.usesQ { q.q = 0.707 }
-                return q
-            }
         } else {
+            // Q for every shape that has one, cuts included; slope is set
+            // from the card's shape strip or the band menu.
             let factor = pow(2, Double(delta) / 100)
             transform = { p in
                 guard p.type.usesQ else { return nil }
