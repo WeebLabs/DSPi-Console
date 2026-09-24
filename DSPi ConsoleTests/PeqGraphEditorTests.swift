@@ -500,6 +500,37 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertTrue(rig.host.bypasses.isEmpty, "a drag is not a bypass click")
     }
 
+    /// Option pressed part-way through a drag locks to the axis moved along
+    /// so far, freezing the other where it is (no jump); releasing it frees
+    /// the drag again from there, also without a jump.
+    @MainActor
+    func testOptionMidDragLocksWithoutAJump() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(0))
+        func move(_ p: CGPoint, _ mods: NSEvent.ModifierFlags = []) {
+            rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, p, mods))
+        }
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, dot))
+        // Free drag, mostly sideways, drifting up to +2 dB.
+        let a = CGPoint(x: dot.x + 60, y: g.y(2))
+        move(CGPoint(x: dot.x + 30, y: g.y(1)))
+        move(a)
+        // Option now: locked to frequency; gain holds at +2 dB.
+        move(CGPoint(x: a.x + 20, y: g.y(8)), .option)
+        let b = CGPoint(x: a.x + 40, y: g.y(-5))
+        move(b, .option)
+        // Release Option: vertical movement counts again, from +2 dB.
+        move(CGPoint(x: b.x, y: b.y - (g.y(0) - g.y(3))))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, CGPoint(x: b.x, y: b.y)))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(Double(p.freq), g.freq(dot.x + 100), accuracy: 2, "frequency followed all the sideways movement")
+        XCTAssertEqual(Double(p.gain), 5, accuracy: 0.05, "held at +2 dB while locked, then +3 dB more once free")
+    }
+
     /// Shift held on a dot: a drag is fine adjustment, not a range select.
     @MainActor
     func testShiftDragIsFine() throws {

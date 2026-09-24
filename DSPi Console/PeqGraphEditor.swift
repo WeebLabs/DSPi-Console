@@ -98,10 +98,14 @@ final class PeqGraphEditorView: NSView {
         var grabbed: Int
         var start: [Int: FilterParams]
         var last: CGPoint
+        /// Pointer movement applied so far, after fine scaling and any lock.
         var offset = CGPoint.zero
         var qMode: Bool
-        var lockAxis: Bool
+        /// The axis Option has locked the drag to; nil when free.
         var axis: Axis?
+        /// Option is held but no axis is chosen yet: movement gathers here,
+        /// with the band held still, until it shows a direction.
+        var pending: CGPoint?
         enum Axis { case horizontal, vertical }
     }
 
@@ -824,7 +828,7 @@ final class PeqGraphEditorView: NSView {
                 setSelection([b])
                 anchor = b
             }
-            beginDrag(grabbed: b, bands: bands, at: start, qMode: mods.contains(.command), lock: mods.contains(.option))
+            beginDrag(grabbed: b, bands: bands, at: start, qMode: mods.contains(.command))
             continueDrag(to: p, event: event)
         case .background(let start, let onCurve, let mods):
             guard hypot(p.x - start.x, p.y - start.y) >= Tuning.dragThreshold else { return }
@@ -839,7 +843,7 @@ final class PeqGraphEditorView: NSView {
                 if slot < shown.count { shown[slot] = band }
                 setSelection([slot])
                 anchor = slot
-                beginDrag(grabbed: slot, bands: [slot], at: start, qMode: false, lock: mods.contains(.option))
+                beginDrag(grabbed: slot, bands: [slot], at: start, qMode: false)
                 continueDrag(to: p, event: event)
             } else {
                 let base = mods.contains(.shift) || mods.contains(.command) ? selection : []
@@ -897,34 +901,60 @@ final class PeqGraphEditorView: NSView {
         updateHover(at: p)
     }
 
-    private func beginDrag(grabbed: Int, bands: Set<Int>, at point: CGPoint, qMode: Bool, lock: Bool) {
+    private func beginDrag(grabbed: Int, bands: Set<Int>, at point: CGPoint, qMode: Bool) {
         commitTimer?.invalidate()
         var start: [Int: FilterParams] = [:]
         for b in bands where isBand(b) || live[b] != nil { start[b] = current(b) }
         start[grabbed] = current(grabbed)
-        gesture = .drag(DragContext(grabbed: grabbed, start: start, last: point, qMode: qMode, lockAxis: lock))
+        gesture = .drag(DragContext(grabbed: grabbed, start: start, last: point, qMode: qMode))
         ghost = nil
         axisLabel.isHidden = true
         showHUD(for: grabbed)
         (qMode ? NSCursor.resizeUpDown : NSCursor.closedHand).set()
     }
 
+    /// Option locks the drag to one axis whenever it is held, not only from
+    /// the start, and never makes the band jump: while locked, movement on
+    /// the other axis is simply not applied, so that axis stays where it was
+    /// when the lock engaged, and releasing Option carries on from there.
+    /// Engaging mid-drag takes the axis the drag has mostly moved along;
+    /// with too little movement to tell (or Option held from the start), the
+    /// next few points of movement decide.
     private func continueDrag(to p: CGPoint, event: NSEvent) {
         guard case .drag(var ctx) = gesture else { return }
-        let fine = event.modifierFlags.contains(.shift)
-        let scale = fine ? Tuning.fine : 1
-        ctx.offset.x += (p.x - ctx.last.x) * scale
-        ctx.offset.y += (p.y - ctx.last.y) * scale
+        let scale = event.modifierFlags.contains(.shift) ? Tuning.fine : 1
+        let move = CGPoint(x: (p.x - ctx.last.x) * scale, y: (p.y - ctx.last.y) * scale)
         ctx.last = p
-        if ctx.lockAxis, ctx.axis == nil, hypot(ctx.offset.x, ctx.offset.y) > 4 {
-            ctx.axis = abs(ctx.offset.x) >= abs(ctx.offset.y) ? .horizontal : .vertical
+        func dominant(_ v: CGPoint) -> DragContext.Axis { abs(v.x) >= abs(v.y) ? .horizontal : .vertical }
+
+        if !event.modifierFlags.contains(.option) {
+            ctx.axis = nil
+            ctx.pending = nil
+            ctx.offset.x += move.x
+            ctx.offset.y += move.y
+        } else {
+            if ctx.axis == nil, ctx.pending == nil {
+                if hypot(ctx.offset.x, ctx.offset.y) >= 4 { ctx.axis = dominant(ctx.offset) } else { ctx.pending = .zero }
+            }
+            if var pending = ctx.pending {
+                pending.x += move.x
+                pending.y += move.y
+                if hypot(pending.x, pending.y) >= 4 {
+                    let axis = dominant(pending)
+                    ctx.axis = axis
+                    ctx.pending = nil
+                    if axis == .horizontal { ctx.offset.x += pending.x } else { ctx.offset.y += pending.y }
+                } else {
+                    ctx.pending = pending
+                }
+            } else if ctx.axis == .horizontal {
+                ctx.offset.x += move.x
+            } else {
+                ctx.offset.y += move.y
+            }
         }
         gesture = .drag(ctx)
-        var dx = ctx.offset.x, dy = ctx.offset.y
-        if ctx.axis == .horizontal { dy = 0 }
-        if ctx.axis == .vertical { dx = 0 }
-        if ctx.lockAxis, ctx.axis == nil { dx = 0; dy = 0 }
-        setLive(dragResult(ctx, dx: dx, dy: dy))
+        setLive(dragResult(ctx, dx: ctx.offset.x, dy: ctx.offset.y))
     }
 
     /// Applies a drag offset to the bands that were grabbed, FabFilter style:
