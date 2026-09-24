@@ -1133,6 +1133,11 @@ private struct GraphSetupPage: View {
             GraphOptionsToggleRow(title: "Frequency Labels", isOn: $settings.showFrequencyLabels)
             GraphOptionsToggleRow(title: "dB Grid", isOn: $settings.showDBGrid)
             GraphOptionsToggleRow(title: "dB Labels", isOn: $settings.showDBLabels)
+            sliderRow("Grid Opacity", value: "\(Int((settings.graphGridOpacity * 100).rounded()))%",
+                      binding: $settings.graphGridOpacity, in: 0...2, step: 0.05)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 2)
+                .disabled(!settings.showFrequencyGrid && !settings.showDBGrid)
 
             sectionHeader("CURVES")
             sliderRow("Line Width", value: String(format: "%.1f pt", settings.graphLineWidth),

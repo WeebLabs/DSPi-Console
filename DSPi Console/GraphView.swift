@@ -255,6 +255,10 @@ struct BodePlotView: View {
                 let dTop = dbTop
                 let dBot = dbBottom
                 let dbSpan = dTop - dBot
+                // The user's grid opacity scales each line's own strength, so
+                // major, minor and 0 dB lines keep their relative weights.
+                let grid = settings.graphGridOpacity
+                func gridColor(_ alpha: Double) -> GraphicsContext.Shading { .color(.white.opacity(min(alpha * grid, 1))) }
 
                 // Frequency gridlines
                 if settings.showFrequencyGrid {
@@ -270,7 +274,7 @@ struct BodePlotView: View {
                             path.addLine(to: CGPoint(x: x, y: size.height))
                         }
                     }
-                    context.stroke(majorPath, with: .color(.white.opacity(0.15)))
+                    context.stroke(majorPath, with: gridColor(0.15))
 
                     let minorPath = Path { path in
                         for f in minorFreqs where f >= minF && f <= maxF && !majorFreqs.contains(f) {
@@ -279,7 +283,7 @@ struct BodePlotView: View {
                             path.addLine(to: CGPoint(x: x, y: size.height))
                         }
                     }
-                    context.stroke(minorPath, with: .color(.white.opacity(0.06)))
+                    context.stroke(minorPath, with: gridColor(0.06))
                 }
 
                 // dB gridlines
@@ -297,7 +301,7 @@ struct BodePlotView: View {
                             db += step
                         }
                     }
-                    context.stroke(dbPath, with: .color(.white.opacity(0.1)))
+                    context.stroke(dbPath, with: gridColor(0.1))
 
                     // 0dB reference line
                     if dBot <= 0 && dTop >= 0 {
@@ -305,7 +309,7 @@ struct BodePlotView: View {
                         var zeroPath = Path()
                         zeroPath.move(to: CGPoint(x: 0, y: zeroY))
                         zeroPath.addLine(to: CGPoint(x: size.width, y: zeroY))
-                        context.stroke(zeroPath, with: .color(.white.opacity(0.3)), lineWidth: 1)
+                        context.stroke(zeroPath, with: gridColor(0.3), lineWidth: 1)
                     }
                 }
 

@@ -52,6 +52,9 @@ class AppSettings: ObservableObject {
     @AppStorage("showDBLabels") var showDBLabels: Bool = true
     @AppStorage("showFrequencyGrid") var showFrequencyGrid: Bool = true
     @AppStorage("showDBGrid") var showDBGrid: Bool = true
+    /// Scales every grid line on the response graph, the 0 dB line included;
+    /// 1 is the original look, 0 hides them, 2 doubles them.
+    @AppStorage("graphGridOpacity") var graphGridOpacity: Double = 1.0
     @AppStorage("graphDBRange") var graphDBRange: Double = 50.0
     @AppStorage("graphDBCenter") var graphDBCenter: Double = 0.0
     @AppStorage("graphHeight") var graphHeight: Double = 250.0
@@ -1848,6 +1851,13 @@ struct GraphingSettingsTab: View {
                         .toggleStyle(.switch)
                     Toggle("Show dB Labels", isOn: $settings.showDBLabels)
                         .toggleStyle(.switch)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Grid Opacity: \(Int((settings.graphGridOpacity * 100).rounded()))%")
+                            .font(.body)
+                        Slider(value: $settings.graphGridOpacity, in: 0...2, step: 0.05)
+                    }
+                    .disabled(!settings.showFrequencyGrid && !settings.showDBGrid)
 
                     Divider()
 
