@@ -82,6 +82,9 @@ final class PeqGraphEditorView: NSView {
         static let deviceInterval: TimeInterval = 1.0 / 30.0
         /// Wheel events closer together than this belong to one gesture.
         static let wheelSession: CFTimeInterval = 0.5
+        /// How long the pointer rests on a band before its list row scrolls
+        /// into view.
+        static let revealDwell: TimeInterval = 0.25
     }
 
     private enum Gesture {
@@ -150,6 +153,7 @@ final class PeqGraphEditorView: NSView {
 
     private var hudBand: Int?
     private var hudHideTimer: Timer?
+    private var revealTimer: Timer?
     private var hudAdjustStart: FilterParams?
     private var deviceTimer: Timer?
     private var deviceDirty: Set<Int> = []
@@ -216,6 +220,7 @@ final class PeqGraphEditorView: NSView {
                 guard let self, set != self.selection else { return }
                 self.selection = set
                 self.anchor = set.count == 1 ? set.first : self.anchor
+                self.pinHUDToSelection()
                 self.invalidate()
             }
             .store(in: &subscriptions)
@@ -235,6 +240,8 @@ final class PeqGraphEditorView: NSView {
     func hudFieldForTesting(_ field: PeqHUDField) -> NSView? {
         hud.subviews.first { ($0 as? PeqHUDValueField)?.field == field }
     }
+    /// The band the chip is showing, or nil when it is hidden.
+    var hudBandForTesting: Int? { hud.isHidden ? nil : hudBand }
     func settleForTesting() {
         updateEmphasisTargets()
         metal?.renderer.picture = picture()
@@ -246,7 +253,7 @@ final class PeqGraphEditorView: NSView {
         commitLive()
         metal?.stopAnimating()
         subscriptions.removeAll()
-        [hudHideTimer, deviceTimer, commitTimer].forEach { $0?.invalidate() }
+        [hudHideTimer, revealTimer, deviceTimer, commitTimer].forEach { $0?.invalidate() }
     }
 
     // MARK: - Configuration
@@ -618,6 +625,7 @@ final class PeqGraphEditorView: NSView {
         guard valid != selection else { return }
         selection = valid
         if vm?.peqSelection.selected != valid { vm?.peqSelection.selected = valid }
+        pinHUDToSelection()
         invalidate()
     }
 
@@ -625,7 +633,26 @@ final class PeqGraphEditorView: NSView {
         guard band != hovered else { return }
         hovered = band
         if vm?.peqSelection.graphHovered != band { vm?.peqSelection.graphHovered = band }
+        scheduleReveal()
         invalidate()
+    }
+
+    /// Once the pointer rests on a band, its list row scrolls into view.  A
+    /// sweep across the graph passes over bands too briefly to move the
+    /// list, and the list holds still while a band is dragged or wheeled.
+    private func scheduleReveal() {
+        revealTimer?.invalidate()
+        guard let band = hovered else { return }
+        let timer = Timer(timeInterval: Tuning.revealDwell, repeats: false) { [weak self] _ in
+            guard let self, self.hovered == band else { return }
+            guard case .idle = self.gesture, !self.graphWheelActive, !self.hudWheelActive else {
+                self.scheduleReveal()
+                return
+            }
+            self.vm?.peqSelection.revealRow.send(band)
+        }
+        revealTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // MARK: - Band operations
@@ -650,6 +677,7 @@ final class PeqGraphEditorView: NSView {
         setSelection(selection.subtracting(targets))
         if let h = hudBand, targets.contains(h) { hideHUD(animated: true) }
         commitNow(changes)
+        pinHUDToSelection()
     }
 
     private func toggleBypass(_ bands: Set<Int>) {
@@ -747,7 +775,11 @@ final class PeqGraphEditorView: NSView {
         let dot = node(at: p)
         let hit = dot ?? lobe(at: p)
         setHovered(hit)
-        if let dot {
+        if let pin = selectedChipBand {
+            // The chip stays on the selection; hovering another band lights
+            // it and its list row instead.
+            if hud.isHidden || hudBand != pin { showHUD(for: pin) }
+        } else if let dot {
             if hudBand != dot || hud.isHidden { showHUD(for: dot) } else { hudHideTimer?.invalidate() }
         } else if !hud.isHidden, !hud.isEditingText {
             scheduleHUDHide()
@@ -800,7 +832,9 @@ final class PeqGraphEditorView: NSView {
                 anchor = b
             }
             gesture = .press(band: b, at: p, modifiers: mods)
-            showHUD(for: b)
+            // A modified press on a band outside the selection leaves the
+            // chip on the selection.
+            showHUD(for: selection.isEmpty || selection.contains(b) ? b : (selectedChipBand ?? b))
             return
         }
 
@@ -1049,18 +1083,29 @@ final class PeqGraphEditorView: NSView {
     /// cut shrinks the band's area, and looking the band up afresh on every
     /// event lost it part-way, so the page scrolled instead and the gain
     /// could not be brought back.
+    ///
+    /// An explicit selection owns the wheel: wherever the wheel would adjust
+    /// a band, it adjusts the selection instead, so drifting over another
+    /// band's dot or area mid-adjustment cannot switch to it.  Choosing a
+    /// different band takes a click.  Empty graph keeps zoom and scrolling.
     @discardableResult
     func handleWheel(at p: CGPoint, delta rawDelta: CGFloat, modifiers: NSEvent.ModifierFlags,
                      begins: Bool = false) -> Bool {
         guard editing else { return false }
         let now = CACurrentMediaTime()
+        let owner = selectedChipBand
         let target: Int? = {
             if case .drag(let ctx) = gesture { return ctx.grabbed }
-            if !begins, let w = wheelBand, isBand(w), now - wheelTime < Tuning.wheelSession { return w }
+            if !begins, let w = wheelBand, isBand(w), now - wheelTime < Tuning.wheelSession,
+               owner == nil || selection.contains(w) { return w }
             // The chip is drawn over the graph, so it wins over a band area
             // beneath it.
-            if let h = hudBand, !hud.isHidden, hud.frame.contains(p) { return h }
-            return band(at: p)
+            let chip: Int? = {
+                guard let h = hudBand, !hud.isHidden, hud.frame.contains(p) else { return nil }
+                return h
+            }()
+            guard let under = chip ?? band(at: p) else { return nil }
+            return owner ?? under
         }()
         guard let b = target else {
             wheelBand = nil
@@ -1112,6 +1157,15 @@ final class PeqGraphEditorView: NSView {
         if hovered == nil { setHovered(b) }
         showHUD(for: b)
         return true
+    }
+
+    /// The selected band the chip is pinned to and the wheel adjusts: the one
+    /// the chip already shows if it is selected, else the selection anchor,
+    /// else the lowest.  `targets(for:)` widens it to the whole selection.
+    private var selectedChipBand: Int? {
+        if let h = hudBand, selection.contains(h) { return h }
+        if let a = anchor, selection.contains(a) { return a }
+        return frequencyOrder(Array(selection)).first
     }
 
     private func zoom(with event: NSEvent) {
@@ -1428,8 +1482,20 @@ final class PeqGraphEditorView: NSView {
         if !strip.isHidden { layoutStrip() }
     }
 
+    /// While bands are selected the chip stays up on the selection, wherever
+    /// the pointer goes; with none selected it follows the hovered dot.
+    private func pinHUDToSelection() {
+        if let pin = selectedChipBand {
+            if case .marquee = gesture { return }
+            if hud.isHidden || hudBand != pin { showHUD(for: pin) }
+        } else if let h = hudBand, pointer.flatMap(node(at:)) != h {
+            scheduleHUDHide()
+        }
+    }
+
     private func scheduleHUDHide() {
         guard !hud.isHidden, !hud.isEditingText else { return }
+        if let h = hudBand, selection.contains(h) { return }
         if case .drag = gesture { return }
         hudHideTimer?.invalidate()
         let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in self?.hideHUD(animated: true) }

@@ -2767,8 +2767,9 @@ struct PeqRowHighlight: View {
 
 
 /// Scrolls the band list just far enough to show a band newly selected on
-/// the graph; a row already in view does not move.  Its own small observer,
-/// so a selection change redraws this and not the list.
+/// the graph, or one the pointer rests on there; a row already in view does
+/// not move.  Its own small observer, so a selection change redraws this and
+/// not the list.
 private struct PeqRowScrollFollower: View {
     @ObservedObject var selection: PeqGraphSelection
     let proxy: ScrollViewProxy
@@ -2783,10 +2784,18 @@ private struct PeqRowScrollFollower: View {
                 let added = selected.subtracting(previous).sorted()
                 previous = selected
                 guard let band = added.first, band < rows else { return }
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    // A nil anchor scrolls the least needed to show the row.
-                    proxy.scrollTo(band, anchor: nil)
-                }
+                reveal(band)
             }
+            .onReceive(selection.revealRow) { band in
+                guard band < rows else { return }
+                reveal(band)
+            }
+    }
+
+    private func reveal(_ band: Int) {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            // A nil anchor scrolls the least needed to show the row.
+            proxy.scrollTo(band, anchor: nil)
+        }
     }
 }

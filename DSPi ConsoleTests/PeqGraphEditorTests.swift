@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
+import Combine
 @testable import DSPi_Console
 
 /// On-graph PEQ editing: the single-precision response the GPU evaluates, the
@@ -260,6 +261,10 @@ final class PeqGraphEditorTests: XCTestCase {
         selection.selected = [0]
         spin(0.6)
         XCTAssertLessThan(scroll.contentView.bounds.origin.y, scrolled - 20, "and back up for the first")
+        let first = scroll.contentView.bounds.origin.y
+        selection.revealRow.send(9)
+        spin(0.6)
+        XCTAssertGreaterThan(scroll.contentView.bounds.origin.y, first + 20, "a band rested on in the graph is revealed too")
     }
 
     // MARK: - Editor interaction
@@ -515,6 +520,121 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(p.q, 2, "Width was not touched")
         XCTAssertEqual(p.freq, 1000, "nor Frequency")
         XCTAssertEqual(p.gain, 4.5, accuracy: 0.01, "all three steps went to the gain")
+    }
+
+    /// An explicit selection owns the wheel: scrolling over another band's
+    /// dot or area adjusts the selection, not the band under the pointer.
+    @MainActor
+    func testSelectionOwnsTheWheel() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let selectedDot = CGPoint(x: g.x(1000), y: g.y(6))
+        let otherDot = CGPoint(x: g.x(4000), y: g.y(6))
+        let otherArea = CGPoint(x: g.x(4000), y: g.y(3))
+        func latest() -> [Int: FilterParams] {
+            var out: [Int: FilterParams] = [:]
+            for commit in rig.host.commits { for c in commit { out[c.band] = c.params } }
+            return out
+        }
+        click(rig, selectedDot)
+        XCTAssertEqual(rig.host.peqSelection.selected, [0])
+
+        // Each step starts a fresh gesture, so no gesture hold is involved.
+        XCTAssertTrue(rig.view.handleWheel(at: otherDot, delta: -10, modifiers: .command, begins: true))
+        XCTAssertTrue(rig.view.handleWheel(at: otherArea, delta: 100, modifiers: [], begins: true))
+        XCTAssertFalse(rig.view.handleWheel(at: CGPoint(x: g.x(200), y: g.y(-15)), delta: 10, modifiers: .command, begins: true),
+                       "empty graph still zooms or scrolls")
+        spin(1.1)
+        var p = latest()
+        XCTAssertEqual(try XCTUnwrap(p[0]).gain, 5.5, accuracy: 0.01, "the gain step went to the selection")
+        XCTAssertEqual(try XCTUnwrap(p[0]).q, 4, accuracy: 0.01, "and so did the Q step")
+        XCTAssertNil(p[1], "the band under the pointer was not touched")
+        XCTAssertEqual(rig.view.hudBandForTesting, 0, "the chip is on the selection")
+
+        // The selected band's own chip fields still take the wheel.
+        let target = try XCTUnwrap(rig.view.hudFieldForTesting(.freq))
+        let onField = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: rig.view)
+        target.scrollWheel(with: try scrollEvent(points: 100, windowPoint: rig.view.convert(onField, to: nil)))
+        spin(0.7)
+        XCTAssertGreaterThan(try XCTUnwrap(latest()[0]).freq, 1000, "the selected band's Frequency field works")
+
+        // With nothing selected the wheel adjusts the band under the pointer.
+        click(rig, CGPoint(x: g.x(200), y: g.y(-15)))
+        XCTAssertEqual(rig.host.peqSelection.selected, [])
+        XCTAssertTrue(rig.view.handleWheel(at: otherDot, delta: -10, modifiers: .command, begins: true))
+        spin(0.7)
+        p = latest()
+        XCTAssertEqual(try XCTUnwrap(p[1]).gain, 5.5, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(p[0]).gain, 5.5, accuracy: 0.01, "the earlier band is unchanged")
+    }
+
+    /// With a selection the chip stays on it, wherever the pointer goes;
+    /// with none it follows the hovered dot.
+    @MainActor
+    func testChipStaysOnTheSelection() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot0 = CGPoint(x: g.x(1000), y: g.y(6))
+        let dot1 = CGPoint(x: g.x(4000), y: g.y(6))
+        let empty = CGPoint(x: g.x(200), y: g.y(-15))
+        click(rig, dot0)
+        rig.view.hoverForTesting(dot1)
+        XCTAssertEqual(rig.view.hudBandForTesting, 0, "hovering another dot leaves the chip on the selection")
+        XCTAssertEqual(rig.host.peqSelection.graphHovered, 1, "while the hovered band still lights up")
+        rig.view.hoverForTesting(empty)
+        spin(0.6)
+        XCTAssertEqual(rig.view.hudBandForTesting, 0, "leaving the dot does not hide it")
+
+        rig.host.peqSelection.selected = [1]
+        XCTAssertEqual(rig.view.hudBandForTesting, 1, "a band selected in the list takes the chip")
+
+        click(rig, empty)
+        XCTAssertEqual(rig.host.peqSelection.selected, [])
+        spin(0.6)
+        XCTAssertNil(rig.view.hudBandForTesting, "clearing the selection lets the chip go")
+        rig.view.hoverForTesting(dot1)
+        XCTAssertEqual(rig.view.hudBandForTesting, 1, "with nothing selected the chip follows the hovered dot")
+    }
+
+    /// The list scrolls to a band only once the pointer rests on it, and not
+    /// while a band is being wheeled.
+    @MainActor
+    func testRestingOnABandRevealsItsRow() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot0 = CGPoint(x: g.x(1000), y: g.y(6))
+        let dot1 = CGPoint(x: g.x(4000), y: g.y(6))
+        var revealed: [Int] = []
+        let watch = rig.host.peqSelection.revealRow.sink { revealed.append($0) }
+        defer { watch.cancel() }
+
+        // Passing over band 0 on the way to band 1 reveals only band 1.
+        rig.view.hoverForTesting(dot0)
+        spin(0.1)
+        rig.view.hoverForTesting(dot1)
+        XCTAssertEqual(revealed, [], "nothing before the pointer rests")
+        spin(0.4)
+        XCTAssertEqual(revealed, [1])
+
+        // Wheeling band 1 then drifting onto band 0 waits for the wheel to stop.
+        XCTAssertTrue(rig.view.handleWheel(at: dot1, delta: -10, modifiers: .command, begins: true))
+        rig.view.hoverForTesting(dot0)
+        spin(0.35)
+        XCTAssertEqual(revealed, [1], "the list holds still while a band is wheeled")
+        spin(0.6)
+        XCTAssertEqual(revealed, [1, 0], "and follows once the wheel stops")
     }
 
     /// Option held on a dot: a drag locks to one axis, a click bypasses.

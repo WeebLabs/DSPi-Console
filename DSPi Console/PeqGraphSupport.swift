@@ -11,6 +11,9 @@ final class PeqGraphSelection: ObservableObject {
     @Published var graphHovered: Int?
     /// The row under the pointer in the list; its dot and lobe light up.
     @Published var listHovered: Int?
+    /// A band the pointer has rested on in the graph; the list scrolls its
+    /// row into view.  An event, not state, so the same band can ask again.
+    let revealRow = PassthroughSubject<Int, Never>()
 
     func reset() {
         if !selected.isEmpty { selected = [] }
