@@ -54,7 +54,7 @@ class AppSettings: ObservableObject {
     @AppStorage("showDBGrid") var showDBGrid: Bool = true
     /// Scales every grid line on the response graph, the 0 dB line included;
     /// 1 is the original look, 0 hides them, 2 doubles them.
-    @AppStorage("graphGridOpacity") var graphGridOpacity: Double = 1.0
+    @AppStorage("graphGridOpacity") var graphGridOpacity: Double = 0.5
     @AppStorage("graphDBRange") var graphDBRange: Double = 50.0
     @AppStorage("graphDBCenter") var graphDBCenter: Double = 0.0
     @AppStorage("graphHeight") var graphHeight: Double = 250.0
@@ -204,6 +204,12 @@ class AppSettings: ObservableObject {
            let amount = defaults.object(forKey: "rtaSmoothing") as? Double {
             defaults.set(amount > 0, forKey: "rtaSmoothingOn")
             defaults.removeObject(forKey: "rtaSmoothing")
+        }
+        // The grid opacity default dropped from 100 % to 50 %.  Clear a value
+        // saved before then, once, so every grid starts from the new default.
+        if !defaults.bool(forKey: "graphGridOpacityReset") {
+            defaults.removeObject(forKey: "graphGridOpacity")
+            defaults.set(true, forKey: "graphGridOpacityReset")
         }
     }
 }
@@ -1855,7 +1861,7 @@ struct GraphingSettingsTab: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Grid Opacity: \(Int((settings.graphGridOpacity * 100).rounded()))%")
                             .font(.body)
-                        Slider(value: $settings.graphGridOpacity, in: 0...2, step: 0.05)
+                        Slider(value: $settings.graphGridOpacity, in: 0...2)
                     }
                     .disabled(!settings.showFrequencyGrid && !settings.showDBGrid)
 

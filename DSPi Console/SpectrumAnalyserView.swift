@@ -1134,7 +1134,7 @@ private struct GraphSetupPage: View {
             GraphOptionsToggleRow(title: "dB Grid", isOn: $settings.showDBGrid)
             GraphOptionsToggleRow(title: "dB Labels", isOn: $settings.showDBLabels)
             sliderRow("Grid Opacity", value: "\(Int((settings.graphGridOpacity * 100).rounded()))%",
-                      binding: $settings.graphGridOpacity, in: 0...2, step: 0.05)
+                      binding: $settings.graphGridOpacity, in: 0...2)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 2)
                 .disabled(!settings.showFrequencyGrid && !settings.showDBGrid)
