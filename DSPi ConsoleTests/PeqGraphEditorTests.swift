@@ -336,7 +336,9 @@ final class PeqGraphEditorTests: XCTestCase {
 
     /// A trackpad-style scroll event with its amounts set explicitly, not
     /// left for the system to derive, so the delta the editor reads is fixed.
-    private func scrollEvent(points: Int64, flags: CGEventFlags = []) throws -> NSEvent {
+    /// `windowPoint` places it: such an event has no window, so its
+    /// `locationInWindow` is its screen location, which is set to match.
+    private func scrollEvent(points: Int64, flags: CGEventFlags = [], windowPoint: CGPoint? = nil) throws -> NSEvent {
         let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                        wheel1: Int32(points), wheel2: 0, wheel3: 0))
         cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
@@ -344,6 +346,9 @@ final class PeqGraphEditorTests: XCTestCase {
         cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: 0)
         cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
         cg.flags = flags
+        if let w = windowPoint, let top = NSScreen.screens.first?.frame.maxY {
+            cg.location = CGPoint(x: w.x, y: top - w.y)
+        }
         let event = try XCTUnwrap(NSEvent(cgEvent: cg))
         XCTAssertEqual(event.scrollingDeltaY, CGFloat(points), "the event carries the delta it was given")
         return event
@@ -482,6 +487,34 @@ final class PeqGraphEditorTests: XCTestCase {
         let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
         XCTAssertEqual(p.q, 2, "Width was not touched")
         XCTAssertLessThan(p.gain, 5.6, "both steps went to the gain")
+    }
+
+    /// A pause longer than a gesture ends the graph's hold on the band, but
+    /// Cmd-wheel on a chip field is still the band's gain, never the field.
+    @MainActor
+    func testCommandWheelOnChipFieldAfterPauseAdjustsGain() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(6))
+        rig.view.hoverForTesting(dot)
+        XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command))
+        spin(0.7) // longer than a gesture
+        for field in [PeqHUDField.q, .freq] {
+            let target = try XCTUnwrap(rig.view.hudFieldForTesting(field))
+            let onField = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: rig.view)
+            let wheel = try scrollEvent(points: -10, flags: .maskCommand, windowPoint: rig.view.convert(onField, to: nil))
+            let seen = rig.view.convert(wheel.locationInWindow, from: nil)
+            XCTAssertEqual(seen.x, onField.x, accuracy: 1, "the editor sees the event on the field")
+            XCTAssertEqual(seen.y, onField.y, accuracy: 1)
+            target.scrollWheel(with: wheel)
+        }
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.q, 2, "Width was not touched")
+        XCTAssertEqual(p.freq, 1000, "nor Frequency")
+        XCTAssertEqual(p.gain, 4.5, accuracy: 0.01, "all three steps went to the gain")
     }
 
     /// Option held on a dot: a drag locks to one axis, a click bypasses.

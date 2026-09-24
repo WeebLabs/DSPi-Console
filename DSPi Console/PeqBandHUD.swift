@@ -205,8 +205,10 @@ final class PeqHUDValueField: NSTextField {
     override func scrollWheel(with event: NSEvent) {
         // The chip follows its dot, so a gesture adjusting the band from the
         // graph can slide a field under the pointer.  That gesture keeps its
-        // band: the event goes on up to the graph.
-        guard !isEditable, adjustable, forwardsScroll?() != true else { super.scrollWheel(with: event); return }
+        // band: the event goes on up to the graph.  Cmd-wheel is always the
+        // band's gain, so it goes up too, however long the pause before it.
+        guard !isEditable, adjustable, !event.modifierFlags.contains(.command),
+              forwardsScroll?() != true else { super.scrollWheel(with: event); return }
         let fine = event.modifierFlags.contains(.shift)
         let raw = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
         onScroll?(field, event.hasPreciseScrollingDeltas ? raw : raw * 8, fine)

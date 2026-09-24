@@ -1031,8 +1031,9 @@ final class PeqGraphEditorView: NSView {
         // the rest of a gesture continue the one already picked.
         let begins = event.phase == .began || event.phase == .mayBegin
         if begins { hudWheelField = nil }
-        // A gesture that began on a chip field stays with that field.
-        if !begins, hudWheelActive, let field = hudWheelField {
+        // A gesture that began on a chip field stays with that field, until
+        // Cmd turns it into a gain gesture.
+        if !begins, !event.modifierFlags.contains(.command), hudWheelActive, let field = hudWheelField {
             scrollHUDField(field, delta: delta, fine: event.modifierFlags.contains(.shift))
             return
         }
@@ -1056,9 +1057,10 @@ final class PeqGraphEditorView: NSView {
         let target: Int? = {
             if case .drag(let ctx) = gesture { return ctx.grabbed }
             if !begins, let w = wheelBand, isBand(w), now - wheelTime < Tuning.wheelSession { return w }
-            if let b = band(at: p) { return b }
+            // The chip is drawn over the graph, so it wins over a band area
+            // beneath it.
             if let h = hudBand, !hud.isHidden, hud.frame.contains(p) { return h }
-            return nil
+            return band(at: p)
         }()
         guard let b = target else {
             wheelBand = nil
