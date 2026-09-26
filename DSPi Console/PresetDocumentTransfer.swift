@@ -436,14 +436,12 @@ enum PresetDocumentApply {
             return
         }
         SettingsSaveCoordinator.shared.beginOutputEdit()
+        var targets: [Int: LimiterOutputSettings] = [:]
         for (output, lm) in blocks {
-            // Enable last, so a limiter engages on the document's threshold
-            // rather than on the one it replaces.
-            vm.setLimiterThreshold(output: output, lm.thresholdDb)
-            vm.setLimiterRelease(output: output, lm.releaseMs)
-            vm.setLimiterLinkGroup(output: output, lm.linkGroup)
-            vm.setLimiterEnabled(output: output, lm.enabled)
+            targets[output] = LimiterOutputSettings(enabled: lm.enabled, thresholdDB: lm.thresholdDb,
+                                                    releaseMs: lm.releaseMs, linkGroup: lm.linkGroup)
         }
+        vm.applyLimiterSettings(targets)
     }
 
     private static func preamp(_ doc: PresetDocument, input: Int) -> Float {

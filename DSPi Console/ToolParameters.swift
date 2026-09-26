@@ -53,6 +53,57 @@ struct LimiterOutputSettings: Equatable {
     var linkGroup: Int = 0
 }
 
+/// The firmware's link-group ganging (spec §2.2, limiter.c), mirrored because
+/// the app never hears its own writes echoed back. Outputs sharing a non-zero
+/// group share enable, threshold and release. Each function works on the first
+/// `count` entries, the outputs this platform has.
+enum LimiterGang {
+    /// Lowest-index output other than `out` in group `group`, or nil. The
+    /// lowest member leads when stored settings disagree.
+    static func peer(of out: Int, group: Int, in outs: [LimiterOutputSettings], count: Int) -> Int? {
+        guard group != 0 else { return nil }
+        return (0..<min(count, outs.count)).first { $0 != out && outs[$0].linkGroup == group }
+    }
+
+    /// An enable, threshold or release edit on `out` reaches every member of
+    /// its group.
+    static func edit(_ out: Int, in outs: inout [LimiterOutputSettings], count: Int,
+                     _ change: (inout LimiterOutputSettings) -> Void) {
+        let group = outs[out].linkGroup
+        for k in 0..<min(count, outs.count) where k == out || (group != 0 && outs[k].linkGroup == group) {
+            change(&outs[k])
+        }
+    }
+
+    /// Joining a group adopts its settings; the first member keeps its own and
+    /// leaving (group 0) keeps the current ones.
+    static func setGroup(_ out: Int, _ group: Int, in outs: inout [LimiterOutputSettings], count: Int) {
+        outs[out].linkGroup = group
+        if let p = peer(of: out, group: group, in: outs, count: count) {
+            outs[out].enabled = outs[p].enabled
+            outs[out].thresholdDB = outs[p].thresholdDB
+            outs[out].releaseMs = outs[p].releaseMs
+        }
+    }
+
+    /// What the firmware does to a raw bulk or preset restore: every member
+    /// copies its group's lowest-numbered member.
+    static func gangAll(_ outs: inout [LimiterOutputSettings], count: Int) {
+        for k in 0..<min(count, outs.count) {
+            guard let lead = peer(of: k, group: outs[k].linkGroup, in: outs, count: count), lead < k else { continue }
+            outs[k].enabled = outs[lead].enabled
+            outs[k].thresholdDB = outs[lead].thresholdDB
+            outs[k].releaseMs = outs[lead].releaseMs
+        }
+    }
+
+    /// A stored group above the maximum falls back to unlinked (a SET clamps
+    /// instead; see `DSPViewModel.clampLimiterLinkGroup`).
+    static func storedGroup(_ raw: UInt8) -> Int {
+        Int(raw) > LIMITER_LINK_GROUP_MAX ? 0 : Int(raw)
+    }
+}
+
 /// Output Limiter (V32). There is no master switch: every output has its own,
 /// so all of it lives here. Always one entry per wire slot, so an index from
 /// the bulk image or a preset file is valid whatever the platform; only

@@ -1245,17 +1245,13 @@ final class SettingsSaveCoordinator: ObservableObject {
                 DispatchQueue.main.async {
                     guard stillCurrent() else { return }
                     // Output limiters last, on main: their setters publish.
-                    // Enable goes last so a limiter re-engages on its restored
-                    // threshold rather than on the one it replaces.
                     if vm.firmwareSupportsLimiter {
+                        var targets: [Int: LimiterOutputSettings] = [:]
                         for k in 0..<min(vm.numOutputChannels, base.limiterOutputs.count)
                         where vm.limiter.outputs[k] != base.limiterOutputs[k] {
-                            let b = base.limiterOutputs[k]
-                            vm.setLimiterThreshold(output: k, b.thresholdDB)
-                            vm.setLimiterRelease(output: k, b.releaseMs)
-                            vm.setLimiterLinkGroup(output: k, b.linkGroup)
-                            vm.setLimiterEnabled(output: k, b.enabled)
+                            targets[k] = base.limiterOutputs[k]
                         }
+                        if !targets.isEmpty { vm.applyLimiterSettings(targets) }
                     }
                     self.outputConfigDirty = false
                 }

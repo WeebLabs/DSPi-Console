@@ -116,6 +116,81 @@ final class LimiterWireTests: XCTestCase {
         XCTAssertEqual(vm.limiter.outputs[0].linkGroup, 0)
     }
 
+    // MARK: - Link-group ganging (spec §2.2)
+
+    private func outs(_ groups: [Int]) -> [LimiterOutputSettings] {
+        groups.enumerated().map { k, g in
+            LimiterOutputSettings(enabled: false, thresholdDB: -Float(k + 1), releaseMs: Float(100 + k), linkGroup: g)
+        }
+    }
+
+    /// An edit on a linked output reaches every member of its group and no
+    /// other output; an unlinked output's edit stays its own.
+    func testEditReachesTheWholeGroup() {
+        var o = outs([1, 0, 1, 2, 1])
+        LimiterGang.edit(2, in: &o, count: 5) { $0.thresholdDB = -9 }
+        XCTAssertEqual(o.map(\.thresholdDB), [-9, -2, -9, -4, -9])
+        LimiterGang.edit(1, in: &o, count: 5) { $0.enabled = true }
+        XCTAssertEqual(o.map(\.enabled), [false, true, false, false, false])
+    }
+
+    /// Joining adopts the lowest-numbered existing member; the first member
+    /// keeps its own; leaving keeps the current settings.
+    func testJoinAdoptsLeaveKeeps() {
+        var o = outs([0, 0, 3, 3, 0])
+        LimiterGang.setGroup(0, 3, in: &o, count: 5)
+        XCTAssertEqual(o[0].thresholdDB, -3, "joins group 3 and adopts output 2, its lowest member")
+        LimiterGang.setGroup(1, 4, in: &o, count: 5)
+        XCTAssertEqual(o[1].thresholdDB, -2, "first member of group 4 keeps its own")
+        LimiterGang.setGroup(0, 0, in: &o, count: 5)
+        XCTAssertEqual(o[0].thresholdDB, -3, "leaving keeps the adopted settings")
+        XCTAssertEqual(o[0].linkGroup, 0)
+    }
+
+    /// A restore that disagrees is ganged to each group's lowest member.
+    func testGangAllCopiesTheLeader() {
+        var o = outs([2, 1, 2, 1, 0])
+        LimiterGang.gangAll(&o, count: 5)
+        XCTAssertEqual(o.map(\.thresholdDB), [-1, -2, -1, -2, -5])
+        XCTAssertEqual(o.map(\.releaseMs), [100, 101, 100, 101, 104])
+    }
+
+    /// A stored group above 4 falls back to unlinked; a SET clamps instead.
+    func testStoredGroupAboveMaxIsUnlinked() {
+        XCTAssertEqual(LimiterGang.storedGroup(4), 4)
+        XCTAssertEqual(LimiterGang.storedGroup(5), 0)
+        XCTAssertEqual(LimiterGang.storedGroup(255), 0)
+        XCTAssertEqual(DSPViewModel.clampLimiterLinkGroup(9), LIMITER_LINK_GROUP_MAX)
+    }
+
+    /// The view model's setters mirror the ganging, as the device would.
+    func testSettersMirrorGanging() {
+        let vm = DSPViewModel()
+        vm.setLimiterThreshold(output: 0, -6)
+        vm.setLimiterLinkGroup(output: 0, 1)
+        vm.setLimiterLinkGroup(output: 1, 1)
+        XCTAssertEqual(vm.limiter.outputs[1].thresholdDB, -6, "joining adopts the group")
+        vm.setLimiterEnabled(output: 1, true)
+        XCTAssertTrue(vm.limiter.outputs[0].enabled, "an edit on one member reaches the other")
+        XCTAssertFalse(vm.limiter.outputs[2].enabled)
+    }
+
+    /// Restoring exact per-output settings across a regrouping: without the
+    /// unlink / write / relink order, writing output 0's threshold while it is
+    /// still grouped with output 1 would spread to output 1.
+    func testApplySettingsLandsExactValuesAcrossRegrouping() {
+        let vm = DSPViewModel()
+        vm.setLimiterLinkGroup(output: 0, 1)
+        vm.setLimiterLinkGroup(output: 1, 1)
+        let targets: [Int: LimiterOutputSettings] = [
+            0: LimiterOutputSettings(enabled: true, thresholdDB: -4, releaseMs: 200, linkGroup: 2),
+            1: LimiterOutputSettings(enabled: false, thresholdDB: -8, releaseMs: 50, linkGroup: 0),
+            2: LimiterOutputSettings(enabled: true, thresholdDB: -4, releaseMs: 200, linkGroup: 2),
+        ]
+        vm.applyLimiterSettings(targets)
+        for (k, t) in targets { XCTAssertEqual(vm.limiter.outputs[k], t, "output \(k)") }
+    }
+
     // MARK: - Live device (skip when no DSPi is attached)
 
     private func getParam(_ usb: USBDevice, output: Int, _ index: UInt8) -> Float? {
@@ -151,14 +226,19 @@ final class LimiterWireTests: XCTestCase {
         (0..<outputs).map { k in (0..<LIMITER_NUM_PARAMS).map { getParam(usb, output: k, $0) } }
     }
 
-    /// Enables go last, so restoring never briefly engages a limiter on a
-    /// setting it did not have.
+    /// Unlinks everything first so ganging cannot spread one output's value to
+    /// another, writes each output's own values with enable last, then
+    /// relinks in ascending order so each group's leader is its lowest member.
     private func restore(_ usb: USBDevice, _ snap: [[Float?]]) {
-        let order: [UInt8] = [LIMITER_PARAM_THRESHOLD_DB, LIMITER_PARAM_RELEASE_MS,
-                              LIMITER_PARAM_LINK_GROUP, LIMITER_PARAM_ENABLED]
-        for index in order {
+        for k in snap.indices { setParam(usb, output: UInt8(k), LIMITER_PARAM_LINK_GROUP, 0) }
+        for index in [LIMITER_PARAM_THRESHOLD_DB, LIMITER_PARAM_RELEASE_MS, LIMITER_PARAM_ENABLED] {
             for (k, params) in snap.enumerated() {
                 if let v = params[Int(index)] { setParam(usb, output: UInt8(k), index, v) }
+            }
+        }
+        for (k, params) in snap.enumerated() {
+            if let g = params[Int(LIMITER_PARAM_LINK_GROUP)], g != 0 {
+                setParam(usb, output: UInt8(k), LIMITER_PARAM_LINK_GROUP, g)
             }
         }
     }
@@ -231,6 +311,23 @@ final class LimiterWireTests: XCTestCase {
         XCTAssertEqual(getParam(usb, output: 0, LIMITER_PARAM_LINK_GROUP), 2)
         setParam(usb, output: 0, LIMITER_PARAM_LINK_GROUP, 17)
         XCTAssertEqual(getParam(usb, output: 0, LIMITER_PARAM_LINK_GROUP), Float(LIMITER_LINK_GROUP_MAX))
+    }
+
+    /// Linked outputs are ganged on the device: a join adopts the group, an
+    /// edit on one member reaches the other.  Leaves every limiter off.
+    func testGangingOnDevice() throws {
+        let (usb, outputs) = try requireLimiter()
+        let snap = snapshot(usb, outputs: outputs)
+        defer { restore(usb, snap) }
+
+        for k: UInt8 in [0, 1] { setParam(usb, output: k, LIMITER_PARAM_LINK_GROUP, 0) }
+        setParam(usb, output: 0, LIMITER_PARAM_THRESHOLD_DB, -6)
+        setParam(usb, output: 1, LIMITER_PARAM_THRESHOLD_DB, -2)
+        setParam(usb, output: 0, LIMITER_PARAM_LINK_GROUP, 3)
+        setParam(usb, output: 1, LIMITER_PARAM_LINK_GROUP, 3)
+        XCTAssertEqual(getParam(usb, output: 1, LIMITER_PARAM_THRESHOLD_DB), -6, "join adopts the group")
+        setParam(usb, output: 1, LIMITER_PARAM_RELEASE_MS, 333)
+        XCTAssertEqual(getParam(usb, output: 0, LIMITER_PARAM_RELEASE_MS), 333, "edit reaches the group")
     }
 
     /// Output 0xFF sets the parameter on every output.

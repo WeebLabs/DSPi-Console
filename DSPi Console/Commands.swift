@@ -1559,6 +1559,10 @@ extension DSPViewModel {
     // The settings follow output_config_mode like the pins, so in INDEPENDENT
     // mode an edit is part of the unsaved output configuration: user-facing
     // callers must mark it (SettingsSaveCoordinator.beginOutputEdit).
+    //
+    // Linked outputs are ganged by the firmware (spec §2.2): one SET reaches
+    // the whole group, and a joining output adopts the group's settings.  The
+    // app mirrors that through `LimiterGang` so it shows what the device holds.
 
     private func sendLimiterParam(output: UInt8, _ index: UInt8, _ value: Float) {
         var val = value
@@ -1604,37 +1608,74 @@ extension DSPViewModel {
         sendLimiterParam(output: UInt8(output), index, v)
     }
 
+    /// Mirrors an enable, threshold or release SET: it reaches the whole
+    /// group of a linked output.  Published once, as a single array write.
+    private func editLimiterGanged(_ output: Int, _ change: (inout LimiterOutputSettings) -> Void) {
+        var outs = limiter.outputs
+        LimiterGang.edit(output, in: &outs, count: numOutputChannels, change)
+        limiter.outputs = outs
+    }
+
     func setLimiterEnabled(output: Int, _ enabled: Bool) {
         guard isLimiterOutput(output) else { return }
-        limiter.outputs[output].enabled = enabled
+        editLimiterGanged(output) { $0.enabled = enabled }
         sendLimiterParam(output: UInt8(output), LIMITER_PARAM_ENABLED, enabled ? 1 : 0)
     }
 
     func setLimiterThreshold(output: Int, _ db: Float) {
         guard isLimiterOutput(output), !db.isNaN else { return }
         let v = Self.clampLimiterThreshold(db)
-        limiter.outputs[output].thresholdDB = v
+        editLimiterGanged(output) { $0.thresholdDB = v }
         sendLimiterParam(output: UInt8(output), LIMITER_PARAM_THRESHOLD_DB, v)
     }
 
     func setLimiterRelease(output: Int, _ ms: Float) {
         guard isLimiterOutput(output), !ms.isNaN else { return }
         let v = Self.clampLimiterRelease(ms)
-        limiter.outputs[output].releaseMs = v
+        editLimiterGanged(output) { $0.releaseMs = v }
         sendLimiterParam(output: UInt8(output), LIMITER_PARAM_RELEASE_MS, v)
     }
 
+    /// Joining a group adopts the settings of its lowest-numbered existing
+    /// member; the first member keeps its own, and leaving keeps the current
+    /// ones.
     func setLimiterLinkGroup(output: Int, _ group: Int) {
         guard isLimiterOutput(output) else { return }
         let g = Self.clampLimiterLinkGroup(group)
-        limiter.outputs[output].linkGroup = g
+        var outs = limiter.outputs
+        LimiterGang.setGroup(output, g, in: &outs, count: numOutputChannels)
+        limiter.outputs = outs
         sendLimiterParam(output: UInt8(output), LIMITER_PARAM_LINK_GROUP, Float(g))
+    }
+
+    /// Puts outputs back to exact per-output settings, for Revert and for a
+    /// preset-file import.  Ganging would otherwise scramble a plain
+    /// write-each-field pass: a threshold written to an output still in its old
+    /// group would spread to that group.  So the targets leave their groups
+    /// first, take their own values unlinked, then rejoin in ascending order,
+    /// which makes the lowest member of each group its leader, as the firmware
+    /// does.  Enable is written last so a limiter engages on its new threshold.
+    func applyLimiterSettings(_ targets: [Int: LimiterOutputSettings]) {
+        let outs = targets.keys.filter(isLimiterOutput).sorted()
+        for k in outs where limiter.outputs[k].linkGroup != 0 {
+            setLimiterLinkGroup(output: k, 0)
+        }
+        for k in outs {
+            let t = targets[k]!
+            setLimiterThreshold(output: k, t.thresholdDB)
+            setLimiterRelease(output: k, t.releaseMs)
+            setLimiterEnabled(output: k, t.enabled)
+        }
+        for k in outs where targets[k]!.linkGroup != 0 {
+            setLimiterLinkGroup(output: k, targets[k]!.linkGroup)
+        }
     }
 
     /// Writes one output's settings to every output with a single SET per
     /// parameter (output 0xFF), which is what the firmware's all-outputs form
     /// is for.  The link group is left alone: copying it would link every
-    /// output into one group.
+    /// output into one group.  Every output gets the same values, so groups
+    /// stay ganged without any mirroring.
     func copyLimiterToAllOutputs(from output: Int) {
         guard isLimiterOutput(output) else { return }
         let src = limiter.outputs[output]
@@ -1659,8 +1700,10 @@ extension DSPViewModel {
         sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_ENABLED, enabled ? 1 : 0)
     }
 
-    /// Sets the link group of every output at once, one SET each.  `groups`
-    /// shorter than the output count leaves the rest unlinked.
+    /// Sets the link group of every output at once, one SET each, in ascending
+    /// order, so each group's lowest output keeps its settings and the rest
+    /// adopt them.  `groups` shorter than the output count leaves the rest
+    /// unlinked.
     func setLimiterLinkGroups(_ groups: [Int]) {
         for k in 0..<min(numOutputChannels, limiter.outputs.count) {
             setLimiterLinkGroup(output: k, k < groups.count ? groups[k] : 0)
@@ -3791,8 +3834,13 @@ extension DSPViewModel {
                 enabled: data[o] != 0,
                 thresholdDB: Self.clampLimiterThreshold(lmF(4)),
                 releaseMs: Self.clampLimiterRelease(lmF(8)),
-                linkGroup: Self.clampLimiterLinkGroup(Int(data[o + 1])))
+                linkGroup: LimiterGang.storedGroup(data[o + 1]))
         }
+        // A restore can leave a group disagreeing (an older preset).  The
+        // firmware gangs it at its next recompute and notifies each change;
+        // doing the same here keeps a read taken before that from showing
+        // settings that are about to change.
+        LimiterGang.gangAll(&lmOutputs, count: min(numOutCh, WIRE_MAX_OUTPUT_CHANNELS))
 
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
