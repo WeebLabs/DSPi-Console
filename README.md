@@ -376,7 +376,7 @@ Limiter settings are part of the hardware configuration. They are stored with th
 
 The band list shows one row per filter band. On the PEQ tab the columns are **#**, **TYPE**, **FREQ**, **GAIN** and **WIDTH**.
 
-- **Bypass dot** (left of the number): a filled dot means the band is active, and a hollow ring means it is bypassed. Click to toggle. A bypassed band is dimmed in the list and drawn flat on the graph. This needs firmware with per-band bypass.
+- **Bypass dot** (left of the number): a filled dot means the band is active, and a hollow ring means it is bypassed. Click to toggle. A bypassed band is dimmed in the list. On the graph it drops out of the main curve, and its own shape stays as a faint grey outline so you can still see where it is. This needs firmware with per-band bypass.
 - **#**: the band number, in the band's own colour. The same colour marks the band's dot on the graph. Click the number to select the band on the graph.
 - **TYPE**: click to choose a filter type. See [Filter Types](#filter-types).
 - **FREQ**: the band's centre or corner frequency in Hz.

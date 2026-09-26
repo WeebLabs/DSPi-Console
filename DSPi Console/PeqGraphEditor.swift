@@ -557,11 +557,11 @@ final class PeqGraphEditorView: NSView {
                 let grey = (color.x + color.y + color.z) / 3
                 color = SIMD4(simd_mix(SIMD3(repeating: grey), SIMD3(color.x, color.y, color.z), SIMD3(repeating: 0.35)), 1)
             }
-            // Every audible band keeps a faint fill; a bypassed one shows only
-            // its outline, and only while hovered or selected.
+            // Every audible band keeps a faint fill and shows its outline while
+            // hovered or selected; a bypassed one stays as a grey ghost of both.
             p.bandStyles.append(.init(row: b, color: color,
-                                      lineOpacity: 0.9 * lift * (band.bypass ? 0.5 : 1) * dimAll,
-                                      fillOpacity: band.bypass ? 0 : (0.22 + 0.2 * lift) * dimAll,
+                                      lineOpacity: (band.bypass ? 0.35 + 0.25 * lift : 0.9 * lift) * dimAll,
+                                      fillOpacity: (band.bypass ? 0.06 + 0.06 * lift : 0.22 + 0.2 * lift) * dimAll,
                                       reach: lobeReach(band)))
             let c = nodePoint(band)
             // Flat discs; hovering enlarges them, selecting also adds a centre dot.
