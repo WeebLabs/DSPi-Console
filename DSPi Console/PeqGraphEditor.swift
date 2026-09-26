@@ -242,6 +242,8 @@ final class PeqGraphEditorView: NSView {
     }
     /// The band the chip is showing, or nil when it is hidden.
     var hudBandForTesting: Int? { hud.isHidden ? nil : hudBand }
+    /// Whether the chip can actually be seen, not just unhidden.
+    var hudVisibleForTesting: Bool { !hud.isHidden && hud.alphaValue > 0.99 }
     func settleForTesting() {
         updateEmphasisTargets()
         metal?.renderer.picture = picture()
@@ -922,6 +924,10 @@ final class PeqGraphEditorView: NSView {
             // takes a double-click (or Cmd-click), so a click to focus or
             // dismiss never adds one by accident.
             setSelection([])
+            // An explicit deselect dismisses the chip, and with it the band's
+            // highlight, at once.  The hover grace delay is only there so the
+            // pointer can travel from a dot to its chip.
+            hideHUD(animated: true)
         case .drag:
             commitLive()
             NSCursor.openHand.set()
@@ -1441,7 +1447,10 @@ final class PeqGraphEditorView: NSView {
         if hudBand != b { closeStrip() }
         hudBand = b
         refreshHUD()
-        if hud.isHidden {
+        // A fade-out only marks the chip hidden when it ends, so a band taking
+        // the chip mid-fade finds it unhidden at zero alpha: fade it back in
+        // whenever it is not fully shown, not only when hidden.
+        if hud.isHidden || hud.alphaValue < 1 {
             hud.isHidden = false
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.12

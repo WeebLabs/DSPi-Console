@@ -598,10 +598,48 @@ final class PeqGraphEditorTests: XCTestCase {
 
         click(rig, empty)
         XCTAssertEqual(rig.host.peqSelection.selected, [])
+        XCTAssertNil(rig.view.hudBandForTesting, "clicking empty graph dismisses the chip at once, without the hover delay")
         spin(0.6)
         XCTAssertNil(rig.view.hudBandForTesting, "clearing the selection lets the chip go")
         rig.view.hoverForTesting(dot1)
         XCTAssertEqual(rig.view.hudBandForTesting, 1, "with nothing selected the chip follows the hovered dot")
+    }
+
+    /// A band that takes the chip while it is still fading out must bring it
+    /// back: the chip is only marked hidden once the fade ends, so it used to
+    /// stay unhidden at zero alpha and never appear again on dot hover.
+    @MainActor
+    func testChipReappearsWhenTakenMidFade() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot0 = CGPoint(x: g.x(1000), y: g.y(6))
+        let dot1 = CGPoint(x: g.x(4000), y: g.y(6))
+        let empty = CGPoint(x: g.x(200), y: g.y(-15))
+
+        rig.view.hoverForTesting(dot0)
+        spin(0.3)
+        XCTAssertTrue(rig.view.hudVisibleForTesting)
+
+        // Leave the dot: the hide fires after 0.35 s and fades for 0.15 s.
+        // Land inside that fade, then hover the other band's dot.
+        rig.view.hoverForTesting(empty)
+        spin(0.42)
+        rig.view.hoverForTesting(dot1)
+        spin(0.4)
+        XCTAssertEqual(rig.view.hudBandForTesting, 1)
+        XCTAssertTrue(rig.view.hudVisibleForTesting, "the chip fades back in, not stuck at zero alpha")
+
+        // The same holds when the wheel over a band takes the chip mid-fade.
+        rig.view.hoverForTesting(empty)
+        spin(0.42)
+        XCTAssertTrue(rig.view.handleWheel(at: dot0, delta: 10, modifiers: [], begins: true))
+        spin(0.4)
+        XCTAssertEqual(rig.view.hudBandForTesting, 0)
+        XCTAssertTrue(rig.view.hudVisibleForTesting, "wheeling a band shows its chip")
     }
 
     /// The list scrolls to a band only once the pointer rests on it, and not
