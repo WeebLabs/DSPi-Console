@@ -368,6 +368,11 @@ final class PeqGraphEditorView: NSView {
                                     dbTop: config.dbTop, dbBottom: config.dbBottom)
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        metal?.redraw()
+    }
+
     override func layout() {
         super.layout()
         // SwiftUI lays hosted views out often; only a new size needs a frame.
@@ -539,6 +544,7 @@ final class PeqGraphEditorView: NSView {
         p.curveColor = config.curveColor
         p.lineWidth = config.lineWidth
         p.glow = config.glow
+        p.selectionCenter = graphBackground()
 
         let dimAll: Float = config.flat ? 0.5 : 1
         var nodes: [(order: Float, node: PeqNodeInstance)] = []
@@ -558,10 +564,10 @@ final class PeqGraphEditorView: NSView {
                                       fillOpacity: band.bypass ? 0 : (0.22 + 0.2 * lift) * dimAll,
                                       reach: lobeReach(band)))
             let c = nodePoint(band)
-            // Flat discs; hovering and selecting only enlarge them.
+            // Flat discs; hovering enlarges them, selecting also adds a centre dot.
             nodes.append((lift + e.select, PeqNodeInstance(
                 center: SIMD2(Float(c.x), Float(c.y)), radius: 5 + 1.5 * lift + 0.5 * e.select,
-                color: color, state: SIMD4(0, 0, (band.bypass ? 0.55 : 1) * dimAll, 0))))
+                color: color, state: SIMD4(0, 0, (band.bypass ? 0.55 : 1) * dimAll, e.select))))
         }
         if let g = ghostShown, ghostAmount > 0 {
             let c = nodePoint(g)
@@ -571,6 +577,21 @@ final class PeqGraphEditorView: NSView {
         // Emphasised dots last, so they draw on top.
         p.nodes = nodes.sorted { $0.order < $1.order }.map(\.node)
         return p
+    }
+
+    /// The graph's backdrop as it appears: GraphView's controlBackgroundColor
+    /// at 60% over the window background, resolved for this appearance.
+    private func graphBackground() -> SIMD4<Float> {
+        var out = SIMD4<Float>(0.15, 0.15, 0.15, 1)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            guard let top = NSColor.controlBackgroundColor.usingColorSpace(.sRGB),
+                  let under = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) else { return }
+            func mix(_ a: CGFloat, _ b: CGFloat) -> Float { Float(0.6 * a + 0.4 * b) }
+            out = SIMD4(mix(top.redComponent, under.redComponent),
+                        mix(top.greenComponent, under.greenComponent),
+                        mix(top.blueComponent, under.blueComponent), 1)
+        }
+        return out
     }
 
     /// The dB range a band's lobe spans, to bound its fill: 0 dB to the

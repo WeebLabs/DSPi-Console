@@ -163,8 +163,14 @@ enum PeqGraphShaders {
                                  constant Draw &u [[buffer(1)]]) {
         Node n = nodes[in.instance];
         float aa = 0.6f / u.viewport.z;
-        float a = (1.0f - smoothstep(n.radius - aa, n.radius + aa, length(in.local))) * n.state.z;
-        return float4(n.color.rgb * a, a);
+        float d = length(in.local);
+        float a = (1.0f - smoothstep(n.radius - aa, n.radius + aa, d)) * n.state.z;
+        // A selected dot grows a centre in the graph's background colour
+        // (u.color) as its selection eases in.
+        float pr = 2.2f * n.state.w;
+        float pip = (1.0f - smoothstep(pr - aa, pr + aa, d)) * min(n.state.w * 2.0f, 1.0f);
+        float3 rgb = mix(n.color.rgb, u.color.rgb, pip);
+        return float4(rgb * a, a);
     }
     """
 }

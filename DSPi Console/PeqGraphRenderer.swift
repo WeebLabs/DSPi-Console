@@ -38,7 +38,7 @@ struct PeqNodeInstance {
     var radius: Float
     var pad: Float = 0
     var color: SIMD4<Float>
-    /// Opacity in z; the rest is unused.
+    /// Opacity in z, selection (0 to 1) in w; the rest is unused.
     var state: SIMD4<Float>
 }
 
@@ -111,6 +111,8 @@ struct PeqGraphPicture {
     var lineWidth: Float = 2
     var glow = true
     var nodes: [PeqNodeInstance] = []
+    /// The centre of a selected dot: the graph's background colour.
+    var selectionCenter = SIMD4<Float>(0.15, 0.15, 0.15, 1)
 }
 
 /// Transparent, on-demand Metal surface.  Never takes mouse events; the
@@ -320,6 +322,7 @@ final class PeqGraphRenderer: NSObject, MTKViewDelegate {
 
         if !picture.nodes.isEmpty {
             var u = uniforms(row: 0)
+            u.color = picture.selectionCenter
             var nodes = picture.nodes
             e.setRenderPipelineState(resources.node)
             e.setVertexBytes(&nodes, length: MemoryLayout<PeqNodeInstance>.stride * nodes.count, index: 0)

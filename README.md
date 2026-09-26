@@ -568,7 +568,7 @@ On a channel page, you can create and shape filters directly on the response gra
 
 ![On-graph editing](Images/graph-editor-selection.png)
 
-Each band appears as a coloured **dot**, in the same colour as its number in the band list. A soft coloured area (the band's fill) shows each band's own contribution. Fills and outlines brighten when you hover over or select a band, so the graph stays uncluttered otherwise.
+Each band appears as a coloured **dot**, in the same colour as its number in the band list. A soft coloured area (the band's fill) shows each band's own contribution. Fills and outlines brighten when you hover over or select a band, so the graph stays uncluttered otherwise. A selected band's dot also has a centre in the graph's background colour, so you can see at a glance which bands are selected.
 
 Only a band's **dot** takes clicks. A fill highlights its band and takes the scroll wheel, but clicking, double-clicking, dragging and right-clicking on a fill all work as they do on empty graph. That means you can place a new band anywhere, including inside another band's fill.
 
