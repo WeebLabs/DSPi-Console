@@ -13,12 +13,14 @@ import simd
 // `BodePlotView` then leaves out of its own drawing.
 //
 // Mouse (Command is FabFilter's Ctrl):
+//   hover a band's fill  highlights it; only its dot takes clicks, so every
+//                         click gesture below treats a fill as empty graph
 //   hover empty graph     a faint dot where a double-click would create a band
 //   double-click / Cmd-click empty graph   create it
 //   click empty graph     deselect
 //   drag the curve        pull a new bell (shelf near either end) out of it
 //   drag empty graph      marquee selection
-//   click a dot or lobe   select; Cmd toggles, Shift selects a range
+//   click a dot           select; Cmd toggles, Shift selects a range
 //   drag a dot            frequency and gain (Q for second-order cuts;
 //                         frequency only for notches, all-passes and
 //                         first-order cuts, whose dots sit at a fixed level)
@@ -26,8 +28,8 @@ import simd
 //   Shift-drag            fine;  Option-drag  lock to one axis
 //   Option-click          bypass
 //   double-click a dot    type values (Tab moves between them)
-//   wheel over a band     Q; Cmd-wheel gain; Shift fine
-//   right-click           band or graph menu
+//   wheel over a band     Q; Cmd-wheel gain; Shift fine (dot or fill)
+//   right-click           band menu on a dot, graph menu elsewhere
 // A modifier held on a dot means a click if the mouse comes up where it went
 // down, and a drag modifier (fine, axis lock) if it moves first.
 // Keys: Delete removes the selection, Escape deselects, Cmd-A selects all,
@@ -370,7 +372,9 @@ final class PeqGraphEditorView: NSView {
     }
 
     /// The band whose filled area (between its curve and 0 dB) contains
-    /// `point`; FabFilter selects on a click there too.
+    /// `point`.  A fill highlights its band and takes the wheel, but clicks
+    /// go through it to the graph, so a band can be placed anywhere; only
+    /// the dot selects or grabs a band.
     private func lobe(at point: CGPoint) -> Int? {
         let freq = geometry.freq(point.x)
         let zero = geometry.y(0)
@@ -385,6 +389,7 @@ final class PeqGraphEditorView: NSView {
         return best?.band
     }
 
+    /// The band the wheel adjusts at `point`: its dot or its fill.
     private func band(at point: CGPoint) -> Int? { node(at: point) ?? lobe(at: point) }
 
     private func isNearCurve(_ point: CGPoint) -> Bool {
@@ -786,7 +791,7 @@ final class PeqGraphEditorView: NSView {
         } else if !hud.isHidden, !hud.isEditingText {
             scheduleHUDHide()
         }
-        if hit == nil {
+        if dot == nil {
             if freeSlot != nil {
                 ghost = PeqCreation.band(at: p, in: geometry, available: available, fromCurve: false)
                 showAxisLabel(PeqValueText.frequency(geometry.freq(p.x)), at: p.x)
@@ -798,13 +803,13 @@ final class PeqGraphEditorView: NSView {
             ghost = nil
             axisLabel.isHidden = true
         }
-        (hit != nil ? NSCursor.openHand : NSCursor.arrow).set()
+        (dot != nil ? NSCursor.openHand : NSCursor.arrow).set()
         invalidate()
     }
 
     override func cursorUpdate(with event: NSEvent) {
         guard editing else { super.cursorUpdate(with: event); return }
-        (hovered != nil ? NSCursor.openHand : NSCursor.arrow).set()
+        (pointer.flatMap(node(at:)) != nil ? NSCursor.openHand : NSCursor.arrow).set()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -816,7 +821,7 @@ final class PeqGraphEditorView: NSView {
         let mods = event.modifierFlags.intersection([.command, .option, .shift, .control])
 
         if event.clickCount == 2 {
-            if let b = node(at: p) ?? lobe(at: p) {
+            if let b = node(at: p) {
                 showHUD(for: b)
                 hud.beginEditing(.freq)
             } else {
@@ -826,7 +831,7 @@ final class PeqGraphEditorView: NSView {
             return
         }
 
-        if let b = band(at: p) {
+        if let b = node(at: p) {
             // Modified presses wait for mouse-up (a click) or movement (a
             // drag) before doing anything, so Option and Shift can mean both.
             if mods.isDisjoint(with: [.command, .option, .shift]), !selection.contains(b) {
@@ -1186,7 +1191,7 @@ final class PeqGraphEditorView: NSView {
         let p = location(event)
         closeStrip()
         let menu: NSMenu
-        if let b = band(at: p) {
+        if let b = node(at: p) {
             if !selection.contains(b) { setSelection([b]); anchor = b }
             menu = bandMenu(for: b)
         } else {

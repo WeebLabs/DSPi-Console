@@ -605,6 +605,35 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(rig.view.hudBandForTesting, 1, "with nothing selected the chip follows the hovered dot")
     }
 
+    /// A band's fill highlights it and takes the wheel, but clicks go
+    /// through to the graph: only the dot selects, so a band can be placed
+    /// anywhere, including inside another band's fill.
+    @MainActor
+    func testClicksPassThroughBandFills() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 0.5, gain: 10)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(10))
+        let fill = CGPoint(x: g.x(400), y: g.y(3))
+
+        rig.view.hoverForTesting(fill)
+        XCTAssertEqual(rig.host.peqSelection.graphHovered, 0, "the fill still highlights its band")
+
+        click(rig, dot)
+        XCTAssertEqual(rig.host.peqSelection.selected, [0], "the dot selects")
+        click(rig, fill)
+        XCTAssertEqual(rig.host.peqSelection.selected, [], "a click on the fill deselects, as on empty graph")
+
+        doubleClick(rig, fill)
+        let created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.band, 1, "a double-click on the fill places a new band")
+        XCTAssertEqual(created.params.type, .peaking)
+        XCTAssertEqual(Double(created.params.freq), 400, accuracy: 4)
+        XCTAssertEqual(Double(created.params.gain), 3, accuracy: 0.2)
+    }
+
     /// A band that takes the chip while it is still fading out must bring it
     /// back: the chip is only marked hidden once the fade ends, so it used to
     /// stay unhidden at zero alpha and never appear again on dot hover.

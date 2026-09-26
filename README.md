@@ -567,7 +567,9 @@ On a channel page, you can create and shape filters directly on the response gra
 
 ![On-graph editing](Images/graph-editor-selection.png)
 
-Each band appears as a coloured **dot**, in the same colour as its number in the band list. A soft coloured area (the band's "lobe") shows each band's own contribution. Lobes and outlines brighten when you hover over or select a band, so the graph stays uncluttered otherwise.
+Each band appears as a coloured **dot**, in the same colour as its number in the band list. A soft coloured area (the band's fill) shows each band's own contribution. Fills and outlines brighten when you hover over or select a band, so the graph stays uncluttered otherwise.
+
+Only a band's **dot** takes clicks. A fill highlights its band and takes the scroll wheel, but clicking, double-clicking, dragging and right-clicking on a fill all work as they do on empty graph. That means you can place a new band anywhere, including inside another band's fill.
 
 ### When Editing Is Available
 
@@ -582,9 +584,10 @@ The graph edits the channel whose page is open. To edit another channel, click i
 
 ### Hovering
 
-- **Over a band's dot or lobe**: the band lights up, its row in the band list is highlighted, and the pointer becomes an open hand. If you rest on it for a moment, the band list scrolls to show that band.
+- **Over a band's dot**: the band lights up, its row in the band list is highlighted, and the pointer becomes an open hand. If you rest on it for a moment, the band list scrolls to show that band.
+- **Over a band's fill**: the band lights up and its row is highlighted in the same way. Because clicks there reach the graph, the ghost dot and frequency readout described next also appear.
 - **Over a dot, with nothing selected**: the [band chip](#the-band-chip) appears beside the dot and shows the band's values. It hides again shortly after you move away.
-- **Over empty graph**: a faint "ghost" dot shows where a double-click would create a band, and a label at the bottom shows the frequency under the pointer. If every band is in use, the label reads **All N bands in use** instead.
+- **Over empty graph, or a band's fill**: a faint "ghost" dot shows where a double-click would create a band, and a label at the bottom shows the frequency under the pointer. If every band is in use, the label reads **All N bands in use** instead.
 - **Over a row in the band list**: that band lights up on the graph.
 
 ### Adding Bands
@@ -593,13 +596,13 @@ A new band goes into the lowest-numbered band that is Off, and is selected strai
 
 ![Ghost dot and frequency readout](Images/graph-editor-hover.png)
 
-- **Double-click** (or **Cmd-click**) empty graph. The kind of band depends on where you click:
+- **Double-click** (or **Cmd-click**) empty graph, or inside a band's fill. The kind of band depends on where you click:
   - Near the **left edge**: a **Low Cut** (12 dB/oct, Q 0.707).
   - Near the **right edge**: a **High Cut** (12 dB/oct, Q 0.707).
   - Near the **bottom**, below -6 dB: a **Notch** (Q 1).
   - **Anywhere else**: a **Bell** (peaking filter) at that frequency and gain, with Q 1.
 - **Drag the curve itself.** Press on the channel's curve and pull, and a new band is drawn out of it, starting at 0 dB so the curve doesn't jump. Near the left edge it is a **Low Shelf**, near the right edge a **High Shelf**, and anywhere else a **Bell**.
-- **Right-click empty graph** and choose **Add Band Here**, then a shape. The band is placed at the pointer's frequency, and bells and shelves take the pointer's level as their gain.
+- **Right-click empty graph** (or a band's fill) and choose **Add Band Here**, then a shape. The band is placed at the pointer's frequency, and bells and shelves take the pointer's level as their gain.
 
 A single click on empty graph never adds a band; it only clears the selection. A Linkwitz Transform can't be created on the graph; use the band list.
 
@@ -607,11 +610,11 @@ A single click on empty graph never adds a band; it only clears the selection. A
 
 | Action | Result |
 |---|---|
-| Click a dot or lobe | Selects that band only. |
-| Cmd-click a band | Adds it to, or removes it from, the selection. |
-| Shift-click a band | Selects every band between the last one you clicked and this one, in frequency order. |
-| Drag across empty graph | Draws a dashed box and selects every band whose dot is inside it. Hold Shift or Cmd as you start to add to the existing selection. |
-| Click empty graph, or press Escape | Clears the selection. |
+| Click a dot | Selects that band only. |
+| Cmd-click a dot | Adds that band to, or removes it from, the selection. |
+| Shift-click a dot | Selects every band between the last one you clicked and this one, in frequency order. |
+| Drag across empty graph or a fill | Draws a dashed box and selects every band whose dot is inside it. Hold Shift or Cmd as you start to add to the existing selection. |
+| Click empty graph or a fill, or press Escape | Clears the selection. |
 | Cmd-A, or right-click > **Select All Bands** | Selects every band. |
 | Tab / Shift-Tab | Selects the next or previous band by frequency. |
 | Click a band number in the band list | Selects that band. |
@@ -620,7 +623,7 @@ While bands are selected, the band chip stays with the selection, and hovering o
 
 ### Dragging Bands
 
-Drag a band's dot (or its lobe) to change it:
+Drag a band's dot to change it:
 
 - **Bells and shelves**: left and right changes frequency; up and down changes gain.
 - **12 dB/oct Low Cut and High Cut**: left and right changes frequency; up and down changes Q, which sets how much the filter peaks at its corner.
@@ -650,9 +653,9 @@ The device updates live while you drag, and the change is saved into the channel
 
 | Where | Scroll | Effect |
 |---|---|---|
-| Over a band | Scroll | Changes the band's **Q** (width). |
-| Over a band | **Cmd**-scroll | Changes the band's **gain** (bells and shelves only). |
-| Over a band | Add **Shift** | Fine adjustment. |
+| Over a band's dot or fill | Scroll | Changes the band's **Q** (width). |
+| Over a band's dot or fill | **Cmd**-scroll | Changes the band's **gain** (bells and shelves only). |
+| Over a band's dot or fill | Add **Shift** | Fine adjustment. |
 | Over the left edge (the dB labels) | Scroll | Zooms the graph's dB range in or out. This also works on the Dashboard. |
 | Over empty graph elsewhere | Scroll | Scrolls the page as normal. |
 
@@ -704,7 +707,7 @@ Clicking a button changes the band, or the whole selection if the band is part o
 
 ### Right-Click Menus
 
-**Right-click a band** to open the band menu. It acts on the whole selection if the band is part of one, and otherwise on that band alone.
+**Right-click a band's dot** to open the band menu. It acts on the whole selection if the band is part of one, and otherwise on that band alone.
 
 ![Band menu](Images/graph-band-menu.png)
 
@@ -716,7 +719,7 @@ Clicking a button changes the band, or the whole selection if the band is part o
 - **Invert Gain** flips a boost into a cut of the same size, or the reverse.
 - **Delete Band** or **Delete N Bands** sets the band(s) to Off.
 
-**Right-click empty graph** to open the graph menu:
+**Right-click empty graph**, or a band's fill, to open the graph menu:
 
 - **Add Band Here** opens a submenu of shapes. It is unavailable when every band is in use.
 - **Select All Bands** and **Deselect All**.
@@ -744,20 +747,20 @@ Arrow-key changes go to the device immediately and are saved a moment after the 
 
 | Where | Do this | Result |
 |---|---|---|
-| Empty graph | Double-click, or Cmd-click | Add a band (Low Cut at the left, High Cut at the right, Notch at the bottom, Bell elsewhere) |
+| Empty graph or fill | Double-click, or Cmd-click | Add a band (Low Cut at the left, High Cut at the right, Notch at the bottom, Bell elsewhere) |
 | The curve | Drag | Pull out a new band (Low Shelf at the left, High Shelf at the right, Bell elsewhere) |
-| Empty graph | Drag | Box-select bands |
-| Empty graph | Click | Deselect all |
-| Empty graph | Right-click | Add Band Here, Select All, Deselect All, Delete Selected |
+| Empty graph or fill | Drag | Box-select bands |
+| Empty graph or fill | Click | Deselect all |
+| Empty graph or fill | Right-click | Add Band Here, Select All, Deselect All, Delete Selected |
 | Left edge | Scroll | Zoom the dB range |
-| Band | Click / Cmd-click / Shift-click | Select / add to selection / select range |
-| Band | Option-click | Bypass or enable |
-| Band | Double-click | Type a new frequency |
-| Band | Drag | Move frequency and gain (or Q for 12 dB cuts) |
-| Band | Cmd-drag | Change Q |
+| Dot | Click / Cmd-click / Shift-click | Select / add to selection / select range |
+| Dot | Option-click | Bypass or enable |
+| Dot | Double-click | Type a new frequency |
+| Dot | Drag | Move frequency and gain (or Q for 12 dB cuts) |
+| Dot | Cmd-drag | Change Q |
 | While dragging | Shift / Option | Fine movement / lock to one axis |
-| Band or chip | Scroll / Cmd-scroll | Q / gain (Shift for fine) |
-| Band | Right-click | Shape, Slope, Edit Values, Bypass, Invert Gain, Delete |
+| Dot, fill or chip | Scroll / Cmd-scroll | Q / gain (Shift for fine) |
+| Dot | Right-click | Shape, Slope, Edit Values, Bypass, Invert Gain, Delete |
 | Chip value | Drag vertically, scroll, or double-click to type | Change that value |
 | Chip shape button | Click | Open the shape strip |
 | Chip power button | Click | Bypass or enable |
