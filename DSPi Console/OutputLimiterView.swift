@@ -114,6 +114,59 @@ struct OutputLimiterCell: View {
     }
 }
 
+// MARK: - Link Group Control
+
+/// The link-group picker, drawn in SwiftUI to match a native segmented
+/// control.  It replaces `Picker(.segmented)`, which is an AppKit control with
+/// a translucent backdrop: under the popover's opacity fade it flashed black
+/// while fading back up, and its own disabled style popped in without fading.
+/// Built from plain shapes, it fades with everything else and takes its
+/// disabled state from the environment like any SwiftUI control.
+/// Colours were sampled from the native control in dark mode.
+private struct LinkGroupSegments: View {
+    let selection: Int
+    let select: (Int) -> Void
+    @Environment(\.isEnabled) private var isEnabled
+
+    private let groups = Array(0...LIMITER_LINK_GROUP_MAX)
+    private let corner: CGFloat = 6
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(groups, id: \.self) { g in
+                Button { select(g) } label: {
+                    Text(g == 0 ? "Off" : "\(g)")
+                        .font(.system(size: 13))
+                        .foregroundColor(.primary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(
+                            RoundedRectangle(cornerRadius: corner - 1)
+                                .fill(Color.white.opacity(g == selection ? 0.29 : 0))
+                                .padding(1)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(g == 0 ? "Not linked" : "Link group \(g)")
+                .accessibilityAddTraits(g == selection ? .isSelected : [])
+
+                // A separator only between two unselected segments, as the
+                // native control draws it.
+                if g != groups.last {
+                    Rectangle()
+                        .fill(Color.black.opacity(g == selection || g + 1 == selection ? 0 : 0.15))
+                        .frame(width: 0.5)
+                        .padding(.vertical, 5)
+                }
+            }
+        }
+        .frame(height: 22)
+        .background(RoundedRectangle(cornerRadius: corner).fill(Color.white.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: corner).strokeBorder(Color.white.opacity(0.13), lineWidth: 0.5))
+        .opacity(isEnabled ? 1 : 0.5)
+    }
+}
+
 // MARK: - Settings Popover
 
 /// Everything the cell cannot show: threshold, release, link group and the
@@ -162,6 +215,30 @@ struct OutputLimiterSettings: View {
                 .help("A test signal from the Signal Generator is limited like any other signal. Switch this output's limiter off for an unaltered full-scale measurement.")
             }
 
+            // Greyed out and disabled while off, so an output without a
+            // limiter never looks as if a ceiling were in force.  Always
+            // present rather than shown on demand: a SwiftUI popover snaps to a
+            // new size instead of animating it, so a popover that changed
+            // height on the switch jumped under the pointer.
+            settings(s)
+                .disabled(!s.enabled)
+                .opacity(s.enabled ? 1 : 0.4)
+        }
+        .padding(16)
+        .frame(width: 320)
+        .animation(.easeInOut(duration: 0.15), value: s.enabled)
+        // On the whole popover, not the settings, which are greyed out and
+        // disabled while the limiter is off, dismiss button included.
+        .onboardingHint("limiter")
+        // Re-created per output, so a slider's local state never carries over
+        // when the page switches with the popover open.
+        .id(output)
+        .onAppear { limiter.watchers += 1 }
+        .onDisappear { limiter.watchers -= 1 }
+    }
+
+    private func settings(_ s: LimiterOutputSettings) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
             ParameterRow(
                 title: "Threshold",
                 subtitle: "The ceiling, in dBFS. No sample leaves this output above it.",
@@ -215,14 +292,6 @@ struct OutputLimiterSettings: View {
             }
             .disabled(!vm.isDeviceConnected)
         }
-        .padding(16)
-        .frame(width: 320)
-        // Re-created per output, so a slider's local state never carries over
-        // when the page switches with the popover open.
-        .id(output)
-        .onboardingHint("limiter")
-        .onAppear { limiter.watchers += 1 }
-        .onDisappear { limiter.watchers -= 1 }
     }
 
     private func linkSection(group: Int) -> some View {
@@ -230,25 +299,16 @@ struct OutputLimiterSettings: View {
             Text("Link group")
                 .font(.system(size: 12, weight: .medium))
 
-            Picker("", selection: Binding(
-                get: { group },
-                set: { g in edit { vm.setLimiterLinkGroup(output: output, g) } }
-            )) {
-                Text("Off").tag(0)
-                ForEach(1...LIMITER_LINK_GROUP_MAX, id: \.self) { g in
-                    Text("\(g)").tag(g)
-                }
+            LinkGroupSegments(selection: group) { g in
+                edit { vm.setLimiterLinkGroup(output: output, g) }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(!vm.isDeviceConnected)
 
             Text(linkSummary(group: group))
                 .font(.system(size: 9))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .help("Outputs in the same group all apply the deepest gain reduction any of them needs, so a stereo image cannot shift and a pair of woofers stays matched. Linking does not share settings: each output keeps its own threshold and release, and only outputs whose limiter is on take part.")
+        .help("Outputs in the same group act as one limiter: they share on/off, threshold and release, so changing one changes them all, and each applies the deepest gain reduction any of them needs. A stereo image cannot shift and a pair of woofers stays matched. An output joining a group takes on the group's settings; leaving keeps them.")
     }
 
     private func linkSummary(group: Int) -> String {
