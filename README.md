@@ -519,6 +519,7 @@ Opening a channel page starts that page's spectrum on the channel you opened.
 | | **Center**: the level at the middle of the graph | -40 to +20 dB | 0 dB |
 | | **Reset** | Restores the four scale settings above | - |
 | **GRID & LABELS** | **Frequency Grid**, **Frequency Labels**, **dB Grid**, **dB Labels** | On or off | On |
+| | **Frequency Readout**, **Gain Readout**: the labels that follow the pointer over empty graph while you edit bands (see [Hovering](#hovering)) | On or off | On |
 | | **Grid Opacity**: 0% hides the grid, 100% is standard, 200% is twice as strong | 0 to 200% | 50% |
 | **CURVES** | **Line Width** | 1 to 4 pt | 2 pt |
 | | **Glow**: a soft neon glow on the curves | On or off | On |
@@ -585,9 +586,9 @@ The graph edits the channel whose page is open. To edit another channel, click i
 ### Hovering
 
 - **Over a band's dot**: the band lights up, its row in the band list is highlighted, and the pointer becomes an open hand. If you rest on it for a moment, the band list scrolls to show that band.
-- **Over a band's fill**: the band lights up and its row is highlighted in the same way. Because clicks there reach the graph, the ghost dot and frequency readout described next also appear.
+- **Over a band's fill**: the band lights up and its row is highlighted in the same way. Because clicks there reach the graph, the ghost dot and readouts described next also appear.
 - **Over a dot, with nothing selected**: the [band chip](#the-band-chip) appears beside the dot and shows the band's values. It hides again shortly after you move away.
-- **Over empty graph, or a band's fill**: a faint "ghost" dot shows where a double-click would create a band, and a label at the bottom shows the frequency under the pointer. If every band is in use, the label reads **All N bands in use** instead.
+- **Over empty graph, or a band's fill**: a faint "ghost" dot shows where a double-click would create a band. A label at the bottom shows the frequency under the pointer, and a label at the left edge shows its level in dB, which is the gain a new bell or shelf takes when you place it there. Either label can be switched off with **Frequency Readout** and **Gain Readout** in [Graph Setup](#graph-setup). If every band is in use, the bottom label reads **All N bands in use** instead and the level is not shown.
 - **Over a row in the band list**: that band lights up on the graph.
 
 ### Adding Bands
@@ -596,13 +597,11 @@ A new band goes into the lowest-numbered band that is Off, and is selected strai
 
 ![Ghost dot and frequency readout](Images/graph-editor-hover.png)
 
-- **Double-click** (or **Cmd-click**) empty graph, or inside a band's fill. The kind of band depends on where you click:
-  - Near the **left edge**: a **Low Cut** (12 dB/oct, Q 0.707).
-  - Near the **right edge**: a **High Cut** (12 dB/oct, Q 0.707).
-  - Near the **bottom**, below -6 dB: a **Notch** (Q 1).
-  - **Anywhere else**: a **Bell** (peaking filter) at that frequency and gain, with Q 1.
+- **Double-click** empty graph, or inside a band's fill. This always makes a **Bell** (peaking filter) at the pointer's frequency and level, with Q 1, wherever you click. To make another shape, change it afterwards from the [band chip](#changing-shape-and-slope), or use the next method.
+- **Hold Cmd and press** on empty graph, or inside a band's fill. A compact row of shape symbols opens with the pointer already on the **Bell**. Keep the mouse button down and slide along the row to another shape. For a shape with two orders, a small stack folds out beneath it: **6 dB** and **12 dB** for shelves and cuts, or **180°** and **360°** for an all-pass. Slide down into the stack to choose one. A small tag names the shape under the pointer. Release to add the highlighted band where you first pressed: at that frequency, and at that level for bells and shelves. Releasing on a shape itself gives 12 dB (or 360°), so holding and releasing without sliding adds a bell. Release away from every option, or press Escape, to cancel.
+
+  If you **Cmd-click quickly** instead of holding, the picker stays open. Move to a shape, or into its stack, and click to add it. Clicking anywhere else, or pressing Escape, closes the picker without adding anything.
 - **Drag the curve itself.** Press on the channel's curve and pull, and a new band is drawn out of it, starting at 0 dB so the curve doesn't jump. Near the left edge it is a **Low Shelf**, near the right edge a **High Shelf**, and anywhere else a **Bell**.
-- **Right-click empty graph** (or a band's fill) and choose **Add Band Here**, then a shape. The band is placed at the pointer's frequency, and bells and shelves take the pointer's level as their gain.
 
 A single click on empty graph never adds a band; it only clears the selection. A Linkwitz Transform can't be created on the graph; use the band list.
 
@@ -613,7 +612,7 @@ A single click on empty graph never adds a band; it only clears the selection. A
 | Click a dot | Selects that band only. |
 | Cmd-click a dot | Adds that band to, or removes it from, the selection. |
 | Shift-click a dot | Selects every band between the last one you clicked and this one, in frequency order. |
-| Drag across empty graph or a fill | Draws a dashed box and selects every band whose dot is inside it. Hold Shift or Cmd as you start to add to the existing selection. |
+| Drag across empty graph or a fill | Draws a dashed box and selects every band whose dot is inside it. Hold Shift as you start to add to the existing selection. |
 | Click empty graph or a fill, or press Escape | Clears the selection. |
 | Cmd-A, or right-click > **Select All Bands** | Selects every band. |
 | Tab / Shift-Tab | Selects the next or previous band by frequency. |
@@ -670,7 +669,7 @@ The band chip is a small dark card next to a band's dot. It shows the band's val
 ![Band chip](Images/band-chip.png)
 
 **Header:**
-- The **shape button** on the left shows the band's shape icon and a two-letter code: **PK** (Bell), **LS** (Low Shelf), **LC** (Low Cut), **HS** (High Shelf), **HC** (High Cut), **NT** (Notch) or **AP** (All Pass). Click it to open the [shape strip](#changing-shape-and-slope). A Linkwitz Transform shows **LT** and must be edited in the band list.
+- The **shape button** on the left shows the band's shape icon and a two-letter code: **PK** (Bell), **LS** (Low Shelf), **LC** (Low Cut), **HS** (High Shelf), **HC** (High Cut), **NT** (Notch) or **AP** (All Pass). Click it to open the [shape picker](#changing-shape-and-slope). A Linkwitz Transform shows **LT** and must be edited in the band list.
 - The **power button** on the right bypasses or re-enables the band, or the whole selection if the band is part of one. It appears when the firmware supports per-band bypass.
 
 **Values** (only the rows a shape uses):
@@ -697,13 +696,15 @@ The chip has no delete button. Use the Delete key or the right-click menu.
 
 ### Changing Shape and Slope
 
-Click the chip's shape button to open the **shape strip**. It is a row of icons for Bell, Low Shelf, Low Cut, High Shelf, High Cut, Notch and All Pass, limited to the shapes your firmware supports. The current shape is highlighted.
+Click the chip's shape button to open the **shape picker**, the same compact row of symbols that Cmd-press opens on the graph (see [Adding Bands](#adding-bands)). It shows Bell, Low Shelf, Low Cut, High Shelf, High Cut, Notch and All Pass, limited to the shapes your firmware supports. The band's current shape, and its current order, are marked in the band's colour.
 
-![Shape strip](Images/shape-strip.png)
+![Shape picker](Images/shape-strip.png)
 
-If the current shape comes in two slopes, buttons after the divider choose between them: **6 dB** and **12 dB** for shelves and cuts, or **1st** and **2nd** order for All Pass.
+- **Names:** as you point at a symbol, a small tag shows its name.
+- **Orders:** pointing at a shape with two orders folds out a small stack beside it: **6 dB** and **12 dB** for shelves and cuts, or **180°** and **360°** for an all-pass.
+- **Choosing:** click a shape to switch to it. It keeps the band's current order where the new shape has one (a 6 dB low shelf clicked over to High Shelf stays 6 dB), and otherwise uses 12 dB or 360°. Click an order in the stack to set that order.
 
-Clicking a button changes the band, or the whole selection if the band is part of one, and closes the strip. The frequency is kept. If the new shape has no gain, the gain is set to 0. If the new shape uses Q and the old one didn't, Q is set to a sensible starting value.
+The change applies to the band, or the whole selection if the band is part of one, and closes the picker. The frequency is kept. If the new shape has no gain, the gain is set to 0. If the new shape uses Q and the old one didn't, Q is set to a sensible starting value.
 
 ### Right-Click Menus
 
@@ -712,16 +713,14 @@ Clicking a button changes the band, or the whole selection if the band is part o
 ![Band menu](Images/graph-band-menu.png)
 
 - The title shows **Band N** or **N Bands**.
-- **Shape** lets you choose a new shape.
+- Shape and exact values are not in this menu; change them on the [band chip](#the-band-chip).
 - **Slope** offers **6 dB/oct** or **12 dB/oct**; for All Pass it is **Order**, with **1st Order** or **2nd Order**. It appears only when both are available.
-- **Edit Values...** opens the chip ready to type the frequency.
 - **Bypass** or **Enable** needs firmware with per-band bypass.
 - **Invert Gain** flips a boost into a cut of the same size, or the reverse.
 - **Delete Band** or **Delete N Bands** sets the band(s) to Off.
 
 **Right-click empty graph**, or a band's fill, to open the graph menu:
 
-- **Add Band Here** opens a submenu of shapes. It is unavailable when every band is in use.
 - **Select All Bands** and **Deselect All**.
 - **Delete Selected Band** or **Delete N Selected Bands** appears when something is selected.
 
@@ -747,11 +746,13 @@ Arrow-key changes go to the device immediately and are saved a moment after the 
 
 | Where | Do this | Result |
 |---|---|---|
-| Empty graph or fill | Double-click, or Cmd-click | Add a band (Low Cut at the left, High Cut at the right, Notch at the bottom, Bell elsewhere) |
+| Empty graph or fill | Double-click | Add a bell at the pointer's frequency and level |
+| Empty graph or fill | Cmd-press, slide to a shape (and to 6 or 12 dB), release | Add that shape and order at the pressed point |
+| Empty graph or fill | Quick Cmd-click, then click a shape or order | The same, one click at a time |
 | The curve | Drag | Pull out a new band (Low Shelf at the left, High Shelf at the right, Bell elsewhere) |
 | Empty graph or fill | Drag | Box-select bands |
 | Empty graph or fill | Click | Deselect all |
-| Empty graph or fill | Right-click | Add Band Here, Select All, Deselect All, Delete Selected |
+| Empty graph or fill | Right-click | Select All, Deselect All, Delete Selected |
 | Left edge | Scroll | Zoom the dB range |
 | Dot | Click / Cmd-click / Shift-click | Select / add to selection / select range |
 | Dot | Option-click | Bypass or enable |
@@ -760,9 +761,9 @@ Arrow-key changes go to the device immediately and are saved a moment after the 
 | Dot | Cmd-drag | Change Q |
 | While dragging | Shift / Option | Fine movement / lock to one axis |
 | Dot, fill or chip | Scroll / Cmd-scroll | Q / gain (Shift for fine) |
-| Dot | Right-click | Shape, Slope, Edit Values, Bypass, Invert Gain, Delete |
+| Dot | Right-click | Slope, Bypass, Invert Gain, Delete |
 | Chip value | Drag vertically, scroll, or double-click to type | Change that value |
-| Chip shape button | Click | Open the shape strip |
+| Chip shape button | Click | Open the shape picker |
 | Chip power button | Click | Bypass or enable |
 | Keyboard | Delete, Escape, Tab, arrows, Option-arrows, Cmd-A | See [Keyboard Shortcuts on the Graph](#keyboard-shortcuts-on-the-graph) |
 
@@ -1353,6 +1354,7 @@ The Graphing page holds the same settings as [Graph Setup](#graph-setup), plus a
 | **Line Width** | 2.0 pt | 1 to 4 pt. |
 | **Animation Speed** | 0.20 s | 0.10 to 0.50 s. How long curve changes take to animate. |
 | **Show Frequency Grid**, **Show Frequency Labels**, **Show dB Grid**, **Show dB Labels** | On | Grid lines and axis labels. |
+| **Show Frequency Readout**, **Show Gain Readout** | On | The labels that follow the pointer over empty graph while you edit bands. |
 | **Grid Opacity** | 50% | 0 to 200%. |
 | **Vertical Range** | 50 dB | 10 to 100 dB. |
 | **Center** | 0 dB | -40 to +20 dB. The label shows the resulting top and bottom of the graph. |

@@ -170,24 +170,23 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(PeqNodeRole.of(FilterParams(type: .lowPass, freq: 100, q: 2, gain: 0)), .resonance)
     }
 
-    func testCreationFollowsPositionLikeProQ() {
+    /// A double-click always makes a bell at the pointer's frequency and
+    /// level, whatever part of the graph it lands on.
+    func testDoubleClickAlwaysMakesABell() {
         let g = PeqGraphGeometry(size: CGSize(width: 1000, height: 300), minFreq: 20, maxFreq: 20000, dbTop: 25, dbBottom: -25)
         let all = Set(FilterType.allCases)
-        func type(_ x: CGFloat, _ y: CGFloat, curve: Bool = false) -> FilterType {
-            PeqCreation.band(at: CGPoint(x: x, y: y), in: g, available: all, fromCurve: curve).type
+        for point in [CGPoint(x: 20, y: 150), CGPoint(x: 980, y: 150), CGPoint(x: 500, y: 290), CGPoint(x: 500, y: 60)] {
+            let band = PeqCreation.band(at: point, in: g, available: all, fromCurve: false)
+            XCTAssertEqual(band.type, .peaking, "at \(point)")
+            XCTAssertEqual(Double(band.freq), g.freq(point.x), accuracy: 0.01)
+            XCTAssertEqual(Double(band.gain), g.db(point.y), accuracy: 0.01)
         }
-        XCTAssertEqual(type(20, 150), .highPass, "far left makes a low cut")
-        XCTAssertEqual(type(980, 150), .lowPass, "far right makes a high cut")
-        XCTAssertEqual(type(500, 290), .notch, "the bottom makes a notch")
-        XCTAssertEqual(type(500, 60), .peaking)
-        XCTAssertEqual(type(60, 150, curve: true), .lowShelf, "pulling the curve near the left makes a shelf")
-        XCTAssertEqual(type(940, 150, curve: true), .highShelf)
-        let bell = PeqCreation.band(at: CGPoint(x: 500, y: 60), in: g, available: all, fromCurve: false)
-        XCTAssertEqual(Double(bell.gain), g.db(60), accuracy: 0.01)
-        XCTAssertEqual(Double(bell.freq), g.freq(500), accuracy: 0.01)
-        XCTAssertEqual(type(500, 290), .notch)
-        XCTAssertEqual(PeqCreation.band(at: CGPoint(x: 500, y: 290), in: g, available: all.subtracting([.notch]),
-                                        fromCurve: false).type, .peaking, "no notch on firmware without one")
+        func curveType(_ x: CGFloat) -> FilterType {
+            PeqCreation.band(at: CGPoint(x: x, y: 150), in: g, available: all, fromCurve: true).type
+        }
+        XCTAssertEqual(curveType(60), .lowShelf, "pulling the curve near the left makes a shelf")
+        XCTAssertEqual(curveType(940), .highShelf)
+        XCTAssertEqual(curveType(500), .peaking)
     }
 
     func testShapeMappingRoundTrips() {
@@ -620,6 +619,7 @@ final class PeqGraphEditorTests: XCTestCase {
 
         rig.view.hoverForTesting(fill)
         XCTAssertEqual(rig.host.peqSelection.graphHovered, 0, "the fill still highlights its band")
+        XCTAssertNotNil(rig.view.axisReadoutsForTesting.freq, "and shows where a band would go")
 
         click(rig, dot)
         XCTAssertEqual(rig.host.peqSelection.selected, [0], "the dot selects")
@@ -632,6 +632,205 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(created.params.type, .peaking)
         XCTAssertEqual(Double(created.params.freq), 400, accuracy: 4)
         XCTAssertEqual(Double(created.params.gain), 3, accuracy: 0.2)
+    }
+
+    /// Cmd-press opens the compact shape picker with the pointer on the bell.
+    /// Sliding onto a shape and releasing creates it at its default order;
+    /// sliding on into the stack that folds out beneath it picks 6 or 12 dB.
+    /// A Cmd-click without sliding leaves the picker open to be clicked.  The
+    /// band goes where Cmd was pressed; a release off every option, a click
+    /// elsewhere, or Escape, cancels.
+    @MainActor
+    func testCmdPressPickerCreatesTheShapeAndOrderReleasedOn() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        func press(_ p: CGPoint) { rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p, .command)) }
+        func slide(_ p: CGPoint) { rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, p, .command)) }
+        func release(_ p: CGPoint) { rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p, .command)) }
+
+        func move(_ p: CGPoint) { rig.view.mouseMoved(with: mouse(.mouseMoved, rig, p)) }
+
+        // A press opens the picker under the pointer on the bell.  Released
+        // without sliding, it stays open, and a click on the bell takes it.
+        let at = CGPoint(x: g.x(300), y: g.y(4))
+        press(at)
+        XCTAssertTrue(rig.view.pickerVisibleForTesting)
+        let bell = try XCTUnwrap(rig.view.pickerPointForTesting(.bell))
+        XCTAssertEqual(bell.x, at.x, accuracy: 0.5, "the pointer starts on the bell")
+        XCTAssertEqual(bell.y, at.y, accuracy: 0.5)
+        XCTAssertNil(rig.view.pickerOrderPointForTesting(1), "a bell has no orders to fold out")
+        release(at)
+        XCTAssertTrue(rig.view.pickerVisibleForTesting, "a Cmd-click without sliding leaves it open")
+        XCTAssertTrue(rig.host.commits.isEmpty)
+        // A real click is hit-tested: it must reach the editor, not the
+        // picker's symbols, or picking from the open picker does nothing.
+        let frame = try XCTUnwrap(rig.view.superview)
+        XCTAssertTrue(rig.view.hitTest(rig.view.convert(bell, to: frame)) === rig.view,
+                      "clicks on the open picker go to the editor")
+        click(rig, bell, .command)
+        XCTAssertFalse(rig.view.pickerVisibleForTesting)
+        var created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .peaking)
+        XCTAssertEqual(Double(created.params.freq), g.freq(at.x), accuracy: 0.5, "at the pressed point")
+        XCTAssertEqual(Double(created.params.gain), 4, accuracy: 0.05)
+
+        // Held without sliding and released in place, it takes the bell.
+        let heldAt = CGPoint(x: g.x(500), y: g.y(-3))
+        let before = rig.host.commits.count
+        press(heldAt)
+        spin(0.4)
+        release(heldAt)
+        XCTAssertFalse(rig.view.pickerVisibleForTesting, "a hold released in place picks")
+        XCTAssertEqual(rig.host.commits.count, before + 1)
+        created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .peaking, "the bell the pointer started on")
+        XCTAssertEqual(Double(created.params.freq), g.freq(heldAt.x), accuracy: 0.5)
+
+        // Slide to a low shelf, down into its stack, and release on 6 dB.
+        let at2 = CGPoint(x: g.x(200), y: g.y(-4))
+        press(at2)
+        let shelf = try XCTUnwrap(rig.view.pickerPointForTesting(.lowShelf))
+        slide(shelf)
+        let sixDB = try XCTUnwrap(rig.view.pickerOrderPointForTesting(1), "the shelf folds out its orders")
+        let twelveDB = try XCTUnwrap(rig.view.pickerOrderPointForTesting(2))
+        XCTAssertGreaterThan(twelveDB.y, sixDB.y, "stacked vertically beneath it")
+        // No dead spot on the way down: the shape stays highlighted across
+        // the gap until the stack takes over.
+        var y = shelf.y
+        while y <= sixDB.y {
+            slide(CGPoint(x: shelf.x, y: y))
+            let h = rig.view.pickerHighlightForTesting
+            XCTAssertEqual(h?.shape, .lowShelf, "at \(y - shelf.y) pt below the symbol")
+            y += 1
+        }
+        XCTAssertEqual(rig.view.pickerHighlightForTesting?.order, 1)
+        slide(sixDB)
+        release(sixDB)
+        created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .lowShelf1)
+        XCTAssertEqual(Double(created.params.freq), g.freq(at2.x), accuracy: 0.5)
+
+        // Click, then click: the stack follows the pointer, and a click on
+        // 12 dB takes it at the first click's point.
+        let at4 = CGPoint(x: g.x(150), y: g.y(-6))
+        click(rig, at4, .command)
+        let highShelf = try XCTUnwrap(rig.view.pickerPointForTesting(.highShelf))
+        move(highShelf)
+        let hs12 = try XCTUnwrap(rig.view.pickerOrderPointForTesting(2), "hovering folds out the stack")
+        move(hs12)
+        XCTAssertEqual(rig.view.pickerHighlightForTesting, .init(shape: .highShelf, order: 2))
+        click(rig, hs12)
+        created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .highShelf)
+        XCTAssertEqual(Double(created.params.freq), g.freq(at4.x), accuracy: 0.5)
+
+        // Releasing on a shape alone gives its default order.
+        press(CGPoint(x: g.x(3000), y: g.y(-2)))
+        let cut = try XCTUnwrap(rig.view.pickerPointForTesting(.highCut))
+        slide(cut)
+        release(cut)
+        created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .lowPass, "12 dB unless 6 dB is chosen")
+
+        // Released off every option, or cancelled with Escape: nothing.
+        let count = rig.host.commits.count
+        let at3 = CGPoint(x: g.x(1000), y: g.y(4))
+        press(at3)
+        let away = CGPoint(x: at3.x, y: g.y(-18))
+        slide(away)
+        release(away)
+        XCTAssertFalse(rig.view.pickerVisibleForTesting)
+        press(at3)
+        key(rig, code: 53, chars: "\u{1b}")
+        XCTAssertFalse(rig.view.pickerVisibleForTesting, "Escape cancels")
+        release(at3)
+        click(rig, at3, .command)
+        click(rig, away)
+        XCTAssertFalse(rig.view.pickerVisibleForTesting, "a click away from the open picker dismisses it")
+        XCTAssertEqual(rig.host.commits.count, count, "none of these creates a band")
+    }
+
+    /// The chip's shape button opens the same compact picker, which takes its
+    /// own clicks: a shape on its own keeps the band's order where it has
+    /// one, and the stack that folds out beneath a shape sets the order.
+    @MainActor
+    func testChipShapePickerSetsShapeAndOrder() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .lowShelf1, freq: 200, q: 0.707, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let strip = rig.view.stripForTesting
+        let frame = try XCTUnwrap(rig.view.superview)
+        func hit(_ p: CGPoint) -> NSView? { rig.view.hitTest(rig.view.convert(p, to: frame)) }
+        func move(_ p: CGPoint) { strip.mouseMoved(with: mouse(.mouseMoved, rig, p)) }
+        func press(_ p: CGPoint) { strip.mouseDown(with: mouse(.leftMouseDown, rig, p)) }
+        func latest() throws -> FilterParams { try XCTUnwrap(rig.host.commits.last?.first?.params) }
+
+        // Selecting the band puts the chip on it.
+        rig.host.peqSelection.selected = [0]
+        rig.view.toggleStripForTesting()
+        XCTAssertFalse(strip.isHidden)
+
+        // A high shelf clicked on its own keeps the band's 6 dB order.
+        let highShelf = try XCTUnwrap(rig.view.stripPointForTesting(.highShelf))
+        XCTAssertTrue(hit(highShelf) === strip, "the chip's picker takes its own clicks")
+        move(highShelf)
+        XCTAssertEqual(strip.highlighted, .init(shape: .highShelf, order: 1))
+        press(highShelf)
+        XCTAssertEqual(try latest().type, .highShelf1)
+
+        // The stack sets the order.
+        rig.view.toggleStripForTesting()
+        let lowCut = try XCTUnwrap(rig.view.stripPointForTesting(.lowCut))
+        move(lowCut)
+        let twelve = try XCTUnwrap(rig.view.stripOrderPointForTesting(2), "the cut folds out its orders")
+        move(twelve)
+        press(twelve)
+        XCTAssertEqual(try latest().type, .highPass, "a 12 dB low cut")
+        XCTAssertTrue(strip.isHidden, "picking closes it")
+    }
+
+    /// Hovering empty graph reads out the pointer's frequency and level;
+    /// over a band neither shows.
+    @MainActor
+    func testEmptyGraphReadsOutFrequencyAndGain() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+
+        rig.view.hoverForTesting(CGPoint(x: g.x(200), y: g.y(4)))
+        var r = rig.view.axisReadoutsForTesting
+        XCTAssertNotNil(r.freq)
+        XCTAssertEqual(r.gain, "+4.00 dB")
+
+        rig.view.hoverForTesting(CGPoint(x: 2, y: g.y(-3)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNotNil(r.freq)
+        XCTAssertEqual(r.gain, "-3.00 dB", "the level shows at the edges too")
+
+        rig.view.hoverForTesting(CGPoint(x: g.x(1000), y: g.y(6)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNil(r.freq, "over a band neither readout shows")
+        XCTAssertNil(r.gain)
+
+        // Each readout can be switched off from Graph Setup.
+        var config = rig.view.configForTesting
+        config.showFrequencyReadout = false
+        rig.view.apply(config)
+        rig.view.hoverForTesting(CGPoint(x: g.x(200), y: g.y(4)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNil(r.freq, "the frequency readout is off")
+        XCTAssertEqual(r.gain, "+4.00 dB", "the gain readout is independent of it")
+        config.showFrequencyReadout = true
+        config.showLevelReadout = false
+        rig.view.apply(config)
+        rig.view.hoverForTesting(CGPoint(x: g.x(300), y: g.y(4)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNotNil(r.freq)
+        XCTAssertNil(r.gain, "the gain readout is off")
     }
 
     /// A band that takes the chip while it is still fading out must bring it

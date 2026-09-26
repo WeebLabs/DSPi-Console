@@ -180,14 +180,12 @@ extension FilterParams {
 
 // MARK: - Creation
 
-/// Which band a click on the empty graph makes, following FabFilter Pro-Q 4:
-/// the far left and right make cuts, the bottom of the display a notch, and
-/// anywhere else a bell at the cursor.  Dragging the curve itself makes a
-/// shelf near either end and a bell elsewhere.
+/// Which band a double-click on the graph makes: always a bell at the
+/// pointer's frequency and level, wherever it lands; other shapes come from
+/// the chip's shape strip or Add Band Here.  Dragging the curve itself makes
+/// a shelf near either end and a bell elsewhere.
 enum PeqCreation {
-    static let cutZone: CGFloat = 0.06
     static let shelfZone: CGFloat = 0.12
-    static let notchZone: CGFloat = 0.18
 
     static func band(at point: CGPoint, in g: PeqGraphGeometry, available: Set<FilterType>,
                      fromCurve: Bool) -> FilterParams {
@@ -199,15 +197,7 @@ enum PeqCreation {
             else if fx > 1 - shelfZone, available.contains(.highShelf) { p.type = .highShelf; p.q = 0.707 }
             return p
         }
-        if fx < cutZone, available.contains(.highPass) {
-            p.type = .highPass; p.q = 0.707
-        } else if fx > 1 - cutZone, available.contains(.lowPass) {
-            p.type = .lowPass; p.q = 0.707
-        } else if point.y > g.size.height * (1 - notchZone), g.db(point.y) < -6, available.contains(.notch) {
-            p.type = .notch
-        } else {
-            p.gain = Float(PeqLimits.clamp(g.db(point.y), PeqLimits.gain))
-        }
+        p.gain = Float(PeqLimits.clamp(g.db(point.y), PeqLimits.gain))
         return p
     }
 }

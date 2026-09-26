@@ -50,6 +50,9 @@ class AppSettings: ObservableObject {
     // Scale & Labels
     @AppStorage("showFrequencyLabels") var showFrequencyLabels: Bool = true
     @AppStorage("showDBLabels") var showDBLabels: Bool = true
+    /// Readouts beside the pointer on empty graph while editing bands.
+    @AppStorage("showFrequencyReadout") var showFrequencyReadout: Bool = true
+    @AppStorage("showLevelReadout") var showLevelReadout: Bool = true
     @AppStorage("showFrequencyGrid") var showFrequencyGrid: Bool = true
     @AppStorage("showDBGrid") var showDBGrid: Bool = true
     /// Scales every grid line on the response graph, the 0 dB line included;
@@ -1852,6 +1855,10 @@ struct GraphingSettingsTab: View {
                     Toggle("Show dB Grid", isOn: $settings.showDBGrid)
                         .toggleStyle(.switch)
                     Toggle("Show dB Labels", isOn: $settings.showDBLabels)
+                        .toggleStyle(.switch)
+                    Toggle("Show Frequency Readout", isOn: $settings.showFrequencyReadout)
+                        .toggleStyle(.switch)
+                    Toggle("Show Gain Readout", isOn: $settings.showLevelReadout)
                         .toggleStyle(.switch)
 
                     VStack(alignment: .leading, spacing: 4) {

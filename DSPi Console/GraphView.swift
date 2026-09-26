@@ -201,6 +201,8 @@ struct BodePlotView: View {
         c.glow = settings.showGraphGlow
         c.availableTypes = availableFilterTypes(vm: vm, includeLinkwitz: false)
         c.bypassSupported = vm.firmwareSupportsBandBypass
+        c.showFrequencyReadout = settings.showFrequencyReadout
+        c.showLevelReadout = settings.showLevelReadout
         return c
     }
 
