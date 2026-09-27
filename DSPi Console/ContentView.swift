@@ -1141,6 +1141,9 @@ struct OutputChannelDetail: View {
                 )
             }
         }
+        .onAppear { vm.crossoverTabShown = tab == .crossover }
+        .onDisappear { vm.crossoverTabShown = false }
+        .onChange(of: tab) { vm.crossoverTabShown = $0 == .crossover }
         .onChange(of: crossoverSupported) { supported in
             // If we lose crossover support (e.g. user switches to a pre-V11
             // device), bounce back to the PEQ tab so we don't show an

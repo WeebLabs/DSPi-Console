@@ -424,7 +424,7 @@ The XO columns are **#**, **FAMILY**, **TYPE**, **SLOPE** and **FREQ**.
 - **SLOPE**: how steeply the filter cuts, in dB per octave. Linkwitz-Riley and Bessel offer 12, 24, 36 and 48. Butterworth offers 6 to 48 in 6 dB steps. If you change the family, Console keeps the slope when it can, or picks the nearest one.
 - **FREQ**: the crossover frequency in Hz.
 
-Crossover bands have no gain or Q; the family and slope set their shape.
+Crossover bands have no gain or Q; the family and slope set their shape. They are set in the list only: while the XO tab is open, the graph still shows the channel's response, but you can't add or edit PEQ bands on it.
 
 **Bypass All** on the XO tab asks for confirmation. Bypassing crossovers sends full-range audio to the output, which can damage a tweeter or other driver that relies on the crossover for protection.
 

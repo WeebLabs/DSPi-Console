@@ -173,10 +173,12 @@ struct BodePlotView: View {
 
     /// The channel whose bands are edited on the graph, or nil.  That
     /// channel's curve, dots and band shapes are drawn by the GPU editor
-    /// overlay, so the SwiftUI curves leave it out.
+    /// overlay, so the SwiftUI curves leave it out.  None on the XO tab,
+    /// where PEQ bands are not what the page lists.
     var editedChannel: Int? {
         guard PeqGraphEditorView.isAvailable, vm.isDeviceReady, !useOverride,
-              let ch = vm.activeEqChannel, vm.channelVisibility[ch] == true else { return nil }
+              let ch = vm.activeEqChannel, vm.channelVisibility[ch] == true,
+              !(vm.crossoverTabShown && ch >= vm.chOut1) else { return nil }
         return ch
     }
 

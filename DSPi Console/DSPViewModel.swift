@@ -2171,6 +2171,10 @@ class DSPViewModel: ObservableObject {
         }
     }
 
+    /// True while an output page shows its XO tab: the graph then shows the
+    /// channel without the PEQ band editor, since those bands are not listed.
+    @Published var crossoverTabShown = false
+
     // Live Data
     let meters = DSPMeterModel()
     let telemetry = DeviceTelemetry()
