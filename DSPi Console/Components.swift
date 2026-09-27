@@ -945,14 +945,7 @@ private struct InputRoutingRow: View {
     private var inverted: Bool { vm.matrixInvert[input][output] }
     private var liveGain: Float { vm.matrixGain[input][output] }
     private var inputColor: Color { MatrixInput.color(for: input) }
-    private var name: String {
-        // In 8-channel mode use the 7.1 role names; stereo keeps the device's
-        // USB L/R channel names.
-        if vm.numMatrixInputs > BASE_MATRIX_INPUTS {
-            return MatrixInput.shortName(for: input, count: vm.numMatrixInputs)
-        }
-        return vm.channelNames.indices.contains(input) ? vm.channelNames[input] : "Input \(input + 1)"
-    }
+    private var name: String { vm.inputChannelName(input) }
 
     var body: some View {
         HStack(spacing: 8) {

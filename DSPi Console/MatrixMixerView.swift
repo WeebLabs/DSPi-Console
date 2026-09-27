@@ -71,40 +71,8 @@ struct MatrixInput {
     /// view is unchanged.
     static let palette: [Color] = ChannelPalette.inputs
 
-    /// 7.1 USB input order used in 8-channel mode (spec §5).
-    static let surroundShortNames = ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]
-    static let surroundFullNames  = ["Front Left", "Front Right", "Center", "LFE",
-                                     "Back Left", "Back Right", "Side Left", "Side Right"]
-
-    /// Stereo (2-input) labels.
-    static let stereo: [MatrixInput] = [
-        MatrixInput(index: 0, name: "Input L", color: palette[0]),
-        MatrixInput(index: 1, name: "Input R", color: palette[1]),
-    ]
-
-    /// Backward-compatible alias for the stereo input pair.
-    static let all: [MatrixInput] = stereo
-
     static func color(for input: Int) -> Color {
         palette.indices.contains(input) ? palette[input] : .accentColor
-    }
-
-    /// Short row label for the given input index and total input count.
-    static func shortName(for input: Int, count: Int) -> String {
-        if count <= 2 { return input == 0 ? "Input L" : "Input R" }
-        return surroundShortNames.indices.contains(input) ? surroundShortNames[input] : "In \(input + 1)"
-    }
-
-    static func fullName(for input: Int, count: Int) -> String {
-        if count <= 2 { return input == 0 ? "USB Left" : "USB Right" }
-        return surroundFullNames.indices.contains(input) ? surroundFullNames[input] : "Input \(input + 1)"
-    }
-
-    /// The inputs to render for a given count (2 = stereo, 8 = 7.1 surround).
-    static func inputs(count: Int) -> [MatrixInput] {
-        (0..<max(count, 1)).map { i in
-            MatrixInput(index: i, name: shortName(for: i, count: count), color: color(for: i))
-        }
     }
 }
 
@@ -467,24 +435,28 @@ struct MatrixMixerView: View {
         }
     }
 
-    /// Left-column label for an input row.  In 8-channel mode it shows the 7.1
-    /// role plus a per-input trim (preamp) field so users can correct level /
-    /// host channel-mapping differences (spec §14).
+    /// Left-column label for an input row: the channel's name, as in the
+    /// sidebar.  In 8-channel mode it adds a per-input trim (preamp) field so
+    /// users can correct level / host channel-mapping differences (spec §14).
     @ViewBuilder private func inputLabel(_ input: MatrixInput) -> some View {
         if is8ch {
             VStack(spacing: 3) {
                 Text(input.name)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(input.color)
-                    .help(MatrixInput.fullName(for: input.index, count: vm.numMatrixInputs))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(vm.matrixRowFullName(input.index))
                 CompactGainField(gain: matrixInputTrimBinding(input.index))
-                    .help("Input trim (preamp) for \(MatrixInput.fullName(for: input.index, count: vm.numMatrixInputs))")
+                    .help("Input trim (preamp) for \(vm.matrixRowFullName(input.index))")
             }
             .frame(width: labelWidth)
         } else {
             Text(input.name)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(input.color)
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .frame(width: labelWidth, alignment: .center)
                 .help(vm.matrixRowFullName(input.index))
         }

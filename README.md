@@ -989,8 +989,7 @@ The Matrix Mixer is the routing patch bay. It decides which inputs feed which ou
 ![Matrix Mixer](Images/matrix-mixer.png)
 
 **Layout.** Each **column** is an output. The column header shows the output's name and its number (**OUT1**, **OUT2** and so on). Each **row** under **ROUTING** is an input:
-- In stereo, the rows are **Input L** and **Input R**.
-- With 4 to 8 inputs (RP2350), rows are labelled in surround order: **FL**, **FR**, **FC**, **LFE**, **BL**, **BR**, **SL**, **SR**. Hover a label for its full name.
+- Each row is labelled with the input's channel name, the same one the sidebar shows. Renaming a channel in the sidebar renames its row here too.
 - When the [Stereo Upmixer](#stereo-upmixer) is on, extra rows **C**, **Ls** and **Rs** appear for its derived channels.
 
 The window resizes itself when the number of rows changes. With 8 inputs it can also be resized and scrolled.
@@ -1020,7 +1019,7 @@ The window resizes itself when the number of rows changes. With 8 inputs it can 
 
 **Multichannel extras (RP2350 with 8-channel input).**
 - A small **input trim** field under each row label sets that input's preamp, from -60 to +12 dB.
-- **Direct 1:1** routes each input to the matching output (FL to OUT1, FR to OUT2 and so on) at 0 dB, clears every other route, and turns off PDM. A multichannel stream is silent until it is routed, so this is the quickest way to start.
+- **Direct 1:1** routes each input to the matching output (input 1 to OUT1, input 2 to OUT2 and so on) at 0 dB, clears every other route, and turns off PDM. A multichannel stream is silent until it is routed, so this is the quickest way to start.
 - **Clear** disconnects every crosspoint. Each crosspoint's gain and polarity are kept, so reconnecting restores them.
 
 ### Loudness Compensation

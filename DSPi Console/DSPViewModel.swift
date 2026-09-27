@@ -2073,7 +2073,7 @@ class DSPViewModel: ObservableObject {
             default: break
             }
         }
-        return MatrixInput.shortName(for: row, count: numMatrixInputs)
+        return inputChannelName(row)
     }
 
     /// Full/tooltip label for matrix source `row`, contextual on the upmixer state.
@@ -2086,7 +2086,13 @@ class DSPViewModel: ObservableObject {
             default: break
             }
         }
-        return MatrixInput.fullName(for: row, count: numMatrixInputs)
+        return inputChannelName(row)
+    }
+
+    /// An input channel's name, the one the sidebar shows (renamable, stored
+    /// on the device).
+    func inputChannelName(_ ch: Int) -> String {
+        channelNames.indices.contains(ch) ? channelNames[ch] : "USB \(ch + 1)"
     }
 
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't

@@ -356,7 +356,7 @@ struct ContentView: View {
                                   color: MatrixInput.color(for: ch),
                                   descriptor: "IN\(ch + 1)",
                                   isSelected: rowSelected,
-                                  name: ch < vm.channelNames.count ? vm.channelNames[ch] : "USB \(ch + 1)",
+                                  name: vm.inputChannelName(ch),
                                   meters: vm.meters,
                                   isRenaming: renamingChannel == ch,
                                   renameText: $renameText,
