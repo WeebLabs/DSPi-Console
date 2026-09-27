@@ -345,6 +345,9 @@ final class PeqGraphEditorView: NSView {
         }
         refreshHUD()
         invalidate()
+        // The layer still holds the last frame of whatever it showed before,
+        // which would flash until the next display cycle.
+        if editing, old.channel != new.channel { metal?.drawNow() }
     }
 
     private func resetInteraction() {

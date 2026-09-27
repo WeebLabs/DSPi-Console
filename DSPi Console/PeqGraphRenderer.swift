@@ -151,6 +151,16 @@ final class PeqGraphMetalView: MTKView {
         needsDisplay = true
     }
 
+    /// Draws a frame now, presented with the current Core Animation
+    /// transaction, so it appears together with the view changes made
+    /// alongside it rather than after a stale frame.
+    func drawNow() {
+        let metalLayer = layer as? CAMetalLayer
+        metalLayer?.presentsWithTransaction = true
+        draw()
+        metalLayer?.presentsWithTransaction = false
+    }
+
     /// Run the display link until `onFrame` reports it has settled.
     func animate() {
         guard !animating else { return }
@@ -243,8 +253,14 @@ final class PeqGraphRenderer: NSObject, MTKViewDelegate {
               let command = resources.queue.makeCommandBuffer() else { return }
         let scale = CGFloat(drawable.texture.width) / view.bounds.width
         guard encode(command: command, target: drawable.texture, backingScale: scale) else { return }
-        command.present(drawable)
-        command.commit()
+        if (view.layer as? CAMetalLayer)?.presentsWithTransaction == true {
+            command.commit()
+            command.waitUntilScheduled()
+            drawable.present()
+        } else {
+            command.present(drawable)
+            command.commit()
+        }
     }
 
     /// Encodes one frame into `target`.  Also used offscreen by tests.
