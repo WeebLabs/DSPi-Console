@@ -86,8 +86,8 @@ private struct TubeStartingPoint {
 /// trim included, so applying one lands on the same sound whatever came before;
 /// the type sets the character knobs.
 private let tubeStartingPoints: [TubeStartingPoint] = [
-    TubeStartingPoint(name: "Clean default", detail: "12AX7, level-neutral, output stage off",
-                      tubeType: 1, driveDB: TUBE_DEFAULT_DRIVE_DB, rectifier: 1, xfmr: false),
+    TubeStartingPoint(name: "Clean default", detail: "12AX7, level-neutral, output stage on",
+                      tubeType: 1, driveDB: TUBE_DEFAULT_DRIVE_DB, rectifier: 1, xfmr: TUBE_DEFAULT_XFMR_ENABLED),
     TubeStartingPoint(name: "Warm hi-fi", detail: "12AU7 line stage, tightly damped",
                       tubeType: 5, driveDB: -3, rectifier: 1, xfmr: true, damping: 10),
     TubeStartingPoint(name: "Single-ended sweetness", detail: "300B, loose damping",

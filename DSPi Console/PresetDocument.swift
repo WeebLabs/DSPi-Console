@@ -281,7 +281,7 @@ struct PresetDocument: Codable {
         var hardnessPct: Float = TUBE_DEFAULT_HARDNESS_PCT
         var sagPct: Float = TUBE_DEFAULT_SAG_PCT
         var rectifier: Int = TUBE_DEFAULT_RECTIFIER
-        var xfmrEnabled = false
+        var xfmrEnabled = TUBE_DEFAULT_XFMR_ENABLED
         var xfmrDamping: Float = TUBE_DEFAULT_XFMR_DAMPING
         var xfmrResHz: Float = TUBE_DEFAULT_XFMR_RES_HZ
         var mixPct: Float = TUBE_DEFAULT_MIX_PCT
@@ -300,7 +300,7 @@ struct PresetDocument: Codable {
             hardnessPct = c.value(.hardnessPct, TUBE_DEFAULT_HARDNESS_PCT)
             sagPct = c.value(.sagPct, TUBE_DEFAULT_SAG_PCT)
             rectifier = c.value(.rectifier, TUBE_DEFAULT_RECTIFIER)
-            xfmrEnabled = c.value(.xfmrEnabled, false)
+            xfmrEnabled = c.value(.xfmrEnabled, TUBE_DEFAULT_XFMR_ENABLED)
             xfmrDamping = c.value(.xfmrDamping, TUBE_DEFAULT_XFMR_DAMPING)
             xfmrResHz = c.value(.xfmrResHz, TUBE_DEFAULT_XFMR_RES_HZ)
             mixPct = c.value(.mixPct, TUBE_DEFAULT_MIX_PCT)

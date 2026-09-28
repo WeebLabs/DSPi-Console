@@ -37,7 +37,7 @@ final class TubeParameters: ObservableObject {
     @Published var hardnessPct: Float = TUBE_DEFAULT_HARDNESS_PCT  // 0..100 %
     @Published var sagPct: Float = TUBE_DEFAULT_SAG_PCT            // 0..100 %
     @Published var rectifier: Int = TUBE_DEFAULT_RECTIFIER
-    @Published var xfmrEnabled: Bool = false
+    @Published var xfmrEnabled: Bool = TUBE_DEFAULT_XFMR_ENABLED
     @Published var xfmrDamping: Float = TUBE_DEFAULT_XFMR_DAMPING  // 1..20
     @Published var xfmrResHz: Float = TUBE_DEFAULT_XFMR_RES_HZ     // 30..150 Hz
     @Published var mixPct: Float = TUBE_DEFAULT_MIX_PCT            // 0..100 %
