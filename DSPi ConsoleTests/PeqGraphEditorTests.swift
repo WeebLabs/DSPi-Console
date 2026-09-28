@@ -707,6 +707,30 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(rig.host.commits.count, before, "none of these creates a band")
     }
 
+    /// The Cmd-click card and the chip of the bell it makes sit on the same
+    /// side of the point: away from 0 dB where there is room, else beside it.
+    @MainActor
+    func testCmdClickCardAndNewChipShareASide() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        func side(_ f: NSRect, of p: CGPoint) -> String {
+            if f.maxY <= p.y { return "north" }
+            if f.minY >= p.y { return "south" }
+            return f.minX >= p.x ? "east" : "west"
+        }
+        for (freq, db, expected) in [(100.0, 4.0, "north"), (300.0, 22.0, "east"),
+                                     (1000.0, -3.0, "south"), (3000.0, -22.0, "east")] {
+            let at = CGPoint(x: g.x(freq), y: g.y(db))
+            click(rig, at, .command)
+            let cardSide = side(try XCTUnwrap(rig.view.cardFrameForTesting), of: at)
+            try XCTUnwrap(rig.view.cardForTesting.shapeButtonForTesting(.bell)).performClick(nil)
+            let chipSide = side(try XCTUnwrap(rig.view.hudFrameForTesting), of: at)
+            XCTAssertEqual(cardSide, expected, "the card at \(db) dB")
+            XCTAssertEqual(chipSide, cardSide, "the chip opens where the card was, at \(db) dB")
+        }
+    }
+
     /// The chip's shape button turns it to a two-step page, the size of its
     /// values and held still: a shape with one order applies at once; one with
     /// two asks for the order, and that click applies both.  Either way the

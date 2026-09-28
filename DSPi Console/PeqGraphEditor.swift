@@ -270,6 +270,7 @@ final class PeqGraphEditorView: NSView {
     func toggleShapePageForTesting() { toggleShapePage() }
     var shapePageShownForTesting: Bool { !hud.isHidden && hud.showsShapes }
     var hudFrameForTesting: NSRect? { hud.isHidden ? nil : hud.frame }
+    var cardFrameForTesting: NSRect? { cardPoint == nil ? nil : card.frame }
     func shapePageButtonForTesting(_ shape: PeqShape) -> NSButton? { hud.chooserForTesting.shapeButtonForTesting(shape) }
     func shapePageSlopeForTesting(_ order: Int) -> NSButton? { hud.chooserForTesting.slopeChoiceForTesting(order) }
     var shapePageBackForTesting: NSButton { hud.chooserForTesting.backButtonForTesting }
@@ -1570,25 +1571,28 @@ final class PeqGraphEditorView: NSView {
         }
         pagedOrigin = nil
         let p = current(b)
-        let node = nodePoint(p)
-        let size = hud.preferredSize
-        let margin: CGFloat = 4
+        let frame = panelFrame(beside: nodePoint(p), size: hud.preferredSize, boost: role(p).db(for: p) >= 0)
+        hud.frame = frame
+        if hud.showsShapes { pagedOrigin = frame.origin }
+    }
+
+    /// Where a floating panel of `size` sits beside `point`.  Away from 0 dB
+    /// first, as FabFilter does, so a chip never sits on its band's own lobe;
+    /// then beside the point; the lobe side last.  The Cmd-click card shares
+    /// the rule so a new band's chip opens on the side the card was on.
+    private func panelFrame(beside point: CGPoint, size: NSSize, boost: Bool) -> NSRect {
         let gap: CGFloat = 16
-        let area = bounds.insetBy(dx: margin, dy: margin)
+        let area = bounds.insetBy(dx: 4, dy: 4)
         func clampedX(_ x: CGFloat) -> CGFloat { min(max(x, area.minX), max(area.maxX - size.width, area.minX)) }
         func clampedY(_ y: CGFloat) -> CGFloat { min(max(y, area.minY), max(area.maxY - size.height, area.minY)) }
-        // Away from 0 dB first, as FabFilter does, so the display never sits
-        // on the band's own lobe; then beside the dot; the lobe side last.
-        let above = NSRect(x: clampedX(node.x - size.width / 2), y: node.y - gap - size.height, width: size.width, height: size.height)
-        let below = NSRect(x: clampedX(node.x - size.width / 2), y: node.y + gap, width: size.width, height: size.height)
-        let right = NSRect(x: node.x + gap, y: clampedY(node.y - size.height / 2), width: size.width, height: size.height)
-        let left = NSRect(x: node.x - gap - size.width, y: clampedY(node.y - size.height / 2), width: size.width, height: size.height)
-        let boost = role(p).db(for: p) >= 0
+        let above = NSRect(x: clampedX(point.x - size.width / 2), y: point.y - gap - size.height, width: size.width, height: size.height)
+        let below = NSRect(x: clampedX(point.x - size.width / 2), y: point.y + gap, width: size.width, height: size.height)
+        let right = NSRect(x: point.x + gap, y: clampedY(point.y - size.height / 2), width: size.width, height: size.height)
+        let left = NSRect(x: point.x - gap - size.width, y: clampedY(point.y - size.height / 2), width: size.width, height: size.height)
         let candidates = boost ? [above, right, left, below] : [below, right, left, above]
         var frame = candidates.first { area.contains($0) } ?? candidates[0]
         frame.origin = NSPoint(x: clampedX(frame.minX), y: clampedY(frame.minY))
-        hud.frame = frame
-        if hud.showsShapes { pagedOrigin = frame.origin }
+        return frame
     }
 
     /// While bands are selected the chip stays up on the selection, wherever
@@ -1658,8 +1662,8 @@ final class PeqGraphEditorView: NSView {
         return band
     }
 
-    /// Opens the shape card for a band at `p`, above the point where there
-    /// is room, else below it.
+    /// Opens the shape card for a band at `p`, placed as the band's chip will
+    /// be.
     private func openCard(at p: CGPoint) {
         guard freeSlot != nil else {
             // Every band is in use: nothing to create, and the press is not
@@ -1679,11 +1683,8 @@ final class PeqGraphEditorView: NSView {
             if let band, let slot = self.createBand(band) { self.showHUD(for: slot) }
         }
         card.chooser.onBack = { [weak self] in self?.closeCard() }
-        let size = card.frame.size, gap: CGFloat = 12, area = bounds.insetBy(dx: 4, dy: 4)
-        let x = min(max(p.x - size.width / 2, area.minX), max(area.maxX - size.width, area.minX))
-        let above = p.y - gap - size.height
-        let y = above >= area.minY ? above : min(p.y + gap, max(area.maxY - size.height, area.minY))
-        card.setFrameOrigin(NSPoint(x: x, y: y))
+        // Boost or cut by the click's level, which is where a bell's dot lands.
+        card.setFrameOrigin(panelFrame(beside: p, size: card.frame.size, boost: geometry.db(p.y) >= 0).origin)
         card.alphaValue = 1
         card.isHidden = false
         cardPoint = p
