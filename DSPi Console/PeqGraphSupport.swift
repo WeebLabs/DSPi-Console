@@ -15,10 +15,41 @@ final class PeqGraphSelection: ObservableObject {
     /// row into view.  An event, not state, so the same band can ask again.
     let revealRow = PassthroughSubject<Int, Never>()
 
+    /// The row a Shift-click in the list extends from.
+    private var listAnchor: Int?
+    /// The selection the list itself last made.  The list follower leaves
+    /// it alone: its rows were clicked where they sit, and a Shift range
+    /// reaching past the top of the view must not scroll the click away.
+    var madeByList: Set<Int>?
+
     func reset() {
         if !selected.isEmpty { selected = [] }
         if graphHovered != nil { graphHovered = nil }
         if listHovered != nil { listHovered = nil }
+        listAnchor = nil
+    }
+
+    /// A click on a band's number in the list, with the modifiers of a click
+    /// on its dot: Cmd toggles the band, Shift takes the run of rows from the
+    /// last one clicked (in row order, as the list shows them, where the
+    /// graph uses frequency order), and a plain click selects it alone.
+    /// `isActive` says which rows hold a band; empty rows are skipped.
+    func listClick(_ band: Int, command: Bool, shift: Bool, isActive: (Int) -> Bool) {
+        var next: Set<Int>
+        if command {
+            next = selected.symmetricDifference([band])
+            listAnchor = band
+        } else if shift, let from = listAnchor.flatMap({ selected.contains($0) ? $0 : nil })
+                    ?? (selected.count == 1 ? selected.first : nil) {
+            // The anchor stays put, so a second Shift-click reshapes the run.
+            next = Set((min(from, band)...max(from, band)).filter(isActive))
+            listAnchor = from
+        } else {
+            next = [band]
+            listAnchor = band
+        }
+        madeByList = next
+        selected = next
     }
 }
 

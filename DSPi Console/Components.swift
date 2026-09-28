@@ -1545,7 +1545,8 @@ struct FilterListView: View {
                                 onBypassToggle?(index, newVal)
                             },
                             graphSelection: graphSelection,
-                            liveReadouts: index < PeqLiveReadouts.bands ? liveReadouts : nil
+                            liveReadouts: index < PeqLiveReadouts.bands ? liveReadouts : nil,
+                            isBandActive: { bands.indices.contains($0) && bands[$0].type != .flat }
                         )
                     }
                 }
@@ -1831,6 +1832,8 @@ struct FilterRowView: View {
     var onBypassToggle: ((Bool) -> Void)? = nil
     var graphSelection: PeqGraphSelection? = nil
     var liveReadouts: PeqLiveReadouts? = nil
+    /// Which rows of the list hold a band, for a Shift-click's run.
+    var isBandActive: (Int) -> Bool = { _ in true }
 
     /// Presentation state for the Linkwitz Transform parameter popover.  LT has
     /// four parameters (f0, Q0, fp, Qp) that don't fit the shared 3-column row,
@@ -1882,7 +1885,9 @@ struct FilterRowView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 guard let graphSelection, isActive else { return }
-                graphSelection.selected = [index]
+                let mods = NSEvent.modifierFlags
+                graphSelection.listClick(index, command: mods.contains(.command),
+                                         shift: mods.contains(.shift), isActive: isBandActive)
             }
 
             if isCrossoverMode {
@@ -2762,7 +2767,7 @@ struct PeqRowHighlight: View {
 
 
 /// Scrolls the band list just far enough to show a band newly selected on
-/// the graph, or one the pointer rests on there; a row already in view does
+/// the graph (not in the list itself), or one the pointer rests on there; a row already in view does
 /// not move.  Its own small observer, so a selection change redraws this and
 /// not the list.
 private struct PeqRowScrollFollower: View {
@@ -2778,6 +2783,8 @@ private struct PeqRowScrollFollower: View {
                 // With several new at once (a marquee), the first in the list.
                 let added = selected.subtracting(previous).sorted()
                 previous = selected
+                if selected == selection.madeByList { return }
+                selection.madeByList = nil
                 guard let band = added.first, band < rows else { return }
                 reveal(band)
             }

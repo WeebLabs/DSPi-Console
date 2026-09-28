@@ -707,6 +707,35 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(rig.host.commits.count, before, "none of these creates a band")
     }
 
+    /// A band number in the list takes the graph's click modifiers: Cmd
+    /// toggles one band, Shift takes the run of rows from the last click,
+    /// skipping empty rows, and a plain click selects the band alone.
+    func testListNumberClicksSelectLikeDots() {
+        let selection = PeqGraphSelection()
+        let active: (Int) -> Bool = { $0 != 4 }
+        selection.listClick(2, command: false, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [2])
+        selection.listClick(6, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [2, 3, 5, 6], "a run of rows, without the empty one")
+        selection.listClick(0, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [0, 1, 2], "a second Shift-click reshapes the run from the same row")
+        selection.listClick(8, command: true, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [0, 1, 2, 8], "Cmd adds a band")
+        selection.listClick(1, command: true, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [0, 2, 8], "and takes one away")
+        XCTAssertEqual(selection.madeByList, [0, 2, 8], "the list does not scroll to its own clicks")
+
+        // A band selected on the graph is where a Shift-click in the list runs from.
+        selection.selected = [7]
+        selection.listClick(9, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [7, 8, 9])
+        selection.selected = [1, 5]
+        selection.listClick(9, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [9], "with no single band to run from, it selects alone")
+        selection.listClick(3, command: false, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [3])
+    }
+
     /// The Cmd-click card and the chip of the bell it makes sit on the same
     /// side of the point: away from 0 dB where there is room, else beside it.
     @MainActor
