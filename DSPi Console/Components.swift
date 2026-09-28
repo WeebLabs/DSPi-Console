@@ -333,13 +333,15 @@ struct CpuMeter: View {
     }
 }
 
+// Observes the meter model directly: DSPViewModel does not republish when
+// `meters.status` changes, so observing the view model froze the readings.
 struct CpuSection: View {
-    @ObservedObject var vm: DSPViewModel
+    @ObservedObject var meters: DSPMeterModel
     var body: some View {
         HStack {
-            CpuMeter(core: 0, load: vm.meters.status.cpu0)
+            CpuMeter(core: 0, load: meters.status.cpu0)
             Spacer()
-            CpuMeter(core: 1, load: vm.meters.status.cpu1)
+            CpuMeter(core: 1, load: meters.status.cpu1)
         }
     }
 }

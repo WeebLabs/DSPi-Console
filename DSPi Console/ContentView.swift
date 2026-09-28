@@ -776,7 +776,7 @@ struct ContentView: View {
                     // System Status — Core 0 utilisation + master volume.
                     // Core 1 still appears in the Stats window; meters are
                     // inline in sidebar rows.
-                    CpuSection(vm: vm)
+                    CpuSection(meters: vm.meters)
                     .padding()
                     }
                     .background(.ultraThinMaterial)
