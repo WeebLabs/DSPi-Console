@@ -307,8 +307,9 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
         static let label: CGFloat = 28
         static let number: CGFloat = 44
         static let gap: CGFloat = 3
-        /// Wide enough for "kHz"; a slope row needs room for "dB/oct".
-        static func unit(slope: Bool) -> CGFloat { slope ? 32 : 19 }
+        /// Wide enough for "kHz".  A fixed slope's longer "dB/oct" sits inline
+        /// after its number instead, so it never widens the card.
+        static let unit: CGFloat = 19
     }
 
     private let power = PeqHUDButton(symbol: "power", size: 9, help: "Bypass band (Option-click the dot)")
@@ -425,6 +426,8 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
         let number: String
         let unit: String
         let adjustable: Bool
+        /// The unit follows the number in one field, for a long unit.
+        var inline = false
     }
 
     /// Shows `p` in band colour `color`.  Bypass dims the card's content and
@@ -457,7 +460,7 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
             } else if shape == .allPass {
                 rows.append(Row(field: .q, label: "Order", number: "1st", unit: "", adjustable: false))
             } else {
-                rows.append(Row(field: .q, label: "Slope", number: "6", unit: "dB/oct", adjustable: false))
+                rows.append(Row(field: .q, label: "Slope", number: "6", unit: "dB/oct", adjustable: false, inline: true))
             }
             _ = order
         } else {
@@ -477,7 +480,7 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
         // A fixed header: the code is always two letters wide.
         let shapeWidth: CGFloat = 60
         let button: CGFloat = bypassSupported ? 20 : 0
-        let unitWidth = Metrics.unit(slope: rows.contains { $0.label == "Slope" })
+        let unitWidth = Metrics.unit
         let columns = Metrics.label + Metrics.number + Metrics.gap + unitWidth
         let width = ceil(max(Metrics.pad * 2 + columns, 4 + shapeWidth + 2 + button + 4))
         let height = Metrics.firstRow + CGFloat(rows.count) * Metrics.rowHeight + Metrics.bottom
@@ -522,9 +525,21 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
             units[i].frame = NSRect(x: unitX, y: y + 1, width: unitWidth, height: Metrics.rowHeight)
             let v = values[i]
             v.adjustable = row.adjustable
-            v.frame = NSRect(x: numberX, y: y, width: Metrics.number, height: Metrics.rowHeight)
-            if editingField != field { v.attributedStringValue = Self.number(row.number, dim: dim || !row.adjustable) }
             [v, labels[i], units[i]].forEach { $0.isHidden = false }
+            if row.inline {
+                // Number and unit together, ending where the other units end.
+                units[i].isHidden = true
+                v.frame = NSRect(x: numberX, y: y, width: width - Metrics.pad - numberX, height: Metrics.rowHeight)
+                let text = NSMutableAttributedString(attributedString: Self.number(row.number, dim: true))
+                text.append(NSAttributedString(string: " " + row.unit, attributes: [.font: Self.quietFont, .foregroundColor: quiet]))
+                let right = NSMutableParagraphStyle()
+                right.alignment = .right
+                text.addAttribute(.paragraphStyle, value: right, range: NSRange(location: 0, length: text.length))
+                if editingField != field { v.attributedStringValue = text }
+            } else {
+                v.frame = NSRect(x: numberX, y: y, width: Metrics.number, height: Metrics.rowHeight)
+                if editingField != field { v.attributedStringValue = Self.number(row.number, dim: dim || !row.adjustable) }
+            }
             window?.invalidateCursorRects(for: v)
         }
     }
