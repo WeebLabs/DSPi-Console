@@ -335,7 +335,7 @@ struct TubeModellerView: View {
                 ends: ("Clean", "Overdrive"),
                 liveIndex: TUBE_PARAM_DRIVE_DB,
                 liveShaper: { shaperOverriding(driveDB: $0) },
-                help: "How hard the tube is driven. Drive moves the knee, not the level: at the -6 dB default the knee sits 6 dB above full scale and the colour is subtle, and the top of the range is overdrive.",
+                help: "How hard the tube is driven. Drive moves the knee, not the level: at the -12 dB default the knee sits 12 dB above full scale and the colour is subtle, the -30 dB floor is close to transparent, and the top of the range is overdrive.",
                 set: { vm.setTubeDrive($0) }
             )
 

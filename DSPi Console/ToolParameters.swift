@@ -31,7 +31,7 @@ final class TubeParameters: ObservableObject {
     /// 0 = Custom, 1..16 = a row of TUBE_TYPE_ROWS. Selecting a row loads the
     /// four character knobs; editing one of them drops the type back to Custom.
     @Published var type: Int = TUBE_DEFAULT_TUBE_TYPE
-    @Published var driveDB: Float = TUBE_DEFAULT_DRIVE_DB          // -6..24 dB
+    @Published var driveDB: Float = TUBE_DEFAULT_DRIVE_DB          // -30..24 dB
     @Published var biasPct: Float = TUBE_DEFAULT_BIAS_PCT          // -100..+100 %
     @Published var asymDB: Float = TUBE_DEFAULT_ASYM_DB            // -12..+12 dB
     @Published var hardnessPct: Float = TUBE_DEFAULT_HARDNESS_PCT  // 0..100 %

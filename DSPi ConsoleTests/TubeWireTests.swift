@@ -137,7 +137,7 @@ final class TubeWireTests: XCTestCase {
         XCTAssertFalse(vm.tubeEnabled)
         XCTAssertEqual(vm.tube.outputMask, 0xFFFF)
         XCTAssertEqual(vm.tube.type, 1)
-        XCTAssertEqual(vm.tube.driveDB, -6)
+        XCTAssertEqual(vm.tube.driveDB, -12)
         XCTAssertEqual(vm.tube.biasPct, 10)
         XCTAssertEqual(vm.tube.asymDB, 3)
         XCTAssertEqual(vm.tube.hardnessPct, 40)
@@ -202,7 +202,7 @@ final class TubeWireTests: XCTestCase {
     func testClamping() {
         let vm = DSPViewModel()
         vm.setTubeDrive(40);        XCTAssertEqual(vm.tube.driveDB, TUBE_DRIVE_MAX)
-        vm.setTubeDrive(-20);       XCTAssertEqual(vm.tube.driveDB, TUBE_DRIVE_MIN)
+        vm.setTubeDrive(-40);       XCTAssertEqual(vm.tube.driveDB, TUBE_DRIVE_MIN)
         vm.setTubeBias(-500);       XCTAssertEqual(vm.tube.biasPct, TUBE_BIAS_MIN)
         vm.setTubeXfmrDamping(0);   XCTAssertEqual(vm.tube.xfmrDamping, TUBE_XFMR_DAMPING_MIN)
         vm.setTubeXfmrDamping(99);  XCTAssertEqual(vm.tube.xfmrDamping, TUBE_XFMR_DAMPING_MAX)
@@ -244,16 +244,16 @@ final class TubeWireTests: XCTestCase {
         }
     }
 
-    /// The positive-half ceiling is 1/(c1 m): +2.5 dBFS at the -6 dB default
+    /// The positive-half ceiling is 1/(c1 m): +26.5 dBFS at the -30 dB floor
     /// and 1 dB lower per dB of drive above 0 (spec §7, headroom).
     func testShaperCeilingFollowsDrive() {
         func ceiling(_ drive: Float) -> Double {
             let s = TubeShaper(driveDB: drive, biasPct: 0, asymDB: 0, hardnessPct: 0,
                                mixPct: 100, trimDB: 0)
             // Well past the knee at every drive, so this is the clipped value.
-            return s.output(10)
+            return s.output(100)
         }
-        XCTAssertEqual(ceiling(TUBE_DRIVE_MIN), 1.333, accuracy: 0.01)
+        XCTAssertEqual(ceiling(TUBE_DRIVE_MIN), 21.08, accuracy: 0.01)
         XCTAssertEqual(ceiling(0), 0.667, accuracy: 0.01)
         XCTAssertEqual(ceiling(6), 0.334, accuracy: 0.01)
     }

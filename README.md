@@ -1134,7 +1134,7 @@ The tube icon in the header glows while the effect is on. The **Basic | Advanced
 
 - The **showcase** on the left draws the selected tube, and it glows in time with the music on the chosen outputs.
 - The **TUBE** shelf offers one-click tube types in three groups: **Preamp triodes**, **Preamp pentodes** and **Power stages**. Hover a tube for its description. Picking a tube loads its character (bias, asymmetry, knee hardness and sag) and leaves the other settings alone.
-- **Drive** (-6 to +24 dB, from **Clean** to **Overdrive**, default -6 dB) sets how hard the tube is driven. A few dB gives warmth, and a lot gives overdrive.
+- **Drive** (-30 to +24 dB, from **Clean** to **Overdrive**, default -12 dB) sets how hard the tube is driven. The bottom of the range is close to transparent, a few dB above the default gives warmth, and a lot gives overdrive.
 - **Mix** (0 to 100%, from **Dry** to **All tube**, default 100%) blends the tube with the untouched signal. Mixing below 100% is the easiest way to use heavy drive subtly.
 
 The available tubes are:

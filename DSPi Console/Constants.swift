@@ -287,10 +287,10 @@ let TUBE_NUM_PARAMS: UInt16         = 14
 
 /// Parameter ranges (spec §2).  The firmware clamps silently; the app clamps the
 /// same way so its state matches without a read-back.
-/// The -6 dB floor puts the knee 6 dB above full scale, and is also a
-/// fixed-point constraint: the negative-half scale reaches 5.3 there with
-/// maximum asymmetry, which is as much as the RP2040 Q28 budget allows.
-let TUBE_DRIVE_MIN: Float    = -6.0
+/// The -30 dB floor puts the knee 30 dB above full scale, close to
+/// transparent, and is also a fixed-point constraint: the makeup scales reach
+/// 105 there with maximum asymmetry, the most the RP2040 Q28 budget allows.
+let TUBE_DRIVE_MIN: Float    = -30.0
 let TUBE_DRIVE_MAX: Float    = 24.0
 let TUBE_BIAS_MIN: Float     = -100.0
 let TUBE_BIAS_MAX: Float     = 100.0
@@ -315,13 +315,13 @@ let TUBE_TRIM_MIN: Float     = -12.0
 let TUBE_TRIM_MAX: Float     = 12.0
 
 /// Factory defaults (spec §2; the character knobs are the 12AX7 row).  They are
-/// chosen to be clean rather than an obvious effect: at -6 dB drive the knee
-/// sits 6 dB above full scale, so enabling the module is level-neutral and adds
-/// about 0.5 % second-harmonic-led distortion at -12 dBFS.
+/// chosen to be subtle rather than an obvious effect: at -12 dB drive the knee
+/// sits 12 dB above full scale, so enabling the module is level-neutral and adds
+/// about 0.23 % second-harmonic-led distortion at -12 dBFS.
 let TUBE_DEFAULT_TUBE_TYPE: Int      = 1
 let TUBE_DEFAULT_RECTIFIER: Int      = 1
 let TUBE_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
-let TUBE_DEFAULT_DRIVE_DB: Float     = -6.0
+let TUBE_DEFAULT_DRIVE_DB: Float     = -12.0
 let TUBE_DEFAULT_BIAS_PCT: Float     = 10.0
 let TUBE_DEFAULT_ASYM_DB: Float      = 3.0
 let TUBE_DEFAULT_HARDNESS_PCT: Float = 40.0
@@ -1363,7 +1363,7 @@ let CS_NOUN_AUX: Int                = 68   // bool: auxiliary output on/off
 let CS_NOUN_AUX_LEVEL: Int          = 69   // continuous percent 0..100 (8.8, any step)
 // Caps v19 (tube preamp spec §6): each dispatches through REQ_SET_TUBE_PARAM.
 let CS_NOUN_TUBE: Int               = 70   // bool: tube modeller enable
-let CS_NOUN_TUBE_DRIVE: Int         = 71   // continuous dB -6..24
+let CS_NOUN_TUBE_DRIVE: Int         = 71   // continuous dB -30..24
 let CS_NOUN_TUBE_TYPE: Int          = 72   // enum 0..16 (0 = Custom)
 let CS_NOUN_TUBE_MIX: Int           = 73   // continuous percent 0..100 (dry/wet)
 /// `CS_NOUN_MACRO` live value while no macro is running (also
