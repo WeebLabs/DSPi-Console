@@ -634,161 +634,153 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(Double(created.params.gain), 3, accuracy: 0.2)
     }
 
-    /// Cmd-press opens the compact shape picker with the pointer on the bell.
-    /// Sliding onto a shape and releasing creates it at its default order;
-    /// sliding on into the stack that folds out beneath it picks 6 or 12 dB.
-    /// A Cmd-click without sliding leaves the picker open to be clicked.  The
-    /// band goes where Cmd was pressed; a release off every option, a click
-    /// elsewhere, or Escape, cancels.
+    /// Cmd-click on empty graph opens the shape card there.  A shape with one
+    /// order creates the band at once; one with two asks for the order, and
+    /// that click creates it.  The band goes where Cmd was clicked, and a
+    /// click elsewhere, the back arrow, right-click or Escape cancels.
     @MainActor
-    func testCmdPressPickerCreatesTheShapeAndOrderReleasedOn() throws {
+    func testCmdClickCardCreatesShapeThenSlope() throws {
         let rig = try makeRig()
         defer { rig.window.orderOut(nil) }
         let g = rig.geometry
-        func press(_ p: CGPoint) { rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p, .command)) }
-        func slide(_ p: CGPoint) { rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, p, .command)) }
-        func release(_ p: CGPoint) { rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p, .command)) }
+        let card = rig.view.cardForTesting
+        func reaches(_ button: NSButton) -> Bool {
+            let p = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            return rig.window.contentView?.hitTest(p) === button
+        }
 
-        func move(_ p: CGPoint) { rig.view.mouseMoved(with: mouse(.mouseMoved, rig, p)) }
-
-        // A press opens the picker under the pointer on the bell.  Released
-        // without sliding, it stays open, and a click on the bell takes it.
+        // A bell is made at once, where Cmd was clicked, at its level.
         let at = CGPoint(x: g.x(300), y: g.y(4))
-        press(at)
-        XCTAssertTrue(rig.view.pickerVisibleForTesting)
-        let bell = try XCTUnwrap(rig.view.pickerPointForTesting(.bell))
-        XCTAssertEqual(bell.x, at.x, accuracy: 0.5, "the pointer starts on the bell")
-        XCTAssertEqual(bell.y, at.y, accuracy: 0.5)
-        XCTAssertNil(rig.view.pickerOrderPointForTesting(1), "a bell has no orders to fold out")
-        release(at)
-        XCTAssertTrue(rig.view.pickerVisibleForTesting, "a Cmd-click without sliding leaves it open")
-        XCTAssertTrue(rig.host.commits.isEmpty)
-        // A real click is hit-tested: it must reach the editor, not the
-        // picker's symbols, or picking from the open picker does nothing.
-        let frame = try XCTUnwrap(rig.view.superview)
-        XCTAssertTrue(rig.view.hitTest(rig.view.convert(bell, to: frame)) === rig.view,
-                      "clicks on the open picker go to the editor")
-        click(rig, bell, .command)
-        XCTAssertFalse(rig.view.pickerVisibleForTesting)
+        click(rig, at, .command)
+        XCTAssertTrue(rig.view.cardVisibleForTesting)
+        XCTAssertTrue(rig.host.commits.isEmpty, "opening the card makes nothing")
+        let bell = try XCTUnwrap(card.shapeButtonForTesting(.bell))
+        XCTAssertTrue(reaches(bell), "the card takes its own clicks")
+        bell.performClick(nil)
+        XCTAssertFalse(rig.view.cardVisibleForTesting)
         var created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(rig.host.peqSelection.selected, [created.band], "the new band is selected")
+        XCTAssertEqual(rig.view.hudBandForTesting, created.band, "and the card turns into its chip")
+        spin(0.3)
+        XCTAssertTrue(rig.view.hudVisibleForTesting)
         XCTAssertEqual(created.params.type, .peaking)
-        XCTAssertEqual(Double(created.params.freq), g.freq(at.x), accuracy: 0.5, "at the pressed point")
+        XCTAssertEqual(Double(created.params.freq), g.freq(at.x), accuracy: 0.5, "at the clicked point")
         XCTAssertEqual(Double(created.params.gain), 4, accuracy: 0.05)
 
-        // Held without sliding and released in place, it takes the bell.
-        let heldAt = CGPoint(x: g.x(500), y: g.y(-3))
-        let before = rig.host.commits.count
-        press(heldAt)
-        spin(0.4)
-        release(heldAt)
-        XCTAssertFalse(rig.view.pickerVisibleForTesting, "a hold released in place picks")
-        XCTAssertEqual(rig.host.commits.count, before + 1)
-        created = try XCTUnwrap(rig.host.commits.last?.first)
-        XCTAssertEqual(created.params.type, .peaking, "the bell the pointer started on")
-        XCTAssertEqual(Double(created.params.freq), g.freq(heldAt.x), accuracy: 0.5)
-
-        // Slide to a low shelf, down into its stack, and release on 6 dB.
-        let at2 = CGPoint(x: g.x(200), y: g.y(-4))
-        press(at2)
-        let shelf = try XCTUnwrap(rig.view.pickerPointForTesting(.lowShelf))
-        slide(shelf)
-        let sixDB = try XCTUnwrap(rig.view.pickerOrderPointForTesting(1), "the shelf folds out its orders")
-        let twelveDB = try XCTUnwrap(rig.view.pickerOrderPointForTesting(2))
-        XCTAssertGreaterThan(twelveDB.y, sixDB.y, "stacked vertically beneath it")
-        // No dead spot on the way down: the shape stays highlighted across
-        // the gap until the stack takes over.
-        var y = shelf.y
-        while y <= sixDB.y {
-            slide(CGPoint(x: shelf.x, y: y))
-            let h = rig.view.pickerHighlightForTesting
-            XCTAssertEqual(h?.shape, .lowShelf, "at \(y - shelf.y) pt below the symbol")
-            y += 1
-        }
-        XCTAssertEqual(rig.view.pickerHighlightForTesting?.order, 1)
-        slide(sixDB)
-        release(sixDB)
-        created = try XCTUnwrap(rig.host.commits.last?.first)
-        XCTAssertEqual(created.params.type, .lowShelf1)
-        XCTAssertEqual(Double(created.params.freq), g.freq(at2.x), accuracy: 0.5)
-
-        // Click, then click: the stack follows the pointer, and a click on
-        // 12 dB takes it at the first click's point.
-        let at4 = CGPoint(x: g.x(150), y: g.y(-6))
-        click(rig, at4, .command)
-        let highShelf = try XCTUnwrap(rig.view.pickerPointForTesting(.highShelf))
-        move(highShelf)
-        let hs12 = try XCTUnwrap(rig.view.pickerOrderPointForTesting(2), "hovering folds out the stack")
-        move(hs12)
-        XCTAssertEqual(rig.view.pickerHighlightForTesting, .init(shape: .highShelf, order: 2))
-        click(rig, hs12)
-        created = try XCTUnwrap(rig.host.commits.last?.first)
-        XCTAssertEqual(created.params.type, .highShelf)
-        XCTAssertEqual(Double(created.params.freq), g.freq(at4.x), accuracy: 0.5)
-
-        // Releasing on a shape alone gives its default order.
-        press(CGPoint(x: g.x(3000), y: g.y(-2)))
-        let cut = try XCTUnwrap(rig.view.pickerPointForTesting(.highCut))
-        slide(cut)
-        release(cut)
-        created = try XCTUnwrap(rig.host.commits.last?.first)
-        XCTAssertEqual(created.params.type, .lowPass, "12 dB unless 6 dB is chosen")
-
-        // Released off every option, or cancelled with Escape: nothing.
+        // A shelf asks for its slope first, with neither marked.
+        let shelfAt = CGPoint(x: g.x(120), y: g.y(-6))
+        click(rig, shelfAt, .command)
         let count = rig.host.commits.count
-        let at3 = CGPoint(x: g.x(1000), y: g.y(4))
-        press(at3)
-        let away = CGPoint(x: at3.x, y: g.y(-18))
-        slide(away)
-        release(away)
-        XCTAssertFalse(rig.view.pickerVisibleForTesting)
-        press(at3)
+        try XCTUnwrap(card.shapeButtonForTesting(.lowShelf)).performClick(nil)
+        XCTAssertEqual(rig.host.commits.count, count, "the shape alone makes nothing")
+        let six = try XCTUnwrap(card.slopeChoiceForTesting(1))
+        XCTAssertFalse((six as? PeqHUDButton)?.isOn ?? true, "no slope is preselected")
+        XCTAssertTrue(reaches(six))
+        six.performClick(nil)
+        created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .lowShelf1, "a 6 dB low shelf")
+        XCTAssertEqual(Double(created.params.freq), g.freq(shelfAt.x), accuracy: 0.5)
+        XCTAssertEqual(Double(created.params.gain), -6, accuracy: 0.05)
+        XCTAssertFalse(rig.view.cardVisibleForTesting)
+
+        // A cut at 12 dB.
+        click(rig, CGPoint(x: g.x(8000), y: g.y(0)), .command)
+        try XCTUnwrap(card.shapeButtonForTesting(.highCut)).performClick(nil)
+        try XCTUnwrap(card.slopeChoiceForTesting(2)).performClick(nil)
+        XCTAssertEqual(try XCTUnwrap(rig.host.commits.last?.first).params.type, .lowPass)
+
+        // Every way out cancels without making anything.
+        let before = rig.host.commits.count
+        let away = CGPoint(x: g.x(2000), y: g.y(-20))
+        click(rig, CGPoint(x: g.x(1000), y: g.y(0)), .command)
+        try XCTUnwrap(card.shapeButtonForTesting(.lowCut)).performClick(nil)
+        card.backButtonForTesting.performClick(nil)
+        XCTAssertNil(card.slopeChoiceForTesting(1), "back returns to the shapes")
+        card.backButtonForTesting.performClick(nil)
+        XCTAssertFalse(rig.view.cardVisibleForTesting, "and back again cancels")
+        click(rig, CGPoint(x: g.x(1000), y: g.y(0)), .command)
         key(rig, code: 53, chars: "\u{1b}")
-        XCTAssertFalse(rig.view.pickerVisibleForTesting, "Escape cancels")
-        release(at3)
-        click(rig, at3, .command)
+        XCTAssertFalse(rig.view.cardVisibleForTesting, "Escape cancels")
+        click(rig, CGPoint(x: g.x(1000), y: g.y(0)), .command)
         click(rig, away)
-        XCTAssertFalse(rig.view.pickerVisibleForTesting, "a click away from the open picker dismisses it")
-        XCTAssertEqual(rig.host.commits.count, count, "none of these creates a band")
+        XCTAssertFalse(rig.view.cardVisibleForTesting, "a click away dismisses it")
+        XCTAssertEqual(rig.host.commits.count, before, "none of these creates a band")
     }
 
-    /// The chip's shape button opens the same compact picker, which takes its
-    /// own clicks: a shape on its own keeps the band's order where it has
-    /// one, and the stack that folds out beneath a shape sets the order.
+    /// The chip's shape button turns it to a two-step page, the size of its
+    /// values and held still: a shape with one order applies at once; one with
+    /// two asks for the order, and that click applies both.  Either way the
+    /// chip returns to its values, and nothing changes before the last click.
     @MainActor
-    func testChipShapePickerSetsShapeAndOrder() throws {
+    func testChipShapePagePicksShapeThenSlope() throws {
         var bands = Array(repeating: FilterParams(), count: 10)
         bands[0] = FilterParams(type: .lowShelf1, freq: 200, q: 0.707, gain: 6)
         let rig = try makeRig(bands: bands)
         defer { rig.window.orderOut(nil) }
-        let strip = rig.view.stripForTesting
-        let frame = try XCTUnwrap(rig.view.superview)
-        func hit(_ p: CGPoint) -> NSView? { rig.view.hitTest(rig.view.convert(p, to: frame)) }
-        func move(_ p: CGPoint) { strip.mouseMoved(with: mouse(.mouseMoved, rig, p)) }
-        func press(_ p: CGPoint) { strip.mouseDown(with: mouse(.leftMouseDown, rig, p)) }
         func latest() throws -> FilterParams { try XCTUnwrap(rig.host.commits.last?.first?.params) }
+        func settle(_ type: FilterType) {
+            var b = bands
+            b[0].type = type
+            var c = rig.view.configForTesting
+            c.bands = b
+            rig.view.apply(c)
+        }
+        func reaches(_ button: NSButton) -> Bool {
+            let p = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            return rig.window.contentView?.hitTest(p) === button
+        }
 
-        // Selecting the band puts the chip on it.
         rig.host.peqSelection.selected = [0]
-        rig.view.toggleStripForTesting()
-        XCTAssertFalse(strip.isHidden)
+        let valuesFrame = try XCTUnwrap(rig.view.hudFrameForTesting)
+        rig.view.toggleShapePageForTesting()
+        XCTAssertTrue(rig.view.shapePageShownForTesting)
+        XCTAssertEqual(rig.view.hudFrameForTesting, valuesFrame, "the page is the size of the values, in their place")
 
-        // A high shelf clicked on its own keeps the band's 6 dB order.
-        let highShelf = try XCTUnwrap(rig.view.stripPointForTesting(.highShelf))
-        XCTAssertTrue(hit(highShelf) === strip, "the chip's picker takes its own clicks")
-        move(highShelf)
-        XCTAssertEqual(strip.highlighted, .init(shape: .highShelf, order: 1))
-        press(highShelf)
-        XCTAssertEqual(try latest().type, .highShelf1)
+        // A shelf has two orders: step two, with nothing applied yet.
+        let count = rig.host.commits.count
+        let highShelf = try XCTUnwrap(rig.view.shapePageButtonForTesting(.highShelf))
+        XCTAssertTrue(reaches(highShelf), "the page's buttons take their own clicks")
+        highShelf.performClick(nil)
+        XCTAssertEqual(rig.host.commits.count, count, "the shape alone changes nothing")
+        let six = try XCTUnwrap(rig.view.shapePageSlopeForTesting(1), "the shelf asks for its slope")
+        XCTAssertFalse((six as? PeqHUDButton)?.isOn ?? true, "another shape's slope starts unselected")
+        XCTAssertEqual(rig.view.hudFrameForTesting, valuesFrame, "step two holds still")
 
-        // The stack sets the order.
-        rig.view.toggleStripForTesting()
-        let lowCut = try XCTUnwrap(rig.view.stripPointForTesting(.lowCut))
-        move(lowCut)
-        let twelve = try XCTUnwrap(rig.view.stripOrderPointForTesting(2), "the cut folds out its orders")
-        move(twelve)
-        press(twelve)
-        XCTAssertEqual(try latest().type, .highPass, "a 12 dB low cut")
-        XCTAssertTrue(strip.isHidden, "picking closes it")
+        // The band's own shape shows its order.
+        rig.view.shapePageBackForTesting.performClick(nil)
+        try XCTUnwrap(rig.view.shapePageButtonForTesting(.lowShelf)).performClick(nil)
+        XCTAssertTrue((rig.view.shapePageSlopeForTesting(1) as? PeqHUDButton)?.isOn == true, "the band's own 6 dB is shown")
+        XCTAssertFalse((rig.view.shapePageSlopeForTesting(2) as? PeqHUDButton)?.isOn ?? true)
+
+        // Back returns to the shapes; the slope then completes the choice.
+        rig.view.shapePageBackForTesting.performClick(nil)
+        XCTAssertNil(rig.view.shapePageSlopeForTesting(1))
+        XCTAssertTrue(rig.view.shapePageShownForTesting)
+        highShelf.performClick(nil)
+        let twelve = try XCTUnwrap(rig.view.shapePageSlopeForTesting(2))
+        XCTAssertTrue(reaches(twelve))
+        twelve.performClick(nil)
+        XCTAssertEqual(try latest().type, .highShelf, "a 12 dB high shelf, in one change")
+        XCTAssertEqual(rig.host.commits.count, count + 1)
+        XCTAssertFalse(rig.view.shapePageShownForTesting, "the chip is back on its values")
+        settle(.highShelf)
+
+        // A bell has one order, so it applies straight away.
+        rig.view.toggleShapePageForTesting()
+        try XCTUnwrap(rig.view.shapePageButtonForTesting(.bell)).performClick(nil)
+        XCTAssertEqual(try latest().type, .peaking)
+        XCTAssertFalse(rig.view.shapePageShownForTesting)
+        settle(.peaking)
+
+        // Escape abandons a choice half made.
+        let before = rig.host.commits.count
+        rig.view.toggleShapePageForTesting()
+        try XCTUnwrap(rig.view.shapePageButtonForTesting(.lowCut)).performClick(nil)
+        XCTAssertNotNil(rig.view.shapePageSlopeForTesting(2))
+        key(rig, code: 53, chars: "\u{1b}")
+        XCTAssertFalse(rig.view.shapePageShownForTesting)
+        XCTAssertEqual(rig.host.commits.count, before, "nothing changed")
+        XCTAssertEqual(rig.host.peqSelection.selected, [0])
     }
 
     /// Hovering empty graph reads out the pointer's frequency and level;
@@ -964,6 +956,35 @@ final class PeqGraphEditorTests: XCTestCase {
         XCTAssertEqual(Double(p.gain), 10 * 0.12, accuracy: 0.15, "fine drag moves about an eighth as far")
     }
 
+    /// Dragging one of several selected bands moves every gain by the same
+    /// number of dB; Control scales them in proportion instead, FabFilter's
+    /// way, so a cut deepens as a boost grows.
+    @MainActor
+    func testSelectionGainsOffsetAndControlScales() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 200, q: 1, gain: -4)
+        let g = PeqGraphGeometry(size: CGSize(width: 800, height: 300), minFreq: 20, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+        let dot = CGPoint(x: g.x(1000), y: g.y(6))
+        let up = CGPoint(x: dot.x, y: g.y(9))
+        func gains(_ mods: NSEvent.ModifierFlags) throws -> (Double, Double) {
+            let rig = try makeRig(bands: bands)
+            defer { rig.window.orderOut(nil) }
+            rig.host.peqSelection.selected = [0, 1]
+            drag(rig, from: dot, to: up, mods)
+            let last = try XCTUnwrap(rig.host.commits.last)
+            let a = try XCTUnwrap(last.first { $0.band == 0 }).params.gain
+            let b = try XCTUnwrap(last.first { $0.band == 1 }).params.gain
+            return (Double(a), Double(b))
+        }
+        let offset = try gains([])
+        XCTAssertEqual(offset.0, 9, accuracy: 0.1)
+        XCTAssertEqual(offset.1, -1, accuracy: 0.1, "the cut moves up by the same 3 dB")
+        let scaled = try gains(.control)
+        XCTAssertEqual(scaled.0, 9, accuracy: 0.1)
+        XCTAssertEqual(scaled.1, -6, accuracy: 0.1, "the cut deepens by the boost's 1.5 times")
+    }
+
     @MainActor
     func testNotchDragMovesFrequencyOnly() throws {
         var bands = Array(repeating: FilterParams(), count: 10)
@@ -1019,7 +1040,7 @@ final class PeqGraphEditorTests: XCTestCase {
     }
 
     @MainActor
-    func testMultiSelectionMovesTogetherAndScalesGains() throws {
+    func testMultiSelectionMovesTogether() throws {
         var bands = Array(repeating: FilterParams(), count: 10)
         bands[0] = FilterParams(type: .peaking, freq: 200, q: 1, gain: 4)
         bands[1] = FilterParams(type: .peaking, freq: 2000, q: 1, gain: -2)
@@ -1033,7 +1054,7 @@ final class PeqGraphEditorTests: XCTestCase {
         let byBand = Dictionary(uniqueKeysWithValues: changes.map { ($0.band, $0.params) })
         XCTAssertEqual(Double(byBand[0]!.freq), 400, accuracy: 1)
         XCTAssertEqual(Double(byBand[1]!.freq), 4000, accuracy: 4, "same frequency ratio")
-        XCTAssertEqual(Double(byBand[1]!.gain), -4, accuracy: 0.05, "gains scale in proportion")
+        XCTAssertEqual(Double(byBand[1]!.gain), 2, accuracy: 0.05, "gains move by the same 4 dB")
     }
 
     @MainActor

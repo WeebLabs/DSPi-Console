@@ -18,11 +18,9 @@ import simd
 //   hover empty graph     a faint dot where a double-click would create a
 //                         bell, with frequency and level readouts
 //   double-click empty graph   create it, always a bell
-//   Cmd-press empty graph a compact shape picker opens with the pointer on
-//                         the bell; slide to a shape (and to 6 or 12 dB in
-//                         the stack that folds out) and release to create it
-//                         where Cmd was pressed.  A Cmd-click without sliding
-//                         leaves it open to be clicked instead
+//   Cmd-click empty graph a card of shapes opens there; click a shape, then
+//                         for a shelf, cut or all-pass its slope, to create
+//                         it where Cmd was clicked
 //   click empty graph     deselect
 //   drag the curve        pull a new bell (shelf near either end) out of it
 //   drag empty graph      marquee selection
@@ -32,6 +30,8 @@ import simd
 //                         first-order cuts, whose dots sit at a fixed level)
 //   Cmd-drag              Q of the selection
 //   Shift-drag            fine;  Option-drag  lock to one axis
+//   Control-drag          scale a selection's gains in proportion (FabFilter's
+//                         default) instead of moving them by the same dB
 //   Option-click          bypass
 //   double-click a dot    type values (Tab moves between them)
 //   wheel over a band     Q; Cmd-wheel gain; Shift fine (dot or fill)
@@ -84,11 +84,6 @@ final class PeqGraphEditorView: NSView {
         static let nodeHitRadius: CGFloat = 10
         static let curveHitDistance: CGFloat = 6
         static let dragThreshold: CGFloat = 2
-        /// A Cmd-click that wanders less than this, and comes up sooner than
-        /// `pickerClickTime`, leaves the shape picker open to be clicked; a
-        /// slide or a hold instead picks on release.
-        static let pickerClickSlop: CGFloat = 5
-        static let pickerClickTime: TimeInterval = 0.3
         static let zoomZone: CGFloat = 40
         static let qPointsPerOctave: Double = 60
         static let fine: CGFloat = 0.12
@@ -111,13 +106,6 @@ final class PeqGraphEditorView: NSView {
         case background(at: CGPoint, onCurve: Bool, modifiers: NSEvent.ModifierFlags)
         case drag(DragContext)
         case marquee(from: CGPoint, to: CGPoint, base: Set<Int>)
-        /// Cmd pressed on empty graph: the shape picker is open for a band at
-        /// `at` and the mouse is still down, since `since` (event time).
-        /// `moved` once it has slid.
-        case picking(at: CGPoint, since: TimeInterval, moved: Bool)
-        /// The picker stayed open after a Cmd-click without sliding, and
-        /// follows the pointer until a click picks or dismisses.
-        case pickerOpen(at: CGPoint)
     }
 
     private struct DragContext {
@@ -146,9 +134,11 @@ final class PeqGraphEditorView: NSView {
     private weak var vm: PeqGraphEditorHost?
     private let metal: PeqGraphMetalView?
     private let hud = PeqBandHUD()
-    /// The chip's shape picker, which takes its own clicks.
-    private let strip = PeqShapePicker(interactive: true)
-    private let picker = PeqShapePicker()
+    /// Where the chip's shape page opened; it stays there while open.
+    private var pagedOrigin: NSPoint?
+    /// The Cmd-click card, and the point its band will be created at.
+    private let card = PeqShapeCard()
+    private var cardPoint: CGPoint?
     private let marqueeLayer = CAShapeLayer()
     /// Readouts for the point under the pointer on empty graph: frequency
     /// along the x-axis and level along the y-axis.
@@ -232,10 +222,8 @@ final class PeqGraphEditorView: NSView {
         hud.isHidden = true
         hud.alphaValue = 0
         addSubview(hud)
-        strip.isHidden = true
-        addSubview(strip)
-        picker.isHidden = true
-        addSubview(picker)
+        card.isHidden = true
+        addSubview(card)
         wireHUD()
 
         vm.peqSelection.$listHovered
@@ -275,26 +263,16 @@ final class PeqGraphEditorView: NSView {
     /// The band the chip is showing, or nil when it is hidden.
     var hudBandForTesting: Int? { hud.isHidden ? nil : hudBand }
     var configForTesting: PeqGraphEditorConfig { config }
-    var pickerVisibleForTesting: Bool { !picker.isHidden }
-    /// The chip's shape picker, opened as its shape button would.
-    func toggleStripForTesting() { toggleStrip() }
-    var stripForTesting: PeqShapePicker { strip }
-    func stripPointForTesting(_ shape: PeqShape) -> CGPoint? {
-        strip.center(of: shape).map { strip.convert($0, to: self) }
-    }
-    func stripOrderPointForTesting(_ order: Int) -> CGPoint? {
-        strip.center(ofOrder: order).map { strip.convert($0, to: self) }
-    }
-    /// What a release would create right now.
-    var pickerHighlightForTesting: PeqShapePicker.Choice? { picker.isHidden ? nil : picker.highlighted }
-    /// Where `shape` sits in the open picker, in editor coordinates.
-    func pickerPointForTesting(_ shape: PeqShape) -> CGPoint? {
-        picker.center(of: shape).map { picker.convert($0, to: self) }
-    }
-    /// Where `order` sits under the picker's current shape.
-    func pickerOrderPointForTesting(_ order: Int) -> CGPoint? {
-        picker.center(ofOrder: order).map { picker.convert($0, to: self) }
-    }
+    /// Whether the Cmd-click card is open (it may still be fading out).
+    var cardVisibleForTesting: Bool { cardPoint != nil }
+    var cardForTesting: PeqShapeChooser { card.chooser }
+    /// The chip's shape page, turned to as its shape button would.
+    func toggleShapePageForTesting() { toggleShapePage() }
+    var shapePageShownForTesting: Bool { !hud.isHidden && hud.showsShapes }
+    var hudFrameForTesting: NSRect? { hud.isHidden ? nil : hud.frame }
+    func shapePageButtonForTesting(_ shape: PeqShape) -> NSButton? { hud.chooserForTesting.shapeButtonForTesting(shape) }
+    func shapePageSlopeForTesting(_ order: Int) -> NSButton? { hud.chooserForTesting.slopeChoiceForTesting(order) }
+    var shapePageBackForTesting: NSButton { hud.chooserForTesting.backButtonForTesting }
     /// The frequency and gain readouts shown on empty graph, nil when hidden.
     var axisReadoutsForTesting: (freq: String?, gain: String?) {
         (axisLabel.isHidden ? nil : axisLabel.stringValue, gainLabel.isHidden ? nil : gainLabel.stringValue)
@@ -351,7 +329,7 @@ final class PeqGraphEditorView: NSView {
     }
 
     private func resetInteraction() {
-        closePicker()
+        closeCard()
         gesture = .idle
         selection = []
         anchor = nil
@@ -818,10 +796,6 @@ final class PeqGraphEditorView: NSView {
         guard editing else { return }
         let p = location(event)
         pointer = p
-        if case .pickerOpen = gesture {
-            picker.track(convert(p, to: picker))
-            return
-        }
         updateHover(at: p)
     }
 
@@ -848,7 +822,17 @@ final class PeqGraphEditorView: NSView {
             invalidate()
             return
         }
-        if !hud.isHidden, hud.frame.insetBy(dx: -4, dy: -4).contains(p) || (!strip.isHidden && strip.frame.contains(p)) {
+        // While the Cmd-click card is open, the faint dot marks where its band
+        // will go, and nothing else on the graph responds to hovering.
+        if let at = cardPoint {
+            setHovered(nil)
+            ghost = PeqCreation.band(at: at, in: geometry, available: available, fromCurve: false)
+            hideAxisLabels()
+            NSCursor.arrow.set()
+            invalidate()
+            return
+        }
+        if !hud.isHidden, hud.frame.insetBy(dx: -4, dy: -4).contains(p) {
             hudHideTimer?.invalidate()
             ghost = nil
             hideAxisLabels()
@@ -877,7 +861,7 @@ final class PeqGraphEditorView: NSView {
                     axisLabel.isHidden = true
                 }
                 // The pointer's level: the gain a double-clicked bell, or a
-                // bell or shelf from the Cmd-click picker, takes.
+                // bell or shelf from the Cmd-click card, takes.
                 if config.showLevelReadout {
                     showGainLabel(PeqValueText.gain(PeqLimits.clamp(geometry.db(p.y), PeqLimits.gain)), at: p.y)
                 } else {
@@ -904,20 +888,17 @@ final class PeqGraphEditorView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard editing else { return }
         window?.makeFirstResponder(self)
-        closeStrip()
+        closeShapePage()
         if hud.isEditingText { hud.endEditing() }
         let p = location(event)
         let mods = event.modifierFlags.intersection([.command, .option, .shift, .control])
 
-        // With the picker left open, a click on a shape or order creates it
-        // and any other click dismisses it without acting on the graph.
-        if case .pickerOpen(let at) = gesture {
-            picker.track(convert(p, to: picker))
-            if let c = picker.highlighted, let band = band(c.shape, order: c.order, at: at) {
-                createBand(band)
-            }
-            closePicker()
+        // The card takes its own clicks; one anywhere else dismisses it
+        // without acting on the graph.
+        if cardPoint != nil {
+            closeCard()
             gesture = .idle
+            updateHover(at: p)
             return
         }
 
@@ -947,7 +928,8 @@ final class PeqGraphEditorView: NSView {
         }
 
         if mods.contains(.command) {
-            openPicker(at: p, since: event.timestamp)
+            openCard(at: p)
+            gesture = .idle
             return
         }
         gesture = .background(at: p, onCurve: freeSlot != nil && isNearCurve(p), modifiers: mods)
@@ -987,7 +969,7 @@ final class PeqGraphEditorView: NSView {
                 beginDrag(grabbed: slot, bands: [slot], at: start, qMode: false)
                 continueDrag(to: p, event: event)
             } else {
-                // Cmd opens the shape picker, so only Shift reaches here to add.
+                // Cmd opens the shape card, so only Shift reaches here to add.
                 let base = mods.contains(.shift) ? selection : []
                 gesture = .marquee(from: start, to: p, base: base)
                 updateMarquee()
@@ -997,12 +979,7 @@ final class PeqGraphEditorView: NSView {
         case .marquee(let from, _, let base):
             gesture = .marquee(from: from, to: p, base: base)
             updateMarquee()
-        case .picking(let at, let since, let moved):
-            picker.track(convert(p, to: picker))
-            if !moved, hypot(p.x - at.x, p.y - at.y) >= Tuning.pickerClickSlop {
-                gesture = .picking(at: at, since: since, moved: true)
-            }
-        case .pickerOpen, .idle:
+        case .idle:
             break
         }
     }
@@ -1044,22 +1021,7 @@ final class PeqGraphEditorView: NSView {
             NSCursor.openHand.set()
         case .marquee:
             marqueeLayer.isHidden = true
-        case .picking(let at, let since, let moved):
-            guard moved || event.timestamp - since >= Tuning.pickerClickTime else {
-                // A quick Cmd-click without sliding: leave the picker open to
-                // be clicked.
-                gesture = .pickerOpen(at: at)
-                return
-            }
-            // After a slide or a hold the release picks what is highlighted,
-            // the bell if the pointer never left it; off every option it
-            // cancels.
-            picker.track(convert(p, to: picker))
-            if let c = picker.highlighted, let band = band(c.shape, order: c.order, at: at) {
-                createBand(band)
-            }
-            closePicker()
-        case .pickerOpen, .idle:
+        case .idle:
             break
         }
         gesture = .idle
@@ -1120,13 +1082,23 @@ final class PeqGraphEditorView: NSView {
             }
         }
         gesture = .drag(ctx)
-        setLive(dragResult(ctx, dx: ctx.offset.x, dy: ctx.offset.y))
+        setLive(dragResult(ctx, dx: ctx.offset.x, dy: ctx.offset.y, scaleGains: event.modifierFlags.contains(.control)))
     }
 
-    /// Applies a drag offset to the bands that were grabbed, FabFilter style:
-    /// the grabbed dot follows the pointer, the others move by the same
-    /// frequency ratio and have their gains scaled in proportion.
-    private func dragResult(_ ctx: DragContext, dx: CGFloat, dy: CGFloat) -> [Int: FilterParams] {
+    /// Control can be pressed or released mid-drag without moving: the
+    /// selection switches between offset and scaled gains at once.
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        guard case .drag(let ctx) = gesture, !ctx.qMode else { return }
+        setLive(dragResult(ctx, dx: ctx.offset.x, dy: ctx.offset.y, scaleGains: event.modifierFlags.contains(.control)))
+    }
+
+    /// Applies a drag offset to the bands that were grabbed: the grabbed dot
+    /// follows the pointer and the others move by the same frequency ratio.
+    /// Their gains move by the same number of dB, or with `scaleGains`
+    /// (Control) are scaled in proportion, as FabFilter always does, so cuts
+    /// deepen as boosts grow.
+    private func dragResult(_ ctx: DragContext, dx: CGFloat, dy: CGFloat, scaleGains: Bool) -> [Int: FilterParams] {
         guard let g0 = ctx.start[ctx.grabbed] else { return [:] }
         var out: [Int: FilterParams] = [:]
         let qFactor = pow(2, -Double(dy) / Tuning.qPointsPerOctave)
@@ -1163,15 +1135,22 @@ final class PeqGraphEditorView: NSView {
         out[ctx.grabbed] = g
 
         let gainFactor: Double? = {
-            guard case .gain = r0, abs(g0.gain) >= 0.25 else { return nil }
+            guard scaleGains, case .gain = r0, abs(g0.gain) >= 0.25 else { return nil }
             return Double(g.gain) / Double(g0.gain)
+        }()
+        // Offset by what the grabbed band's gain actually moved, after its
+        // clamp; a grabbed band without gain passes on the pointer's travel.
+        let gainOffset: Double? = {
+            guard case .gain = r0 else { return nil }
+            return Double(g.gain - g0.gain)
         }()
         for (b, s) in ctx.start where b != ctx.grabbed {
             var p = s
             if case .locked = role(s) { continue }
             p.freq = Float(PeqLimits.clamp(Double(s.freq) * ratio, freqRange))
             if s.type.usesGain {
-                let gain = gainFactor.map { Double(s.gain) * $0 } ?? Double(s.gain) + dbDelta / max(role(s).gainScale, 0.05)
+                let gain = gainFactor.map { Double(s.gain) * $0 }
+                    ?? Double(s.gain) + (gainOffset ?? dbDelta / max(role(s).gainScale, 0.05))
                 p.gain = Float(PeqLimits.clamp(gain, PeqLimits.gain))
             }
             out[b] = p
@@ -1265,7 +1244,7 @@ final class PeqGraphEditorView: NSView {
             }
         } else {
             // Q for every shape that has one, cuts included; slope is set
-            // from the chip's shape picker or the band menu.
+            // from the chip's shape page or the band menu.
             let factor = pow(2, Double(delta) / 100)
             transform = { p in
                 guard p.type.usesQ else { return nil }
@@ -1309,13 +1288,13 @@ final class PeqGraphEditorView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         guard editing else { super.rightMouseDown(with: event); return }
-        if !picker.isHidden {
-            closePicker()
+        if cardPoint != nil {
+            closeCard()
             gesture = .idle
             return
         }
         let p = location(event)
-        closeStrip()
+        closeShapePage()
         let menu: NSMenu
         if let b = node(at: p) {
             if !selection.contains(b) { setSelection([b]); anchor = b }
@@ -1335,9 +1314,12 @@ final class PeqGraphEditorView: NSView {
         case 51, 117: // delete, forward delete
             deleteBands(selection)
         case 53: // escape
-            if !picker.isHidden {
-                closePicker()
-                gesture = .idle
+            if cardPoint != nil {
+                closeCard()
+                return
+            }
+            if !hud.isHidden, hud.showsShapes {
+                closeShapePage()
                 return
             }
             setSelection([])
@@ -1466,7 +1448,8 @@ final class PeqGraphEditorView: NSView {
             guard let self, let b = self.hudBand else { return }
             self.toggleBypass(self.targets(for: b))
         }
-        hud.onShapeButton = { [weak self] in self?.toggleStrip() }
+        hud.onShapeButton = { [weak self] in self?.toggleShapePage() }
+        hud.onPageChanged = { [weak self] in self?.layoutHUD() }
         hud.onEditingChanged = { [weak self] editing in
             guard let self else { return }
             if !editing { self.scheduleHUDHide() }
@@ -1475,10 +1458,11 @@ final class PeqGraphEditorView: NSView {
         hud.onAdjust = { [weak self] field, delta, fine, phase in self?.adjustFromHUD(field, delta, phase) }
         hud.onScroll = { [weak self] field, delta, fine in self?.scrollHUDField(field, delta: delta, fine: fine) }
         hud.forwardsScroll = { [weak self] in self?.graphWheelActive ?? false }
-        strip.onPick = { [weak self] shape, order in
+        // A completed choice applies and turns the chip back to its values.
+        hud.onPick = { [weak self] shape, order in
             guard let self, let b = self.hudBand else { return }
             self.setShape(self.targets(for: b), shape: shape, order: order)
-            self.closeStrip()
+            self.closeShapePage()
         }
     }
 
@@ -1553,7 +1537,7 @@ final class PeqGraphEditorView: NSView {
     private func showHUD(for b: Int) {
         guard isBand(b) else { return }
         hudHideTimer?.invalidate()
-        if hudBand != b { closeStrip() }
+        if hudBand != b { closeShapePage() }
         hudBand = b
         refreshHUD()
         // A fade-out only marks the chip hidden when it ends, so a band taking
@@ -1578,6 +1562,13 @@ final class PeqGraphEditorView: NSView {
 
     private func layoutHUD() {
         guard let b = hudBand, isBand(b) else { return }
+        // The shape page stays where it opened: a pick moves the band's dot,
+        // and a chip that followed it would leave the pointer behind and hide.
+        if hud.showsShapes, let o = pagedOrigin {
+            hud.frame = NSRect(origin: o, size: hud.preferredSize)
+            return
+        }
+        pagedOrigin = nil
         let p = current(b)
         let node = nodePoint(p)
         let size = hud.preferredSize
@@ -1597,7 +1588,7 @@ final class PeqGraphEditorView: NSView {
         var frame = candidates.first { area.contains($0) } ?? candidates[0]
         frame.origin = NSPoint(x: clampedX(frame.minX), y: clampedY(frame.minY))
         hud.frame = frame
-        if !strip.isHidden { layoutStrip() }
+        if hud.showsShapes { pagedOrigin = frame.origin }
     }
 
     /// While bands are selected the chip stays up on the selection, wherever
@@ -1623,7 +1614,7 @@ final class PeqGraphEditorView: NSView {
 
     private func hideHUD(animated: Bool) {
         hudHideTimer?.invalidate()
-        closeStrip()
+        closeShapePage()
         if hud.isEditingText { hud.endEditing() }
         hudBand = nil
         guard !hud.isHidden else { return }
@@ -1642,37 +1633,20 @@ final class PeqGraphEditorView: NSView {
         invalidate()
     }
 
-    /// Opens the chip's shape picker below the chip, folding its order
-    /// stack down, or above it with the stack folding up where there is no
-    /// room below.
-    private func toggleStrip() {
-        guard let b = hudBand else { return }
-        if !strip.isHidden { closeStrip(); return }
-        let marked = PeqShape.of(current(b).type).map { PeqShapePicker.Choice(shape: $0.shape, order: $0.order) }
-        let color = PeqBandPalette.nsColor(b)
-        strip.configure(available: available, foldsUp: false, marked: marked, color: color)
-        if hud.frame.maxY + 4 + strip.frame.height > bounds.height - 4 {
-            strip.configure(available: available, foldsUp: true, marked: marked, color: color)
-        }
-        strip.isHidden = false
-        layoutStrip()
+    /// Turns the chip to its shape page, or back to its values.
+    private func toggleShapePage() {
+        guard hudBand != nil else { return }
+        if hud.showsShapes { hud.showValues() } else { hud.showShapes(available: available) }
+        layoutHUD()
     }
 
-    /// The picker sits just off the chip, its name tag showing in the space
-    /// between the two.
-    private func layoutStrip() {
-        let size = strip.frame.size
-        let x = min(max(hud.frame.minX, 4), max(bounds.width - size.width - 4, 4))
-        let y = strip.foldsUp ? hud.frame.minY - 4 - size.height : hud.frame.maxY + 4
-        strip.frame.origin = NSPoint(x: x, y: min(max(y, 4), max(bounds.height - size.height - 4, 4)))
+    private func closeShapePage() {
+        guard hud.showsShapes else { return }
+        hud.showValues()
+        layoutHUD()
     }
 
-    private func closeStrip() {
-        strip.reset()
-        strip.isHidden = true
-    }
-
-    // MARK: - Shape picker
+    // MARK: - Shape card
 
     /// A new band of `shape` at `order` placed at `p`: the pointer's
     /// frequency, and its level as the gain for shapes that have one.
@@ -1684,35 +1658,60 @@ final class PeqGraphEditorView: NSView {
         return band
     }
 
-    /// Opens the picker with the bell under the pressed point, its order
-    /// stack folding up when there is no room below.
-    private func openPicker(at p: CGPoint, since: TimeInterval) {
+    /// Opens the shape card for a band at `p`, above the point where there
+    /// is room, else below it.
+    private func openCard(at p: CGPoint) {
         guard freeSlot != nil else {
             // Every band is in use: nothing to create, and the press is not
             // a click on the graph either.
             NSSound.beep()
-            gesture = .idle
             return
         }
-        closeStrip()
-        picker.configure(available: available, foldsUp: false)
-        if let bell = picker.center(of: .bell), p.y - bell.y + picker.frame.height > bounds.height - 4 {
-            picker.configure(available: available, foldsUp: true)
+        closeShapePage()
+        card.chooser.configure(available: available)
+        card.chooser.mark(own: nil, color: .white)
+        // The new band is selected, and its chip fades in as the card fades
+        // out, so the choice turns straight into the band's values.
+        card.chooser.onPick = { [weak self] shape, order in
+            guard let self, let at = self.cardPoint else { return }
+            let band = self.band(shape, order: order, at: at)
+            self.closeCard(animated: true)
+            if let band, let slot = self.createBand(band) { self.showHUD(for: slot) }
         }
-        let anchor = picker.center(of: .bell) ?? NSPoint(x: picker.frame.width / 2, y: picker.frame.height / 2)
-        let size = picker.frame.size
-        let x = min(max(p.x - anchor.x, 4), max(bounds.width - size.width - 4, 4))
-        let y = min(max(p.y - anchor.y, 4), max(bounds.height - size.height - 4, 4))
-        picker.setFrameOrigin(NSPoint(x: x, y: y))
-        picker.isHidden = false
-        picker.track(convert(p, to: picker))
-        gesture = .picking(at: p, since: since, moved: false)
-        NSCursor.arrow.set()
+        card.chooser.onBack = { [weak self] in self?.closeCard() }
+        let size = card.frame.size, gap: CGFloat = 12, area = bounds.insetBy(dx: 4, dy: 4)
+        let x = min(max(p.x - size.width / 2, area.minX), max(area.maxX - size.width, area.minX))
+        let above = p.y - gap - size.height
+        let y = above >= area.minY ? above : min(p.y + gap, max(area.maxY - size.height, area.minY))
+        card.setFrameOrigin(NSPoint(x: x, y: y))
+        card.alphaValue = 1
+        card.isHidden = false
+        cardPoint = p
+        updateHover(at: p)
     }
 
-    private func closePicker() {
-        picker.reset()
-        picker.isHidden = true
+    private func closeCard(animated: Bool = false) {
+        guard cardPoint != nil else { return }
+        cardPoint = nil
+        ghost = nil
+        invalidate()
+        guard animated else {
+            card.isHidden = true
+            card.chooser.reset()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            card.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            // A card opened again during the fade is left alone.
+            if self.cardPoint == nil {
+                self.card.isHidden = true
+                self.card.chooser.reset()
+            }
+            self.card.alphaValue = 1
+        })
     }
 
     private func showAxisLabel(_ text: String, at x: CGFloat) {

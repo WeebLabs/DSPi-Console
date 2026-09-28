@@ -1,8 +1,8 @@
 import AppKit
 
 // The floating parameter display beside a band's dot, after FabFilter Pro-Q
-// 4's: bypass and delete, the band's frequency, gain and Q, a shape button
-// that opens a strip of shapes and slopes, and a chevron for the band menu.
+// 4's: bypass, the band's frequency, gain and Q, and a shape button that
+// turns the card to a page of shapes and slopes.
 // Values can be dragged, scrolled, or double-clicked to type one in.  All
 // AppKit, so moving or updating it during a drag costs SwiftUI nothing.
 
@@ -73,8 +73,12 @@ enum PeqShapeGlyph {
 final class PeqHUDButton: NSButton {
     var tint: NSColor = NSColor(white: 1, alpha: 0.82) { didSet { applyTint() } }
     var isOn = false { didSet { updateBackground() } }
+    /// A faint fill at rest, for a button that must read as one before it
+    /// is hovered.
+    var restingFill: CGFloat = 0 { didSet { updateBackground() } }
     var handler: (() -> Void)?
-    private var hovering = false { didSet { updateBackground() } }
+    var onHover: ((Bool) -> Void)?
+    private var hovering = false { didSet { updateBackground(); if hovering != oldValue { onHover?(hovering) } } }
 
     convenience init(symbol: String, size: CGFloat = 11, weight: NSFont.Weight = .regular, help: String) {
         self.init(frame: .zero)
@@ -114,7 +118,7 @@ final class PeqHUDButton: NSButton {
     }
 
     private func updateBackground() {
-        let alpha: CGFloat = isOn ? 0.16 : (hovering ? 0.09 : 0)
+        let alpha: CGFloat = isOn ? 0.16 : (hovering ? max(0.09, restingFill + 0.07) : restingFill)
         layer?.backgroundColor = NSColor(white: 1, alpha: alpha).cgColor
     }
 
@@ -260,15 +264,27 @@ class PeqFrostedPanel: NSView {
 
 /// The compact card beside a hovered band's dot: a header with the shape's
 /// glyph in the band colour and its two-letter code (a fixed width, so the
-/// card never changes size with the type; click for the shape strip), bypass on
+/// card never changes size with the type; click for the shape page), bypass on
 /// the right, then one row per value.  Deleting is the Delete key or the band
 /// menu, so the card spends no width on it.  Rows are label, number and
 /// unit in fixed columns so the decimals line up.  The card is tall and
 /// narrow on purpose: bands crowd along the frequency axis, so a narrow card
 /// covers fewer neighbouring dots.  Only the rows a shape uses appear.
+///
+/// The shape page replaces the values in place, at exactly the same size,
+/// and holds still while open.  It is a two-step choice: a grid of shapes,
+/// then, for a shape with two orders, two slope (or all-pass phase) buttons,
+/// marked only when the shape is the band's own.  The last click applies shape and order together
+/// and turns the card back to its values; nothing changes before it.  The
+/// band's own shape is marked in its colour.
 final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
     var onBypass: (() -> Void)?
     var onShapeButton: (() -> Void)?
+    /// A shape and order picked on the shape page.
+    var onPick: ((PeqShape, Int) -> Void)?
+    /// The card switched pages by itself (its back arrow); it may have
+    /// changed size.
+    var onPageChanged: (() -> Void)?
     var onAdjust: ((PeqHUDField, CGFloat, Bool, PeqAdjustPhase) -> Void)?
     var onScroll: ((PeqHUDField, CGFloat, Bool) -> Void)?
     /// Returns false when the text did not parse, which keeps the field open.
@@ -292,7 +308,7 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
         static let number: CGFloat = 44
         static let gap: CGFloat = 3
         /// Wide enough for "kHz"; a slope row needs room for "dB/oct".
-        static func unit(slope: Bool) -> CGFloat { slope ? 28 : 19 }
+        static func unit(slope: Bool) -> CGFloat { slope ? 32 : 19 }
     }
 
     private let power = PeqHUDButton(symbol: "power", size: 9, help: "Bypass band (Option-click the dot)")
@@ -304,6 +320,13 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
     private var editingField: PeqHUDField?
     private var cancelling = false
     private var shown: (params: FilterParams, color: NSColor, bypassSupported: Bool)?
+
+    // Shape page
+    private(set) var showsShapes = false
+    /// The size the card had when the page opened, kept while it is open,
+    /// however the band's values change underneath.
+    private var pageSize: NSSize?
+    private let chooser = PeqShapeChooser(backHelp: "Back to values")
 
     init() {
         super.init(cornerRadius: 8)
@@ -330,6 +353,14 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
             addSubview(v)
         }
         [ruleLine, shapeButton, power].forEach(addSubview)
+
+        chooser.onPick = { [weak self] in self?.onPick?($0, $1) }
+        chooser.onBack = { [weak self] in
+            self?.showValues()
+            self?.onPageChanged?()
+        }
+        chooser.isHidden = true
+        addSubview(chooser)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -450,6 +481,19 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
         let columns = Metrics.label + Metrics.number + Metrics.gap + unitWidth
         let width = ceil(max(Metrics.pad * 2 + columns, 4 + shapeWidth + 2 + button + 4))
         let height = Metrics.firstRow + CGFloat(rows.count) * Metrics.rowHeight + Metrics.bottom
+
+        let onPage = showsShapes && PeqShape.of(p.type) != nil
+        ([shapeButton, ruleLine] + values + labels + units).forEach { $0.isHidden = onPage }
+        power.isHidden = onPage || !bypassSupported
+        chooser.isHidden = !onPage
+        if onPage {
+            preferredSize = pageSize ?? NSSize(width: width, height: height)
+            setFrameSize(preferredSize)
+            chooser.frame = bounds
+            chooser.mark(own: PeqShape.of(p.type), color: dim ? NSColor(white: 1, alpha: 0.4) : color)
+            return
+        }
+
         preferredSize = NSSize(width: width, height: height)
         setFrameSize(preferredSize)
 
@@ -484,6 +528,35 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
             window?.invalidateCursorRects(for: v)
         }
     }
+
+    // MARK: Shape page
+
+    /// Turns the card to its shape page, offering the shapes the firmware
+    /// supports.
+    func showShapes(available: Set<FilterType>) {
+        if isEditingText { endEditing() }
+        chooser.configure(available: available)
+        showsShapes = true
+        pageSize = preferredSize
+        relayout()
+    }
+
+    /// Back to the values.
+    func showValues() {
+        guard showsShapes else { return }
+        showsShapes = false
+        pageSize = nil
+        chooser.reset()
+        relayout()
+    }
+
+    private func relayout() {
+        if let s = shown { show(s.params, color: s.color, bypassSupported: s.bypassSupported) }
+    }
+
+    #if DEBUG
+    var chooserForTesting: PeqShapeChooser { chooser }
+    #endif
 
     // MARK: Typing
 
@@ -552,261 +625,219 @@ final class PeqBandHUD: PeqFrostedPanel, NSTextFieldDelegate {
     }
 }
 
-/// The shape picker: a compact row of shape symbols.  Moving onto a shape
-/// that has two orders folds a small stack out beneath it (above it when
-/// `foldsUp`) holding them: "6 dB" and "12 dB", or "180°" and "360°" for an
-/// all-pass.  A name tag over the highlighted symbol says which shape it is,
-/// at once, where a system tooltip would wait and never show mid-drag.
-///
-/// It serves two places.  Cmd-press on the graph opens it passive: the
-/// editor keeps the mouse and drives it through `track(_:)`, and clicks fall
-/// through to the editor.  The chip's shape button opens it interactive: it
-/// follows the pointer and takes its own clicks, reporting them through
-/// `onPick`, and marks the band's current shape and order in its colour.
-final class PeqShapePicker: NSView {
-    struct Choice: Equatable {
-        let shape: PeqShape
-        let order: Int
-    }
-
+/// Chooses a shape and its order: a header with a back arrow and the
+/// shape's name, a grid of shapes, then, for a shape with two orders, its two
+/// slopes (or all-pass phases).  The last click reports shape and order
+/// together; nothing is reported before it.  The chip shows it as its shape
+/// page, marking the band's own shape (and, on that shape, its order), and
+/// Cmd-click on the graph shows it on a card of its own.
+final class PeqShapeChooser: NSView {
     var onPick: ((PeqShape, Int) -> Void)?
+    /// The back arrow on the first step.
+    var onBack: (() -> Void)?
+    /// The shape picked in step one, awaiting its order in step two.
+    private(set) var pendingShape: PeqShape?
 
-    private let interactive: Bool
-    private let row = PeqFrostedPanel(cornerRadius: 7)
-    private let stack = PeqFrostedPanel(cornerRadius: 7)
-    private let nameTag = NSTextField(labelWithString: "")
-    private var shapeCells: [(shape: PeqShape, view: PeqHUDButton)] = []
-    private var orderCells: [(order: Int, view: PeqHUDButton)] = []
     private var available: Set<FilterType> = []
-    private var marked: Choice?
+    private var own: (shape: PeqShape, order: Int)?
     private var markColor = NSColor.white
-    private(set) var foldsUp = false
-    /// The shape whose orders are showing: the last one the pointer was on.
-    private(set) var current: PeqShape?
-    private(set) var highlighted: Choice?
+    private let backHelp: String
+    private let backButton = PeqHUDButton(symbol: "chevron.left", size: 9, weight: .semibold, help: "")
+    private let shapeName = NSTextField(labelWithString: "")
+    private let ruleLine = NSView()
+    private var shapeCells: [(shape: PeqShape, view: PeqHUDButton)] = []
+    private let slopeChoices = [PeqHUDButton(frame: .zero), PeqHUDButton(frame: .zero)]
+    private var hoveredShape: PeqShape?
 
-    private static let cell = NSSize(width: 26, height: 22)
-    private static let orderCell = NSSize(width: 40, height: 20)
-    private static let pad: CGFloat = 3
-    private static let gap: CGFloat = 3
-    private static let tagHeight: CGFloat = 16
+    // The chip's header geometry, so both pages share one header line.
+    private enum Metrics {
+        static let pad: CGFloat = 8
+        static let headerY: CGFloat = 4
+        static let headerHeight: CGFloat = 17
+        static let rule: CGFloat = 24
+    }
 
     override var isFlipped: Bool { true }
 
-    init(interactive: Bool = false) {
-        self.interactive = interactive
+    /// `backHelp` names what the back arrow does on the first step.
+    init(backHelp: String) {
+        self.backHelp = backHelp
         super.init(frame: .zero)
-        stack.isHidden = true
-        nameTag.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        nameTag.textColor = NSColor(white: 1, alpha: 0.9)
-        nameTag.alignment = .center
-        nameTag.wantsLayer = true
-        nameTag.layer?.backgroundColor = NSColor(srgbRed: 0.09, green: 0.09, blue: 0.11, alpha: 0.92).cgColor
-        nameTag.layer?.cornerRadius = 4
-        nameTag.isHidden = true
-        addSubview(row)
-        addSubview(stack)
-        addSubview(nameTag)
+        backButton.handler = { [weak self] in
+            guard let self else { return }
+            if self.pendingShape != nil {
+                self.pendingShape = nil
+                self.layoutContent()
+            } else {
+                self.onBack?()
+            }
+        }
+        shapeName.textColor = NSColor(white: 1, alpha: 0.85)
+        shapeName.lineBreakMode = .byTruncatingTail
+        shapeName.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        ruleLine.wantsLayer = true
+        ruleLine.layer?.backgroundColor = NSColor(white: 1, alpha: 0.09).cgColor
+        for (i, choice) in slopeChoices.enumerated() {
+            choice.layer?.cornerRadius = 5
+            choice.restingFill = 0.07
+            choice.handler = { [weak self] in self?.pickOrder(i + 1) }
+        }
+        ([backButton, shapeName, ruleLine] + slopeChoices).forEach(addSubview)
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Rebuilds for the shapes the firmware supports.  `marked` is the band's
-    /// current shape and order, shown in `color`; a shape clicked on its own
-    /// keeps that order where it has one.
-    func configure(available: Set<FilterType>, foldsUp: Bool, marked: Choice? = nil, color: NSColor = .white) {
-        self.available = available
-        self.foldsUp = foldsUp
-        self.marked = marked
-        markColor = color
-        shapeCells.forEach { $0.view.removeFromSuperview() }
-        shapeCells.removeAll()
-        let pad = Self.pad, size = Self.cell
-        for shape in PeqShape.allCases where Self.defaultOrder(shape, available) != nil {
-            let b = PeqHUDButton(frame: NSRect(x: pad + CGFloat(shapeCells.count) * size.width, y: pad,
-                                               width: size.width, height: size.height))
-            b.image = PeqShapeGlyph.image(shape)
-            b.imagePosition = .imageOnly
-            row.addSubview(b)
-            shapeCells.append((shape, b))
+    /// Offers the shapes the firmware supports, from the first step.
+    func configure(available: Set<FilterType>) {
+        if available != self.available || shapeCells.isEmpty {
+            self.available = available
+            shapeCells.forEach { $0.view.removeFromSuperview() }
+            shapeCells = PeqShape.allCases.filter { Self.defaultOrder($0, available) != nil }.map { shape in
+                let b = PeqHUDButton(frame: .zero)
+                b.image = PeqShapeGlyph.image(shape)
+                b.imagePosition = .imageOnly
+                b.toolTip = shape.title
+                b.handler = { [weak self] in self?.pickShape(shape) }
+                b.onHover = { [weak self] in
+                    guard let self else { return }
+                    if $0 { self.hoveredShape = shape } else if self.hoveredShape == shape { self.hoveredShape = nil }
+                    self.updateShapeName()
+                }
+                addSubview(b)
+                return (shape, b)
+            }
         }
-        let rowSize = NSSize(width: pad * 2 + CGFloat(shapeCells.count) * size.width, height: pad * 2 + size.height)
-        let stackHeight = pad * 2 + Self.orderCell.height * 2
-        let height = Self.tagHeight + Self.gap + rowSize.height + Self.gap + stackHeight
-        setFrameSize(NSSize(width: max(rowSize.width, Self.orderCell.width + pad * 2), height: height))
-        // The name tag sits on the side away from the stack.
-        let rowY = foldsUp ? stackHeight + Self.gap : Self.tagHeight + Self.gap
-        row.frame = NSRect(origin: NSPoint(x: 0, y: rowY), size: rowSize)
         reset()
     }
 
-    /// Where `shape`'s symbol sits, in the picker's coordinates.
-    func center(of shape: PeqShape) -> NSPoint? {
-        shapeCells.first { $0.shape == shape }.map { row.convert(NSPoint(x: $0.view.frame.midX, y: $0.view.frame.midY), to: self) }
+    /// Marks the band's own shape, and its order on that shape, in `color`;
+    /// nil marks nothing.
+    func mark(own: (shape: PeqShape, order: Int)?, color: NSColor) {
+        self.own = own
+        markColor = color
+        layoutContent()
     }
 
-    /// Where `order` sits in the folded-out stack, in the picker's coordinates.
-    func center(ofOrder order: Int) -> NSPoint? {
-        guard !stack.isHidden else { return nil }
-        return orderCells.first { $0.order == order }.map { stack.convert(NSPoint(x: $0.view.frame.midX, y: $0.view.frame.midY), to: self) }
+    /// Back to the first step.
+    func reset() {
+        pendingShape = nil
+        hoveredShape = nil
+        layoutContent()
     }
 
-    /// Follows the pointer at `point`, in the picker's coordinates: a shape
-    /// becomes current (folding out its orders) and is highlighted at the
-    /// order a click on it would give; an order in the stack highlights
-    /// itself.
-    ///
-    /// There are no dead spots on the way: the whole row, padding included,
-    /// maps to the nearest shape; the gap between the row and the stack still
-    /// counts as the current shape; and the whole stack maps to the nearest
-    /// order.
-    func track(_ point: NSPoint) {
-        if row.frame.contains(point), let s = nearest(shapeCells, to: point.x, by: { row.convert($0.view.frame, to: self).midX })?.shape {
-            if s != current { current = s; foldOut(s) }
-            update(order(for: s).map { Choice(shape: s, order: $0) })
-        } else if let current, !stack.isHidden, stack.frame.contains(point),
-                  let o = nearest(orderCells, to: point.y, by: { stack.convert($0.view.frame, to: self).midY })?.order {
-            update(Choice(shape: current, order: o))
-        } else if let current, !stack.isHidden, gapToStack.contains(point) {
-            update(order(for: current).map { Choice(shape: current, order: $0) })
-        } else {
-            update(nil)
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        layoutContent()
+    }
+
+    private func layoutContent() {
+        let width = bounds.width
+        backButton.frame = NSRect(x: 3, y: Metrics.headerY, width: 15, height: Metrics.headerHeight)
+        backButton.toolTip = pendingShape == nil ? backHelp : "Back to shapes"
+        shapeName.frame = NSRect(x: 18, y: Metrics.headerY + 1.5, width: max(width - 18 - Metrics.pad, 0), height: Metrics.headerHeight)
+        ruleLine.frame = NSRect(x: Metrics.pad, y: Metrics.rule, width: max(width - Metrics.pad * 2, 0), height: 1)
+        let top = Metrics.rule + 3, bottom = bounds.height - 4
+        let quiet = NSColor(white: 1, alpha: 0.7)
+
+        // Step two: the picked shape's two orders, centred in the body.  Only
+        // the band's own shape shows its order; another starts unselected.
+        if let pending = pendingShape {
+            shapeCells.forEach { $0.view.isHidden = true }
+            let choice = NSSize(width: 42, height: 20), gap: CGFloat = 6
+            let x0 = (width - choice.width * 2 - gap) / 2
+            let y = ((top + bottom) / 2 - choice.height / 2).rounded()
+            for (i, button) in slopeChoices.enumerated() {
+                let o = i + 1
+                let marked = own.map { $0.shape == pending && $0.order == o } ?? false
+                button.isHidden = false
+                button.frame = NSRect(x: x0 + CGFloat(i) * (choice.width + gap), y: y, width: choice.width, height: choice.height)
+                button.isOn = marked
+                button.tint = marked ? markColor : NSColor(white: 1, alpha: 0.85)
+                button.setTitle(Self.orderLabel(pending, o), size: 11)
+                button.toolTip = pending == .allPass
+                    ? (o == 1 ? "First order, 180° of phase" : "Second order, 360° of phase")
+                    : "\(o == 1 ? 6 : 12) dB per octave"
+            }
+            updateShapeName()
+            return
+        }
+
+        // Step one: the grid fills the body; a short last row is centred.
+        slopeChoices.forEach { $0.isHidden = true }
+        let columns = 4
+        let rows = (shapeCells.count + columns - 1) / columns
+        let cellHeight = (bottom - top + 1) / CGFloat(max(rows, 1))
+        let cellWidth = (width - Metrics.pad * 2) / CGFloat(columns)
+        for (i, cell) in shapeCells.enumerated() {
+            let r = i / columns, c = i % columns
+            let inRow = min(columns, shapeCells.count - r * columns)
+            let inset = CGFloat(columns - inRow) * cellWidth / 2
+            let marked = cell.shape == own?.shape
+            cell.view.isHidden = false
+            cell.view.frame = NSRect(x: Metrics.pad + inset + CGFloat(c) * cellWidth, y: top + CGFloat(r) * cellHeight,
+                                     width: cellWidth, height: cellHeight - 1)
+            cell.view.isOn = marked
+            cell.view.tint = marked ? markColor : quiet
+        }
+        updateShapeName()
+    }
+
+    /// The header names the shape being chosen: the picked one in step two,
+    /// else the one under the pointer, else the band's own.
+    private func updateShapeName() {
+        shapeName.stringValue = (pendingShape ?? hoveredShape ?? own?.shape)?.title ?? "Add Band"
+    }
+
+    /// Step one: a shape with one order is reported now; one with two goes on
+    /// to step two.
+    private func pickShape(_ shape: PeqShape) {
+        let orders = [1, 2].filter { shape.type(order: $0).map(available.contains) ?? false }
+        if orders.count == 2 {
+            pendingShape = shape
+            hoveredShape = nil
+            layoutContent()
+        } else if let order = orders.first {
+            onPick?(shape, order)
         }
     }
 
-    func reset() {
-        current = nil
-        stack.isHidden = true
-        update(nil)
+    /// Step two: the order completes the choice.
+    private func pickOrder(_ order: Int) {
+        guard let shape = pendingShape else { return }
+        onPick?(shape, order)
     }
-
-    // MARK: - Interactive use
-
-    /// Passive, clicks go through to the editor behind; interactive, the
-    /// picker takes those on its panels and nothing else.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard interactive, !isHidden, let superview else { return nil }
-        return isOnPanels(convert(point, from: superview)) ? self : nil
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        guard interactive else { return }
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
-                                       owner: self, userInfo: nil))
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        guard interactive else { return super.mouseMoved(with: event) }
-        track(convert(event.locationInWindow, from: nil))
-    }
-
-    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
-
-    override func mouseExited(with event: NSEvent) {
-        guard interactive else { return super.mouseExited(with: event) }
-        update(nil)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard interactive else { return super.mouseDown(with: event) }
-        track(convert(event.locationInWindow, from: nil))
-        if let c = highlighted { onPick?(c.shape, c.order) }
-    }
-
-    // MARK: - Private
 
     /// The order a shape on its own creates: second where available.
-    private static func defaultOrder(_ shape: PeqShape, _ available: Set<FilterType>) -> Int? {
+    static func defaultOrder(_ shape: PeqShape, _ available: Set<FilterType>) -> Int? {
         [2, 1].first { shape.type(order: $0).map(available.contains) ?? false }
-    }
-
-    /// The order a shape on its own gives: the band's current order where the
-    /// shape has it, else the default.
-    private func order(for shape: PeqShape) -> Int? {
-        if let m = marked, shape.type(order: m.order).map(available.contains) == true { return m.order }
-        return Self.defaultOrder(shape, available)
     }
 
     /// The compact label for `order`: the slope in dB, or the phase for an
     /// all-pass, whose orders are not slopes.
-    private static func label(_ shape: PeqShape, _ order: Int) -> String {
+    static func orderLabel(_ shape: PeqShape, _ order: Int) -> String {
         if shape == .allPass { return order == 1 ? "180°" : "360°" }
         return order == 1 ? "6 dB" : "12 dB"
     }
 
-    /// The strip between the row and the folded-out stack, as wide as the
-    /// stack.
-    private var gapToStack: NSRect {
-        let top = min(row.frame.maxY, stack.frame.maxY), bottom = max(row.frame.minY, stack.frame.minY)
-        return NSRect(x: stack.frame.minX, y: min(top, bottom), width: stack.frame.width, height: abs(bottom - top))
+    #if DEBUG
+    func shapeButtonForTesting(_ shape: PeqShape) -> NSButton? { shapeCells.first { $0.shape == shape }?.view }
+    func slopeChoiceForTesting(_ order: Int) -> NSButton? {
+        pendingShape == nil || !slopeChoices.indices.contains(order - 1) ? nil : slopeChoices[order - 1]
     }
+    var backButtonForTesting: NSButton { backButton }
+    #endif
+}
 
-    private func isOnPanels(_ p: NSPoint) -> Bool {
-        row.frame.contains(p) || (!stack.isHidden && (stack.frame.contains(p) || gapToStack.contains(p)))
-    }
+/// The Cmd-click card: the shape chooser on a frosted panel of its own, the
+/// size of a band's chip, for a band not made yet.
+final class PeqShapeCard: PeqFrostedPanel {
+    let chooser = PeqShapeChooser(backHelp: "Cancel")
 
-    private func nearest<T>(_ cells: [T], to value: CGFloat, by position: (T) -> CGFloat) -> T? {
-        cells.min { abs(position($0) - value) < abs(position($1) - value) }
+    init() {
+        super.init(cornerRadius: 8)
+        setFrameSize(NSSize(width: 110, height: 78))
+        chooser.frame = bounds
+        chooser.autoresizingMask = [.width, .height]
+        addSubview(chooser)
     }
-
-    /// Folds `shape`'s two orders out beneath its symbol, or hides the stack
-    /// for a shape with only one.
-    private func foldOut(_ shape: PeqShape) {
-        orderCells.forEach { $0.view.removeFromSuperview() }
-        orderCells.removeAll()
-        let orders = [1, 2].filter { shape.type(order: $0).map(available.contains) ?? false }
-        guard orders.count == 2, let anchor = shapeCells.first(where: { $0.shape == shape })?.view else {
-            stack.isHidden = true
-            return
-        }
-        let pad = Self.pad, size = Self.orderCell
-        for (i, order) in orders.enumerated() {
-            let b = PeqHUDButton(frame: NSRect(x: pad, y: pad + CGFloat(i) * size.height, width: size.width, height: size.height))
-            b.setTitle(Self.label(shape, order), size: 10)
-            stack.addSubview(b)
-            orderCells.append((order, b))
-        }
-        let stackSize = NSSize(width: pad * 2 + size.width, height: pad * 2 + size.height * 2)
-        let a = row.convert(anchor.frame, to: self)
-        let x = min(max(a.midX - stackSize.width / 2, 0), bounds.width - stackSize.width)
-        let y = foldsUp ? row.frame.minY - Self.gap - stackSize.height : row.frame.maxY + Self.gap
-        stack.frame = NSRect(origin: NSPoint(x: x, y: y), size: stackSize)
-        stack.isHidden = false
-    }
-
-    private func update(_ choice: Choice?) {
-        highlighted = choice
-        for cell in shapeCells {
-            let on = cell.shape == choice?.shape
-            cell.view.isOn = on
-            cell.view.tint = cell.shape == marked?.shape ? markColor : NSColor(white: 1, alpha: on ? 0.95 : 0.7)
-        }
-        for cell in orderCells {
-            let on = choice?.order == cell.order && choice?.shape == current
-            cell.view.isOn = on
-            let isMarked = current == marked?.shape && cell.order == marked?.order
-            cell.view.tint = isMarked ? markColor : NSColor(white: 1, alpha: on ? 0.95 : 0.65)
-            if let current { cell.view.setTitle(Self.label(current, cell.order), size: 10) }
-        }
-        showTag(for: choice?.shape)
-    }
-
-    /// The name tag over the highlighted symbol, on the side away from the
-    /// stack and kept inside the picker.
-    private func showTag(for shape: PeqShape?) {
-        guard let shape, let cell = shapeCells.first(where: { $0.shape == shape })?.view else {
-            nameTag.isHidden = true
-            return
-        }
-        nameTag.stringValue = shape.title
-        let width = ceil(nameTag.intrinsicContentSize.width) + 10
-        let a = row.convert(cell.frame, to: self)
-        let x = min(max(a.midX - width / 2, 0), max(bounds.width - width, 0))
-        let y = foldsUp ? row.frame.maxY + Self.gap : row.frame.minY - Self.gap - Self.tagHeight
-        nameTag.frame = NSRect(x: x, y: y, width: width, height: Self.tagHeight)
-        nameTag.isHidden = false
-    }
+    required init?(coder: NSCoder) { fatalError() }
 }
