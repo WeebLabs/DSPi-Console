@@ -377,13 +377,13 @@ Limiter settings are part of the hardware configuration. They are stored with th
 The band list shows one row per filter band. On the PEQ tab the columns are **#**, **TYPE**, **FREQ**, **GAIN** and **WIDTH**.
 
 - **Bypass dot** (left of the number): a filled dot means the band is active, and a hollow ring means it is bypassed. Click to toggle. A bypassed band is dimmed in the list. On the graph it drops out of the main curve, and its own shape stays as a faint grey outline so you can still see where it is. This needs firmware with per-band bypass.
-- **#**: the band number, in the band's own colour. The same colour marks the band's dot on the graph. Click the number to select the band on the graph.
+- **#**: the band number. Each band has its own colour, which also marks its dot on the graph. The colour appears on the bypass dot, or on the number itself if the firmware has no per-band bypass. Click the number to select the band on the graph. **Cmd**-click adds the band to the selection or removes it. **Shift**-click selects every band in the rows from the last one you clicked to this one, skipping rows that are Off. Clicking the number of an Off row does nothing.
 - **TYPE**: click to choose a filter type. See [Filter Types](#filter-types).
 - **FREQ**: the band's centre or corner frequency in Hz.
 - **GAIN**: boost or cut in dB. Only peaking and shelf filters have gain; the field is blank for other types.
 - **WIDTH**: the band's Q. A higher Q gives a narrower band. It is hidden for types without a Q.
 
-The list and the graph stay in step. Hovering a row lights up that band on the graph, and selecting a band on the graph highlights and scrolls to its row.
+The list and the graph stay in step. Hovering a row lights up that band on the graph, and selecting a band on the graph highlights and scrolls to its row. A selection made in the list itself doesn't scroll the list, so the row you clicked stays where it is.
 
 At the foot of the list:
 
@@ -527,7 +527,7 @@ Opening a channel page starts that page's spectrum on the channel you opened.
 | | **Unwrap Phase**: continuous phase instead of jumping at ±180° | On or off (needs Phase Response) | Off |
 | | **Follow Channel Selection** (pop-out window only) | On or off | On |
 
-**Back** returns to the main options page. You can also change the dB range without opening the settings: scroll with the pointer over the dB labels at the left edge of the graph to zoom in or out.
+**Back** returns to the main options page. You can also change the dB range without opening the settings: scroll with the pointer over the dB labels at the left edge of the graph to zoom in or out. On a channel page, scrolling over a band's dot or fill adjusts that band instead, even at the left edge.
 
 ### Resizing the Graph
 
@@ -588,17 +588,17 @@ The graph edits the channel whose page is open. To edit another channel, click i
 - **Over a band's dot**: the band lights up, its row in the band list is highlighted, and the pointer becomes an open hand. If you rest on it for a moment, the band list scrolls to show that band.
 - **Over a band's fill**: the band lights up and its row is highlighted in the same way. Because clicks there reach the graph, the ghost dot and readouts described next also appear.
 - **Over a dot, with nothing selected**: the [band chip](#the-band-chip) appears beside the dot and shows the band's values. It hides again shortly after you move away.
-- **Over empty graph, or a band's fill**: a faint "ghost" dot shows where a double-click would create a band. A label at the bottom shows the frequency under the pointer, and a label at the left edge shows its level in dB, which is the gain a new bell or shelf takes when you place it there. Either label can be switched off with **Frequency Readout** and **Gain Readout** in [Graph Setup](#graph-setup). If every band is in use, the bottom label reads **All N bands in use** instead and the level is not shown.
+- **Over empty graph, or a band's fill**: a faint "ghost" dot shows where a double-click would create a band. A label at the bottom shows the frequency under the pointer, and a label at the left edge shows its level in dB, which is the gain a new bell or shelf takes when you place it there. Either label can be switched off with **Frequency Readout** and **Gain Readout** in [Graph Setup](#graph-setup). If every band is in use, the bottom label reads **All N bands in use** instead and the level is not shown. That note appears even when Frequency Readout is off.
 - **Over a row in the band list**: that band lights up on the graph.
 
 ### Adding Bands
 
-A new band goes into the lowest-numbered band that is Off, and is selected straight away. If every band is already in use, Console beeps and nothing is added.
+A new band goes into the lowest-numbered band that is Off, and is selected straight away. If every band is already in use, a double-click or Cmd-click beeps and adds nothing, and dragging the curve draws a selection box instead.
 
 ![Ghost dot and frequency readout](Images/graph-editor-hover.png)
 
 - **Double-click** empty graph, or inside a band's fill. This always makes a **Bell** (peaking filter) at the pointer's frequency and level, with Q 1, wherever you click. To make another shape, change it afterwards from the [band chip](#changing-shape-and-slope), or use the next method.
-- **Cmd-click** empty graph, or inside a band's fill. A card of shapes opens there, the same two steps as the chip's [shape page](#changing-shape-and-slope), and a faint dot marks where the band will go. Click a shape: **Bell** and **Notch** are added straight away, and for a shelf, cut or all-pass the card then asks for the slope (**6 dB** or **12 dB**, or **180°** or **360°**). The band goes where you Cmd-clicked: at that frequency, and at that level for bells and shelves. It is selected, and the card turns into its [chip](#the-band-chip) so you can fine-tune it straight away. The arrow steps back, and clicking anywhere else or pressing Escape closes the card without adding anything.
+- **Cmd-click** empty graph, or inside a band's fill. A card headed **Add Band** opens beside the point, on the side the new band's [chip](#the-band-chip) will use, and a faint dot marks where the band will go. The card works in the same two steps as the chip's [shape page](#changing-shape-and-slope). Click a shape: **Bell** and **Notch** are added straight away. For a shelf, cut or all-pass, the card then asks for the slope (**6 dB** or **12 dB**, or **180°** or **360°**), unless your firmware supports only one, in which case the band is added straight away too. The band goes where you Cmd-clicked: at that frequency, and at that level for bells and shelves. It is selected, and the card turns into its chip so you can fine-tune it straight away. On the slope step the arrow goes back to the shapes; on the shape step it cancels the card. A click or right-click on the graph, or Escape, also closes the card without adding anything.
 - **Drag the curve itself.** Press on the channel's curve and pull, and a new band is drawn out of it, starting at 0 dB so the curve doesn't jump. Near the left edge it is a **Low Shelf**, near the right edge a **High Shelf**, and anywhere else a **Bell**.
 
 A single click on empty graph never adds a band; it only clears the selection. A Linkwitz Transform can't be created on the graph; use the band list.
@@ -614,20 +614,20 @@ A single click on empty graph never adds a band; it only clears the selection. A
 | Click empty graph or a fill, or press Escape | Clears the selection. |
 | Cmd-A, or right-click > **Select All Bands** | Selects every band. |
 | Tab / Shift-Tab | Selects the next or previous band by frequency. |
-| Click a band number in the band list | Selects that band. |
+| Click a band number in the band list | Selects that band. Cmd-click and Shift-click work as they do on a dot, except that Shift selects a run of rows in list order rather than frequency order. |
 
 While bands are selected, the band chip stays with the selection, and hovering other bands only highlights them.
 
 ### Dragging Bands
 
-Drag a band's dot to change it:
+Drag a band's dot to change it. The pointer becomes a closed hand while you drag, or up and down arrows for a Cmd-drag.
 
 - **Bells and shelves**: left and right changes frequency; up and down changes gain.
 - **12 dB/oct Low Cut and High Cut**: left and right changes frequency; up and down changes Q, which sets how much the filter peaks at its corner.
 - **Notch, All Pass and 6 dB/oct cuts**: only the frequency changes. Use the scroll wheel to change Q.
 - **Linkwitz Transform** bands can't be dragged.
 
-If you drag a band that is part of a selection, **all selected bands move together**. The band you grab follows the pointer. The others move by the same frequency ratio, and their gains move by the same number of dB. Hold **Control** to scale their gains in proportion instead: if the band you grab goes from +6 dB to +9 dB, a -4 dB band goes to -6 dB, so the whole selection's shape grows or shrinks together, as FabFilter Pro-Q does.
+If you drag a band that is part of a selection, **all selected bands move together**. The band you grab follows the pointer. The others move by the same frequency ratio, and their gains move by the same number of dB. Hold **Control** to scale their gains in proportion instead: if the band you grab goes from +6 dB to +9 dB, a -4 dB band goes to -6 dB, so the whole selection's shape grows or shrinks together, as FabFilter Pro-Q does. If the band you grab has no gain, or starts within 0.25 dB of 0 dB, there is nothing to scale by, so the gains move by the same number of dB as usual.
 
 Modifier keys change how a drag behaves:
 
@@ -635,7 +635,7 @@ Modifier keys change how a drag behaves:
 |---|---|---|
 | **Shift** | At any point | Fine adjustment: the band moves at about one eighth of the speed. Press or release it mid-drag as needed. |
 | **Option** | At any point | Locks the drag to one axis (frequency only, or gain/Q only). If you press Option mid-drag, Console locks to the direction you have mostly been moving. Release Option to free the drag again. The band never jumps. |
-| **Cmd** | From the start | Changes Q instead of position: drag up to raise Q (narrower), down to lower it (wider). |
+| **Cmd** | From the start | Changes Q instead of position: drag up to raise Q (narrower), down to lower it (wider). With several bands selected, all their Qs change together; a band outside the selection joins it. |
 | **Control** | At any point | With several bands selected, scales their gains in proportion to the band you grab instead of moving them all by the same dB. Press or release it mid-drag to switch. |
 
 When you hold Option, Shift or Cmd and **release without moving**, the press counts as a click instead:
@@ -657,13 +657,15 @@ The device updates live while you drag, and the change is saved into the channel
 | Over the left edge (the dB labels) | Scroll | Zooms the graph's dB range in or out. This also works on the Dashboard. |
 | Over empty graph elsewhere | Scroll | Scrolls the page as normal. |
 
-When bands are selected, scrolling over any band or over the chip adjusts **the whole selection**. To work on a different band, click it first.
+When bands are selected, scrolling over any band adjusts **the whole selection**, and so does Cmd-scroll anywhere on the chip. A plain scroll over one of the chip's values changes only that value, on the chip's own band (see [The Band Chip](#the-band-chip)). To work on a different band, click it first.
+
+A 6 dB/oct shelf or cut and a 180° All Pass have no Q, so a plain scroll leaves them unchanged, although other selected bands still change. Cmd-scroll still changes a shelf's gain.
 
 A scroll gesture stays with the band it started on, even if the dot moves out from under the pointer. You can also scroll during a drag to change Q at the same time. Scroll changes are sent live and saved a moment after you stop.
 
 ### The Band Chip
 
-The band chip is a small dark card next to a band's dot. It shows the band's values and lets you edit them precisely. It appears when you hover a dot, select a band, or start editing. It sits above boosted bands and below cut bands, and always stays inside the graph.
+The band chip is a small dark card next to a band's dot. It shows the band's values and lets you edit them precisely. It appears when you hover a dot, select a band, or start editing. It sits on the side of the dot away from 0 dB: above a dot at or above 0 dB, and below a dot under it. Where there isn't room, it goes to the right of the dot, then the left, then the other side. It always stays inside the graph.
 
 ![Band chip](Images/band-chip.png)
 
@@ -691,6 +693,8 @@ To change a value in the chip:
   - **Gain** accepts a number, with an optional `+` and `dB`.
   - **Width** accepts a number, with an optional leading `q`.
 
+Changes to the chip's values apply only to the band the chip shows, even when several bands are selected. The shape button and the power button act on the whole selection.
+
 The chip has no delete button. Use the Delete key or the right-click menu.
 
 ### Changing Shape and Slope
@@ -700,7 +704,7 @@ Click the chip's shape button to turn the chip to its **shape page**. The page r
 ![Shape page](Images/shape-page.png)
 
 1. **Shape:** click one of Bell, Low Shelf, Low Cut, High Shelf, High Cut, Notch or All Pass, limited to the shapes your firmware supports. The band's current shape is marked in the band's colour. Bell and Notch have only one slope, so they are applied straight away.
-2. **Slope:** for a shelf, cut or all-pass, the page then shows two buttons: **6 dB** and **12 dB**, or **180°** and **360°** for an all-pass. If you picked the band's own shape, its current slope is marked in the band's colour; for any other shape neither is marked. Click one to apply the shape and slope together.
+2. **Slope:** for a shelf, cut or all-pass, if your firmware supports both slopes, the page then shows two buttons: **6 dB** and **12 dB**, or **180°** and **360°** for an all-pass. If you picked the band's own shape, its current slope is marked in the band's colour; for any other shape neither is marked. Click one to apply the shape and slope together.
 
 The header names the shape you are pointing at, or the one you picked. Its arrow goes back one step: from the slopes to the shapes, or from the shapes to the values. Escape, or a click on the graph, closes the page without changing anything.
 
@@ -708,15 +712,15 @@ The change applies to the band, or to the whole selection if the band is part of
 
 ### Right-Click Menus
 
-**Right-click a band's dot** to open the band menu. It acts on the whole selection if the band is part of one, and otherwise on that band alone.
+**Right-click a band's dot** to open the band menu. If the band isn't selected, it becomes the selection first. The menu acts on the whole selection if the band is part of one, and otherwise on that band alone. While the Cmd-click card is open, a right-click only closes the card.
 
 ![Band menu](Images/graph-band-menu.png)
 
 - The title shows **Band N** or **N Bands**.
 - Shape and exact values are not in this menu; change them on the [band chip](#the-band-chip).
-- **Slope** offers **6 dB/oct** or **12 dB/oct**; for All Pass it is **Order**, with **1st Order** or **2nd Order**. It appears only when both are available.
+- **Slope** offers **6 dB/oct** or **12 dB/oct**; for All Pass it is **Order**, with **1st Order** or **2nd Order**. It appears only when both are available. The choice gives every band the menu acts on the right-clicked band's shape, at the chosen slope.
 - **Bypass** or **Enable** needs firmware with per-band bypass.
-- **Invert Gain** flips a boost into a cut of the same size, or the reverse.
+- **Invert Gain** flips a boost into a cut of the same size, or the reverse. It appears when the right-clicked band has gain, and leaves bands without gain alone.
 - **Delete Band** or **Delete N Bands** sets the band(s) to Off.
 
 **Right-click empty graph**, or a band's fill, to open the graph menu:
@@ -759,7 +763,8 @@ Arrow-key changes go to the device immediately and are saved a moment after the 
 | Dot | Drag | Move frequency and gain (or Q for 12 dB cuts) |
 | Dot | Cmd-drag | Change Q |
 | While dragging | Shift / Option / Control | Fine movement / lock to one axis / scale the selection's gains |
-| Dot, fill or chip | Scroll / Cmd-scroll | Q / gain (Shift for fine) |
+| Dot or fill | Scroll / Cmd-scroll | Q / gain (Shift for fine) |
+| Chip | Cmd-scroll | Gain |
 | Dot | Right-click | Slope, Bypass, Invert Gain, Delete |
 | Chip value | Drag vertically, scroll, or double-click to type | Change that value |
 | Chip shape button | Click | Turn the chip to its shape page |
