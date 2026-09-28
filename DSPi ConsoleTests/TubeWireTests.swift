@@ -145,7 +145,7 @@ final class TubeWireTests: XCTestCase {
         XCTAssertEqual(vm.tube.rectifier, 1)
         XCTAssertTrue(vm.tube.xfmrEnabled)
         XCTAssertEqual(vm.tube.xfmrDamping, 2)
-        XCTAssertEqual(vm.tube.xfmrResHz, 85)
+        XCTAssertEqual(vm.tube.xfmrResHz, 95)
         XCTAssertEqual(vm.tube.mixPct, 100)
         XCTAssertEqual(vm.tube.trimDB, 0)
     }
