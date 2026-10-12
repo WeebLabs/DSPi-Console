@@ -538,7 +538,9 @@ extension DSPViewModel {
     func setPreamp(_ db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
-        self.preampDB = [val, val]
+        // The device sets every input, so every entry follows.  Replacing the
+        // array with two entries would leave inputs 2+ out of range.
+        self.preampDB = Array(repeating: val, count: preampDB.count)
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }

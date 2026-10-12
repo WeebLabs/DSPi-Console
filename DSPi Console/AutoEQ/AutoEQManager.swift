@@ -172,14 +172,15 @@ class AutoEQManager: ObservableObject {
     func applyProfile(_ entry: HeadphoneEntry) {
         let vm = AppState.shared.viewModel
 
-        // Set preamp
-        vm.setPreamp(Float(entry.preamp))
-
         // Apply filters to both Master channels
         let masterChannels = [Channel.masterLeft.rawValue, Channel.masterRight.rawValue]
         let maxBands = Channel.masterLeft.bandCount // 10
 
         for ch in masterChannels {
+            // Per-channel, not the legacy all-input REQ_SET_PREAMP: that one
+            // trims every input on the device, not just the two the profile EQs.
+            vm.setPreampChannel(channel: ch, db: Float(entry.preamp))
+
             // Apply filters (up to maxBands)
             for (i, filter) in entry.filters.prefix(maxBands).enumerated() {
                 let filterType = FilterType.from(string: filter.type)
@@ -193,7 +194,7 @@ class AutoEQManager: ObservableObject {
             }
 
             // Clear remaining bands
-            for i in entry.filters.count..<maxBands {
+            for i in min(entry.filters.count, maxBands)..<maxBands {
                 vm.setFilter(ch: ch, band: i, p: FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
             }
         }
