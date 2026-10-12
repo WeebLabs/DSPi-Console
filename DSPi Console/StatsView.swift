@@ -603,9 +603,10 @@ private func formatElapsed(_ interval: TimeInterval) -> String {
 struct StarvationTimerRow: View {
     let label: String
     let since: Date?
-    @State private var now = Date()
-    let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    // A TimelineView, not a Timer.publish stored on the struct: the buffer poll
+    // rebuilds this row every 60 ms, which restarted that timer before it could
+    // ever fire and froze the elapsed time.
     var body: some View {
         HStack {
             Text(label)
@@ -613,9 +614,11 @@ struct StarvationTimerRow: View {
                 .foregroundColor(.secondary)
             Spacer()
             if let since = since {
-                Text(formatElapsed(now.timeIntervalSince(since)))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+                TimelineView(.periodic(from: since, by: 1)) { context in
+                    Text(formatElapsed(max(0, context.date.timeIntervalSince(since))))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             } else {
                 Text("-")
                     .font(.system(size: 10, design: .monospaced))
@@ -623,7 +626,6 @@ struct StarvationTimerRow: View {
             }
         }
         .padding(.vertical, 1)
-        .onReceive(timer) { self.now = $0 }
     }
 }
 
