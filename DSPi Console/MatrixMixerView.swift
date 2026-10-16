@@ -86,6 +86,12 @@ struct PendingConflict: Identifiable {
 
 struct MatrixMixerView: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var telemetry: DeviceTelemetry
+
+    init(vm: DSPViewModel) {
+        self.vm = vm
+        self.telemetry = vm.telemetry
+    }
     @State private var pendingConflict: PendingConflict?
     @State private var renamingOutput: Int? = nil
     @State private var renameText = ""
@@ -381,7 +387,7 @@ struct MatrixMixerView: View {
                     CompactDelayField(delay: Binding(
                         get: { vm.outputDelayMS[idx] },
                         set: { vm.setOutputDelay(output: idx, ms: $0) }
-                    ), maxDelay: vm.platformName == "RP2040" ? 42 : 85)
+                    ), maxDelay: vm.maximumDelayMS(output: idx))
                     .frame(width: columnWidth, height: 30)
                     .opacity(vm.outputEnabled[idx] ? 1.0 : 0.3)
                 }
@@ -624,7 +630,7 @@ struct CompactGainField: View {
 
 struct CompactDelayField: View {
     @Binding var delay: Float
-    var maxDelay: Float = 85
+    let maxDelay: Float
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
 
@@ -639,7 +645,7 @@ struct CompactDelayField: View {
             .onSubmit { commitValue(); isFocused = false }
             .onChange(of: isFocused) { focused in
                 if focused {
-                    text = String(format: "%.1f", delay)
+                    text = String(format: "%.2f", delay)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
                     }
@@ -653,21 +659,17 @@ struct CompactDelayField: View {
             }
             .background(
                 ScrollWheelHandler { delta in
-                    if !isFocused {
-                        delay = max(0, min(maxDelay, delay + delta * 5))
+                    if !isFocused && delta != 0 {
+                        let step: Float = delta > 0 ? 0.01 : -0.01
+                        delay = DelaySettings.roundedMS(delay + step, maximum: maxDelay)
                     }
                 }
             )
+            .disabled(maxDelay <= 0)
     }
 
     private func updateDisplay() {
-        if delay == 0 {
-            text = "0 ms"
-        } else if delay < 1 {
-            text = String(format: "%.1f ms", delay)
-        } else {
-            text = String(format: "%.1f ms", delay)
-        }
+        text = String(format: "%.2f ms", delay)
     }
 
     private func commitValue() {
@@ -675,7 +677,7 @@ struct CompactDelayField: View {
             .replacingOccurrences(of: "ms", with: "")
             .trimmingCharacters(in: .whitespaces)
         if let value = Float(cleaned) {
-            delay = max(0, min(maxDelay, value))
+            delay = DelaySettings.roundedMS(value, maximum: maxDelay)
         }
         updateDisplay()
     }

@@ -342,7 +342,7 @@ The settings card of an output page holds, from left to right:
    - The **dB** field sets the level at which that input feeds this output. You can set it before connecting. Right-click it to reset it to 0 dB.
    - **INV** inverts the polarity of that input on this output. It turns orange when active.
 2. **GAIN**: the output level, from -60 dB to +10 dB in 0.1 dB steps. Right-click the slider to reset it to 0 dB.
-3. **DELAY**: delays this output so that speakers at different distances arrive at your ears together. The range is 0 to 42 ms on the RP2040 and 0 to 85 ms on the RP2350. Delay is applied in whole milliseconds. Sound travels about 34 cm (13.5 inches) per millisecond, so delay the nearer speaker by its distance difference divided by that figure. Right-click the slider to reset it to 0.
+3. **DELAY**: delays this output so that speakers at different distances arrive at your ears together. Delay is adjustable in 0.01 ms increments. The maximum follows the device platform and current sample rate, including PDM alignment headroom. Sound travels about 34 cm (13.5 inches) per millisecond, so delay the nearer speaker by its distance difference divided by that figure. Right-click the slider to reset it to 0.
 4. **Mute**: the speaker icon mutes the output. It turns red with a slash while muted.
 5. **Output limiter**: the gauge icon under the mute button. See [Output Limiter](#output-limiter).
 
@@ -1009,7 +1009,7 @@ The window resizes itself when the number of rows changes. With 8 inputs it can 
 |---|---|
 | **ENABLE** | Turns the output on (blue) or off (grey). Disabling unused outputs saves processing power. Disabled outputs are greyed in the matrix and hidden from the sidebar. |
 | **GAIN** | Output level, from -60 to +12 dB. This is the same value as GAIN on the output's channel page. |
-| **DELAY** | Output delay in milliseconds, up to 42 ms (RP2040) or 85 ms (RP2350). Applied in whole milliseconds. |
+| **DELAY** | Output delay in 0.01 ms increments. Limits follow the device platform and current sample rate, including PDM alignment headroom. |
 | **MUTE** | Mutes the output (red speaker) or unmutes it. |
 
 **The PDM subwoofer output shares a processor core** with the higher-numbered outputs: outputs 3 to 8 on the RP2350, or 3 and 4 on the RP2040. Only one side can run at a time. Enabling one side shows a warning that the other will be disabled. Choose **Enable PDM** or **Disable PDM** to confirm, or **Cancel**. An orange ENABLE button, or orange rings in the PDM column, mark where a conflict would occur.

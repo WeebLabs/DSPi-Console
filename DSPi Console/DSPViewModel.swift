@@ -2163,6 +2163,15 @@ class DSPViewModel: ObservableObject {
     /// Index of the PDM output in `outputPins` (the physical-output index used
     /// by REQ_SET_OUTPUT_PIN), distinct from its matrix index above.
     var pdmPinIndex: Int { platformName == "RP2040" ? 2 : 4 }
+    func maximumDelayMS(output: Int) -> Float {
+        DelaySettings.maximumMS(platform: platformName, sampleRateHz: telemetry.sampleRateHz,
+                                isPDM: output == pdmOutputIndex)
+    }
+
+    func roundedDelayMS(_ ms: Float, output: Int) -> Float {
+        DelaySettings.roundedMS(ms, maximum: maximumDelayMS(output: output))
+    }
+
     // EQ-worker outputs that share Core 1 with the PDM sub (matrix output indices).
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }
     var numOutputSlots: Int { platformName == "RP2040" ? 2 : 4 }

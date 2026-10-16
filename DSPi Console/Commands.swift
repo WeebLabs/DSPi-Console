@@ -308,8 +308,7 @@ extension DSPViewModel {
     }
 
     func sendOutputDelayToDevice(output: Int, ms: Float) {
-        var val = ms.rounded()
-        if val == -0.0 { val = 0.0 }
+        var val = roundedDelayMS(ms, output: output)
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
     }
@@ -516,8 +515,8 @@ extension DSPViewModel {
     }
 
     func setDelay(ch: Int, ms: Float) {
-        var val = ms.rounded()
-        if val == -0.0 { val = 0.0 }
+        // Unified channel numbering places outputs after the platform inputs.
+        var val = roundedDelayMS(ms, output: ch - chOut1)
         self.channelDelays[ch] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
@@ -527,7 +526,7 @@ extension DSPViewModel {
         if let d = usb.getControlRequest(request: REQ_GET_DELAY, value: UInt16(ch), index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs((self.channelDelays[ch] ?? 0) - val) > 0.01 {
+                if self.channelDelays[ch] != val {
                     self.channelDelays[ch] = val
                 }
             }
@@ -2093,8 +2092,7 @@ extension DSPViewModel {
     // MARK: - Per-Output Delay
 
     func setOutputDelay(output: Int, ms: Float) {
-        var val = ms.rounded()
-        if val == -0.0 { val = 0.0 }
+        var val = roundedDelayMS(ms, output: output)
         outputDelayMS[output] = val
         let data = Data(bytes: &val, count: 4)
         usb.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
@@ -2104,7 +2102,7 @@ extension DSPViewModel {
         if let d = usb.getControlRequest(request: REQ_GET_OUTPUT_DELAY, value: UInt16(output), index: 2, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.outputDelayMS[output] - val) > 0.01 {
+                if self.outputDelayMS[output] != val {
                     self.outputDelayMS[output] = val
                 }
             }

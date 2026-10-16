@@ -1,0 +1,17 @@
+name: Delay checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test rounding and firmware buffer limits
+        run: |
+          swiftc "DSPi Console/DelaySettings.swift" Tests/DelaySettingsTests.swift -o /tmp/delay-tests
+          /tmp/delay-tests
+      - name: Build macOS app
+        run: xcodebuild -project "DSPi Console.xcodeproj" -scheme "DSPi Console" -configuration Debug CODE_SIGNING_ALLOWED=NO build
