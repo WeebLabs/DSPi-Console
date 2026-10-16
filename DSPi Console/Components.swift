@@ -848,7 +848,11 @@ struct ChannelSettingsView: View {
                     }
                 }
 
-                Slider(value: $localDelay, in: 0...max(0.01, maxDelay), step: 0.01) { editing in
+                // Quantize the binding without native slider tick marks.
+                Slider(value: Binding(
+                    get: { localDelay },
+                    set: { localDelay = DelaySettings.roundedMS($0, maximum: maxDelay) }
+                ), in: 0...max(0.01, maxDelay)) { editing in
                     isDraggingDelay = editing
                     if !editing { delayMS = localDelay }
                 }

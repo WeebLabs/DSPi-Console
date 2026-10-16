@@ -462,7 +462,7 @@ extension PresetSnapshot {
             let newVal = new.channelDelays[ch] ?? 0
             if oldVal != newVal {
                 let name = ch < channelNames.count ? channelNames[ch] : "Ch \(ch)"
-                changes.append(.init(category: "Delays", description: "\(name) delay: \(formatVal(oldVal)) ms → \(formatVal(newVal)) ms"))
+                changes.append(.init(category: "Delays", description: "\(name) delay: \(formatDelay(oldVal)) ms → \(formatDelay(newVal)) ms"))
             }
         }
 
@@ -490,7 +490,7 @@ extension PresetSnapshot {
             if old.outputEnabled[i] != new.outputEnabled[i] { outputChanges.append(new.outputEnabled[i] ? "enabled" : "disabled") }
             if old.outputMuted[i] != new.outputMuted[i] { outputChanges.append(new.outputMuted[i] ? "muted" : "unmuted") }
             if old.outputGainDB[i] != new.outputGainDB[i] { outputChanges.append("gain: \(formatDB(old.outputGainDB[i])) → \(formatDB(new.outputGainDB[i]))") }
-            if old.outputDelayMS[i] != new.outputDelayMS[i] { outputChanges.append("delay: \(formatVal(old.outputDelayMS[i])) ms → \(formatVal(new.outputDelayMS[i])) ms") }
+            if old.outputDelayMS[i] != new.outputDelayMS[i] { outputChanges.append("delay: \(formatDelay(old.outputDelayMS[i])) ms → \(formatDelay(new.outputDelayMS[i])) ms") }
             for change in outputChanges {
                 changes.append(.init(category: name, description: "\(name) \(change)"))
             }
@@ -655,6 +655,10 @@ extension PresetSnapshot {
         }
 
         return PresetDiff(changes: changes)
+    }
+
+    private static func formatDelay(_ val: Float) -> String {
+        String(format: "%.2f", val)
     }
 
     private static func formatDB(_ val: Float) -> String {

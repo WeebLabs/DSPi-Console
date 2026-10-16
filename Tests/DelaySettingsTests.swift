@@ -9,7 +9,7 @@ struct DelaySettingsTests {
         let maximum: Float = 42.64
         let cases: [(Float, Float)] = [
             (0.004, 0), (0.005, 0.01), (0.014, 0.01), (0.015, 0.02),
-            (1.234, 1.23), (1.235, 1.24), (1.005, 1.01),
+            (1.234, 1.23), (1.235, 1.24), (1.005, 1.01), (11.51, 11.51),
             (-1, 0), (85, maximum), (.nan, 0), (.infinity, 0)
         ]
         for (input, expected) in cases {
