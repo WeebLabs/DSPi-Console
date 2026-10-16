@@ -1413,7 +1413,7 @@ Only pins that are actually in use are shown. For example, a disabled optional i
   - If any output is I2S, Console warns before you change it. Switching may make a connected DAC emit loud noise if its wiring doesn't suit the new mode.
 - **Lock Status** (in Slave mode, with I2S selected) shows **Locked**, **Acquiring**, **Relocking** or **Inactive**, and the measured rate.
 - **Channels**: 2, 4, 6 or 8 channels (RP2350), carried as stereo pairs. The RP2040 always uses 2.
-- **Serial Data 1** to **4**: the GPIO carrying each stereo pair's data. The defaults are GPIO 4, 16, 17 and 18.
+- **Serial Data 1** to **4**: the GPIO carrying each stereo pair's data. The defaults are GPIO 1, 2, 3 and 4. In stereo, the pins of the unused pairs are under **Unused pairs**. They reserve nothing until you raise **Channels**, which is refused if one of them clashes with another function.
 - The shared bit clock pin and the sample rate are set in [I2S Configuration](#i2s-configuration).
 
 **ADAT Input** (RP2350)

@@ -2274,19 +2274,11 @@ class DSPViewModel: ObservableObject {
                 }
             }
         }
-        // I2S RX data pins.  Mirrors the firmware's two-tier rule:
-        //   - Assigning an I2S RX pin itself keeps ALL configured pair pins
-        //     mutually distinct (firmware i2s_rx_pair_pin_taken), so a pair can't
-        //     land on another pair's pin even if that pair is currently inactive.
-        //   - Every OTHER consumer (outputs, MCK, BCK, S/PDIF RX, DAC mute) only
-        //     sees the *active* pairs as reserved (firmware is_pin_in_use), so
-        //     inactive placeholder pins never lock GPIOs out of other functions
-        //     while in a lower channel mode.
+        // I2S RX data pins: only the active pairs reserve theirs, for every
+        // consumer including another pair (firmware is_pin_in_use and
+        // check_i2s_rx_pin).  A channel-count raise re-checks the parked pins.
         if i2sInputSupported {
-            let assigningI2SRx: Bool
-            if case .some(.i2sRx) = consumer { assigningI2SRx = true } else { assigningI2SRx = false }
-            let pairsReserved = assigningI2SRx ? i2sMaxPairs : i2sActivePairs
-            for pair in 0..<min(pairsReserved, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
+            for pair in 0..<min(i2sActivePairs, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
                 return PinAssignment(pin: pin, label: i2sMaxPairs > 1 ? "I2S RX \(pair + 1)" : "I2S RX", role: .input)
             }
         }

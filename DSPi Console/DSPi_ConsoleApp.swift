@@ -1219,13 +1219,16 @@ final class SettingsSaveCoordinator: ObservableObject {
                     }
                 }
                 guard stillCurrent() else { return }
-                // I2S input: restore the channel count first (lowering frees pairs
-                // and never fails), then each pair's data pin.
-                if vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
+                // I2S input: a lowered count goes first (it frees pairs and never
+                // fails); a raised count goes last, because the firmware checks the
+                // newly active pairs' parked pins, which must be restored first.
+                let i2sRaising = base.i2sInputChannels > vm.i2sInputChannels
+                if !i2sRaising && vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
                 for pair in 0..<min(vm.i2sRxPins.count, base.i2sRxPins.count)
                 where vm.i2sRxPins[pair] != base.i2sRxPins[pair] {
                     _ = vm.setI2SRxPin(pair: pair, base.i2sRxPins[pair])
                 }
+                if i2sRaising { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
                 if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
                 if vm.i2sClockMode != base.i2sClockMode { vm.setI2SClockMode(base.i2sClockMode) }
                 // Clock-pin mode: restore the slave pair first (a dormant store,
@@ -7769,10 +7772,49 @@ struct HardwareSettingsTab: View {
         }
     }
 
+    /// Data-pin picker row for I2S RX stereo `pair` (input channels 2p+1, 2p+2).
+    /// An inactive pair's pin is parked: it reserves nothing until a raise.
+    @ViewBuilder
+    private func i2sDataPinRow(pair: Int) -> some View {
+        HStack {
+            Image(systemName: "cable.connector")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Serial Data \(pair + 1)")
+                    .font(.body)
+                Text("GPIO data pin for input channels \(pair * 2 + 1)-\(pair * 2 + 2)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Picker("", selection: Binding(
+                get: { vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : 0 },
+                set: { newPin in
+                    SettingsSaveCoordinator.shared.beginOutputEdit()
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let status = vm.setI2SRxPin(pair: pair, newPin)
+                        DispatchQueue.main.async {
+                            handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin)
+                        }
+                    }
+                }
+            )) {
+                let current = vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : UInt8(255)
+                ForEach(Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .i2sRx(pair)) == nil }, id: \.self) { pin in
+                    Text("GPIO \(pin)").tag(pin)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
     /// For a raise from `oldCount` to `newCount` channels, return human-readable
     /// "GPIO N (pair P) is used by <owner>" strings for each newly-activated pair
-    /// whose data pin clashes.  Mirrors the firmware's check_i2s_rx_pin so the
-    /// message matches what the device rejected.
+    /// whose data pin clashes.  Mirrors the firmware's check_i2s_rx_pin with the
+    /// new pair count, so newly-activated pairs are also checked against each other.
     private func i2sRaiseConflicts(from oldCount: Int, to newCount: Int) -> [String] {
         let oldPairs = max(1, oldCount / 2)
         let newPairs = newCount / 2
@@ -7781,6 +7823,8 @@ struct HardwareSettingsTab: View {
             let pin = vm.i2sRxPins[pair]
             if let owner = vm.pinInUseBy(pin, excluding: .i2sRx(pair)) {
                 out.append("GPIO \(pin) (pair \(pair + 1)) is used by \(owner)")
+            } else if let other = (oldPairs..<pair).first(where: { vm.i2sRxPins[$0] == pin }) {
+                out.append("GPIO \(pin) is set on both Serial Data \(other + 1) and \(pair + 1)")
             }
         }
         return out
@@ -8592,41 +8636,21 @@ struct HardwareSettingsTab: View {
                         }
                     }
 
-                    // One data-pin picker per active stereo pair.  Pair p carries
-                    // input channels 2p, 2p+1.
+                    // One data-pin picker per active stereo pair.  The parked pins
+                    // of inactive pairs are editable too, so a channel-count raise
+                    // refused for a clash can be fixed before retrying.
                     ForEach(Array(0..<vm.i2sActivePairs), id: \.self) { pair in
-                        HStack {
-                            Image(systemName: "cable.connector")
-                                .font(.system(size: 12))
+                        i2sDataPinRow(pair: pair)
+                    }
+                    if vm.i2sMaxPairs > vm.i2sActivePairs {
+                        DisclosureGroup {
+                            ForEach(Array(vm.i2sActivePairs..<vm.i2sMaxPairs), id: \.self) { pair in
+                                i2sDataPinRow(pair: pair)
+                            }
+                        } label: {
+                            Text("Unused pairs")
+                                .font(.caption)
                                 .foregroundColor(.secondary)
-                                .frame(width: 16)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Serial Data \(pair + 1)")
-                                    .font(.body)
-                                Text("GPIO data pin for input channels \(pair * 2 + 1)-\(pair * 2 + 2)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Picker("", selection: Binding(
-                                get: { vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : 0 },
-                                set: { newPin in
-                                    SettingsSaveCoordinator.shared.beginOutputEdit()
-                                    DispatchQueue.global(qos: .userInitiated).async {
-                                        let status = vm.setI2SRxPin(pair: pair, newPin)
-                                        DispatchQueue.main.async {
-                                            handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin)
-                                        }
-                                    }
-                                }
-                            )) {
-                                let current = vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : UInt8(255)
-                                ForEach(Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .i2sRx(pair)) == nil }, id: \.self) { pin in
-                                    Text("GPIO \(pin)").tag(pin)
-                                }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
                         }
                     }
                 } header: {

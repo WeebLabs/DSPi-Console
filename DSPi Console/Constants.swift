@@ -872,10 +872,10 @@ let REQ_GET_I2S_INPUT_CHANNELS: UInt8 = 0xF4   // IN 1 byte: active I2S input ch
 
 // I2S input defaults and rate table.  The wire/preset encoding stores the
 // rate as an enum (0/1/2); vendor SET/GET commands use Hz.
-let I2S_RX_PIN_DEFAULT: UInt8         = 4
+let I2S_RX_PIN_DEFAULT: UInt8         = 1
 /// Default I2S RX data GPIO per stereo pair (0..3).  Pairs 1..3 are placeholders
 /// that must be wired to the user's ADC(s); pair 0 matches I2S_RX_PIN_DEFAULT.
-let I2S_RX_PIN_DEFAULTS: [UInt8]      = [4, 16, 17, 18]
+let I2S_RX_PIN_DEFAULTS: [UInt8]      = [1, 2, 3, 4]
 /// Max I2S stereo pairs / channels per platform (RP2350 = 4 pairs / 8 ch).
 let I2S_RX_MAX_PAIRS_RP2350: Int      = 4
 let I2S_INPUT_RATES_HZ: [UInt32]      = [44100, 48000, 96000]
