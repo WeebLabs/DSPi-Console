@@ -223,7 +223,7 @@ class AppSettings: ObservableObject {
 /// Symbol, and tint so the sidebar row and the detail navigation title stay in
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
-    case general, graphing, spectrum, advanced
+    case general, softwareUpdate, graphing, spectrum, advanced
     case overview
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
     case channelGroups, macros, auxOutputs
@@ -234,6 +234,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .overview:         return "Overview"
         case .general:          return "About"
+        case .softwareUpdate:   return "Software Update"
         case .graphing:         return "Graphing"
         case .spectrum:         return "Spectrum Analyser"
         case .advanced:         return "Advanced"
@@ -253,6 +254,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .overview:         return "cpu.fill"
         case .general:          return "gear"
+        case .softwareUpdate:   return "arrow.down.circle"
         case .graphing:         return "waveform.path.ecg"
         case .spectrum:         return "waveform.and.magnifyingglass"
         case .advanced:         return "gearshape.2"
@@ -282,6 +284,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // Neutral: these pages assign no GPIO.
         case .overview:         return Color(red: 0.384, green: 0.439, blue: 0.502)  // #627080 steel
         case .general:          return Color(red: 0.392, green: 0.412, blue: 0.443)  // #646971 slate
+        case .softwareUpdate:   return Color(red: 0.365, green: 0.416, blue: 0.478)  // #5d6a7a slate blue
         case .advanced:         return Color(red: 0.447, green: 0.471, blue: 0.502)  // #727880 slate light
         case .graphing:         return Color(red: 0.345, green: 0.478, blue: 0.537)  // #587a89 steel cyan
         case .spectrum:         return Color(red: 0.298, green: 0.502, blue: 0.541)  // #4c808a steel cyan light
@@ -323,7 +326,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
 
     /// Non-collapsible sidebar groups, in display order.
     static let groups: [(title: String, items: [SettingsCategory])] = [
-        ("Application", [.general, .advanced]),
+        ("Application", [.general, .softwareUpdate, .advanced]),
         ("Display",     [.graphing, .spectrum]),
         // Overview leads the group: it is the read-only summary of what every
         // page below it has claimed.
@@ -573,6 +576,7 @@ struct SettingsView: View {
         switch selection {
         case .overview:         PinOverviewTab()
         case .general:          GeneralSettingsTab()
+        case .softwareUpdate:   SoftwareUpdateSettingsTab()
         case .graphing:         GraphingSettingsTab()
         case .spectrum:         SpectrumSettingsTab()
         case .advanced:         AdvancedSettingsTab()
@@ -838,25 +842,6 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    @ObservedObject private var updates = AppUpdateChecker.shared
-    @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
-
-    private var updateStatus: String {
-        switch updates.installState {
-        case .downloading(let fraction): return "Downloading update... \(Int(fraction * 100))%"
-        case .verifying:                 return "Verifying update..."
-        case .waitingForQuit:            return "Update will install when DSPi Console quits"
-        case .failed(let message):       return message
-        case .idle:                      break
-        }
-        if updates.isChecking { return "Checking..." }
-        if let release = updates.available {
-            return "Version \(release.version?.description ?? release.tagName) is available"
-        }
-        guard let date = updates.lastChecked else { return "Not checked yet" }
-        return "Up to date, last checked \(date.formatted(.relative(presentation: .named)))"
-    }
-
     var body: some View {
         Form {
             Section {
@@ -882,27 +867,6 @@ struct GeneralSettingsTab: View {
             }
 
             Section {
-                Toggle("Check for updates automatically", isOn: $checkAutomatically)
-                HStack {
-                    Text(updateStatus)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if let release = updates.available {
-                        if updates.canInstall(release) {
-                            Button("Install Update") { updates.install(release) }
-                                .disabled(updates.isInstalling)
-                        } else {
-                            Button("View Release") { NSWorkspace.shared.open(release.htmlURL) }
-                        }
-                    }
-                    Button("Check Now") { updates.checkInteractively() }
-                        .disabled(updates.isChecking)
-                }
-            } header: {
-                Label("Software Update", systemImage: "arrow.down.circle")
-            }
-
-            Section {
                 Text("DSPi Firmware and Console are free, open-source software that I develop in my spare time. Contributions of any kind - code, feedback, funding, or otherwise - are always immensely appreciated.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -920,6 +884,108 @@ struct GeneralSettingsTab: View {
                             icon: "cup.and.saucer.fill", color: Color(red: 0.443, green: 0.620, blue: 0.737))
             } header: {
                 Label("Links & Support", systemImage: "heart.text.square")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+/// Settings > Software Update: the running version, the result of the last
+/// check, and the controls to check or install.  Driven by AppUpdateChecker.
+struct SoftwareUpdateSettingsTab: View {
+    @ObservedObject private var updates = AppUpdateChecker.shared
+    @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
+
+    private var replaceable: Bool { AppUpdateInstaller.canReplace(Bundle.main.bundleURL) }
+
+    private var statusTitle: String {
+        switch updates.installState {
+        case .downloading:     return "Downloading update..."
+        case .verifying:       return "Verifying update..."
+        case .waitingForQuit:  return "Update ready"
+        case .failed:          return "The update couldn't be installed"
+        case .idle:            break
+        }
+        if updates.isChecking { return "Checking for updates..." }
+        if let release = updates.available {
+            return "DSPi Console \(release.version?.description ?? release.tagName) is available"
+        }
+        return updates.lastChecked == nil ? "Not checked yet" : "DSPi Console is up to date"
+    }
+
+    private var statusDetail: String? {
+        switch updates.installState {
+        case .waitingForQuit:      return "It will be installed when DSPi Console quits."
+        case .failed(let message): return message
+        default:                   break
+        }
+        let version = "Version \(updates.currentVersion?.description ?? GeneralSettingsTab.appVersion)"
+        guard let date = updates.lastChecked, !updates.isChecking else { return version }
+        return "\(version) - last checked \(date.formatted(.relative(presentation: .named)))"
+    }
+
+    private var statusIcon: (name: String, color: Color) {
+        switch updates.installState {
+        case .failed:                               return ("exclamationmark.triangle.fill", .orange)
+        case .downloading, .verifying, .waitingForQuit: return ("arrow.down.circle.fill", .accentColor)
+        case .idle:                                 break
+        }
+        if updates.available != nil { return ("arrow.down.circle.fill", .accentColor) }
+        return ("checkmark.circle.fill", .green)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: statusIcon.name)
+                        .font(.system(size: 28))
+                        .foregroundStyle(statusIcon.color)
+                        .frame(width: 32)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(statusTitle).font(.headline)
+                        if let detail = statusDetail {
+                            Text(detail)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if case .downloading(let fraction) = updates.installState {
+                            ProgressView(value: fraction)
+                        } else if case .verifying = updates.installState {
+                            ProgressView().progressViewStyle(.linear)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+
+                HStack {
+                    if let release = updates.available {
+                        Button("Release Notes") { NSWorkspace.shared.open(release.htmlURL) }
+                    }
+                    Spacer()
+                    if case .downloading = updates.installState {
+                        Button("Cancel") { updates.cancelInstall() }
+                    } else if let release = updates.available, updates.canInstall(release) {
+                        Button("Install and Relaunch") { updates.install(release) }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(updates.isInstalling)
+                    }
+                    Button("Check Now") { updates.checkInteractively() }
+                        .disabled(updates.isChecking || updates.isInstalling)
+                }
+            } header: {
+                Label("Status", systemImage: "arrow.down.circle")
+            }
+
+            Section {
+                Toggle("Check for updates automatically", isOn: $checkAutomatically)
+            } footer: {
+                Text(replaceable
+                     ? "DSPi Console checks GitHub for new releases at launch and once a day. Each release includes matching DSPi firmware, which the app offers to install when your device is connected."
+                     : "DSPi Console can't update itself from where it is running. Move it to the Applications folder with Finder to install updates from here; until then, updates open the release page.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
