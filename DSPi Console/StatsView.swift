@@ -10,6 +10,16 @@ struct SpdifBufferStats {
     var consumerFillPct: UInt8 = 0
     var consumerMinFillPct: UInt8 = 0
     var consumerMaxFillPct: UInt8 = 0
+    /// Sample-granular fill in 0.01% of the same 768-frame scale; may exceed 100%.
+    /// Zero on firmware that predates it.
+    var fillCentiPct: UInt16 = 0
+
+    /// Fill in percent to frame resolution. consumerFillPct moves in 6.25% steps,
+    /// so a slot hovering near a 48-frame boundary flickers a whole step.
+    var preciseFillPct: Double {
+        if fillCentiPct == 0 && consumerFillPct != 0 { return Double(consumerFillPct) }
+        return Double(fillCentiPct) / 100
+    }
 }
 
 struct PdmBufferStats {
@@ -474,7 +484,8 @@ class StatsViewModel: ObservableObject {
                 consumerPlaying: data[base + 2],
                 consumerFillPct: data[base + 3],
                 consumerMinFillPct: data[base + 4],
-                consumerMaxFillPct: data[base + 5]
+                consumerMaxFillPct: data[base + 5],
+                fillCentiPct: UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
             )
         }
 
@@ -1081,7 +1092,7 @@ struct StatsView: View {
                     ForEach(0..<Int(vm.bufferStats.numSpdif), id: \.self) { i in
                         BufferFillRow(
                             title: "Out \(i * 2 + 1)/\(i * 2 + 2) (\(AppState.shared.viewModel.outputSlotTypes[i] == 1 ? "I2S" : "SPDIF"))",
-                            fillPct: vm.bufferStats.spdif[i].consumerFillPct,
+                            fillPct: vm.bufferStats.spdif[i].preciseFillPct,
                             minPct: vm.bufferStats.spdif[i].consumerMinFillPct,
                             maxPct: vm.bufferStats.spdif[i].consumerMaxFillPct,
                             thresholds: .spdif,
@@ -1099,7 +1110,7 @@ struct StatsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     BufferFillRow(
                         title: "PDM DMA",
-                        fillPct: vm.bufferStats.pdm.dmaFillPct,
+                        fillPct: Double(vm.bufferStats.pdm.dmaFillPct),
                         minPct: vm.bufferStats.pdm.dmaMinFillPct,
                         maxPct: vm.bufferStats.pdm.dmaMaxFillPct,
                         thresholds: .pdmDma,
@@ -1110,7 +1121,7 @@ struct StatsView: View {
                     )
                     BufferFillRow(
                         title: "PDM Ring",
-                        fillPct: vm.bufferStats.pdm.ringFillPct,
+                        fillPct: Double(vm.bufferStats.pdm.ringFillPct),
                         minPct: vm.bufferStats.pdm.ringMinFillPct,
                         maxPct: vm.bufferStats.pdm.ringMaxFillPct,
                         thresholds: .pdmRing,
@@ -1173,7 +1184,7 @@ enum BufferFillThresholds {
 
 struct BufferFillRow: View {
     let title: String
-    let fillPct: UInt8
+    let fillPct: Double
     let minPct: UInt8
     let maxPct: UInt8
     let thresholds: BufferFillThresholds
@@ -1222,9 +1233,9 @@ struct BufferFillRow: View {
                     .foregroundColor(.secondary)
                     .help("Lowest and highest fill since the watermarks were reset")
 
-                Text("\(fillPct)%")
+                Text("\(Int(fillPct.rounded()))%")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(thresholds.color(for: fillPct))
+                    .foregroundColor(thresholds.color(for: UInt8(min(100, max(0, fillPct.rounded(.down))))))
                     .frame(width: 36, alignment: .trailing)
             }
             .padding(.horizontal, 6)
@@ -1314,10 +1325,10 @@ final class BufferFillHistory {
     static let seriesCount = 6
     static let pdmDmaSeries = 4
     static let pdmRingSeries = 5
-    private static let absent: UInt8 = 0xFF
+    private static let absent: Float = -1
 
-    private var rings = [[UInt8]](
-        repeating: [UInt8](repeating: BufferFillHistory.absent, count: BufferFillHistory.capacity),
+    private var rings = [[Float]](
+        repeating: [Float](repeating: BufferFillHistory.absent, count: BufferFillHistory.capacity),
         count: BufferFillHistory.seriesCount
     )
 
@@ -1332,17 +1343,18 @@ final class BufferFillHistory {
         let slot = total % Self.capacity
         let spdifCount = min(Int(packet.numSpdif), 4)
         for i in 0..<4 {
-            rings[i][slot] = i < spdifCount ? packet.spdif[i].consumerFillPct : Self.absent
+            // The ring can hold more than the 768-frame scale; pin the trace to the graph top.
+            rings[i][slot] = i < spdifCount ? Float(min(100, packet.spdif[i].preciseFillPct)) : Self.absent
         }
-        rings[Self.pdmDmaSeries][slot] = packet.pdmActive ? packet.pdm.dmaFillPct : Self.absent
-        rings[Self.pdmRingSeries][slot] = packet.pdmActive ? packet.pdm.ringFillPct : Self.absent
+        rings[Self.pdmDmaSeries][slot] = packet.pdmActive ? Float(packet.pdm.dmaFillPct) : Self.absent
+        rings[Self.pdmRingSeries][slot] = packet.pdmActive ? Float(packet.pdm.ringFillPct) : Self.absent
         total += 1
         appended.send(total - 1)
     }
 
     /// The fill percentage of `series` at sample `s`, or nil when the sample
     /// has aged out or that buffer was not running.
-    func value(series: Int, sample s: Int) -> UInt8? {
+    func value(series: Int, sample s: Int) -> Float? {
         guard s >= 0, s < total, s >= total - Self.capacity else { return nil }
         let v = rings[series][s % Self.capacity]
         return v == Self.absent ? nil : v
