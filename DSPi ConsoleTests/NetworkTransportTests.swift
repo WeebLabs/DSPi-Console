@@ -197,4 +197,17 @@ final class NetworkTransportTests: XCTestCase {
         XCTAssertLessThan(nestedElapsed ?? 99, 0.1, "a nested main-thread GET does not wait")
         XCTAssertEqual(client.commands.map { $0.bRequest }, [0x50], "the nested GET was not sent")
     }
+    func testUnattributedChangesAreNeverTakenForOurOwnEcho() {
+        let (t, client, _) = make()
+        // A hub that did not tell us our id leaves the session at 0; knob
+        // turns and the OS volume slider arrive with origin 0 too.
+        client.sessionID = 0
+        XCTAssertFalse(t.isOwnWrite(origin: 0))
+        XCTAssertFalse(t.isOwnWrite(origin: 4))
+
+        client.sessionID = 7
+        XCTAssertTrue(t.isOwnWrite(origin: 7))
+        XCTAssertFalse(t.isOwnWrite(origin: 0), "origin 0 is unattributed, not ours")
+        XCTAssertFalse(t.isOwnWrite(origin: 4), "another client's write")
+    }
 }

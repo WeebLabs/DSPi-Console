@@ -439,12 +439,17 @@ final class LinkClient: LinkClientProtocol {
                 .authPair(LinkAuthPair(id: id, pin: Self.openAccessPIN, name: name, role: nil))
             }, requiresReady: false) { [weak self] result in
                 guard let self = self else { return }
-                if case .success(let ok) = result, let body = try? ok.decodeBody(LinkAuthOkBody.self) {
+                if case .success(let ok) = result, let body = try? ok.decodeBody(LinkAuthOkBody.self),
+                   body.session != 0 {
                     self.becameReady(session: body.session, role: body.role)
                 } else {
-                    // The session exists regardless; only the id is unknown, so
-                    // go ready with 0 rather than stalling a usable connection.
-                    self.becameReady(session: 0, role: .admin)
+                    // Without our id every notification would look foreign
+                    // (or, with id 0, every unattributed change like ours), so
+                    // a session we cannot name is not one worth driving: fail
+                    // and let the transport reconnect with backoff.
+                    self.shutdown(generation: self.sync { self.generation },
+                                  newState: .failed("hub did not report a session id"),
+                                  closeNormally: true)
                 }
             }
 
