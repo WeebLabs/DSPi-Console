@@ -838,6 +838,25 @@ struct GeneralSettingsTab: View {
         }
     }
 
+    @ObservedObject private var updates = AppUpdateChecker.shared
+    @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
+
+    private var updateStatus: String {
+        switch updates.installState {
+        case .downloading(let fraction): return "Downloading update... \(Int(fraction * 100))%"
+        case .verifying:                 return "Verifying update..."
+        case .waitingForQuit:            return "Update will install when DSPi Console quits"
+        case .failed(let message):       return message
+        case .idle:                      break
+        }
+        if updates.isChecking { return "Checking..." }
+        if let release = updates.available {
+            return "Version \(release.version?.description ?? release.tagName) is available"
+        }
+        guard let date = updates.lastChecked else { return "Not checked yet" }
+        return "Up to date, last checked \(date.formatted(.relative(presentation: .named)))"
+    }
+
     var body: some View {
         Form {
             Section {
@@ -860,6 +879,27 @@ struct GeneralSettingsTab: View {
                     }
                 }
                 .padding(.vertical, 8)
+            }
+
+            Section {
+                Toggle("Check for updates automatically", isOn: $checkAutomatically)
+                HStack {
+                    Text(updateStatus)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let release = updates.available {
+                        if updates.canInstall(release) {
+                            Button("Install Update") { updates.install(release) }
+                                .disabled(updates.isInstalling)
+                        } else {
+                            Button("View Release") { NSWorkspace.shared.open(release.htmlURL) }
+                        }
+                    }
+                    Button("Check Now") { updates.checkInteractively() }
+                        .disabled(updates.isChecking)
+                }
+            } header: {
+                Label("Software Update", systemImage: "arrow.down.circle")
             }
 
             Section {
@@ -10675,6 +10715,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.mainWindowObserver = nil
             }
         }
+
+        // Not under XCTest: the test bundle runs inside the app, and an update
+        // alert there would sit modal and stall the run.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            AppUpdateChecker.shared.startAutomaticChecks()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -10701,6 +10747,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         alert.addButton(withTitle: "Quit")
                         alert.addButton(withTitle: "Cancel")
                         let quit = alert.runModal() == .alertFirstButtonReturn
+                        if !quit { AppUpdateChecker.shared.quitCancelled() }
                         NSApp.reply(toApplicationShouldTerminate: quit)
                     }
                 }
@@ -10709,6 +10756,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .discard:
             return .terminateNow
         case .cancel:
+            AppUpdateChecker.shared.quitCancelled()
             return .terminateCancel
         }
     }
@@ -10904,6 +10952,10 @@ struct DSPi_ConsoleApp: App {
                     NSApplication.shared.orderFrontStandardAboutPanel(options: [
                         .credits: credits
                     ])
+                }
+
+                Button("Check for Updates...") {
+                    AppUpdateChecker.shared.checkInteractively()
                 }
             }
 
