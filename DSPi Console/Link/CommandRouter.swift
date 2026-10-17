@@ -132,6 +132,12 @@ final class CommandRouter {
 
         let timeout = Self.bulkOpcodes.contains(request.bRequest) ? bulkTimeout : commandTimeout
 
+        // Bind the command to the attachment that is current now, as USBDevice
+        // binds its own transfers: a switch (close/open) landing before the
+        // queue reaches this command fails it instead of delivering it to the
+        // board that replaced the one it was issued for.
+        let gen = device?.generation
+
         queue.async { [weak self] in
             guard let self = self else { return }
             defer {
@@ -141,11 +147,10 @@ final class CommandRouter {
                 self.stateLock.unlock()
             }
 
-            guard let device = self.device, device.isConnected else {
+            guard let device = self.device, device.isConnected, device.generation == gen else {
                 return completion(self.reject(request, .noDevice))
             }
 
-            let gen = device.generation
             // Anything that can change device state is a write for attribution,
             // whichever transfer direction carries it (write-as-read included).
             var writerToken: UInt64?

@@ -24,6 +24,9 @@ private final class FakeDevice: HubDevice {
     var responsePayload: Data = Data()
     /// When set, execute() blocks on this until the test signals it.
     var gate: DispatchSemaphore?
+    /// Signalled as each execute() begins, before it waits on `gate`, so a test
+    /// can know the device is busy with one command before queueing the next.
+    let entered = DispatchSemaphore(value: 0)
     var perCallDelay: TimeInterval = 0
 
     init(serial: String = "E46058388B1A2E2C") {
@@ -32,6 +35,7 @@ private final class FakeDevice: HubDevice {
     }
 
     func execute(_ request: LinkCmdRequest) -> LinkCmdResponse {
+        entered.signal()
         if let gate = gate { gate.wait() }
         if perCallDelay > 0 { Thread.sleep(forTimeInterval: perCallDelay) }
         lock.lock(); executed.append(request.bRequest); lock.unlock()
@@ -250,6 +254,36 @@ final class LinkHubCoreTests: XCTestCase {
             XCTAssertEqual(result.response.status, .noDevice); e.fulfill()
         }
         wait(for: [e], timeout: 2)
+    }
+
+    // MARK: Device binding
+
+    /// A write queued behind a device switch must not land on the board that
+    /// replaced the one it was issued for.  The attachment is bound when the
+    /// command is submitted, as USBDevice binds its own transfers, not when
+    /// the queue reaches it.
+    func testWriteQueuedBeforeSwitchIsNotDeliveredToTheNewBoard() {
+        let dev = FakeDevice()
+        let gate = DispatchSemaphore(value: 0); dev.gate = gate
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
+                               wIndex: 2, payload: Data([0,0,0,0]))
+
+        // The first write is inside the device; the second queues behind it.
+        let first = expectation(description: "first"), second = expectation(description: "second")
+        router.submit(r, session: control(1)) { _ in first.fulfill() }
+        XCTAssertEqual(dev.entered.wait(timeout: .now() + 2), .success)
+        router.submit(r, session: control(1)) { result in
+            XCTAssertEqual(result.response.status, .noDevice,
+                           "a write bound to the old attachment fails rather than crossing over")
+            second.fulfill()
+        }
+
+        // The connection is replaced while both are in flight.
+        dev.generation = 1
+        gate.signal(); gate.signal()
+        wait(for: [first, second], timeout: 3)
+        XCTAssertEqual(dev.executedOrder.count, 1, "the queued write never reached the new board")
     }
 
     // MARK: Registry
