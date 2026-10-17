@@ -43,7 +43,9 @@ final class LinkClient: LinkClientProtocol {
 
     var state: LinkClientState { stateSubject.value }
     var statePublisher: AnyPublisher<LinkClientState, Never> { stateSubject.eraseToAnyPublisher() }
-    var devices: [LinkDeviceInfo] { devicesSubject.value }
+    /// The authoritative inventory, read under the lock; the subject behind
+    /// `devicesPublisher` is a main-thread mirror of it.
+    var devices: [LinkDeviceInfo] { sync { inventory } }
     var devicesPublisher: AnyPublisher<[LinkDeviceInfo], Never> { devicesSubject.eraseToAnyPublisher() }
 
     // MARK: - Guarded state
@@ -70,6 +72,11 @@ final class LinkClient: LinkClientProtocol {
     /// The token to offer when the hub's hello says `auth: pin`.  Cleared
     /// once used, so a re-auth on the same socket cannot replay it.
     private var pendingToken: String?
+
+    /// Device inventory, updated on the socket's callback thread from
+    /// device.list and the device.* events.  Lock held; every change publishes
+    /// a snapshot, so a burst of events cannot overwrite one another.
+    private var inventory: [LinkDeviceInfo] = []
 
     private var _hubInfo: LinkHubInfo?
     private var _capabilities: [String] = []
@@ -135,7 +142,7 @@ final class LinkClient: LinkClientProtocol {
             return self.generation
         }
         publishState(.connecting)
-        publishDevices([])
+        replaceDevices([])
 
         var request = URLRequest(url: url)
         // URLSession offers a protocols: argument too, but the header is the
@@ -348,7 +355,9 @@ final class LinkClient: LinkClientProtocol {
         }
     }
 
-    private func handleText(_ data: Data) {
+    /// One control-plane message from the hub.  Internal so a test can feed
+    /// events without a socket.
+    func handleText(_ data: Data) {
         guard let message = try? LinkMessage.decode(data) else { return }
         switch message {
         case .helloHub(let hello):
@@ -430,12 +439,17 @@ final class LinkClient: LinkClientProtocol {
                 .authPair(LinkAuthPair(id: id, pin: Self.openAccessPIN, name: name, role: nil))
             }, requiresReady: false) { [weak self] result in
                 guard let self = self else { return }
-                if case .success(let ok) = result, let body = try? ok.decodeBody(LinkAuthOkBody.self) {
+                if case .success(let ok) = result, let body = try? ok.decodeBody(LinkAuthOkBody.self),
+                   body.session != 0 {
                     self.becameReady(session: body.session, role: body.role)
                 } else {
-                    // The session exists regardless; only the id is unknown, so
-                    // go ready with 0 rather than stalling a usable connection.
-                    self.becameReady(session: 0, role: .admin)
+                    // Without our id every notification would look foreign
+                    // (or, with id 0, every unattributed change like ours), so
+                    // a session we cannot name is not one worth driving: fail
+                    // and let the transport reconnect with backoff.
+                    self.shutdown(generation: self.sync { self.generation },
+                                  newState: .failed("hub did not report a session id"),
+                                  closeNormally: true)
                 }
             }
 
@@ -485,24 +499,35 @@ final class LinkClient: LinkClientProtocol {
             guard let self = self,
                   case .success(let ok) = result,
                   let body = try? ok.decodeBody(LinkDeviceListBody.self) else { return }
-            self.publishDevices(body.devices)
+            self.replaceDevices(body.devices)
         }
     }
 
     // MARK: - Device inventory
 
+    private func replaceDevices(_ list: [LinkDeviceInfo]) {
+        let snapshot: [LinkDeviceInfo] = sync { inventory = list; return inventory }
+        publishDevices(snapshot)
+    }
+
     private func upsertDevice(_ device: LinkDeviceInfo) {
-        var list = devicesSubject.value
-        if let index = list.firstIndex(where: { $0.handle == device.handle }) {
-            list[index] = device
-        } else {
-            list.append(device)
+        let snapshot: [LinkDeviceInfo] = sync {
+            if let index = inventory.firstIndex(where: { $0.handle == device.handle }) {
+                inventory[index] = device
+            } else {
+                inventory.append(device)
+            }
+            return inventory
         }
-        publishDevices(list)
+        publishDevices(snapshot)
     }
 
     private func removeDevice(handle: Int) {
-        publishDevices(devicesSubject.value.filter { $0.handle != handle })
+        let snapshot: [LinkDeviceInfo] = sync {
+            inventory.removeAll { $0.handle == handle }
+            return inventory
+        }
+        publishDevices(snapshot)
     }
 
     // MARK: - Keepalive

@@ -37,13 +37,21 @@ final class NetworkTransport: DeviceTransport {
     private var generationValue: UInt64 = 0
     private let generationLock = NSLock()
 
+    /// Reconnect state is touched on the main thread only; callers on GCD
+    /// queues (the bulk-read failure paths) hop there first.
     private var reconnectAttempt = 0
-    private var reconnectTimer: Timer?
+    private var reconnectWork: DispatchWorkItem?
     private var wantConnection = false
 
     /// Called on the main thread when the hub needs a PIN.  Returns the PIN
     /// or nil to give up.  The app installs a modal prompt.
     var pairingPrompt: ((String) -> String?)?
+    /// True while the prompt is up.  The modal spins the run loop, so a
+    /// reconnect can ask for a PIN again underneath it; that ask waits.
+    private var pairingPromptShowing = false
+    /// A PIN typed after the hub's auth deadline closed the socket: sent on
+    /// the next connection that asks, instead of prompting again.
+    private var pendingPIN: String?
 
     init(client: LinkClientProtocol, hubID: String, hubName: String,
          tokens: LinkTokenStore, clientName: String) {
@@ -77,18 +85,31 @@ final class NetworkTransport: DeviceTransport {
 
     /// Open (or re-open) the connection to the hub.
     func connect(to url: URL) {
-        self.url = url
-        wantConnection = true
-        reconnectAttempt = 0
-        client.connect(to: url, clientName: clientName, token: tokens.token(forHub: hubID))
+        onMain {
+            self.url = url
+            self.wantConnection = true
+            self.reconnectAttempt = 0
+            self.reconnectWork?.cancel()
+            self.reconnectWork = nil
+            self.client.connect(to: url, clientName: self.clientName, token: self.tokens.token(forHub: self.hubID))
+        }
+    }
+
+    /// Run now when already on the main thread (so tests and view actions see
+    /// the effect synchronously), otherwise hop there.
+    private func onMain(_ body: @escaping () -> Void) {
+        if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
     }
 
     /// Bind to one of the hub's devices.  The device list may not have
     /// arrived yet, so bind by serial and resolve the handle when it does.
+    /// Selecting a device again after the user cancelled pairing (which gave
+    /// the connection up) is how they ask to try again.
     func bind(serial: String) {
         boundSerial = serial
         resolveBinding()
         publishConnected()
+        if !wantConnection, let url = url { connect(to: url) }
     }
 
     private func resolveBinding() {
@@ -109,7 +130,12 @@ final class NetworkTransport: DeviceTransport {
             generationLock.lock(); generationValue &+= 1; generationLock.unlock()
             errorSubject.send(nil)
         case .awaitingAuth(let needsPairing) where needsPairing:
-            pair()
+            if let pin = pendingPIN {
+                pendingPIN = nil
+                sendPIN(pin)
+            } else {
+                pair()
+            }
         case .failed(let reason):
             errorSubject.send(reason)
             scheduleReconnect()
@@ -126,11 +152,27 @@ final class NetworkTransport: DeviceTransport {
             errorSubject.send("This hub needs pairing.")
             return
         }
-        guard let pin = prompt(hubName) else {
+        guard !pairingPromptShowing else { return }
+        pairingPromptShowing = true
+        let pin = prompt(hubName)
+        pairingPromptShowing = false
+        guard let pin = pin else {
             wantConnection = false
+            reconnectWork?.cancel()
+            reconnectWork = nil
             client.disconnect()
             return
         }
+        // The hub gives a client 30 s to authenticate; a slower answer finds
+        // the socket closed and a reconnect under way.  Hold the PIN for it.
+        guard case .awaitingAuth = client.state else {
+            pendingPIN = pin
+            return
+        }
+        sendPIN(pin)
+    }
+
+    private func sendPIN(_ pin: String) {
         client.pair(pin: pin, clientName: clientName, role: .control) { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -145,17 +187,22 @@ final class NetworkTransport: DeviceTransport {
         }
     }
 
-    /// 1 s, 2 s, 4 s ... capped at 30 s (spec 5).
+    /// 1 s, 2 s, 4 s ... capped at 30 s (spec 5).  Main thread only: the
+    /// delayed work is queued on the main queue, which every caller has a
+    /// run loop for, unlike a Timer created on a GCD worker.
     private func scheduleReconnect() {
         guard wantConnection, let url = url else { return }
         let delay = min(30.0, pow(2.0, Double(reconnectAttempt)))
         reconnectAttempt += 1
-        reconnectTimer?.invalidate()
-        reconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        reconnectWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.wantConnection else { return }
+            self.reconnectWork = nil
             self.client.connect(to: url, clientName: self.clientName,
                                 token: self.tokens.token(forHub: self.hubID))
         }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func remoteDevicesChanged(_ infos: [LinkDeviceInfo]) {
@@ -193,8 +240,27 @@ final class NetworkTransport: DeviceTransport {
 
     func selectDevice(_ device: DSPiDevice) { bind(serial: device.serial) }
     func reconnect() { if let url = url { connect(to: url) } }
-    func disconnect() { wantConnection = false; reconnectTimer?.invalidate(); client.disconnect() }
-    func markDisconnected() { scheduleReconnect() }
+    func disconnect() {
+        onMain {
+            self.wantConnection = false
+            self.reconnectWork?.cancel()
+            self.reconnectWork = nil
+            self.client.disconnect()
+        }
+    }
+
+    /// The command layer gave up on the link (a bulk read that never
+    /// answered).  Drop the socket so the view model sees connected=false and
+    /// re-runs its connect sequence on the next ready, then come back with
+    /// backoff.  Called from GCD queues, so everything happens on main.
+    func markDisconnected() {
+        onMain {
+            guard self.wantConnection else { return }
+            self.client.disconnect()
+            if self.connectedSubject.value { self.connectedSubject.send(false) }
+            self.scheduleReconnect()
+        }
+    }
 
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
         guard let handle = boundHandle else { return }
@@ -206,6 +272,9 @@ final class NetworkTransport: DeviceTransport {
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
         -> Result<Data, LinkStatus> {
         guard let handle = boundHandle else { return .failure(.noDevice) }
+        // A main-thread caller cannot be left waiting on the network: with no
+        // ready session the answer is known now, so give it without a wait.
+        if Thread.isMainThread, client.state != .ready { return .failure(.noDevice) }
 
         // The bulk read is the one the hub can answer from its cache in a
         // single reply; use it when offered and fall through on any failure.
@@ -239,15 +308,27 @@ final class NetworkTransport: DeviceTransport {
         return blob
     }
 
+    /// Longest a main-thread caller is held.  Off main the hub's own limits
+    /// apply; the client times a command out before this.
+    static let mainThreadWait: TimeInterval = 1.0
+    /// Non-zero while a main-thread wait is spinning the run loop.
+    private var mainWaitDepth = 0
+
     /// Block the caller until `work` signals done.  The command layer calls
-    /// the blocking GET off the main thread, where a semaphore is right; the
-    /// client completes on main, so a main-thread caller instead spins the
-    /// run loop rather than deadlocking against its own completion.
+    /// the blocking GET off the main thread, where a semaphore is right.  The
+    /// client completes on main, so a main-thread caller spins the run loop
+    /// instead, for a short bounded time only: a hub that stops answering
+    /// must not freeze the UI.  A timer that fires inside that spin and asks
+    /// for another GET gets an immediate failure rather than nesting another
+    /// spin, which is how a 60 ms poll once piled up 15 s waits.
     private func waitFor(_ work: (@escaping () -> Void) -> Void) {
         if Thread.isMainThread {
+            guard mainWaitDepth == 0 else { return }
+            mainWaitDepth += 1
+            defer { mainWaitDepth -= 1 }
             var finished = false
             work { finished = true }
-            let deadline = Date().addingTimeInterval(15)
+            let deadline = Date().addingTimeInterval(Self.mainThreadWait)
             while !finished && Date() < deadline {
                 RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
             }

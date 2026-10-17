@@ -160,6 +160,15 @@ protocol DeviceTransport: AnyObject {
 }
 
 extension DeviceTransport {
+    /// True when a notification's origin names this transport's own session,
+    /// so the change is the echo of a write already applied locally.  Origin
+    /// 0 is "unattributed" (a knob turn, the OS volume slider, a hub that did
+    /// not tell us our id) and is never ours, even while our own session id
+    /// is still 0.
+    func isOwnWrite(origin: LinkSessionID) -> Bool {
+        origin != 0 && origin == session
+    }
+
     func getControlRequest(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Data? {
         if case .success(let data) = getControlResult(request: request, value: value, index: index, length: length) {
             return data

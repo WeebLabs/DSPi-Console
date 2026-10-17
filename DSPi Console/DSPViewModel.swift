@@ -2484,8 +2484,9 @@ class DSPViewModel: ObservableObject {
         // firmware's source byte: on USB every HOST_SET is ours, but through
         // a DSPi Link hub a HOST_SET may be another client's write, which we
         // must apply like a knob turn or the OS volume slider (PARAM_SRC_UAC1).
+        // Origin 0 is unattributed and never ours.
         AppState.shared.interruptMonitor.onParamChanged = { [weak self] offset, size, source, origin, payload in
-            guard let self = self, origin != self.transport.session else { return }
+            guard let self = self, !self.transport.isOwnWrite(origin: origin) else { return }
             self.applyNotifiedParamChange(offset: offset, size: size, payload: payload)
         }
 
