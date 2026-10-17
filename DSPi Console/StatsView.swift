@@ -240,6 +240,15 @@ class StatsViewModel: ObservableObject {
     private weak var transport: (any DeviceTransport)?
     private var cancellables = Set<AnyCancellable>()
 
+    /// Every device read runs here.  The timers fire on main, but a GET
+    /// blocks until the device (or, through DSPi Link, a hub across the
+    /// network) answers, and the UI must never wait on that.  One serial
+    /// queue keeps the reads in order; a tick that lands while the previous
+    /// read of its kind is still out is skipped rather than queued.
+    private let fetchQueue = DispatchQueue(label: "com.foxdac.stats.fetch", qos: .utility)
+    private var statsFetchInFlight = false
+    private var bufferFetchInFlight = false
+
     init(transport: any DeviceTransport) {
         self.transport = transport
 
@@ -281,7 +290,44 @@ class StatsViewModel: ObservableObject {
         bufferPollTimer?.invalidate()
     }
 
+    // MARK: Scheduling (main thread)
+
+    /// Read the 2 s counters and status blocks off the main thread.
     func fetchStats() {
+        guard isConnected, !statsFetchInFlight else { return }
+        statsFetchInFlight = true
+        fetchQueue.async { [weak self] in
+            self?.readStats()
+            DispatchQueue.main.async { self?.statsFetchInFlight = false }
+        }
+    }
+
+    /// Read the buffer fill packet off the main thread.
+    func fetchBufferStats() {
+        guard isConnected, !bufferFetchInFlight else { return }
+        bufferFetchInFlight = true
+        fetchQueue.async { [weak self] in
+            self?.readBufferStats()
+            DispatchQueue.main.async { self?.bufferFetchInFlight = false }
+        }
+    }
+
+    /// Read the identity block (serial, platform, input source) off the main thread.
+    func fetchDeviceInfo() {
+        fetchQueue.async { [weak self] in self?.readDeviceInfo() }
+    }
+
+    func resetBufferWatermarks() {
+        guard isConnected else { return }
+        fetchQueue.async { [weak self] in
+            guard let transport = self?.transport else { return }
+            _ = transport.getControlRequest(request: REQ_RESET_BUFFER_STATS, value: 1, index: 0, length: 1)
+        }
+    }
+
+    // MARK: Reads (fetch queue)
+
+    private func readStats() {
         guard let transport = transport, isConnected else { return }
 
         // wValue=3: pdm_ring_overruns
@@ -360,7 +406,7 @@ class StatsViewModel: ObservableObject {
     /// Poll REQ_GET_I2S_SLAVE_STATUS (0x8A) for the I2S clock-slave lock
     /// diagnostics.  A STALL (nil) leaves `i2sClockModeSupported` false so the
     /// section stays hidden on firmware that predates the feature.
-    func fetchI2SSlaveStatus() {
+    private func fetchI2SSlaveStatus() {
         guard let transport = transport, isConnected else { return }
         guard let data = transport.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
               let status = I2sSlaveStatus.fromData(data) else {
@@ -376,7 +422,7 @@ class StatsViewModel: ObservableObject {
     /// Poll REQ_GET_ADAT_STATUS (0xCE) for the ADAT diagnostics section.  A
     /// STALL (nil) or a non-RP2350 platform leaves `adatSupported` false so the
     /// section stays hidden.  RP2040 returns all-zero, also treated as absent.
-    func fetchAdatStatus() {
+    private func fetchAdatStatus() {
         guard let transport = transport, isConnected else { return }
         guard let data = transport.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
               let status = AdatStatus.fromData(data) else {
@@ -393,7 +439,7 @@ class StatsViewModel: ObservableObject {
     /// LgSoundSyncStatus struct.  STALLs on V7 / older firmware - we
     /// detect that via the nil response and leave `lgSoundSyncSupported`
     /// false, which hides the section in the UI.
-    func fetchLgSoundSyncStatus() {
+    private func fetchLgSoundSyncStatus() {
         guard let transport = transport, isConnected else { return }
         guard let data = transport.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_STATUS, value: 0, index: 0, length: 16),
               data.count >= 4 else { return }
@@ -410,9 +456,10 @@ class StatsViewModel: ObservableObject {
         }
     }
 
-    func fetchBufferStats() {
+    private func readBufferStats() {
         guard let transport = transport, isConnected else { return }
-        guard let data = transport.getControlRequest(request: REQ_GET_BUFFER_STATS, value: 0, index: 0, length: 44) else { return }
+        guard let data = transport.getControlRequest(request: REQ_GET_BUFFER_STATS, value: 0, index: 0, length: 44),
+              data.count >= 44 else { return }
 
         var packet = BufferStatsPacket()
         packet.numSpdif = data[0]
@@ -447,7 +494,7 @@ class StatsViewModel: ObservableObject {
         }
     }
 
-    func fetchStarvationStats() {
+    private func fetchStarvationStats() {
         guard let transport = transport, isConnected else { return }
 
         // wValue=17: total SPDIF DMA starvations (wIndex=2 per spec)
@@ -490,7 +537,7 @@ class StatsViewModel: ObservableObject {
         }
     }
 
-    func fetchSpdifRxStatus() {
+    private func fetchSpdifRxStatus() {
         guard let transport = transport, isConnected, inputSourceSupported else { return }
 
         guard let data = transport.getControlRequest(request: REQ_GET_SPDIF_RX_STATUS, value: 0, index: 2, length: 16),
@@ -535,12 +582,7 @@ class StatsViewModel: ObservableObject {
         }
     }
 
-    func resetBufferWatermarks() {
-        guard let transport = transport, isConnected else { return }
-        _ = transport.getControlRequest(request: REQ_RESET_BUFFER_STATS, value: 1, index: 0, length: 1)
-    }
-
-    func fetchDeviceInfo() {
+    private func readDeviceInfo() {
         guard let transport = transport else { return }
 
         // REQ_GET_SERIAL (0x7E): 16-byte ASCII hex serial

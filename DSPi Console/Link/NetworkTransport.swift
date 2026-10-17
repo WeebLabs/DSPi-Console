@@ -242,6 +242,9 @@ final class NetworkTransport: DeviceTransport {
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
         -> Result<Data, LinkStatus> {
         guard let handle = boundHandle else { return .failure(.noDevice) }
+        // A main-thread caller cannot be left waiting on the network: with no
+        // ready session the answer is known now, so give it without a wait.
+        if Thread.isMainThread, client.state != .ready { return .failure(.noDevice) }
 
         // The bulk read is the one the hub can answer from its cache in a
         // single reply; use it when offered and fall through on any failure.
@@ -275,15 +278,27 @@ final class NetworkTransport: DeviceTransport {
         return blob
     }
 
+    /// Longest a main-thread caller is held.  Off main the hub's own limits
+    /// apply; the client times a command out before this.
+    static let mainThreadWait: TimeInterval = 1.0
+    /// Non-zero while a main-thread wait is spinning the run loop.
+    private var mainWaitDepth = 0
+
     /// Block the caller until `work` signals done.  The command layer calls
-    /// the blocking GET off the main thread, where a semaphore is right; the
-    /// client completes on main, so a main-thread caller instead spins the
-    /// run loop rather than deadlocking against its own completion.
+    /// the blocking GET off the main thread, where a semaphore is right.  The
+    /// client completes on main, so a main-thread caller spins the run loop
+    /// instead, for a short bounded time only: a hub that stops answering
+    /// must not freeze the UI.  A timer that fires inside that spin and asks
+    /// for another GET gets an immediate failure rather than nesting another
+    /// spin, which is how a 60 ms poll once piled up 15 s waits.
     private func waitFor(_ work: (@escaping () -> Void) -> Void) {
         if Thread.isMainThread {
+            guard mainWaitDepth == 0 else { return }
+            mainWaitDepth += 1
+            defer { mainWaitDepth -= 1 }
             var finished = false
             work { finished = true }
-            let deadline = Date().addingTimeInterval(15)
+            let deadline = Date().addingTimeInterval(Self.mainThreadWait)
             while !finished && Date() < deadline {
                 RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
             }

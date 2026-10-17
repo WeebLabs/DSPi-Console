@@ -38,6 +38,9 @@ final class LinkClientFake: LinkClientProtocol {
     }
     var snapshotBody: LinkSnapshotBody?
     var disconnectCalls = 0
+    /// False models a hub that has stopped answering: commands are recorded
+    /// but never completed.
+    var answersCommands = true
 
     // Test-side drivers
     func setState(_ s: LinkClientState) { stateSubject.send(s) }
@@ -55,6 +58,7 @@ final class LinkClientFake: LinkClientProtocol {
     func disconnect() { disconnectCalls += 1; stateSubject.send(.disconnected) }
     func command(_ request: LinkCmdRequest, completion: @escaping (LinkCmdResponse) -> Void) {
         commands.append(request)
+        guard answersCommands else { return }
         let r = responder(request)
         DispatchQueue.main.async { completion(r) }
     }

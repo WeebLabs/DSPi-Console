@@ -371,7 +371,10 @@ struct GettingStartedView: View {
         installer.installWhenReady()
         guard !rebootRequested else { return }
         rebootRequested = true
-        _ = vm.transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        let transport = vm.transport
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        }
     }
 
     /// Starts the install flow over after a failure: the view's flags and the

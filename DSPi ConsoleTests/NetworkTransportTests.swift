@@ -157,4 +157,44 @@ final class NetworkTransportTests: XCTestCase {
         probe.invalidate()
         XCTAssertEqual(client.connectCalls.count, 2)
     }
+    func testMainThreadGetFailsAtOnceWithoutAReadySession() {
+        let (t, client, _) = make()
+        t.bind(serial: "AAAA")
+        client.setDevices([info("AAAA", handle: 0)])
+        client.setState(.connecting)
+        let started = Date()
+        let r = t.getControlResult(request: 0x50, value: 0, index: 0, length: 4)
+        XCTAssertEqual(r, .failure(.noDevice))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.2)
+        XCTAssertTrue(client.commands.isEmpty, "nothing was sent to a hub we are not ready on")
+    }
+
+    func testMainThreadGetIsBoundedWhenTheHubStopsAnswering() {
+        let (t, client, _) = make()
+        t.bind(serial: "AAAA")
+        client.setDevices([info("AAAA", handle: 0)])
+        client.setState(.ready)
+        client.answersCommands = false
+
+        // A poll timer firing during the wait asks again, as the Stats window's
+        // 60 ms timer did; that request must return at once, not nest a wait.
+        var nestedElapsed: TimeInterval?
+        var nestedResult: Result<Data, LinkStatus>?
+        let probe = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { _ in
+            let s = Date()
+            nestedResult = t.getControlResult(request: 0x51, value: 0, index: 0, length: 4)
+            nestedElapsed = Date().timeIntervalSince(s)
+        }
+
+        let started = Date()
+        let r = t.getControlResult(request: 0x50, value: 0, index: 0, length: 4)
+        let elapsed = Date().timeIntervalSince(started)
+        probe.invalidate()
+
+        XCTAssertEqual(r, .failure(.timeout))
+        XCTAssertLessThan(elapsed, 1.5, "NetworkTransport.mainThreadWait plus slack")
+        XCTAssertEqual(nestedResult, .failure(.timeout))
+        XCTAssertLessThan(nestedElapsed ?? 99, 0.1, "a nested main-thread GET does not wait")
+        XCTAssertEqual(client.commands.map { $0.bRequest }, [0x50], "the nested GET was not sent")
+    }
 }
