@@ -75,17 +75,33 @@ final class LinkSessionHandler {
         guard isAuthenticated, let session = session else {
             return   // no data-plane traffic before auth; drop silently
         }
-        guard let frame = try? LinkFrame.decode(data) else { return }
+        let frame: LinkFrame
+        do {
+            frame = try LinkFrame.decode(data)
+        } catch LinkFrameError.unknownType(let type) {
+            // Spec 8: an unknown request type (below 0x80) gets UNSUPPORTED
+            // under its own tag, so the client is not left waiting on it.
+            if type < 0x80, data.count >= 4 {
+                let tag = UInt16(data[data.startIndex + 2]) | UInt16(data[data.startIndex + 3]) << 8
+                emitFrame(.cmdResponse(LinkCmdResponse(tag: tag, status: .unsupported)))
+            }
+            return
+        } catch {
+            return   // undecodable: drop (spec 10.4)
+        }
         switch frame {
         case .cmdRequest(let req):
             handleCommand(req, session: session)
-        case .fwData:
-            // Firmware install streaming lands in Phase 5.
-            break
+        case .fwData(let chunk):
+            // fw.install is not implemented, so no transfer can be open.  The
+            // spec has no "no transfer" status; UNSUPPORTED says the feature.
+            emitFrame(.fwDataAck(LinkFwDataAck(tag: chunk.tag, offset: chunk.offset, status: .unsupported)))
         default:
-            break
+            break   // hub-to-client types from a client: ignored
         }
     }
+
+    private func emitFrame(_ frame: LinkFrame) { emit(.binary(frame.encode())) }
 
     /// The connection closed.  Release the hub session and its resources.
     func connectionClosed() {

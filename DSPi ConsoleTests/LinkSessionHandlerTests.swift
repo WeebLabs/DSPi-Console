@@ -367,4 +367,40 @@ final class LinkSessionHandlerTests: XCTestCase {
         XCTAssertEqual(sink.lastErr()?.code, "denied")
         XCTAssertEqual(sink.lastErr()?.id, 5)
     }
+
+    // MARK: - Unknown and unsupported binary frames
+
+    private func lastFrame(_ sink: Sink) -> LinkFrame? {
+        sink.binary.last.flatMap { try? LinkFrame.decode($0) }
+    }
+
+    /// Spec 8: an unknown request type is answered UNSUPPORTED with its tag.
+    func testUnknownRequestFrameTypeAnswersUnsupportedWithItsTag() {
+        let (hub, auth, policy) = makeStack()
+        let sink = Sink()
+        let h = authedAdmin(hub, auth, policy, sink)
+        h.receiveBinary(Data([0x06, 0x00, 0x34, 0x12, 0xAA, 0xBB]))
+        XCTAssertEqual(lastFrame(sink), .cmdResponse(LinkCmdResponse(tag: 0x1234, status: .unsupported)))
+    }
+
+    /// Types from 0x80 are hub-to-client; a client sending one is not asking
+    /// for anything, and garbage that does not decode is dropped (spec 10.4).
+    func testUnknownResponseTypeAndGarbageAreDropped() {
+        let (hub, auth, policy) = makeStack()
+        let sink = Sink()
+        let h = authedAdmin(hub, auth, policy, sink)
+        h.receiveBinary(Data([0x90, 0x00, 0x01, 0x00]))
+        h.receiveBinary(Data([0x01]))                        // truncated CMD
+        h.receiveBinary(Data([0x06, 0x00]))                  // unknown, tag unreadable
+        XCTAssertTrue(sink.binary.isEmpty)
+    }
+
+    /// No firmware transfer can be open, so a chunk is refused, not ignored.
+    func testFwDataChunkIsRefused() {
+        let (hub, auth, policy) = makeStack()
+        let sink = Sink()
+        let h = authedAdmin(hub, auth, policy, sink)
+        h.receiveBinary(LinkFrame.fwData(LinkFwDataFrame(tag: 3, offset: 4096, data: Data([1, 2, 3]))).encode())
+        XCTAssertEqual(lastFrame(sink), .fwDataAck(LinkFwDataAck(tag: 3, offset: 4096, status: .unsupported)))
+    }
 }
