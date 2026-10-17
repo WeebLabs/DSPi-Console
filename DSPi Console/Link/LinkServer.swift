@@ -17,6 +17,17 @@ import NIOHTTP1
 import NIOWebSocket
 import NIOFoundationCompat
 
+/// Per-connection limits.  Internal so tests can shorten the deadlines.
+struct LinkServerTuning {
+    /// NIO marks a child channel unwritable above `writeBufferHigh` buffered
+    /// bytes and writable again below `writeBufferLow`.
+    var writeBufferLow = 64 * 1024
+    var writeBufferHigh = 256 * 1024
+    /// A connection that stays unwritable this long has stopped reading and
+    /// is closed, so its backlog cannot grow without bound.
+    var stallDeadline: TimeInterval = 10
+}
+
 final class LinkServer {
     private let hub: LinkHub
     private let auth: LinkAuthStore
@@ -25,6 +36,8 @@ final class LinkServer {
     private var group: MultiThreadedEventLoopGroup?
     private var channel: NIOCore.Channel?
     private let lock = NSLock()
+    /// Read at start; set it before then.
+    var tuning = LinkServerTuning()
 
     init(hub: LinkHub, auth: LinkAuthStore, policy: LinkPolicy) {
         self.hub = hub
@@ -51,7 +64,7 @@ final class LinkServer {
         guard channel == nil else { return }   // already running; start is idempotent
 
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let hub = self.hub, auth = self.auth, policy = self.policy
+        let hub = self.hub, auth = self.auth, policy = self.policy, tuning = self.tuning
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
@@ -71,7 +84,7 @@ final class LinkServer {
                     },
                     upgradePipelineHandler: { channel, _ in
                         channel.pipeline.addHandler(
-                            LinkWebSocketHandler(hub: hub, auth: auth, policy: policy))
+                            LinkWebSocketHandler(hub: hub, auth: auth, policy: policy, tuning: tuning))
                     })
                 let upgradeConfig: NIOHTTPServerUpgradeConfiguration = (
                     upgraders: [upgrader],
@@ -84,6 +97,9 @@ final class LinkServer {
                     .flatMap { channel.pipeline.addHandler(httpHandler) }
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.writeBufferWaterMark,
+                                value: WriteBufferWaterMark(low: tuning.writeBufferLow,
+                                                            high: tuning.writeBufferHigh))
 
         do {
             let ch = try bootstrap.bind(host: "0.0.0.0", port: port).wait()
@@ -264,9 +280,15 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
     private let hub: LinkHub
     private let auth: LinkAuthStore
     private let policy: LinkPolicy
+    private let tuning: LinkServerTuning
 
     private var session: LinkSessionHandler?
     private var channel: NIOCore.Channel?
+
+    /// Set when a NOTIFY or RESYNC was shed while unwritable: the handle for
+    /// the one RESYNC owed once the socket drains.
+    private var owedResyncHandle: UInt8?
+    private var stallTimer: Scheduled<Void>?
 
     // Fragmented-message reassembly (spec 4: one message may span frames).
     private var fragmentOpcode: WebSocketOpcode?
@@ -278,10 +300,11 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
     private static let pingInterval: TimeAmount = .seconds(10)
     private static let authDeadline: TimeAmount = .seconds(30)
 
-    init(hub: LinkHub, auth: LinkAuthStore, policy: LinkPolicy) {
+    init(hub: LinkHub, auth: LinkAuthStore, policy: LinkPolicy, tuning: LinkServerTuning) {
         self.hub = hub
         self.auth = auth
         self.policy = policy
+        self.tuning = tuning
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -325,9 +348,56 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
         keepalive = nil
         authTimeout?.cancel()
         authTimeout = nil
+        stallTimer?.cancel()
+        stallTimer = nil
         session?.connectionClosed()
         session = nil
         channel = nil
+    }
+
+    // MARK: Backpressure
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable {
+            stallTimer?.cancel()
+            stallTimer = nil
+            if let handle = owedResyncHandle {
+                owedResyncHandle = nil
+                send(.binary(LinkFrame.resync(LinkResyncFrame(handle: handle, reason: 0)).encode()))
+            }
+        } else if stallTimer == nil {
+            let deadline = TimeAmount.milliseconds(Int64(tuning.stallDeadline * 1000))
+            stallTimer = context.eventLoop.scheduleTask(in: deadline) { [weak self] in
+                self?.abort(code: 1011)
+            }
+        }
+        context.fireChannelWritabilityChanged()
+    }
+
+    /// True when an unwritable channel should shed this frame.  POLL is
+    /// superseded by the next one; NOTIFY and RESYNC are replaced by one
+    /// RESYNC later.  CMD responses (bounded by max_inflight) still queue.
+    private func shed(_ data: Data, on channel: NIOCore.Channel) -> Bool {
+        guard !channel.isWritable, let type = data.first else { return false }
+        switch type {
+        case LinkFrameType.poll.rawValue:
+            return true
+        case LinkFrameType.notify.rawValue, LinkFrameType.resync.rawValue:
+            owedResyncHandle = data.count > 4 ? data[data.startIndex + 4] : 0
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Close without waiting on the close frame's write: a peer that is not
+    /// reading would never let it complete.
+    private func abort(code: UInt16) {
+        guard let channel = channel else { return }
+        var buf = channel.allocator.buffer(capacity: 2)
+        buf.writeInteger(code, endianness: .big)
+        channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .connectionClose, data: buf), promise: nil)
+        channel.close(promise: nil)
     }
 
     // MARK: Inbound
@@ -412,6 +482,7 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
             buf.writeBytes(data)
             channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .text, data: buf), promise: nil)
         case .binary(let data):
+            if shed(data, on: channel) { return }
             var buf = channel.allocator.buffer(capacity: data.count)
             buf.writeBytes(data)
             channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .binary, data: buf), promise: nil)
