@@ -46,12 +46,21 @@ struct LinkCommandEntry: Codable, Equatable {
     let name: String
     /// Directions the firmware accepts for this code.  Anything else STALLs.
     let dirs: [LinkCommandDirection]
+    /// The strictest class of the row, and the class of every direction
+    /// `classes` does not name.
     let commandClass: LinkCommandClass
+    /// Per-direction classes keyed by "set"/"get" (spec 9.3, added in 1.1).
+    /// String keys because an enum-keyed dictionary decodes from an array.
+    let classes: [String: LinkCommandClass]?
     let note: String?
 
     private enum CodingKeys: String, CodingKey {
-        case code, name, dirs, note
+        case code, name, dirs, classes, note
         case commandClass = "class"
+    }
+
+    func commandClass(for direction: LinkCommandDirection) -> LinkCommandClass {
+        classes?[direction.rawValue] ?? commandClass
     }
 }
 
@@ -119,7 +128,7 @@ struct LinkPolicy {
     /// accept for a listed code, is config and therefore admin only.
     func classify(code: UInt8, direction: LinkCommandDirection) -> LinkCommandClass {
         guard let entry = byCode[code], entry.dirs.contains(direction) else { return .config }
-        return entry.commandClass
+        return entry.commandClass(for: direction)
     }
 
     func isAllowed(role: LinkRole, code: UInt8, direction: LinkCommandDirection) -> Bool {
@@ -136,7 +145,7 @@ struct LinkPolicy {
             .sorted { $0.code < $1.code }
             .flatMap { entry in
                 entry.dirs.compactMap { dir in
-                    role.permits(entry.commandClass) ? nil : (code: entry.code, direction: dir)
+                    role.permits(entry.commandClass(for: dir)) ? nil : (code: entry.code, direction: dir)
                 }
             }
     }

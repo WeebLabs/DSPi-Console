@@ -57,8 +57,17 @@ final class CommandRouter {
         let token: UInt64
         let session: LinkSessionID
         let code: UInt8
-        let wValue: UInt16
+        let param: UInt32
         let at: Date
+    }
+
+    /// Which parameter a write targets, so repeats merge exactly where the
+    /// firmware coalesces.  REQ_SET_EQ_PARAM sends wValue 0 and names its
+    /// channel and band in the payload, and the device notifies once per band.
+    static func parameterKey(_ request: LinkCmdRequest) -> UInt32 {
+        let p = request.payload
+        guard request.bRequest == REQ_SET_EQ_PARAM, p.count >= 2 else { return UInt32(request.wValue) }
+        return UInt32(request.wValue) | UInt32(p[p.startIndex]) << 16 | UInt32(p[p.startIndex + 1]) << 24
     }
     private var recentWriters: [WriterEntry] = []
     private var nextWriterToken: UInt64 = 0
@@ -142,22 +151,23 @@ final class CommandRouter {
             var writerToken: UInt64?
             var previousWriter: WriterEntry?
             if self.policy.classify(code: request.bRequest, direction: direction) != .read {
+                let param = Self.parameterKey(request)
                 self.stateLock.lock()
-                // A repeat of the same parameter by the same session is one entry:
-                // the firmware coalesces those into one notification, and the
-                // queue must coalesce the same way to stay aligned with it.
-                if let last = self.recentWriters.last, last.session == session.id,
-                   last.code == request.bRequest, last.wValue == request.wValue {
+                // A repeat of the same parameter by the same session is one entry,
+                // merged in place wherever it sits, as the firmware coalesces into
+                // any unsent ring slot; a drag alternating linked bands stays aligned.
+                if let i = self.recentWriters.lastIndex(where: {
+                    $0.session == session.id && $0.code == request.bRequest && $0.param == param }) {
+                    let last = self.recentWriters[i]
                     previousWriter = last
-                    self.recentWriters[self.recentWriters.count - 1] =
-                        WriterEntry(token: last.token, session: last.session, code: last.code,
-                                    wValue: last.wValue, at: Date())
+                    self.recentWriters[i] = WriterEntry(token: last.token, session: last.session,
+                                                        code: last.code, param: last.param, at: Date())
                     writerToken = last.token
                 } else {
                     let token = self.nextWriterToken; self.nextWriterToken &+= 1
                     self.recentWriters.append(WriterEntry(token: token, session: session.id,
                                                           code: request.bRequest,
-                                                          wValue: request.wValue, at: Date()))
+                                                          param: param, at: Date()))
                     if self.recentWriters.count > 64 { self.recentWriters.removeFirst() }
                     writerToken = token
                 }

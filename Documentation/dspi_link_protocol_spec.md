@@ -1,8 +1,8 @@
 # DSPi Link Protocol Specification
 
-*Version: 1.0 (draft)*
-*Status: design, not yet implemented*
-*Last updated: 2026-09-08*
+*Version: 1.1 (draft)*
+*Status: draft; dspi-link-js implements 1.1, the DSPi Console `feature/dspi-link` branch implements 1.0*
+*Last updated: 2026-10-17 (changes from 1.0 are listed in section 13)*
 *Canonical home: `WeebLabs/DSPi-Link` `spec/`; this copy is kept in step with it.*
 
 DSPi Link is the local-network protocol through which a **hub** (DSPi Console
@@ -97,7 +97,7 @@ work without DNS-SD:
 GET /dspi/v1/info
 200 OK, Content-Type: application/json
 {
-  "proto": {"major": 1, "minor": 0},
+  "proto": {"major": 1, "minor": 1},
   "hub":   {"id": "<uuid>", "name": "Studio Mac", "kind": "console", "version": "1.1.7"},
   "auth":  "pin",
   "tls":   false,
@@ -236,9 +236,15 @@ Write-as-read commands (a `GET` transfer that mutates, see `commands.md`
 section 1.1) are classified by what they do, not by their direction. The
 table must list them explicitly.
 
+A `bRequest` the firmware accepts in both directions can carry a different
+class per direction. `REQ_LIMITER` (0x81) is the case today. Its `SET`
+changes a limiter setting and is *control*, while its `GET` reads a setting,
+the gain-reduction meter or the limiter status and is *read*, so a viewer
+can poll the meter but cannot change the limiter. Section 9.3 gives the table encoding.
+
 ### 6.4 Transport security
 
-Version 1.0 hubs serve plaintext by default because browsers cannot be made
+Hubs serve plaintext by default because browsers cannot be made
 to trust a self-signed certificate on a LAN without user friction, and the
 threat model is "devices on my own network". Hubs may offer TLS (`tls=1`);
 native clients pin the certificate on first use (trust on first use, keyed by
@@ -281,7 +287,7 @@ ignores unknown event types. Both ignore unknown fields.
 Client to hub, first message:
 
 ```json
-{"t": "hello", "proto": {"major": 1, "minor": 0},
+{"t": "hello", "proto": {"major": 1, "minor": 1},
  "client": {"name": "Troy's iPhone", "app": "DSPi Mobile", "version": "0.1"}}
 ```
 
@@ -289,7 +295,7 @@ Hub to client, in reply (no `id`):
 
 ```json
 {"t": "hello",
- "proto": {"major": 1, "minor": 0},
+ "proto": {"major": 1, "minor": 1},
  "hub": {"id": "<uuid>", "name": "Studio Mac", "kind": "console", "version": "1.1.7"},
  "auth": "pin",
  "caps": ["cmd", "notify", "poll", "snapshot", "lock", "fw_install", "web", "rename"],
@@ -340,8 +346,8 @@ advertises a small one.
 {"t": "device.list", "id": 5}
 {"t": "ok", "id": 5, "devices": [
   {"handle": 0, "serial": "E46058388B1A2E2C", "name": "Living room",
-   "platform": 1, "fw": "1.1.7", "outputs": 9, "inputs": 8,
-   "wire_version": 30, "state": "online", "link": "usb",
+   "platform": 1, "fw": "1.1.7", "fw_beta": 0, "outputs": 9, "inputs": 8,
+   "wire_version": 32, "state": "online", "link": "usb",
    "locked_by": null}
 ]}
 ```
@@ -351,7 +357,8 @@ advertises a small one.
 | `handle` | Hub-assigned, section 2. Stable until `device.removed`. |
 | `serial` | `REQ_GET_SERIAL` (0x7E). |
 | `name` | Hub-stored friendly name, or a default derived from the serial. |
-| `platform`, `fw`, `outputs` | `REQ_GET_PLATFORM` (0x7F), 6-byte read. |
+| `platform`, `fw`, `outputs` | `REQ_GET_PLATFORM` (0x7F), 7-byte read. `fw` is `major.minor.patch` from bytes 1, 4 and 5, or from the byte 2 nibbles on firmware that returns only 4 bytes. |
+| `fw_beta` | Byte 6 of the same read: the beta number, 0 for a final release. Betas of one patch share its `fw` string, so this is the only field that tells them apart. A hub omits it when the device returns fewer than 7 bytes, and a client treats a missing field as unknown, not as 0. Added in 1.1. |
 | `inputs` | Compile-time input count if the hub knows it; else omitted. |
 | `wire_version` | From the bulk header, if the hub has read it; else omitted. Clients must still read it themselves. |
 | `state` | `online`, `offline` (known device currently unplugged; handle retained for 60 s), `updating` (firmware install in progress). |
@@ -374,7 +381,7 @@ command, hubs should prefer it so the name travels with the board.
 
 ```json
 {"t": "device.snapshot", "id": 6, "handle": 0}
-{"t": "ok", "id": 6, "handle": 0, "wire_version": 30, "age_ms": 120,
+{"t": "ok", "id": 6, "handle": 0, "wire_version": 32, "age_ms": 120,
  "bulk_b64": "<REQ_GET_ALL_PARAMS blob, base64>", "status_b64": "<REQ_GET_STATUS wValue=9 response>"}
 ```
 
@@ -440,13 +447,21 @@ serialises commands as usual and clients skip the lock step.
 {"t": "ok", "id": 12, "xfer": 3}
    ... client sends FWDATA binary frames with xfer 3 (section 8.5) ...
 {"t": "fw.progress", "handle": 0, "phase": "uploading"|"rebooting"|"copying"|"verifying", "pct": 42}
-{"t": "fw.done", "handle": 0, "ok": true, "fw": "1.1.8"}
+{"t": "fw.done", "handle": 0, "ok": true, "fw": "1.1.8", "fw_beta": 0}
 ```
 
 Requires `admin` and implicitly takes the lock. The hub validates the SHA-256
 before touching the device, enters the bootloader (0xF0), copies the UF2 and
 waits for the device to re-enumerate with the expected version. The device is
 `updating` throughout and `device.changed` fires at each state.
+
+`version` is the release tag without its `v`: `1.1.8` for a final release,
+`1.1.8-beta2` for a beta. Two betas of one patch report the same `fw`, so
+when the device returns the 7-byte platform reply the hub also compares
+`fw_beta` (section 7.4) with the beta in `version`, `-beta<n>` or 0 when
+absent. Firmware that returns 6 bytes or fewer cannot report a beta; the hub
+then compares `fw` alone. A 1.0 hub compares `fw` only and does not expect a
+suffix, so a client sends a minor-0 hub `major.minor.patch` without one.
 
 ### 7.9 Hub management (admin)
 
@@ -658,7 +673,8 @@ DSPi Console for Windows implements the same hub with these differences,
 none of which are visible to clients:
 
 - **Bulk transfers.** WinUSB caps a control transfer's data stage at 4096
-  bytes, so a Windows hub cannot issue `0xA0`/`0xA1` for the 5980-byte blob.
+  bytes, so a Windows hub cannot issue `0xA0`/`0xA1` for the 6136-byte blob
+  (wire V32; the size grows with the wire format).
   It serves a client's `0xA0` GET by running the chunked read (`0xA2`, 2048-byte
   chunks) and returning the concatenated blob in one CMD response, and serves
   a client's `0xA1` SET by splitting the payload across `0xA3` writes. The
@@ -687,8 +703,8 @@ none of which are visible to clients:
 ### 9.2 Bridge hub (UART)
 
 - Requires the device's UART control interface enabled over USB once, with
-  `notify_enable = 1` and a baud of 921600 or 1000000 (a 5980-byte bulk read
-  takes about 60 ms at 1 Mbaud, 520 ms at 115200). The bridge reads
+  `notify_enable = 1` and a baud of 921600 or 1000000 (the 6136-byte V32 bulk
+  read takes about 61 ms at 1 Mbaud, 530 ms at 115200). The bridge reads
   `REQ_GET_CTRL_IFACE_STATUS` (0xF9) at boot and reports `uart_live`.
 - Obeys the one-request-in-flight rule on the UART: the Link router
   serialises per device anyway, so this costs nothing.
@@ -715,15 +731,22 @@ machine-readable files so that no implementation hand-transcribes them:
 
 | File | Content | Used by |
 |------|---------|---------|
-| `policy/commands.json` | Every `bRequest` with its direction(s), class (`read`, `control`, `config`) and a short name. | Hubs (authorization), clients (greying out controls), tests (coverage). |
+| `policy/commands.json` | Every `bRequest` with its direction(s), class (`read`, `control`, `config`) and a short name, plus a per-direction `classes` object where the directions differ. | Hubs (authorization), clients (greying out controls), tests (coverage). |
 | `fixtures/frames/*.bin` + `frames.json` | Byte-exact CMD, NOTIFY, POLL, FWDATA and RESYNC frames with their decoded meaning. | Codec tests in every language. |
 | `fixtures/messages/*.json` | Valid and invalid control-plane messages with the expected reply or error code. | Control-plane tests. |
-| `fixtures/device/bulk_v30.bin`, `status_rp2350.bin`, `notify_*.bin` | Real device captures with the decoded values in a sidecar JSON. | Decoder tests, so Swift, C#, TypeScript and Kotlin all decode the same bytes to the same numbers. |
+| `fixtures/device/bulk_v32.bin`, `status_wvalue9.bin`, `platform.bin` | Real device captures with the decoded values in the `capture.json` sidecar. | Decoder tests, so Swift, C#, TypeScript and Kotlin all decode the same bytes to the same numbers. |
 | `conformance/` | A reference client that drives any hub through the checklist in section 12, and a reference hub (Python, on the existing `tools/dspi_test` USB layer) that any client can be tested against. | CI for every implementation. |
 
 An implementation embeds `policy/commands.json` as a resource and records the
 spec version it was taken from. A hub must treat a `bRequest` absent from
 its embedded table as `config`.
+
+A row whose directions need different classes carries `classes`, an object
+with one entry per direction in `dirs`, for example
+`"classes": {"set": "control", "get": "read"}`. Where `classes` is present it
+decides, and `class` must hold the strictest of its values. A 1.0 reader
+ignores the unknown key and applies `class` to both directions, which fails
+safe.
 
 ## 10. Versioning and compatibility rules
 
@@ -781,8 +804,8 @@ frame and drops it because `origin` matches its own session.
 ### 11.2 Read the platform (REQ_GET_PLATFORM 0x7F)
 
 ```
-01 00 08 00  00 01 7F 00  00 00 02 00  06 00
-81 00 08 00  00 00 06 00  01 01 17 09 01 07     -> RP2350, fw 1.1.7, 9 outputs
+01 00 08 00  01 01 7F 00  00 00 02 00  07 00     -> handle 1, GET, wLength 7
+81 00 08 00  00 00 07 00  01 01 17 09 01 07 00  -> RP2350, fw 1.1.7, final (beta 0), 9 outputs
 ```
 
 ### 11.3 Subscribe to the peak meters at 10 Hz
@@ -822,3 +845,23 @@ A client is conformant when it:
 - [ ] suppresses echoes by `origin`, never by `source` alone;
 - [ ] re-reads state on any sequence gap or RESYNC;
 - [ ] gates device features on the device's own version and capability reports.
+
+---
+
+## 13. Changes from 1.0
+
+Version 1.1 tracks firmware v1.1.6-beta5 (wire format V32). Every change is
+additive under section 10, so 1.0 hubs and clients keep working. The one
+exception is the `fw.install` `version` string, which a client keeps
+suffix-free for a minor-0 hub (section 7.8).
+
+- `hello.proto.minor` is 1.
+- The device object gains `fw_beta` (section 7.4), read from byte 6 of the
+  now 7-byte `REQ_GET_PLATFORM` reply. `fw.install` and `fw.done` carry the
+  beta number too (section 7.8).
+- The policy table may class each direction of one `bRequest` separately
+  (sections 6.3 and 9.3). It gains `REQ_SET_TUBE_PARAM` (0x3E),
+  `REQ_GET_TUBE_PARAM` (0x3F), `REQ_LIMITER` (0x81) and
+  `REQ_GET_CLOCK_DIAG` (0x82).
+- Examples and sizes move from wire V30 (5980-byte bulk blob) to V32 (6136
+  bytes), and the device fixtures are recaptured from beta5 firmware.

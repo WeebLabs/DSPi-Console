@@ -170,10 +170,10 @@ final class LinkMessageTests: XCTestCase {
         XCTAssertEqual(try wireKeys(install), ["t", "id", "handle", "size", "sha256", "version"])
 
         let device = LinkMessage.deviceAdded(LinkDeviceEvent(device: LinkDeviceInfo(
-            handle: 0, serial: "S", name: "n", platform: 1, fw: "1.1.7", outputs: 9, inputs: 8,
+            handle: 0, serial: "S", name: "n", platform: 1, fw: "1.1.7", fwBeta: 0, outputs: 9, inputs: 8,
             wireVersion: 30, state: .online, link: .usb, lockedBy: 12)))
         let deviceObject = try object(String(data: device.encoded(), encoding: .utf8)!)["device"] as! [String: Any]
-        XCTAssertEqual(Set(deviceObject.keys), ["handle", "serial", "name", "platform", "fw",
+        XCTAssertEqual(Set(deviceObject.keys), ["handle", "serial", "name", "platform", "fw", "fw_beta",
                                                 "outputs", "inputs", "wire_version", "state",
                                                 "link", "locked_by"])
 
@@ -214,17 +214,17 @@ final class LinkMessageTests: XCTestCase {
 
     func testSpecExampleHelloExchange() throws {
         let client = """
-        {"t": "hello", "proto": {"major": 1, "minor": 0},
+        {"t": "hello", "proto": {"major": 1, "minor": 1},
          "client": {"name": "Troy's iPhone", "app": "DSPi Mobile", "version": "0.1"}}
         """
         guard case .helloClient(let c) = try decode(client) else {
             return XCTFail("a hello without hub or auth is the client's")
         }
-        XCTAssertEqual(c.proto, LinkProtoVersion(major: 1, minor: 0))
+        XCTAssertEqual(c.proto, LinkProtoVersion(major: 1, minor: 1))
         XCTAssertEqual(c.client.name, "Troy's iPhone")
 
         let hub = """
-        {"t": "hello", "proto": {"major": 1, "minor": 0},
+        {"t": "hello", "proto": {"major": 1, "minor": 1},
          "hub": {"id": "9d1b", "name": "Studio Mac", "kind": "console", "version": "1.1.7"},
          "auth": "pin",
          "caps": ["cmd", "notify", "poll", "snapshot", "lock", "fw_install", "web", "rename"],
@@ -263,8 +263,8 @@ final class LinkMessageTests: XCTestCase {
         let json = """
         {"t": "ok", "id": 5, "devices": [
           {"handle": 0, "serial": "E46058388B1A2E2C", "name": "Living room",
-           "platform": 1, "fw": "1.1.7", "outputs": 9, "inputs": 8,
-           "wire_version": 30, "state": "online", "link": "usb",
+           "platform": 1, "fw": "1.1.7", "fw_beta": 0, "outputs": 9, "inputs": 8,
+           "wire_version": 32, "state": "online", "link": "usb",
            "locked_by": null}]}
         """
         guard case .ok(let ok) = try decode(json) else { return XCTFail("expected ok") }
@@ -272,10 +272,18 @@ final class LinkMessageTests: XCTestCase {
         XCTAssertEqual(body.devices.count, 1)
         let device = body.devices[0]
         XCTAssertEqual(device.serial, "E46058388B1A2E2C")
-        XCTAssertEqual(device.wireVersion, 30)
+        XCTAssertEqual(device.wireVersion, 32)
+        XCTAssertEqual(device.fwBeta, 0)
         XCTAssertEqual(device.state, .online)
         XCTAssertEqual(device.link, .usb)
         XCTAssertNil(device.lockedBy, "an explicit null means unlocked")
+    }
+
+    /// A 1.0 hub sends no fw_beta; that must read as unknown, never as final.
+    func testMissingFwBetaIsUnknown() throws {
+        let json = #"{"t":"device.added","device":{"handle":0,"serial":"S","fw":"1.1.6"}}"#
+        guard case .deviceAdded(let e) = try decode(json) else { return XCTFail("expected device.added") }
+        XCTAssertNil(e.device.fwBeta)
     }
 
     func testSpecExamplePollSubscribe() throws {
@@ -315,10 +323,11 @@ final class LinkMessageTests: XCTestCase {
         XCTAssertEqual(p.phase, .copying)
         XCTAssertEqual(p.pct, 42)
 
-        guard case .fwDone(let d) = try decode(#"{"t":"fw.done","handle":0,"ok":true,"fw":"1.1.8"}"#) else {
+        guard case .fwDone(let d) = try decode(#"{"t":"fw.done","handle":0,"ok":true,"fw":"1.1.8","fw_beta":0}"#) else {
             return XCTFail("expected fw.done")
         }
         XCTAssertTrue(d.ok)
+        XCTAssertEqual(d.fwBeta, 0)
     }
 
     func testSpecExampleHubStats() throws {

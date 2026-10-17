@@ -55,10 +55,9 @@ final class USBHubDevice: HubDevice {
         }
     }
 
-    /// Read a device's identity over USB for the registry.  Platform and
-    /// firmware come from REQ_GET_PLATFORM (6 bytes, full-width minor/patch),
-    /// the serial from REQ_GET_SERIAL.  Returns nil if the device does not
-    /// answer, which the caller treats as "not ready yet".
+    /// Read a device's identity over USB for the registry: REQ_GET_PLATFORM
+    /// (7 bytes, via FirmwareVersion.fromPlatformReply) and REQ_GET_SERIAL.
+    /// nil if the device does not answer, which the caller treats as not ready.
     static func readInfo(from usb: USBDevice, serialFallback: String) -> HubDeviceInfo? {
         let serial: String
         if let s = usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16),
@@ -67,16 +66,14 @@ final class USBHubDevice: HubDevice {
         } else {
             serial = serialFallback
         }
-        guard let p = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 6),
-              p.count >= 4 else { return nil }
-        let platform = p[0]
-        let major = p[1]
-        let minor = p.count >= 6 ? p[4] : p[2] >> 4
-        let patch = p.count >= 6 ? p[5] : p[2] & 0x0F
-        let outputs = Int(p[3])
-        let link: LinkDeviceLink = .usb
-        return HubDeviceInfo(serial: serial, platform: platform,
-                             firmware: "\(major).\(minor).\(patch)",
-                             outputs: outputs, inputs: nil, wireVersion: nil, link: link)
+        guard let p = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+              let reply = FirmwareVersion.fromPlatformReply([UInt8](p)) else { return nil }
+        let v = reply.version
+        // fw_beta reports only what byte 6 says; a short reply leaves it unknown
+        // even where FirmwareVersion can infer more (spec 7.4).
+        return HubDeviceInfo(serial: serial, platform: reply.platform,
+                             firmware: "\(v.major).\(v.minor).\(v.patch)",
+                             firmwareBeta: p.count >= 7 ? Int(p[p.startIndex + 6]) : nil,
+                             outputs: Int(p[p.startIndex + 3]), inputs: nil, wireVersion: nil, link: .usb)
     }
 }

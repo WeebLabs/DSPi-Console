@@ -326,7 +326,7 @@ final class LinkSessionHandler {
     private func linkDeviceInfo(_ d: RegisteredDevice) -> LinkDeviceInfo {
         LinkDeviceInfo(handle: Int(d.handle), serial: d.info.serial, name: d.name,
                        platform: Int(d.info.platform), fw: d.info.firmware,
-                       outputs: d.info.outputs, inputs: d.info.inputs,
+                       fwBeta: d.info.firmwareBeta, outputs: d.info.outputs, inputs: d.info.inputs,
                        wireVersion: d.info.wireVersion,
                        state: d.state, link: d.info.link == .usb ? .usb : .uart,
                        lockedBy: d.lockedBy.map { Int($0) })

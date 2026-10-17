@@ -21,7 +21,7 @@ final class LinkPolicyTests: XCTestCase {
 
     func testBundledTableLoadsAndParses() throws {
         let policy = try loadPolicy()
-        XCTAssertEqual(policy.specVersion, "1.0")
+        XCTAssertEqual(policy.specVersion, "1.1")
         XCTAssertFalse(policy.generated.isEmpty)
         XCTAssertGreaterThan(policy.entries.count, 200, "the table should cover the whole vendor surface")
 
@@ -153,6 +153,62 @@ final class LinkPolicyTests: XCTestCase {
         XCTAssertEqual(policy.classify(code: 0x43, direction: .get), .read)
     }
 
+    func testSpecOneOneCommands() throws {
+        let policy = try loadPolicy()
+        XCTAssertEqual(policy.classify(code: 0x3E, direction: .set), .control)   // SET_TUBE_PARAM
+        XCTAssertEqual(policy.classify(code: 0x3F, direction: .get), .read)      // GET_TUBE_PARAM
+        XCTAssertEqual(policy.classify(code: 0x82, direction: .get), .read)      // GET_CLOCK_DIAG
+        XCTAssertEqual(policy.classify(code: 0x82, direction: .set), .config)
+    }
+
+    // MARK: - Per-direction classes (spec 9.3, 1.1)
+
+    /// REQ_LIMITER is one opcode both ways: a viewer may poll its meter but
+    /// not change a setting.
+    func testLimiterIsClassedPerDirection() throws {
+        let policy = try loadPolicy()
+        XCTAssertEqual(policy.classify(code: 0x81, direction: .set), .control)
+        XCTAssertEqual(policy.classify(code: 0x81, direction: .get), .read)
+        XCTAssertTrue(policy.isAllowed(role: .viewer, code: 0x81, direction: .get))
+        XCTAssertFalse(policy.isAllowed(role: .viewer, code: 0x81, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .control, code: 0x81, direction: .set))
+
+        let viewerDenied = policy.denied(for: .viewer)
+        XCTAssertTrue(viewerDenied.contains { $0.code == 0x81 && $0.direction == .set })
+        XCTAssertFalse(viewerDenied.contains { $0.code == 0x81 && $0.direction == .get })
+    }
+
+    /// `class` must be the strictest of a row's `classes`, so a 1.0 hub that
+    /// ignores the key fails safe; and `classes` may only name listed directions.
+    func testPerDirectionRowsKeepTheStrictestClass() throws {
+        let rank: [LinkCommandClass: Int] = [.read: 0, .control: 1, .config: 2]
+        let policy = try loadPolicy()
+        for entry in policy.entries {
+            guard let classes = entry.classes else { continue }
+            XCTAssertEqual(Set(classes.keys), Set(entry.dirs.map(\.rawValue)), entry.name)
+            let strictest = entry.dirs.map { rank[entry.commandClass(for: $0)]! }.max()
+            XCTAssertEqual(rank[entry.commandClass], strictest, entry.name)
+        }
+        // A SET is never read, whatever the row says for its GET.
+        for entry in policy.entries where entry.dirs.contains(.set) {
+            XCTAssertNotEqual(entry.commandClass(for: .set), .read, entry.name)
+        }
+    }
+
+    func testRowWithoutClassesAppliesClassToBothDirections() throws {
+        let json = #"""
+        {"spec_version": "1.1", "generated": "x", "commands": [
+          {"code": 129, "name": "LIMITER", "dirs": ["set", "get"], "class": "control"},
+          {"code": 130, "name": "SPLIT", "dirs": ["set", "get"], "class": "control",
+           "classes": {"set": "control", "get": "read"}}
+        ]}
+        """#
+        let policy = try LinkPolicy(data: Data(json.utf8))
+        XCTAssertEqual(policy.classify(code: 129, direction: .get), .control)
+        XCTAssertEqual(policy.classify(code: 130, direction: .get), .read)
+        XCTAssertEqual(policy.classify(code: 130, direction: .set), .control)
+    }
+
     /// Every write-as-read command must be classified by what it does, not by
     /// its direction (spec section 6.3).  These are the ones commands.md
     /// section 1.1 names; none of them may be `read`.
@@ -199,8 +255,8 @@ final class LinkPolicyTests: XCTestCase {
         }
         // and everything not denied is readable by a viewer
         let deniedSet = Set(viewerDenied.map { "\($0.code)-\($0.direction.rawValue)" })
-        for entry in policy.entries where entry.commandClass == .read {
-            for dir in entry.dirs {
+        for entry in policy.entries {
+            for dir in entry.dirs where entry.commandClass(for: dir) == .read {
                 XCTAssertFalse(deniedSet.contains("\(entry.code)-\(dir.rawValue)"))
             }
         }

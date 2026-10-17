@@ -385,6 +385,27 @@ extension LinkHubCoreTests {
         XCTAssertEqual(router.consumeAttribution(within: 1), 0, "five sweeps, one entry")
     }
 
+    /// EQ writes name their channel and band in the payload (wValue is 0), and
+    /// the firmware notifies once per band: a drag on a linked pair alternates
+    /// two bands and must leave exactly two entries, not one and not six.
+    func testEqWritesCoalescePerChannelAndBand() {
+        let dev = FakeDevice()
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        let done = expectation(description: "drag"); done.expectedFulfillmentCount = 6
+        for _ in 0..<3 {
+            for ch: UInt8 in [0, 1] {
+                var payload = Data(count: 16); payload[0] = ch; payload[1] = 3
+                let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: REQ_SET_EQ_PARAM,
+                                       wIndex: 0, payload: payload)
+                router.submit(r, session: control(7)) { _ in done.fulfill() }
+            }
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(router.consumeAttribution(within: 1), 7)
+        XCTAssertEqual(router.consumeAttribution(within: 1), 7)
+        XCTAssertEqual(router.consumeAttribution(within: 1), 0, "two bands, two entries")
+    }
+
     func testFailedRepeatPreservesEarlierSuccessfulAttribution() {
         checkFailedRepeatAttribution(consumeDuringFailure: false)
     }

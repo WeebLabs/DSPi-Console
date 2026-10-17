@@ -218,7 +218,7 @@ private final class LinkHTTPHandler: ChannelInboundHandler, RemovableChannelHand
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let devices = hub.registry.devices.map { ["serial": $0.info.serial, "name": $0.name] }
         let info: [String: Any] = [
-            "proto": ["major": 1, "minor": 0],
+            "proto": ["major": LinkProtoVersion().major, "minor": LinkProtoVersion().minor],
             "hub": ["id": auth.hubID.uuidString.lowercased(),
                     "name": auth.hubName, "kind": "console", "version": version],
             "auth": auth.authMode.rawValue,

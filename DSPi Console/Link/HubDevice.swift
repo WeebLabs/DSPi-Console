@@ -14,7 +14,10 @@ import Foundation
 struct HubDeviceInfo: Equatable {
     var serial: String
     var platform: UInt8          // 0 RP2040, 1 RP2350, 2 STM32
-    var firmware: String         // "1.1.7"
+    var firmware: String         // "1.1.7", without the beta
+    /// Beta number, 0 for a final release; nil when the device's platform reply
+    /// is shorter than 7 bytes and so cannot say (spec 7.4).
+    var firmwareBeta: Int? = nil
     var outputs: Int
     var inputs: Int?
     var wireVersion: Int?

@@ -141,7 +141,8 @@ struct LinkProtoVersion: Codable, Equatable {
     var major: Int
     var minor: Int
 
-    init(major: Int = 1, minor: Int = 0) {
+    /// Defaults to the version this build speaks: spec 1.1.
+    init(major: Int = 1, minor: Int = 1) {
         self.major = major
         self.minor = minor
     }
@@ -238,6 +239,8 @@ struct LinkDeviceInfo: Codable, Equatable {
     var name: String?
     var platform: Int?
     var fw: String?
+    /// Beta number, 0 for final; absent means unknown, not final (spec 7.4, 1.1).
+    var fwBeta: Int?
     var outputs: Int?
     var inputs: Int?
     var wireVersion: Int?
@@ -247,7 +250,7 @@ struct LinkDeviceInfo: Codable, Equatable {
     var lockedBy: Int?
 
     init(handle: Int, serial: String, name: String? = nil, platform: Int? = nil,
-         fw: String? = nil, outputs: Int? = nil, inputs: Int? = nil,
+         fw: String? = nil, fwBeta: Int? = nil, outputs: Int? = nil, inputs: Int? = nil,
          wireVersion: Int? = nil, state: LinkDeviceState? = nil,
          link: LinkDeviceLinkKind? = nil, lockedBy: Int? = nil) {
         self.handle = handle
@@ -255,6 +258,7 @@ struct LinkDeviceInfo: Codable, Equatable {
         self.name = name
         self.platform = platform
         self.fw = fw
+        self.fwBeta = fwBeta
         self.outputs = outputs
         self.inputs = inputs
         self.wireVersion = wireVersion
@@ -265,6 +269,7 @@ struct LinkDeviceInfo: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case handle, serial, name, platform, fw, outputs, inputs
+        case fwBeta = "fw_beta"
         case wireVersion = "wire_version"
         case state, link
         case lockedBy = "locked_by"
@@ -662,15 +667,18 @@ struct LinkFwDone: Codable, Equatable {
     var handle: Int
     var ok: Bool
     var fw: String?
+    var fwBeta: Int?
 
-    init(handle: Int, ok: Bool, fw: String? = nil) {
+    init(handle: Int, ok: Bool, fw: String? = nil, fwBeta: Int? = nil) {
         self.handle = handle
         self.ok = ok
         self.fw = fw
+        self.fwBeta = fwBeta
     }
 
     enum CodingKeys: String, CodingKey {
         case handle, ok, fw
+        case fwBeta = "fw_beta"
     }
 }
 
