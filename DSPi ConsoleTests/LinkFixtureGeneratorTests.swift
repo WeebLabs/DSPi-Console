@@ -43,7 +43,7 @@ final class LinkFixtureGeneratorTests: XCTestCase {
         let cmdResp = LinkCmdResponse(tag: 8, status: .ok, payload: Data([1, 1, 0x17, 9, 1, 7, 0]))
         let denied = LinkCmdResponse(tag: 9, status: .denied)
         let notify = LinkNotifyFrame(tag: 3, handle: 0, origin: 12, packet: makeParamChangedPacket(source: 1, seq: 41))
-        let poll = LinkPollFrame(tag: 100, handle: 0, slot: 2, payload: Data((0..<27).map { UInt8($0) }))
+        let poll = LinkPollFrame(tag: 100, handle: 0, slot: 2, payload: Data((0..<41).map { UInt8($0) }))
         let fw = LinkFwDataFrame(tag: 3, offset: 65536, data: Data([0xAA, 0xBB, 0xCC]))
         let ack = LinkFwDataAck(tag: 3, offset: 65536, status: .ok)
         let resync = LinkResyncFrame(handle: 0, reason: 1)
@@ -64,7 +64,7 @@ final class LinkFixtureGeneratorTests: XCTestCase {
              ["type": "notify", "tag": 3, "handle": 0, "origin": 12,
               "packet": ["version": 2, "event": 2, "seq": 41, "wire_offset": 16, "wire_size": 4, "source": 1]]),
             ("poll_status", .poll(poll),
-             ["type": "poll", "tag": 100, "handle": 0, "slot": 2, "payload_length": 27]),
+             ["type": "poll", "tag": 100, "handle": 0, "slot": 2, "payload_length": 41]),
             ("fwdata_chunk", .fwData(fw),
              ["type": "fwdata", "tag": 3, "offset": 65536, "data_hex": "aabbcc"]),
             ("fwdata_ack", .fwDataAck(ack),
@@ -92,11 +92,11 @@ final class LinkFixtureGeneratorTests: XCTestCase {
         let hubInfo = LinkHubInfo(id: "6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b", name: "Studio Mac", kind: .console, version: "1.1.7")
         let limits = LinkLimits(maxFrame: 65536, maxPayload: 8192, maxInflight: 8, pollMaxHz: 20, pollBudgetBps: 200000)
         let samples: [(String, LinkMessage)] = [
-            ("hello_client", .helloClient(LinkHelloClient(client: LinkClientInfo(name: "Troy's iPhone", app: "DSPi Mobile", version: "0.1")))),
+            ("hello_client", .helloClient(LinkHelloClient(client: LinkClientInfo(name: "Living Room iPad", app: "DSPi Mobile", version: "0.1")))),
             ("hello_hub", .helloHub(LinkHelloHub(hub: hubInfo, auth: .pin,
                                                 caps: ["cmd", "notify", "poll", "snapshot", "lock", "rename"], limits: limits))),
             ("auth_token", .authToken(LinkAuthToken(id: 1, token: "Zm9vYmFyYmF6cXV4"))),
-            ("auth_pair", .authPair(LinkAuthPair(id: 1, pin: "482913", name: "Troy's iPhone", role: .control))),
+            ("auth_pair", .authPair(LinkAuthPair(id: 1, pin: "482913", name: "Living Room iPad", role: .control))),
             ("auth_ok", .ok(try LinkOk(id: 1, body: LinkAuthOkBody(session: 12, role: .control, token: "Zm9vYmFyYmF6cXV4",
                                                                      policy: LinkPolicyDescriptor(denied: [[240, 1], [83, 1]]))))),
             ("device_list", .deviceList(LinkDeviceListRequest(id: 5))),
@@ -104,12 +104,12 @@ final class LinkFixtureGeneratorTests: XCTestCase {
                 LinkDeviceInfo(handle: 0, serial: "E46058388B1A2E2C", name: "Living room", platform: 1, fw: "1.1.7",
                                fwBeta: 0, outputs: 9, inputs: 8, wireVersion: 32, state: .online, link: .usb,
                                lockedBy: nil)])))),
-            ("device_added", .deviceAdded(LinkDeviceEvent(device: LinkDeviceInfo(handle: 1, serial: "4BA1DDB9D1443D6A", name: "Bench", state: .online, link: .usb)))),
-            ("device_removed", .deviceRemoved(LinkDeviceRemoved(handle: 1, serial: "4BA1DDB9D1443D6A"))),
+            ("device_added", .deviceAdded(LinkDeviceEvent(device: LinkDeviceInfo(handle: 1, serial: "0123456789ABCDEF", name: "Bench", state: .online, link: .usb)))),
+            ("device_removed", .deviceRemoved(LinkDeviceRemoved(handle: 1, serial: "0123456789ABCDEF"))),
             ("device_snapshot", .deviceSnapshot(LinkDeviceSnapshotRequest(id: 6, handle: 0))),
             ("poll_subscribe", .pollSubscribe(LinkPollSubscribe(id: 8, handle: 0, polls: [
-                LinkPollSpec(slot: 0, req: 80, val: 9, idx: 2, len: 27, hz: 10),
-                LinkPollSpec(slot: 1, req: 11, val: 3, idx: 2, len: 80, hz: 15)]))),
+                LinkPollSpec(slot: 0, req: 80, val: 9, idx: 2, len: 41, hz: 10),
+                LinkPollSpec(slot: 1, req: 11, val: 3, idx: 2, len: 82, hz: 15)]))),
             ("poll_subscribe_ok", .ok(try LinkOk(id: 8, body: LinkPollSubscribeBody(granted: [LinkPollGrant(slot: 0, hz: 10), LinkPollGrant(slot: 1, hz: 12)])))),
             ("poll_unsubscribe", .pollUnsubscribe(LinkPollUnsubscribe(id: 9, handle: 0, slots: [1]))),
             ("lock_acquire", .lockAcquire(LinkLockAcquire(id: 10, handle: 0, reason: "Applying configuration", timeoutMs: 10000))),

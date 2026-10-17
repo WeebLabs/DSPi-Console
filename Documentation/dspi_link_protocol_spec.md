@@ -1,7 +1,7 @@
 # DSPi Link Protocol Specification
 
 *Version: 1.1 (draft)*
-*Status: draft; dspi-link-js implements 1.1, the DSPi Console `feature/dspi-link` branch implements 1.0*
+*Status: draft; dspi-link-js and the DSPi Console `feature/dspi-link` branch implement 1.1*
 *Last updated: 2026-10-17 (changes from 1.0 are listed in section 13)*
 *Canonical home: `WeebLabs/DSPi-Link` `spec/`; this copy is kept in step with it.*
 
@@ -13,8 +13,6 @@ self-contained: a hub or client can be implemented from it plus the firmware's
 vendor command catalogue (`Documentation/commands.md` in the firmware repo)
 and the notification spec (`notification_protocol_v2_spec.md`). No DSPi Console
 source is required.
-
-Writing style note: this document avoids em-dashes per project convention.
 
 ---
 
@@ -228,13 +226,31 @@ invalidated after any 5 failures.
 
 The hub classifies each `bRequest` into *read*, *control* or *config* with
 a table it owns and maintains. Because the table is hub policy, the hub
-publishes the session's effective denial list in `hello` (`policy.denied`,
-an array of `[bRequest, dir]` pairs) so clients can grey out controls without
-guessing. A command outside the role gets status `0x81 DENIED`.
+publishes the session's effective denial list in the auth `ok` reply
+(`policy.denied`, an array of `[bRequest, dir]` pairs, section 7.3) so clients
+can grey out controls without guessing. In `auth: none` mode there is no auth
+exchange unless the client chooses to send `auth.pair` (section 6.1), so a
+client receives the list only if it does. A command outside the role gets
+status `0x81 DENIED`.
 
 Write-as-read commands (a `GET` transfer that mutates, see `commands.md`
 section 1.1) are classified by what they do, not by their direction. The
 table must list them explicitly.
+
+Two *control* commands can reach hardware configuration under one device
+setting. When the device's output-config persistence mode is "with preset"
+(set by `REQ_SET_OUTPUT_CONFIG_MODE` 0x98, which is *config*), the firmware
+applies the output pins, output types, I2S BCK/MCK pins, S/PDIF RX pin and
+ADAT configuration carried in a bulk blob (`REQ_SET_ALL_PARAMS` 0xA1) or a
+preset slot (`REQ_PRESET_LOAD` 0x91), so a `control` session can change the
+wiring through those two commands (firmware: `main.c` calls
+`bulk_params_apply(buf, oc_mode == OUTPUT_CONFIG_MODE_WITH_PRESET)`, and
+`flash_storage.c` `apply_output_config_from_mode()` runs `io_config_apply()`
+on preset load only in that mode). In the default "independent" mode they
+change live parameters only. This is an accepted trade-off: the two commands
+stay *control* because they are the normal way a control user restores a
+configuration, and an admin who wants control users kept away from the
+wiring leaves the device in independent mode.
 
 A `bRequest` the firmware accepts in both directions can carry a different
 class per direction. `REQ_LIMITER` (0x81) is the case today. Its `SET`
@@ -288,7 +304,7 @@ Client to hub, first message:
 
 ```json
 {"t": "hello", "proto": {"major": 1, "minor": 1},
- "client": {"name": "Troy's iPhone", "app": "DSPi Mobile", "version": "0.1"}}
+ "client": {"name": "Living Room iPad", "app": "DSPi Mobile", "version": "0.1"}}
 ```
 
 Hub to client, in reply (no `id`):
@@ -327,11 +343,11 @@ advertises a small one.
 {"t": "auth.token", "id": 1, "token": "<base64url>"}
 {"t": "ok", "id": 1, "session": 12, "role": "control", "policy": {"denied": [[240,1],[83,1]]}}
 
-{"t": "auth.pair", "id": 1, "pin": "482913", "name": "Troy's iPhone", "role": "control"}
+{"t": "auth.pair", "id": 1, "pin": "482913", "name": "Living Room iPad", "role": "control"}
 {"t": "ok", "id": 1, "session": 12, "role": "control", "token": "<base64url>", "policy": {...}}
 
 {"t": "auth.list", "id": 2}                         (admin)
-{"t": "ok", "id": 2, "clients": [{"cid": 3, "name": "Troy's iPhone", "role": "control",
+{"t": "ok", "id": 2, "clients": [{"cid": 3, "name": "Living Room iPad", "role": "control",
                                   "created": "2026-09-08T10:12:00Z", "last_seen": "...", "online": true}]}
 {"t": "auth.revoke", "id": 3, "cid": 3}             (admin)
 {"t": "auth.set_role", "id": 4, "cid": 3, "role": "viewer"}   (admin)
@@ -404,7 +420,7 @@ several sessions are executed once and fanned out.
 ```json
 {"t": "poll.subscribe", "id": 8, "handle": 0, "polls": [
   {"slot": 0, "req": 80,  "val": 9, "idx": 2, "len": 41, "hz": 10},
-  {"slot": 1, "req": 11,  "val": 3, "idx": 2, "len": 80, "hz": 15}
+  {"slot": 1, "req": 11,  "val": 3, "idx": 2, "len": 82, "hz": 15}
 ]}
 {"t": "ok", "id": 8, "granted": [{"slot": 0, "hz": 10}, {"slot": 1, "hz": 12}]}
 
@@ -709,6 +725,14 @@ none of which are visible to clients:
 - Obeys the one-request-in-flight rule on the UART: the Link router
   serialises per device anyway, so this costs nothing.
 - Forwards the UART `status` byte verbatim; wraps UART timeouts as `TIMEOUT`.
+- Cannot serve `REQ_RTA_GET_BANDS_ALL` (0x0F): it is USB-only in firmware,
+  the device refuses it on the UART and the client receives status `0x02
+  ERROR` (not `BLOCKED`), so clients behind a bridge poll `REQ_RTA_GET_BANDS`
+  (0x0B) per channel instead. A bridge also caps every non-bulk `GET`
+  response at 132 bytes and every `SET` payload at 64 bytes (firmware
+  `vendor_commands.c`: `_ext_resp_copy` is `sizeof(CsMacro)` = 132 and
+  `vendor_rx_buf` is 64), so a longer `GET` reply is truncated and a longer
+  `SET` answers `OVERSIZE`.
 - Relays type 0x40 UART notification frames as NOTIFY. Because a busy request
   stream starves UART notifications, the bridge must leave idle gaps: a
   minimum of 2 ms between the end of one response and the start of the next
@@ -735,7 +759,7 @@ machine-readable files so that no implementation hand-transcribes them:
 | `fixtures/frames/*.bin` + `frames.json` | Byte-exact CMD, NOTIFY, POLL, FWDATA and RESYNC frames with their decoded meaning. | Codec tests in every language. |
 | `fixtures/messages/*.json` | Valid and invalid control-plane messages with the expected reply or error code. | Control-plane tests. |
 | `fixtures/device/bulk_v32.bin`, `status_wvalue9.bin`, `platform.bin` | Real device captures with the decoded values in the `capture.json` sidecar. | Decoder tests, so Swift, C#, TypeScript and Kotlin all decode the same bytes to the same numbers. |
-| `conformance/` | A reference client that drives any hub through the checklist in section 12, and a reference hub (Python, on the existing `tools/dspi_test` USB layer) that any client can be tested against. | CI for every implementation. |
+| `conformance/` (planned, not yet in the repository) | A reference client that drives any hub through the checklist in section 12, and a reference hub (Python, on the existing `tools/dspi_test` USB layer) that any client can be tested against. | CI for every implementation. |
 
 An implementation embeds `policy/commands.json` as a resource and records the
 spec version it was taken from. A hub must treat a `bRequest` absent from
@@ -865,3 +889,15 @@ suffix-free for a minor-0 hub (section 7.8).
   `REQ_GET_CLOCK_DIAG` (0x82).
 - Examples and sizes move from wire V30 (5980-byte bulk blob) to V32 (6136
   bytes), and the device fixtures are recaptured from beta5 firmware.
+- The `REQ_RTA_GET_BANDS` (0x0B) poll length in the section 7.6 example and
+  in `fixtures/messages/poll_subscribe.json` is 82 bytes, the firmware's
+  `RtaBandFrame` size, not 80. The status poll example and the
+  `poll_status.bin` fixture carry the 41-byte 17-channel frame.
+- `REQ_RTA_GET_BANDS_ALL` (0x0F) is marked USB-only in the policy table: a
+  bridge hub returns `0x02 ERROR` for it, and clients poll 0x0B per channel
+  (section 9.2). Section 9.2 also records the bridge's 132-byte `GET`
+  response and 64-byte `SET` payload caps.
+- Section 6.3 now documents that `REQ_SET_ALL_PARAMS` (0xA1) and
+  `REQ_PRESET_LOAD` (0x91), both still *control*, apply output and interface
+  pin configuration when the device is in the "with preset" output-config
+  mode (0x98). The policy rows carry matching notes.
