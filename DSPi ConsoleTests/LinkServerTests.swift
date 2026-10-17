@@ -225,9 +225,11 @@ final class RawWebSocketClient {
         try write(frame)
     }
 
-    /// Read frames, answering nothing, until a close frame arrives; returns
-    /// its code, or nil if the socket ended or timed out first.
-    func readUntilClose() -> UInt16? {
+    /// Read frames, answering nothing (pings included), until a close frame
+    /// arrives; returns its code, or nil if the socket ended or `timeout`
+    /// passed first.
+    func readUntilClose(timeout: TimeInterval) -> UInt16? {
+        let deadline = Date().addingTimeInterval(timeout)
         func read(_ n: Int) -> Data? {
             var out = Data()
             var buf = [UInt8](repeating: 0, count: n)
@@ -238,7 +240,7 @@ final class RawWebSocketClient {
             }
             return out
         }
-        while let h = read(2) {
+        while Date() < deadline, let h = read(2) {
             let opcode = h[0] & 0x0F
             var length = Int(h[1] & 0x7F)
             if length == 126 { guard let l = read(2) else { return nil }; length = Int(l[0]) << 8 | Int(l[1]) }
@@ -337,5 +339,44 @@ extension LinkServerTests {
             wait(for: [done], timeout: 5)
             XCTAssertEqual(status, 200, "info over \(host)")
         }
+    }
+
+    /// Spec 4: a session that has not answered the hub's pings is closed.
+    /// URLSession always pongs, hence the raw client.
+    func testClientThatNeverAnswersPingsIsClosedWith1001() throws {
+        let (server, hub, port) = try startOpenServer {
+            $0.pingInterval = 0.2
+            $0.idleDeadline = 0.6
+        }
+        defer { server.stop() }
+        let client = try RawWebSocketClient(port: port)
+        try client.upgrade(port: port)
+        try client.sendText(try helloData())
+        XCTAssertTrue(waitUntil(5) { hub.sessionCount == 1 })
+        XCTAssertEqual(client.readUntilClose(timeout: 5), 1001)
+        XCTAssertTrue(waitUntil(5) { hub.sessionCount == 0 }, "the session is released")
+    }
+
+    /// The other half: a client that keeps reading answers pings and stays
+    /// connected well past the idle deadline.
+    func testClientThatAnswersPingsStaysConnected() throws {
+        let (server, hub, port) = try startOpenServer {
+            $0.pingInterval = 0.2
+            $0.idleDeadline = 0.6
+        }
+        defer { server.stop() }
+        let task = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/dspi/v1")!,
+                                                   protocols: ["dspi-link-1"])
+        task.resume()
+        defer { task.cancel(with: .goingAway, reason: nil) }
+        // URLSession only reads (and so only pongs) while a receive is pending.
+        func receiveForever() { task.receive { if case .success = $0 { receiveForever() } } }
+        receiveForever()
+        let sent = expectation(description: "hello sent")
+        task.send(.string(String(decoding: try helloData(), as: UTF8.self))) { _ in sent.fulfill() }
+        wait(for: [sent], timeout: 5)
+        XCTAssertTrue(waitUntil(5) { hub.sessionCount == 1 })
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(hub.sessionCount, 1, "pongs keep the session alive")
     }
 }

@@ -26,6 +26,14 @@ struct LinkServerTuning {
     /// A connection that stays unwritable this long has stopped reading and
     /// is closed, so its backlog cannot grow without bound.
     var stallDeadline: TimeInterval = 10
+    /// The hub pings this often and closes a connection that has sent
+    /// nothing, pongs included, for `idleDeadline` (spec 4).
+    var pingInterval: TimeInterval = 10
+    var idleDeadline: TimeInterval = 30
+}
+
+private extension TimeAmount {
+    static func interval(_ t: TimeInterval) -> TimeAmount { .nanoseconds(Int64(t * 1_000_000_000)) }
 }
 
 final class LinkServer {
@@ -312,8 +320,10 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
 
     private var keepalive: RepeatedTask?
     private var authTimeout: Scheduled<Void>?
+    /// When the peer last sent any frame.  TCP alone may take hours to
+    /// notice a vanished peer, so the keepalive tick checks this.
+    private var lastInbound = NIODeadline.now()
 
-    private static let pingInterval: TimeAmount = .seconds(10)
     private static let authDeadline: TimeAmount = .seconds(30)
 
     init(hub: LinkHub, auth: LinkAuthStore, policy: LinkPolicy, tuning: LinkServerTuning) {
@@ -337,11 +347,17 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
             onLoop { self?.send(outbound) }
         }
 
-        // Keepalive: ping every 10 s (spec 4).  The client's pongs keep it alive;
-        // an unresponsive one is dropped when the TCP connection dies.
-        keepalive = eventLoop.scheduleRepeatedTask(initialDelay: Self.pingInterval,
-                                                   delay: Self.pingInterval) { [weak self] _ in
-            self?.sendPing()
+        // Keepalive: ping every 10 s and close with 1001 a peer that has sent
+        // nothing for 30 s, pongs included (spec 4).
+        let interval = TimeAmount.interval(tuning.pingInterval)
+        let idle = TimeAmount.interval(tuning.idleDeadline)
+        keepalive = eventLoop.scheduleRepeatedTask(initialDelay: interval, delay: interval) { [weak self] _ in
+            guard let self = self else { return }
+            if NIODeadline.now() - self.lastInbound >= idle {
+                self.abort(code: 1001)
+            } else {
+                self.sendPing()
+            }
         }
         // Close an unauthenticated connection after 30 s (spec 5, close 4001).
         authTimeout = eventLoop.scheduleTask(in: Self.authDeadline) { [weak self] in
@@ -420,6 +436,7 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let frame = unwrapInboundIn(data)
+        lastInbound = .now()
         switch frame.opcode {
         case .connectionClose:
             // Echo a normal close and let the channel go.
@@ -433,7 +450,7 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
             let pong = WebSocketFrame(fin: true, opcode: .pong, data: frame.unmaskedData)
             context.writeAndFlush(wrapOutboundOut(pong), promise: nil)
         case .pong:
-            break   // keepalive answered; nothing to do
+            break   // keepalive answered; lastInbound is already updated
         case .text:
             deliver(opcode: .text, frame: frame)
         case .binary:
