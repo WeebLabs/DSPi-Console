@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Test Signals Window Controller
+// MARK: - Signal Generator Window Controller
 
 class TestSignalsWindowController: NSObject, ObservableObject {
     private var window: NSWindow?
@@ -11,17 +11,24 @@ class TestSignalsWindowController: NSObject, ObservableObject {
             let view = TestSignalsView(vm: vm).onboardingHint("test-signals")
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 428, height: 760),
+                contentRect: NSRect(x: 0, y: 0, width: 780, height: 500),
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
-            window?.title = "Test Signals"
-            window?.contentView = NSHostingView(rootView: view)
+            window?.title = "Signal Generator"
+            let hosting = NSHostingView(rootView: view)
+            // The window's size limits are set here, not derived from the
+            // tree: left at its defaults the hosting view re-measures the
+            // whole tree for them on every display cycle, which is most of
+            // what a meter reading or a drag used to cost in this window.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
-            window?.contentMinSize = NSSize(width: 428, height: 480)
-            window?.contentMaxSize = NSSize(width: 428, height: 980)
+            // The left column (signal tiles and nine output chips) does not
+            // scroll, so the window cannot be made shorter than it.
+            window?.contentMinSize = NSSize(width: 740, height: 500)
         }
 
         window?.center()
@@ -268,7 +275,7 @@ private struct SiggenGlyph: Shape {
     }
 }
 
-// MARK: - Test Signals View
+// MARK: - Signal Generator View
 
 struct TestSignalsView: View {
     @ObservedObject var vm: DSPViewModel
@@ -308,27 +315,41 @@ struct TestSignalsView: View {
             if vm.isDeviceConnected && !vm.siggenSupported {
                 unsupportedNotice
             } else {
-                ScrollView {
-                    VStack(spacing: 16) {
+                // What plays and where on the left, how it plays on the right.
+                // The left column is the same height for every signal type, so
+                // the window is sized to it; the right column's length depends
+                // on the type's parameters and timing, so it scrolls on its own
+                // rather than leaving empty space under the shorter types.
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 16) {
                         signalSection
-                            .padding(.top, 14)
-                        Divider().padding(.horizontal, 16)
+                        Divider()
                         outputsSection
-                        Divider().padding(.horizontal, 16)
-                        levelSection
-                        parametersSection
-                        timingSection
-                        Divider().padding(.horizontal, 16)
-                        optionsSection
-                            .padding(.bottom, 14)
+                    }
+                    .toolColumn()
+                    .padding(.vertical, 14)
+
+                    Divider()
+
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            levelSection
+                            parametersSection
+                            timingSection
+                            Divider()
+                            optionsSection
+                        }
+                        .toolColumn()
+                        .padding(.vertical, 14)
                     }
                 }
+                .frame(maxHeight: .infinity, alignment: .top)
             }
 
             Divider()
             transportBar
         }
-        .frame(minWidth: 428, maxWidth: 428)
+        .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             pulsing = true
             refreshStatus()
@@ -352,9 +373,9 @@ struct TestSignalsView: View {
                 .foregroundColor(.accentColor)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Test Signals")
+                Text("Signal Generator")
                     .font(.system(size: 14, weight: .semibold))
-                Text("Onboard measurement signal generator")
+                Text("Onboard test and measurement signals")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
@@ -438,7 +459,6 @@ struct TestSignalsView: View {
                 .font(.system(size: 9))
                 .foregroundColor(.secondary)
         }
-        .padding(.horizontal, 16)
     }
 
     private func signalTile(_ ti: SiggenTypeInfo) -> some View {
@@ -507,7 +527,6 @@ struct TestSignalsView: View {
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 16)
     }
 
     private var allOutputsMask: UInt16 {
@@ -606,7 +625,6 @@ struct TestSignalsView: View {
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 16)
     }
 
     // MARK: Parameters
@@ -640,7 +658,6 @@ struct TestSignalsView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            .padding(.horizontal, 16)
         }
     }
 
@@ -777,7 +794,6 @@ struct TestSignalsView: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
     }
 
     private func timingRow<Field: View>(label: String, caption: String?,
@@ -872,7 +888,6 @@ struct TestSignalsView: View {
                           ))
             }
         }
-        .padding(.horizontal, 16)
     }
 
     private func optionRow(title: String, caption: String, isOn: Binding<Bool>) -> some View {

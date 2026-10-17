@@ -1,5 +1,18 @@
 [
   {
+    "version": "1.1.6-beta4",
+    "headline": "Tube modelling, output limiters and filters you shape on the graph",
+    "items": [
+      "The Tube Modeller gives each output the character of one of 16 popular vacuum tubes, with drive, mix and an output stage that recreates how a valve amplifier's transformer meets a loudspeaker. Find it under Tools > Tube Modeller (Cmd+Shift+D).",
+      "Every output now has its own brickwall limiter with adjustable threshold and release. Click the icon under an output's mute button to switch it on, or right-click it for settings. Linked outputs share their limiter settings, and the limiter also guards against test signals overdriving a tweeter.",
+      "Filters can now be edited directly on the response graph. Drag a band's dot to change its frequency and gain, scroll to change its width, and use the card beside it to pick a shape.",
+      "The effect windows are laid out in two columns, so their controls and graphs fit side by side.",
+      "The Matrix Mixer labels its input rows with the channel names.",
+      "Changing the computer's volume while listening to a non-USB input no longer shows a volume the device is not actually playing at.",
+      "DSPi Console uses much less CPU while connected to the device."
+    ]
+  },
+  {
     "version": "1.1.6-beta3",
     "headline": "A spectrum analyser, firmware updates and a guided start",
     "items": [

@@ -95,8 +95,14 @@ class AppSettings: ObservableObject {
     // Scale & Labels
     @AppStorage("showFrequencyLabels") var showFrequencyLabels: Bool = true
     @AppStorage("showDBLabels") var showDBLabels: Bool = true
+    /// Readouts beside the pointer on empty graph while editing bands.
+    @AppStorage("showFrequencyReadout") var showFrequencyReadout: Bool = true
+    @AppStorage("showLevelReadout") var showLevelReadout: Bool = true
     @AppStorage("showFrequencyGrid") var showFrequencyGrid: Bool = true
     @AppStorage("showDBGrid") var showDBGrid: Bool = true
+    /// Scales every grid line on the response graph, the 0 dB line included;
+    /// 1 is the original look, 0 hides them, 2 doubles them.
+    @AppStorage("graphGridOpacity") var graphGridOpacity: Double = 0.5
     @AppStorage("graphDBRange") var graphDBRange: Double = 50.0
     @AppStorage("graphDBCenter") var graphDBCenter: Double = 0.0
     @AppStorage("graphHeight") var graphHeight: Double = 250.0
@@ -247,6 +253,12 @@ class AppSettings: ObservableObject {
             defaults.set(amount > 0, forKey: "rtaSmoothingOn")
             defaults.removeObject(forKey: "rtaSmoothing")
         }
+        // The grid opacity default dropped from 100 % to 50 %.  Clear a value
+        // saved before then, once, so every grid starts from the new default.
+        if !defaults.bool(forKey: "graphGridOpacityReset") {
+            defaults.removeObject(forKey: "graphGridOpacity")
+            defaults.set(true, forKey: "graphGridOpacityReset")
+        }
     }
 }
 
@@ -256,7 +268,7 @@ class AppSettings: ObservableObject {
 /// Symbol, and tint so the sidebar row and the detail navigation title stay in
 /// sync from a single source of truth.
 private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
-    case general, graphing, spectrum, advanced, networking
+    case general, softwareUpdate, graphing, spectrum, advanced, networking
     case overview
     case globalParams, outputAssignment, i2sConfig, spdifInput, controlInterfaces, controlSurfaces
     case channelGroups, macros, auxOutputs
@@ -267,6 +279,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .overview:         return "Overview"
         case .general:          return "About"
+        case .softwareUpdate:   return "Software Update"
         case .graphing:         return "Graphing"
         case .spectrum:         return "Spectrum Analyser"
         case .advanced:         return "Advanced"
@@ -287,6 +300,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .overview:         return "cpu.fill"
         case .general:          return "gear"
+        case .softwareUpdate:   return "arrow.down.circle"
         case .graphing:         return "waveform.path.ecg"
         case .spectrum:         return "waveform.and.magnifyingglass"
         case .advanced:         return "gearshape.2"
@@ -317,6 +331,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
         // Neutral: these pages assign no GPIO.
         case .overview:         return Color(red: 0.384, green: 0.439, blue: 0.502)  // #627080 steel
         case .general:          return Color(red: 0.392, green: 0.412, blue: 0.443)  // #646971 slate
+        case .softwareUpdate:   return Color(red: 0.365, green: 0.416, blue: 0.478)  // #5d6a7a slate blue
         case .advanced:         return Color(red: 0.447, green: 0.471, blue: 0.502)  // #727880 slate light
         case .graphing:         return Color(red: 0.345, green: 0.478, blue: 0.537)  // #587a89 steel cyan
         case .networking:       return Color(red: 0.290, green: 0.455, blue: 0.600)  // #4a7499 network blue
@@ -359,7 +374,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable, Hashable {
 
     /// Non-collapsible sidebar groups, in display order.
     static let groups: [(title: String, items: [SettingsCategory])] = [
-        ("Application", [.general, .advanced, .networking]),
+        ("Application", [.general, .softwareUpdate, .advanced, .networking]),
         ("Display",     [.graphing, .spectrum]),
         // Overview leads the group: it is the read-only summary of what every
         // page below it has claimed.
@@ -609,6 +624,7 @@ struct SettingsView: View {
         switch selection {
         case .overview:         PinOverviewTab()
         case .general:          GeneralSettingsTab()
+        case .softwareUpdate:   SoftwareUpdateSettingsTab()
         case .graphing:         GraphingSettingsTab()
         case .spectrum:         SpectrumSettingsTab()
         case .advanced:         AdvancedSettingsTab()
@@ -923,6 +939,108 @@ struct GeneralSettingsTab: View {
     }
 }
 
+/// Settings > Software Update: the running version, the result of the last
+/// check, and the controls to check or install.  Driven by AppUpdateChecker.
+struct SoftwareUpdateSettingsTab: View {
+    @ObservedObject private var updates = AppUpdateChecker.shared
+    @AppStorage(AppUpdateChecker.automaticKey) private var checkAutomatically = true
+
+    private var replaceable: Bool { AppUpdateInstaller.canReplace(Bundle.main.bundleURL) }
+
+    private var statusTitle: String {
+        switch updates.installState {
+        case .downloading:     return "Downloading update..."
+        case .verifying:       return "Verifying update..."
+        case .waitingForQuit:  return "Update ready"
+        case .failed:          return "The update couldn't be installed"
+        case .idle:            break
+        }
+        if updates.isChecking { return "Checking for updates..." }
+        if let release = updates.available {
+            return "DSPi Console \(release.version?.description ?? release.tagName) is available"
+        }
+        return updates.lastChecked == nil ? "Not checked yet" : "DSPi Console is up to date"
+    }
+
+    private var statusDetail: String? {
+        switch updates.installState {
+        case .waitingForQuit:      return "It will be installed when DSPi Console quits."
+        case .failed(let message): return message
+        default:                   break
+        }
+        let version = "Version \(updates.currentVersion?.description ?? GeneralSettingsTab.appVersion)"
+        guard let date = updates.lastChecked, !updates.isChecking else { return version }
+        return "\(version) - last checked \(date.formatted(.relative(presentation: .named)))"
+    }
+
+    private var statusIcon: (name: String, color: Color) {
+        switch updates.installState {
+        case .failed:                               return ("exclamationmark.triangle.fill", .orange)
+        case .downloading, .verifying, .waitingForQuit: return ("arrow.down.circle.fill", .accentColor)
+        case .idle:                                 break
+        }
+        if updates.available != nil { return ("arrow.down.circle.fill", .accentColor) }
+        return ("checkmark.circle.fill", .green)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: statusIcon.name)
+                        .font(.system(size: 28))
+                        .foregroundStyle(statusIcon.color)
+                        .frame(width: 32)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(statusTitle).font(.headline)
+                        if let detail = statusDetail {
+                            Text(detail)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if case .downloading(let fraction) = updates.installState {
+                            ProgressView(value: fraction)
+                        } else if case .verifying = updates.installState {
+                            ProgressView().progressViewStyle(.linear)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+
+                HStack {
+                    if let release = updates.available {
+                        Button("Release Notes") { NSWorkspace.shared.open(release.htmlURL) }
+                    }
+                    Spacer()
+                    if case .downloading = updates.installState {
+                        Button("Cancel") { updates.cancelInstall() }
+                    } else if let release = updates.available, updates.canInstall(release) {
+                        Button("Install and Relaunch") { updates.install(release) }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(updates.isInstalling)
+                    }
+                    Button("Check Now") { updates.checkInteractively() }
+                        .disabled(updates.isChecking || updates.isInstalling)
+                }
+            } header: {
+                Label("Status", systemImage: "arrow.down.circle")
+            }
+
+            Section {
+                Toggle("Check for updates automatically", isOn: $checkAutomatically)
+            } footer: {
+                Text(replaceable
+                     ? "DSPi Console checks GitHub for new releases at launch and once a day. Each release includes matching DSPi firmware, which the app offers to install when your device is connected."
+                     : "DSPi Console can't update itself from where it is running. Move it to the Applications folder with Finder to install updates from here; until then, updates open the release page.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
 // MARK: - Global Settings Tab
 //
 // Houses every setting that lives in the device's flash directory
@@ -959,6 +1077,7 @@ struct GlobalSettingsDraft: Equatable {
 /// clocks, S/PDIF RX). These edits apply live to RAM; this captures a baseline
 /// so we can detect/revert changes that haven't been flashed yet.
 struct OutputConfigSnapshot: Equatable {
+    var limiterOutputs: [LimiterOutputSettings]
     var outputPins: [UInt8]
     var outputSlotTypes: [UInt8]
     var i2sBckPin: UInt8
@@ -984,8 +1103,9 @@ struct OutputConfigSnapshot: Equatable {
 ///
 ///  - Global parameters: staged in `globalDraft` and not applied until saved
 ///    (the firmware setters apply + persist on Save).
-///  - Output config (independent mode only): pin/type/clock/RX edits apply
-///    LIVE to RAM as they're made; "dirty" means they haven't been flashed yet.
+///  - Output config (independent mode only): pin/type/clock/RX and output
+///    limiter edits apply LIVE to RAM as they're made; "dirty" means they
+///    haven't been flashed yet.
 ///    Save calls `saveOutputConfig()`; Revert re-applies the captured baseline.
 ///
 /// One Save / one Revert acts on whatever is pending. Dirtiness is gated on
@@ -1071,6 +1191,7 @@ final class SettingsSaveCoordinator: ObservableObject {
 
     private static func snapshot(_ vm: DSPViewModel) -> OutputConfigSnapshot {
         OutputConfigSnapshot(
+            limiterOutputs: vm.limiter.outputs,
             outputPins: vm.outputPins,
             outputSlotTypes: vm.outputSlotTypes,
             i2sBckPin: vm.i2sBckPin,
@@ -1253,13 +1374,16 @@ final class SettingsSaveCoordinator: ObservableObject {
                     }
                 }
                 guard stillCurrent() else { return }
-                // I2S input: restore the channel count first (lowering frees pairs
-                // and never fails), then each pair's data pin.
-                if vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
+                // I2S input: a lowered count goes first (it frees pairs and never
+                // fails); a raised count goes last, because the firmware checks the
+                // newly active pairs' parked pins, which must be restored first.
+                let i2sRaising = base.i2sInputChannels > vm.i2sInputChannels
+                if !i2sRaising && vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
                 for pair in 0..<min(vm.i2sRxPins.count, base.i2sRxPins.count)
                 where vm.i2sRxPins[pair] != base.i2sRxPins[pair] {
                     _ = vm.setI2SRxPin(pair: pair, base.i2sRxPins[pair])
                 }
+                if i2sRaising { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
                 if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
                 if vm.i2sClockMode != base.i2sClockMode { vm.setI2SClockMode(base.i2sClockMode) }
                 // Clock-pin mode: restore the slave pair first (a dormant store,
@@ -1281,6 +1405,15 @@ final class SettingsSaveCoordinator: ObservableObject {
                 }
                 DispatchQueue.main.async {
                     guard stillCurrent() else { return }
+                    // Output limiters last, on main: their setters publish.
+                    if vm.firmwareSupportsLimiter {
+                        var targets: [Int: LimiterOutputSettings] = [:]
+                        for k in 0..<min(vm.numOutputChannels, base.limiterOutputs.count)
+                        where vm.limiter.outputs[k] != base.limiterOutputs[k] {
+                            targets[k] = base.limiterOutputs[k]
+                        }
+                        if !targets.isEmpty { vm.applyLimiterSettings(targets) }
+                    }
                     self.outputConfigDirty = false
                 }
             }
@@ -1881,6 +2014,17 @@ struct GraphingSettingsTab: View {
                         .toggleStyle(.switch)
                     Toggle("Show dB Labels", isOn: $settings.showDBLabels)
                         .toggleStyle(.switch)
+                    Toggle("Show Frequency Readout", isOn: $settings.showFrequencyReadout)
+                        .toggleStyle(.switch)
+                    Toggle("Show Gain Readout", isOn: $settings.showLevelReadout)
+                        .toggleStyle(.switch)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Grid Opacity: \(Int((settings.graphGridOpacity * 100).rounded()))%")
+                            .font(.body)
+                        Slider(value: $settings.graphGridOpacity, in: 0...2)
+                    }
+                    .disabled(!settings.showFrequencyGrid && !settings.showDBGrid)
 
                     Divider()
 
@@ -6188,6 +6332,9 @@ struct ControlSurfacesSettingsTab: View {
                              CS_NOUN_SUBHARM_HOLD, CS_NOUN_SUBHARM_CEILING,
                              CS_NOUN_SUBHARM_LINK, CS_NOUN_SUBHARM_SOLO],
                      strip: ["Subharm"], enableNoun: CS_NOUN_SUBHARM),
+        NounCategory(name: "Tube Modeller",
+                     nouns: [CS_NOUN_TUBE, CS_NOUN_TUBE_TYPE, CS_NOUN_TUBE_DRIVE, CS_NOUN_TUBE_MIX],
+                     strip: ["Tube"], enableNoun: CS_NOUN_TUBE),
         NounCategory(name: "Upmixer",
                      nouns: [CS_NOUN_UPMIX, CS_NOUN_UPMIX_CENTER_MODE, CS_NOUN_UPMIX_SURROUND_MODE,
                              CS_NOUN_UPMIX_STRENGTH, CS_NOUN_UPMIX_WIDTH, CS_NOUN_UPMIX_PRESENCE],
@@ -7142,7 +7289,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_FILTER_Q:           return "Filter Q"
         case CS_NOUN_FILTER_TYPE:        return "Filter Type"
         case CS_NOUN_FILTER_BYPASS:      return "Filter Bypass"
-        case CS_NOUN_SIGGEN:             return "Test Signal"
+        case CS_NOUN_SIGGEN:             return "Signal Generator"
         case CS_NOUN_DAC_MUTE_TEST:      return "DAC Mute Test"
         case CS_NOUN_CLIP_CH:            return "Channel Clipping"
         case CS_NOUN_LEVEL:              return "Channel Level"
@@ -7175,6 +7322,10 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_SUBHARM_CEILING:    return "Subharm Sub Ceiling"
         case CS_NOUN_SUBHARM_LINK:       return "Subharm Pair Link"
         case CS_NOUN_SUBHARM_SOLO:       return "Subharm Solo"
+        case CS_NOUN_TUBE:               return "Tube Modeller"
+        case CS_NOUN_TUBE_DRIVE:         return "Tube Drive"
+        case CS_NOUN_TUBE_TYPE:          return "Tube Type"
+        case CS_NOUN_TUBE_MIX:           return "Tube Mix"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
@@ -7430,9 +7581,11 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_UPMIX_SURROUND_MODE:
             let names = ["Off", "Sinner", "Logician"]
             return (value >= 0 && value < names.count) ? names[value] : "Mode \(value)"
+        case CS_NOUN_TUBE_TYPE:
+            return tubeTypeName(value)
         case CS_NOUN_FILTER_TYPE:
-            let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "Low Pass",
-                         "High Pass", "Notch", "All Pass", "All Pass (1st)",
+            let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "High Cut",
+                         "Low Cut", "Notch", "All Pass", "All Pass (1st)",
                          "Low Shelf (1st)", "High Shelf (1st)"]
             return (value >= 0 && value < names.count) ? names[value] : "Type \(value)"
         default:
@@ -7611,6 +7764,7 @@ struct HardwareSettingsTab: View {
     var section: Page = .outputs
 
     @ObservedObject private var vm = AppState.shared.viewModel
+    @ObservedObject private var telemetry = AppState.shared.viewModel.telemetry
     @State private var statusMessage: String?
     @State private var statusIsError = false
 
@@ -7642,14 +7796,14 @@ struct HardwareSettingsTab: View {
     private static let defaultDataPins: [UInt8] = [6, 7, 8, 9]
 
     private var mck256UnsupportedAtCurrentRate: Bool {
-        vm.sampleRateHz >= 96000
+        telemetry.sampleRateHz >= 96000
     }
 
     private var sampleRateLabel: String {
-        if vm.sampleRateHz == 0 {
+        if telemetry.sampleRateHz == 0 {
             return "unknown sample rate"
         }
-        return String(format: "%.1f kHz", Double(vm.sampleRateHz) / 1000.0)
+        return String(format: "%.1f kHz", Double(telemetry.sampleRateHz) / 1000.0)
     }
 
     private var visiblePinOutputs: [PinOutput] {
@@ -7773,10 +7927,49 @@ struct HardwareSettingsTab: View {
         }
     }
 
+    /// Data-pin picker row for I2S RX stereo `pair` (input channels 2p+1, 2p+2).
+    /// An inactive pair's pin is parked: it reserves nothing until a raise.
+    @ViewBuilder
+    private func i2sDataPinRow(pair: Int) -> some View {
+        HStack {
+            Image(systemName: "cable.connector")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Serial Data \(pair + 1)")
+                    .font(.body)
+                Text("GPIO data pin for input channels \(pair * 2 + 1)-\(pair * 2 + 2)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Picker("", selection: Binding(
+                get: { vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : 0 },
+                set: { newPin in
+                    SettingsSaveCoordinator.shared.beginOutputEdit()
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let status = vm.setI2SRxPin(pair: pair, newPin)
+                        DispatchQueue.main.async {
+                            handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin)
+                        }
+                    }
+                }
+            )) {
+                let current = vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : UInt8(255)
+                ForEach(Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .i2sRx(pair)) == nil }, id: \.self) { pin in
+                    Text("GPIO \(pin)").tag(pin)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+        }
+    }
+
     /// For a raise from `oldCount` to `newCount` channels, return human-readable
     /// "GPIO N (pair P) is used by <owner>" strings for each newly-activated pair
-    /// whose data pin clashes.  Mirrors the firmware's check_i2s_rx_pin so the
-    /// message matches what the device rejected.
+    /// whose data pin clashes.  Mirrors the firmware's check_i2s_rx_pin with the
+    /// new pair count, so newly-activated pairs are also checked against each other.
     private func i2sRaiseConflicts(from oldCount: Int, to newCount: Int) -> [String] {
         let oldPairs = max(1, oldCount / 2)
         let newPairs = newCount / 2
@@ -7785,6 +7978,8 @@ struct HardwareSettingsTab: View {
             let pin = vm.i2sRxPins[pair]
             if let owner = vm.pinInUseBy(pin, excluding: .i2sRx(pair)) {
                 out.append("GPIO \(pin) (pair \(pair + 1)) is used by \(owner)")
+            } else if let other = (oldPairs..<pair).first(where: { vm.i2sRxPins[$0] == pin }) {
+                out.append("GPIO \(pin) is set on both Serial Data \(other + 1) and \(pair + 1)")
             }
         }
         return out
@@ -8596,41 +8791,21 @@ struct HardwareSettingsTab: View {
                         }
                     }
 
-                    // One data-pin picker per active stereo pair.  Pair p carries
-                    // input channels 2p, 2p+1.
+                    // One data-pin picker per active stereo pair.  The parked pins
+                    // of inactive pairs are editable too, so a channel-count raise
+                    // refused for a clash can be fixed before retrying.
                     ForEach(Array(0..<vm.i2sActivePairs), id: \.self) { pair in
-                        HStack {
-                            Image(systemName: "cable.connector")
-                                .font(.system(size: 12))
+                        i2sDataPinRow(pair: pair)
+                    }
+                    if vm.i2sMaxPairs > vm.i2sActivePairs {
+                        DisclosureGroup {
+                            ForEach(Array(vm.i2sActivePairs..<vm.i2sMaxPairs), id: \.self) { pair in
+                                i2sDataPinRow(pair: pair)
+                            }
+                        } label: {
+                            Text("Unused pairs")
+                                .font(.caption)
                                 .foregroundColor(.secondary)
-                                .frame(width: 16)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Serial Data \(pair + 1)")
-                                    .font(.body)
-                                Text("GPIO data pin for input channels \(pair * 2 + 1)-\(pair * 2 + 2)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Picker("", selection: Binding(
-                                get: { vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : 0 },
-                                set: { newPin in
-                                    SettingsSaveCoordinator.shared.beginOutputEdit()
-                                    DispatchQueue.global(qos: .userInitiated).async {
-                                        let status = vm.setI2SRxPin(pair: pair, newPin)
-                                        DispatchQueue.main.async {
-                                            handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin)
-                                        }
-                                    }
-                                }
-                            )) {
-                                let current = vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : UInt8(255)
-                                ForEach(Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .i2sRx(pair)) == nil }, id: \.self) { pin in
-                                    Text("GPIO \(pin)").tag(pin)
-                                }
-                            }
-                            .labelsHidden()
-                            .fixedSize()
                         }
                     }
                 } header: {
@@ -9346,7 +9521,7 @@ class MatrixMixerWindowController: NSObject, ObservableObject {
             let vm = AppState.shared.viewModel
             let triggers: [AnyPublisher<Void, Never>] = [
                 vm.$upmixEnabled.map { _ in () }.eraseToAnyPublisher(),
-                vm.$upmixSurroundMode.map { _ in () }.eraseToAnyPublisher(),
+                vm.upmix.$surroundMode.map { _ in () }.eraseToAnyPublisher(),
                 vm.$activeInputChannels.map { _ in () }.eraseToAnyPublisher(),
                 vm.$hostConfiguredInputChannels.map { _ in () }.eraseToAnyPublisher(),
                 vm.$inputSource.map { _ in () }.eraseToAnyPublisher(),
@@ -9483,8 +9658,8 @@ class StatsWindowController: NSObject, ObservableObject {
             let statsView = StatsView(vm: statsVM!)
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 960, height: 660),
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
@@ -9492,6 +9667,7 @@ class StatsWindowController: NSObject, ObservableObject {
             window?.contentView = NSHostingView(rootView: statsView.onboardingHint("stats"))
             window?.isReleasedWhenClosed = false
             window?.delegate = self
+            window?.contentMinSize = NSSize(width: 900, height: 480)
         }
 
         window?.center()
@@ -9820,7 +9996,7 @@ struct FileMenuActions {
 
         let volumeCheck = NSButton(checkboxWithTitle: "Volume levels (master and listening volume)",
                                    target: nil, action: nil)
-        let ioCheck = NSButton(checkboxWithTitle: "Hardware I/O (GPIO pins, clocks, ADAT, inputs)",
+        let ioCheck = NSButton(checkboxWithTitle: "Hardware I/O (GPIO pins, clocks, ADAT, inputs, output limiters)",
                                target: nil, action: nil)
 
         let accessory = NSStackView(views: [volumeCheck, ioCheck])
@@ -9898,10 +10074,10 @@ struct FileMenuActions {
     }
 
     /// Persist the device's current live output configuration (output pins,
-    /// output types, I2S clocks, S/PDIF RX pin) to its independent (directory)
-    /// storage so it survives a reboot. Relevant in INDEPENDENT mode, where
-    /// per-field edits apply live but only persist after an explicit save.
-    /// Runs on a background queue because the underlying USB control transfer
+    /// output types, I2S clocks, S/PDIF RX pin, output limiters) to its
+    /// independent (directory) storage so it survives a reboot. Relevant in
+    /// INDEPENDENT mode, where per-field edits apply live but only persist
+    /// after an explicit save. Runs on a background queue because the underlying USB control transfer
     /// is synchronous.
     static func saveOutputConfig() {
         let vm = AppState.shared.viewModel
@@ -10668,6 +10844,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { menuBar.minimise() }
             }
         }
+
+        // Not under XCTest: the test bundle runs inside the app, and an update
+        // alert there would sit modal and stall the run.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            AppUpdateChecker.shared.startAutomaticChecks()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -10694,6 +10876,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         alert.addButton(withTitle: "Quit")
                         alert.addButton(withTitle: "Cancel")
                         let quit = alert.runModal() == .alertFirstButtonReturn
+                        if !quit { AppUpdateChecker.shared.quitCancelled() }
                         NSApp.reply(toApplicationShouldTerminate: quit)
                     }
                 }
@@ -10702,6 +10885,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .discard:
             return .terminateNow
         case .cancel:
+            AppUpdateChecker.shared.quitCancelled()
             return .terminateCancel
         }
     }
@@ -10814,6 +10998,7 @@ struct DSPi_ConsoleApp: App {
     @StateObject private var crossfeedWindowController = CrossfeedWindowController()
     @StateObject private var psybassWindowController = PsychoacousticBassWindowController()
     @StateObject private var subharmWindowController = SubharmonicSynthWindowController()
+    @StateObject private var tubeWindowController = TubeModellerWindowController()
     @StateObject private var upmixerWindowController = UpmixerWindowController()
     @StateObject private var levellerWindowController = VolumeLevellerWindowController()
     @StateObject private var autoEQBrowserController = AutoEQBrowserController()
@@ -10858,6 +11043,7 @@ struct DSPi_ConsoleApp: App {
                 .environmentObject(crossfeedWindowController)
                 .environmentObject(psybassWindowController)
                 .environmentObject(subharmWindowController)
+                .environmentObject(tubeWindowController)
                 .environmentObject(upmixerWindowController)
                 .environmentObject(levellerWindowController)
                 .environmentObject(statsWindowController)
@@ -10917,6 +11103,10 @@ struct DSPi_ConsoleApp: App {
                     NSApplication.shared.orderFrontStandardAboutPanel(options: [
                         .credits: credits
                     ])
+                }
+
+                Button("Check for Updates...") {
+                    AppUpdateChecker.shared.checkInteractively()
                 }
             }
 
@@ -11067,6 +11257,11 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("S", modifiers: [.command, .shift])
 
+                Button("Tube Modeller...") {
+                    tubeWindowController.show(vm: AppState.shared.viewModel)
+                }
+                .keyboardShortcut("D", modifiers: [.command, .shift])
+
                 Button("Stereo Upmixer...") {
                     upmixerWindowController.show(vm: AppState.shared.viewModel)
                 }
@@ -11077,7 +11272,7 @@ struct DSPi_ConsoleApp: App {
                 }
                 .keyboardShortcut("V", modifiers: [.command, .shift])
 
-                Button("Test Signals...") {
+                Button("Signal Generator...") {
                     testSignalsWindowController.show(vm: AppState.shared.viewModel)
                 }
                 .keyboardShortcut("G", modifiers: [.command, .shift])

@@ -1051,7 +1051,7 @@ struct CsDisplayStatus: Equatable {
     }
 }
 
-// MARK: - Test Signal Generator Wire Structs
+// MARK: - Signal Generator Wire Structs
 //
 // Wire-format structs mirroring firmware `siggen.h`
 // (test_signals_spec.md §3).  All packed, little-endian; floats are IEEE-754
@@ -1272,74 +1272,35 @@ class DSPViewModel: ObservableObject {
     @Published var xoverData: [Int: [FilterParams]] = [:]
     @Published var channelVisibility: [Int: Bool] = [:]
     @Published var channelDelays: [Int: Float] = [:]
+    // Only the master switches live here, because the main window's toggle
+    // pills read them and they change on a click rather than during a gesture.
+    // Every sweepable parameter is in the module object; see ToolParameters.swift.
     @Published var loudnessEnabled: Bool = false
-    @Published var loudnessRefSPL: Float = 83.0
-    @Published var loudnessIntensity: Float = 100.0
-    /// Per-output loudness mask (V19+): bit k enables compensation on output
-    /// channel k.  Default 0xFFFF = every output compensated.
-    @Published var loudnessOutputMask: UInt16 = LOUDNESS_DEFAULT_OUTPUT_MASK
+    let loudness = LoudnessParameters()
     @Published var crossfeedEnabled: Bool = false
-    @Published var crossfeedPreset: Int = 0
-    @Published var crossfeedFreq: Float = 700.0
-    @Published var crossfeedFeed: Float = 4.5
-    @Published var crossfeedITD: Bool = true
-    /// Crossfeed output-pair mask (V20+): bit p runs crossfeed on output pair p
-    /// (outputs 2p / 2p+1).  Default 0x01 = pair 1 only (outputs 0/1).  Filter
-    /// settings stay global; the mask only selects which pairs are crossfed.
-    @Published var crossfeedOutputMask: UInt8 = CROSSFEED_DEFAULT_OUTPUT_MASK
+    let crossfeed = CrossfeedParameters()
 
-    // Psychoacoustic Bass (V23): one global parameter set applied per output
-    // channel selected by `psybassOutputMask`, exactly like loudness.  The
-    // firmware clamps each value to the range shown; the app enforces the same
-    // ranges so its state stays identical without a read-back.
+    // Psychoacoustic Bass (V23): parameters in `psybass`, master switch here.
     @Published var psybassEnabled: Bool = false
-    @Published var psybassCutoffHz: Float = 80.0      // 30..300 Hz
-    @Published var psybassHarmonicsDB: Float = 0.0    // -24..+12 dB
-    @Published var psybassDriveDB: Float = 6.0        // 0..18 dB
-    @Published var psybassCharacterPct: Float = 50.0  // 0..100 % (warm..aggressive)
-    @Published var psybassOriginalDB: Float = 0.0     // -60..0 dB (speaker protection)
-    /// Per-output psybass mask: bit k processes output channel k (PDM sub = bit 8
-    /// on RP2350 / bit 4 on RP2040).  Default 0xFFFF = every output.
-    @Published var psybassOutputMask: UInt16 = PSYBASS_DEFAULT_OUTPUT_MASK
+    let psybass = PsybassParameters()
 
-    // Subharmonic Synthesizer (V29, extended V30): a dbx-style octave divider that
-    // adds a real fundamental an octave below the program bass, per output channel
-    // selected by `subharmOutputMask`.  Same wire shape as psybass; the firmware
-    // clamps each value to the range shown and the app enforces the same ranges so
-    // its state matches without a read-back.
+    // Subharmonic Synthesizer (V29, extended V30): parameters and live
+    // telemetry in `subharm`, master switch here.
     @Published var subharmEnabled: Bool = false
-    @Published var subharmLowDB: Float = 0.0      // -30..+12 dB (24-36 Hz sub; -30 = band off)
-    @Published var subharmHighDB: Float = 0.0     // -30..+12 dB (36-56 Hz sub; -30 = band off)
-    @Published var subharmTopDB: Float = -30.0    // -30..+12 dB (56-80 Hz sub; ships off)
-    @Published var subharmBoostDB: Float = 0.0    // 0..+6 dB (70 Hz LF boost bell)
-    /// Per-output subharm mask: bit k processes output channel k (PDM sub = bit 8
-    /// on RP2350 / bit 4 on RP2040).  Default 0xFFFF = every output.
-    @Published var subharmOutputMask: UInt16 = SUBHARM_DEFAULT_OUTPUT_MASK
-    /// Selectivity: which kind of bass material gets a sub, how hard the rest is
-    /// gated down, and the span the decision is made over.  Depth and hold do
-    /// nothing while the mode is `all`.
-    @Published var subharmSelectMode: Int = SUBHARM_SELECT_ALL
-    @Published var subharmSelectDepthPct: Float = 100.0   // 0..100 %
-    @Published var subharmSelectHoldMs: Float = 150.0     // 50..400 ms
-    /// Soft limit on the synthesized sub before it is mixed in (dBFS); 0 = off.
-    @Published var subharmCeilingDB: Float = 0.0
-    /// Synthesize one sub per output pair from its mono sum rather than one per
-    /// channel, so a panned event cannot leave the two dividers in opposite
-    /// polarity.  On by default, as on the dbx.
-    @Published var subharmLinkPairs: Bool = true
-    /// Runtime-only monitor: masked outputs carry the sub with the program signal
-    /// removed.  Never persisted, absent from the bulk image, so it has to be read
-    /// with 0x2D rather than coming back with `fetchAllParams`.
-    @Published var subharmSolo: Bool = false
-    /// Worst-case gain of the live configuration (dB), read back with 0x1A after
-    /// every change.  Not carried on the wire and not part of the preset: it is
-    /// derived from enable, the band levels, the boost and the ceiling, and
-    /// nothing else - not the mask, the pair link or the sample rate.
-    @Published var subharmHeadroomDB: Float = 0.0
-    /// Decaying peak of the synthesized sub per output channel (0x1F), normalized
-    /// to 0..1 like `SystemStatus.peaks` so one meter widget drives either.
-    /// Polled only while the subharm window is open; empty when never read.
-    @Published var subharmSubMeter: [Float] = []
+    let subharm = SubharmParameters()
+
+    // Tube Modeller (V31): valve-style waveshaper with supply sag and an optional
+    // output stage, per output channel selected by `tube.outputMask`.  Only the
+    // master switch lives here, because the main window's toggle pills read it;
+    // every sweepable parameter is in `tube` so a drag does not invalidate the
+    // whole app.  See ToolParameters.swift.
+    @Published var tubeEnabled: Bool = false
+    let tube = TubeParameters()
+
+    // Output Limiter (V32): per-output enable, threshold, release and link
+    // group, plus the polled engage state and meter.  No master switch, so
+    // nothing lives on the view model itself.
+    let limiter = LimiterParameters()
 
     // Stereo Upmixer (V25): derives Centre + Ls/Rs matrix source rows from a
     // stereo input.  These mirror UpmixConfigPacket (spec §6.1); defaults match
@@ -1347,34 +1308,7 @@ class DSPViewModel: ObservableObject {
     // the first fetch.  The firmware clamps every float to its documented range;
     // the app enforces the same ranges on commit so state stays identical.
     @Published var upmixEnabled: Bool = false
-    @Published var upmixCenterMode: Int = UPMIX_CENTER_MODE_ADAPTIVE       // 0/1/2
-    @Published var upmixSurroundMode: Int = UPMIX_SURROUND_MODE_ADAPTIVE   // 0/1/2
-    @Published var upmixStrengthPct: Float = 100.0        // 0..100 %
-    @Published var upmixCenterWidthPct: Float = 25.0      // 0..100 %
-    @Published var upmixThresholdPct: Float = 30.0        // 0..95 %
-    @Published var upmixAttackMs: Float = 10.0            // 1..500 ms
-    @Published var upmixReleaseMs: Float = 100.0          // 5..2000 ms
-    @Published var upmixDetectorHpfHz: Float = 200.0      // 20..1000 Hz
-    @Published var upmixSurroundDelayMs: Float = 12.0     // 0..20 ms
-    @Published var upmixSurroundHpfHz: Float = 300.0      // 20..2000 Hz
-    @Published var upmixSurroundLpfHz: Float = 7000.0     // 1000..20000 Hz
-    @Published var upmixDecorrPct: Float = 90.0           // 0..100 %
-    /// Centre presence bell gain at 3 kHz / Q 0.6 (V26+).  Stored on the device in
-    /// 0.5 dB steps (config byte presence_q1 = dB x 2); the app keeps the dB value.
-    @Published var upmixPresenceDB: Float = 0.0           // -12..+12 dB
-
-    // Upmix live telemetry (REQ_UPMIX_GET_STATUS, spec §6.3).  Polled only while
-    // the upmixer window is open (`upmixStatusPolling`).
-    @Published var upmixActive: Bool = false
-    @Published var upmixParkedReason: UInt8 = UPMIX_PARKED_DISABLED
-    @Published var upmixCorr: Float = 0.0          // smoothed L/R correlation, -1..+1
-    @Published var upmixBalance: Float = 0.0       // level balance, 0 (centred)..1
-    @Published var upmixCenterGain: Float = 0.0    // live centre extraction gain, 0..1
-    @Published var upmixLsGain: Float = 0.0        // live Ls steering gain, 0..1
-    @Published var upmixRsGain: Float = 0.0        // live Rs steering gain, 0..1
-    /// Set by the upmixer window while visible so the shared poll timer fetches
-    /// UpmixStatus (~16 Hz); left false everywhere else to avoid the extra I/O.
-    @Published var upmixStatusPolling: Bool = false
+    let upmix = UpmixParameters()
 
     // Matrix mixer state (up to 8 inputs x 9 outputs).  Backing arrays are
     // always MAX_MATRIX_INPUTS rows so crosspoint bindings for inputs 2-7 are
@@ -1393,14 +1327,7 @@ class DSPViewModel: ObservableObject {
 
     // Volume Leveller state (firmware factory defaults, overwritten on connect)
     @Published var levellerEnabled: Bool = false
-    @Published var levellerAmount: Float = 50.0
-    @Published var levellerSpeed: Int = 0        // 0=Slow, 1=Medium, 2=Fast
-    @Published var levellerMaxGainDB: Float = 15.0
-    @Published var levellerLookahead: Bool = true
-    @Published var levellerGateDB: Float = -96.0
-    // V18 channel masks: bit k = input channel k. Default all-on = classic stereo link.
-    @Published var levellerDetectorMask: UInt8 = 0xFF
-    @Published var levellerApplyMask: UInt8 = 0xFF
+    let leveller = LevellerParameters()
 
     // I2S configuration state
     @Published var outputSlotTypes: [UInt8] = [0, 0, 0, 0]  // Per-slot: 0=S/PDIF, 1=I2S
@@ -1408,7 +1335,6 @@ class DSPViewModel: ObservableObject {
     @Published var mckEnabled: Bool = false
     @Published var mckPin: UInt8 = 13
     @Published var mckMultiplier: Int = 128   // 128 or 256
-    @Published var sampleRateHz: UInt32 = 0   // live device sample rate (REQ_GET_STATUS wValue=15)
 
     // Input source state
     @Published var inputSource: Int = 0               // 0=USB, 1=SPDIF, 2=I2S, 4/5/6=SPDIF2/3/4
@@ -2102,6 +2028,14 @@ class DSPViewModel: ObservableObject {
     /// individual GETs STALL on V29 firmware and the UI hides these controls.
     var firmwareSupportsSubharmExtended: Bool { firmwareWireFormatVersion >= 30 }
 
+    /// Tube Modeller (cmds 0x3E/0x3F) shipped in wire format V31, which
+    /// appends WireTubeParams to the bulk layout.  Both platforms run it.
+    var firmwareSupportsTube: Bool { firmwareWireFormatVersion >= 31 }
+
+    /// Output Limiter (REQ_LIMITER 0x81) shipped in wire format V32, which
+    /// appends WireLimiterParams to the bulk layout.  Both platforms run it.
+    var firmwareSupportsLimiter: Bool { firmwareWireFormatVersion >= 32 }
+
     /// Stereo Upmixer (cmds 0x4A-0x4E) shipped in wire format V25 and gained the
     /// presence control in V26; the app is a V26 client (strict version match on
     /// the bulk image), so the whole feature is gated on V26.  RP2350 only: on
@@ -2126,7 +2060,7 @@ class DSPViewModel: ObservableObject {
     /// the surround engine is OFF, 5 (L/R + C + Ls + Rs) otherwise.
     var matrixSourceRowCount: Int {
         guard upmixDerivesRows else { return numMatrixInputs }
-        return upmixSurroundMode == UPMIX_SURROUND_MODE_OFF ? 3 : 5
+        return upmix.surroundMode == UPMIX_SURROUND_MODE_OFF ? 3 : 5
     }
 
     /// Short label for matrix source `row`, contextual on the upmixer state.
@@ -2139,7 +2073,7 @@ class DSPViewModel: ObservableObject {
             default: break
             }
         }
-        return MatrixInput.shortName(for: row, count: numMatrixInputs)
+        return inputChannelName(row)
     }
 
     /// Full/tooltip label for matrix source `row`, contextual on the upmixer state.
@@ -2152,7 +2086,13 @@ class DSPViewModel: ObservableObject {
             default: break
             }
         }
-        return MatrixInput.fullName(for: row, count: numMatrixInputs)
+        return inputChannelName(row)
+    }
+
+    /// An input channel's name, the one the sidebar shows (renamable, stored
+    /// on the device).
+    func inputChannelName(_ ch: Int) -> String {
+        channelNames.indices.contains(ch) ? channelNames[ch] : "USB \(ch + 1)"
     }
 
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
@@ -2233,12 +2173,24 @@ class DSPViewModel: ObservableObject {
         // Re-selecting the same channel (a link refresh) keeps what was checked.
         didSet {
             if let ch = activeEqChannel, ch != oldValue { resetRtaPageSelection(for: ch) }
+            if activeEqChannel != oldValue { peqSelection.reset() }
         }
     }
 
+    /// True while an output page shows its XO tab: the graph then shows the
+    /// channel without the PEQ band editor, since those bands are not listed.
+    @Published var crossoverTabShown = false
+
     // Live Data
     let meters = DSPMeterModel()
+    let telemetry = DeviceTelemetry()
     let outputGainPreview = OutputGainPreview()
+    /// Bands selected or hovered on the response graph, shared with the band
+    /// list so a row lights up with its dot.  See `PeqGraphEditorView`.
+    let peqSelection = PeqGraphSelection()
+    /// AppKit readouts that let the band list follow a graph drag without a
+    /// SwiftUI update.
+    let peqLive = PeqLiveReadouts()
 
     /// The device's spectrum analyser.  Its own observable, because it
     /// republishes at the poll rate and everything watching the view model
@@ -2322,19 +2274,11 @@ class DSPViewModel: ObservableObject {
                 }
             }
         }
-        // I2S RX data pins.  Mirrors the firmware's two-tier rule:
-        //   - Assigning an I2S RX pin itself keeps ALL configured pair pins
-        //     mutually distinct (firmware i2s_rx_pair_pin_taken), so a pair can't
-        //     land on another pair's pin even if that pair is currently inactive.
-        //   - Every OTHER consumer (outputs, MCK, BCK, S/PDIF RX, DAC mute) only
-        //     sees the *active* pairs as reserved (firmware is_pin_in_use), so
-        //     inactive placeholder pins never lock GPIOs out of other functions
-        //     while in a lower channel mode.
+        // I2S RX data pins: only the active pairs reserve theirs, for every
+        // consumer including another pair (firmware is_pin_in_use and
+        // check_i2s_rx_pin).  A channel-count raise re-checks the parked pins.
         if i2sInputSupported {
-            let assigningI2SRx: Bool
-            if case .some(.i2sRx) = consumer { assigningI2SRx = true } else { assigningI2SRx = false }
-            let pairsReserved = assigningI2SRx ? i2sMaxPairs : i2sActivePairs
-            for pair in 0..<min(pairsReserved, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
+            for pair in 0..<min(i2sActivePairs, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
                 return PinAssignment(pin: pin, label: i2sMaxPairs > 1 ? "I2S RX \(pair + 1)" : "I2S RX", role: .input)
             }
         }
@@ -2732,7 +2676,7 @@ class DSPViewModel: ObservableObject {
             self.fetchStatus()
             // Upmix telemetry only while its window is open (~16 Hz, within the
             // spec's 5-20 Hz guidance); skipped everywhere else to avoid the I/O.
-            if self.upmixStatusPolling && self.firmwareSupportsUpmixer {
+            if self.upmix.statusPolling && self.firmwareSupportsUpmixer {
                 self.fetchUpmixStatus()
             }
             // Spectrum analyser frames, only while a view is watching.  It
@@ -2741,6 +2685,10 @@ class DSPViewModel: ObservableObject {
             // 60 ms is already a faster cadence than the device refreshes a
             // channel at.
             if self.rta.isWatching { self.rta.tick() }
+            // Limiter meter while its icon is on screen and any limiter is on.
+            if self.limiter.watchers > 0 && self.firmwareSupportsLimiter {
+                self.pollLimiter(meter: self.limiter.anyEnabled)
+            }
         }
         timer.resume()
         pollTimer = timer
@@ -2872,55 +2820,70 @@ class DSPViewModel: ObservableObject {
             platformName: platformName,
             bypass: bypass,
             loudnessEnabled: loudnessEnabled,
-            loudnessOutputMask: loudnessOutputMask,
-            loudnessRefSPL: loudnessRefSPL,
-            loudnessIntensity: loudnessIntensity,
+            loudnessOutputMask: loudness.outputMask,
+            loudnessRefSPL: loudness.refSPL,
+            loudnessIntensity: loudness.intensity,
             crossfeedEnabled: crossfeedEnabled,
-            crossfeedPreset: crossfeedPreset,
-            crossfeedFreq: crossfeedFreq,
-            crossfeedFeed: crossfeedFeed,
-            crossfeedITD: crossfeedITD,
-            crossfeedOutputMask: crossfeedOutputMask,
+            crossfeedPreset: crossfeed.preset,
+            crossfeedFreq: crossfeed.freq,
+            crossfeedFeed: crossfeed.feed,
+            crossfeedITD: crossfeed.itd,
+            crossfeedOutputMask: crossfeed.outputMask,
             psybassEnabled: psybassEnabled,
-            psybassOutputMask: psybassOutputMask,
-            psybassCutoffHz: psybassCutoffHz,
-            psybassHarmonicsDB: psybassHarmonicsDB,
-            psybassDriveDB: psybassDriveDB,
-            psybassCharacterPct: psybassCharacterPct,
-            psybassOriginalDB: psybassOriginalDB,
+            psybassOutputMask: psybass.outputMask,
+            psybassCutoffHz: psybass.cutoffHz,
+            psybassHarmonicsDB: psybass.harmonicsDB,
+            psybassDriveDB: psybass.driveDB,
+            psybassCharacterPct: psybass.characterPct,
+            psybassOriginalDB: psybass.originalDB,
             subharmEnabled: subharmEnabled,
-            subharmOutputMask: subharmOutputMask,
-            subharmLowDB: subharmLowDB,
-            subharmHighDB: subharmHighDB,
-            subharmTopDB: subharmTopDB,
-            subharmBoostDB: subharmBoostDB,
-            subharmSelectMode: subharmSelectMode,
-            subharmSelectDepthPct: subharmSelectDepthPct,
-            subharmSelectHoldMs: subharmSelectHoldMs,
-            subharmCeilingDB: subharmCeilingDB,
-            subharmLinkPairs: subharmLinkPairs,
+            subharmOutputMask: subharm.outputMask,
+            subharmLowDB: subharm.lowDB,
+            subharmHighDB: subharm.highDB,
+            subharmTopDB: subharm.topDB,
+            subharmBoostDB: subharm.boostDB,
+            subharmSelectMode: subharm.selectMode,
+            subharmSelectDepthPct: subharm.selectDepthPct,
+            subharmSelectHoldMs: subharm.selectHoldMs,
+            subharmCeilingDB: subharm.ceilingDB,
+            subharmLinkPairs: subharm.linkPairs,
+            tubeEnabled: tubeEnabled,
+            tubeOutputMask: tube.outputMask,
+            tubeType: tube.type,
+            tubeDriveDB: tube.driveDB,
+            tubeBiasPct: tube.biasPct,
+            tubeAsymDB: tube.asymDB,
+            tubeHardnessPct: tube.hardnessPct,
+            tubeSagPct: tube.sagPct,
+            tubeRectifier: tube.rectifier,
+            tubeXfmrEnabled: tube.xfmrEnabled,
+            tubeXfmrDamping: tube.xfmrDamping,
+            tubeXfmrResHz: tube.xfmrResHz,
+            tubeMixPct: tube.mixPct,
+            tubeTrimDB: tube.trimDB,
+            limiterOutputs: limiter.outputs,
             upmixEnabled: upmixEnabled,
-            upmixCenterMode: upmixCenterMode,
-            upmixSurroundMode: upmixSurroundMode,
-            upmixStrengthPct: upmixStrengthPct,
-            upmixCenterWidthPct: upmixCenterWidthPct,
-            upmixThresholdPct: upmixThresholdPct,
-            upmixAttackMs: upmixAttackMs,
-            upmixReleaseMs: upmixReleaseMs,
-            upmixDetectorHpfHz: upmixDetectorHpfHz,
-            upmixSurroundDelayMs: upmixSurroundDelayMs,
-            upmixSurroundHpfHz: upmixSurroundHpfHz,
-            upmixSurroundLpfHz: upmixSurroundLpfHz,
-            upmixDecorrPct: upmixDecorrPct,
-            upmixPresenceDB: upmixPresenceDB,
+            upmixCenterMode: upmix.centerMode,
+            upmixSurroundMode: upmix.surroundMode,
+            upmixStrengthPct: upmix.strengthPct,
+            upmixCenterWidthPct: upmix.centerWidthPct,
+            upmixThresholdPct: upmix.thresholdPct,
+            upmixAttackMs: upmix.attackMs,
+            upmixReleaseMs: upmix.releaseMs,
+            upmixDetectorHpfHz: upmix.detectorHpfHz,
+            upmixSurroundDelayMs: upmix.surroundDelayMs,
+            upmixSurroundHpfHz: upmix.surroundHpfHz,
+            upmixSurroundLpfHz: upmix.surroundLpfHz,
+            upmixDecorrPct: upmix.decorrPct,
+            upmixPresenceDB: upmix.presenceDB,
             levellerEnabled: levellerEnabled,
-            levellerAmount: levellerAmount,
-            levellerSpeed: levellerSpeed,
-            levellerMaxGainDB: levellerMaxGainDB,
-            levellerLookahead: levellerLookahead,
-            levellerGateDB: levellerGateDB,
-            levellerDetectorMask: levellerDetectorMask,
-            levellerApplyMask: levellerApplyMask,
+            levellerAmount: leveller.amount,
+            levellerSpeed: leveller.speed,
+            levellerMaxGainDB: leveller.maxGainDB,
+            levellerLookahead: leveller.lookahead,
+            levellerGateDB: leveller.gateDB,
+            levellerDetectorMask: leveller.detectorMask,
+            levellerApplyMask: leveller.applyMask,
             channelDelays: channelDelays,
             matrixRouting: matrixRouting,
             matrixGain: matrixGain,

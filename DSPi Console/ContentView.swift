@@ -20,7 +20,7 @@ enum SidebarSelection: Hashable {
 /// `includeLinkwitz` is false for input channels: the Linkwitz Transform is a
 /// driver/sealed-box bass-extension tool that only makes sense on the outputs
 /// feeding physical speakers, so it's hidden from input EQ banks entirely.
-fileprivate func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = true) -> [FilterType] {
+func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = true) -> [FilterType] {
     var filters: [FilterType] = FilterType.allCases.filter { !$0.isCrossover }
 
     if vm.firmwareSupportsNotch == false {
@@ -356,7 +356,7 @@ struct ContentView: View {
                                   color: MatrixInput.color(for: ch),
                                   descriptor: "IN\(ch + 1)",
                                   isSelected: rowSelected,
-                                  name: ch < vm.channelNames.count ? vm.channelNames[ch] : "USB \(ch + 1)",
+                                  name: vm.inputChannelName(ch),
                                   meters: vm.meters,
                                   isRenaming: renamingChannel == ch,
                                   renameText: $renameText,
@@ -776,7 +776,7 @@ struct ContentView: View {
                     // System Status — Core 0 utilisation + master volume.
                     // Core 1 still appears in the Stats window; meters are
                     // inline in sidebar rows.
-                    CpuSection(vm: vm)
+                    CpuSection(meters: vm.meters)
                     .padding()
                     }
                     .background(.ultraThinMaterial)
@@ -879,7 +879,9 @@ struct ContentView: View {
                                         vm.setBandBypass(ch: m, band: band, bypass: bypass)
                                     }
                                 },
-                                onClear: nil  // handled by InputChannelHeader's Clear button
+                                onClear: nil,  // handled by InputChannelHeader's Clear button
+                                graphSelection: vm.peqSelection,
+                                liveReadouts: vm.peqLive
                             )
                         }
 
@@ -1117,7 +1119,9 @@ struct OutputChannelDetail: View {
                     onBypassToggle: { band, bypass in
                         vm.setBandBypass(ch: eqChannel, band: band, bypass: bypass)
                     },
-                    onClear: { vm.clearPEQBands(ch: eqChannel) }
+                    onClear: { vm.clearPEQBands(ch: eqChannel) },
+                    graphSelection: vm.peqSelection,
+                    liveReadouts: vm.peqLive
                 )
             case .crossover:
                 FilterListView(
@@ -1137,6 +1141,9 @@ struct OutputChannelDetail: View {
                 )
             }
         }
+        .onAppear { vm.crossoverTabShown = tab == .crossover }
+        .onDisappear { vm.crossoverTabShown = false }
+        .onChange(of: tab) { vm.crossoverTabShown = $0 == .crossover }
         .onChange(of: crossoverSupported) { supported in
             // If we lose crossover support (e.g. user switches to a pre-V11
             // device), bounce back to the PEQ tab so we don't show an

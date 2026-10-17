@@ -33,16 +33,6 @@
 		FACEFACEFACEFACEFACE0002 /* DSPi ConsoleTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DSPi ConsoleTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		66626F362F148868009BAE8A /* Exceptions for "Images" folder in "DSPi Console" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				DSPiConsole.png,
-			);
-			target = 665141C42F0DF37B00093CAF /* DSPi Console */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		665141C72F0DF37B00093CAF /* DSPi Console */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -51,9 +41,6 @@
 		};
 		66626F352F148868009BAE8A /* Images */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				66626F362F148868009BAE8A /* Exceptions for "Images" folder in "DSPi Console" target */,
-			);
 			path = Images;
 			sourceTree = "<group>";
 		};
@@ -132,7 +119,6 @@
 			);
 			fileSystemSynchronizedGroups = (
 				665141C72F0DF37B00093CAF /* DSPi Console */,
-				66626F352F148868009BAE8A /* Images */,
 				667C679A2F61130D00264C32 /* Documentation */,
 			);
 			name = "DSPi Console";
@@ -395,7 +381,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = "1.1.6-beta3";
+				MARKETING_VERSION = "1.1.6-beta4";
 				PRODUCT_BUNDLE_IDENTIFIER = "WeebLabs.DSPi-Console";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -424,7 +410,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = "1.1.6-beta3";
+				MARKETING_VERSION = "1.1.6-beta4";
 				PRODUCT_BUNDLE_IDENTIFIER = "WeebLabs.DSPi-Console";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

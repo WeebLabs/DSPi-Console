@@ -51,18 +51,25 @@ class LoudnessWindowController: NSObject, ObservableObject {
 
     func show(vm: DSPViewModel) {
         if window == nil {
-            let view = LoudnessView(vm: vm).onboardingHint("loudness")
+            let view = LoudnessView(vm: vm, loudness: vm.loudness).onboardingHint("loudness")
 
             window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 380, height: 600),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 780, height: 400),
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window?.title = "Loudness Compensation"
-            window?.contentView = NSHostingView(rootView: view)
+            let hosting = NSHostingView(rootView: view)
+            // The window's size limits are set here, not derived from the
+            // tree: left at its defaults the hosting view re-measures the
+            // whole tree for them on every display cycle, which is most of
+            // what a meter reading or a drag used to cost in this window.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
+            window?.contentMinSize = NSSize(width: 740, height: 390)
         }
 
         window?.center()
@@ -110,6 +117,11 @@ private func loudnessCompensationDB(
 
 struct LoudnessView: View {
     @ObservedObject var vm: DSPViewModel
+    /// Observed separately from `vm` so a slider drag invalidates this
+    /// window and nothing else; see ToolParameters.swift.
+    @ObservedObject var loudness: LoudnessParameters
+    /// What the curve follows during a drag; see `GraphLive`.
+    @State private var graphLive = GraphLive<LoudnessGraphKey>()
 
     /// Output channels exposed in the mask grid (5 on RP2040, 9 on RP2350).
     private var outputCount: Int { vm.numOutputChannels }
@@ -126,27 +138,33 @@ struct LoudnessView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             headerSection
 
             Divider()
 
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Visualization
-                    compensationGraph
-                        .padding(.top, 16)
-                        .padding(.horizontal, 16)
+            // Two columns of the sections the other tool windows stack. The
+            // curve has the left column to itself and grows to the height of
+            // the parameters and outputs beside it, so the columns always end
+            // together.
+            HStack(alignment: .top, spacing: 0) {
+                compensationGraph
+                    .toolColumn()
 
-                    Divider().padding(.horizontal, 16)
+                Divider()
 
-                    // Parameters
+                VStack(alignment: .leading, spacing: 14) {
                     parameterSection
-                        .padding(.horizontal, 16)
+                    if showMask {
+                        Divider()
+                        channelSection
+                    }
                 }
+                .toolColumn()
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 16)
         }
-        .frame(width: 380, height: 560)
+        .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Header
@@ -194,14 +212,16 @@ struct LoudnessView: View {
                     .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
 
                 // Grid + curve
-                CompensationCurveView(
-                    refSPL: vm.loudnessRefSPL,
-                    intensity: vm.loudnessIntensity,
-                    isEnabled: vm.loudnessEnabled
-                )
-                .padding(8)
+                // In its own hosting view, so following a drag re-lays out the
+                // graph alone rather than the whole window.
+                LiveGraphHost(flexibleHeight: true) {
+                    LoudnessGraphPane(
+                        base: .init(refSPL: loudness.refSPL, intensity: loudness.intensity),
+                        isEnabled: vm.loudnessEnabled, live: graphLive)
+                    .padding(8)
+                }
             }
-            .frame(height: 140)
+            .frame(minHeight: 160, maxHeight: .infinity)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.gray.opacity(0.2), lineWidth: 1)
@@ -213,72 +233,37 @@ struct LoudnessView: View {
 
     private var parameterSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if showMask {
-                channelSection
-                Divider()
-            }
-
             Text("PARAMETERS")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.secondary)
 
-            // Reference SPL
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Reference SPL")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "dB",
-                        value: vm.loudnessRefSPL,
-                        width: 60
-                    ) { vm.setLoudnessRef($0) }
-                }
-                
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.loudnessRefSPL },
-                        set: { vm.setLoudnessRef($0) }
-                    ),
-                    range: 40...100
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("SPL at 1 kHz when USB volume is 0 dB. Lower = more compensation per dB of volume reduction.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Reference SPL",
+                unit: "dB",
+                value: loudness.refSPL,
+                range: 40...100,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "SPL at 1 kHz when USB volume is 0 dB. Lower = more compensation per dB of volume reduction.",
+                live: { v in vm.sendFloatParamToDevice(REQ_SET_LOUDNESS_REF, v); graphLive.set(.refSPL, v) },
+                set: { vm.setLoudnessRef($0) }
+            )
 
             Divider()
 
-            // Intensity
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Intensity")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    ValueField(
-                        label: "%",
-                        value: vm.loudnessIntensity,
-                        width: 60
-                    ) { vm.setLoudnessIntensity($0) }
-                }
-                
-                CustomSlider(
-                    value: Binding(
-                        get: { vm.loudnessIntensity },
-                        set: { vm.setLoudnessIntensity($0) }
-                    ),
-                    range: 0...200
-                )
-                .disabled(!vm.isDeviceConnected)
-
-                Text("Scales the ISO 226 compensation. 100% = standard curve. 0% = bypassed. >100% = exaggerated.")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            ParameterRow(
+                title: "Intensity",
+                unit: "%",
+                value: loudness.intensity,
+                range: 0...200,
+                scrollStep: 0.1,
+                maxDecimals: 1,
+                isEnabled: vm.isDeviceConnected,
+                caption: "Scales the ISO 226 compensation. 100% = standard curve. 0% = bypassed. >100% = exaggerated.",
+                live: { v in vm.sendFloatParamToDevice(REQ_SET_LOUDNESS_INTENSITY, v); graphLive.set(.intensity, v) },
+                set: { vm.setLoudnessIntensity($0) }
+            )
         }
     }
 
@@ -319,9 +304,9 @@ struct LoudnessView: View {
                 ForEach(0..<outputCount, id: \.self) { out in
                     channelChip(
                         out: out,
-                        on: vm.loudnessOutputMask & (UInt16(1) << out) != 0
+                        on: loudness.outputMask & (UInt16(1) << out) != 0
                     ) {
-                        vm.setLoudnessOutputChannel(out, enabled: vm.loudnessOutputMask & (UInt16(1) << out) == 0)
+                        vm.setLoudnessOutputChannel(out, enabled: loudness.outputMask & (UInt16(1) << out) == 0)
                     }
                 }
             }
@@ -350,50 +335,6 @@ struct LoudnessView: View {
     }
 }
 
-// MARK: - Custom Slider
-
-struct CustomSlider: View {
-    @Binding var value: Float
-    let range: ClosedRange<Float>
-    var disabled: Bool = false
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                // Track
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(height: 3)
-                
-                // Active Track
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(disabled ? Color.gray.opacity(0.3) : Color.accentColor)
-                    .frame(width: max(0, min(geometry.size.width, geometry.size.width * CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)))), height: 3)
-                
-                // Thumb
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 12, height: 12)
-                    .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
-                    .offset(x: max(0, min(geometry.size.width - 12, geometry.size.width * CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)) - 6)))
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { gesture in
-                                if !disabled {
-                                    let percent = min(max(0, gesture.location.x / geometry.size.width), 1)
-                                    let newValue = range.lowerBound + Float(percent) * (range.upperBound - range.lowerBound)
-                                    value = newValue
-                                }
-                            }
-                    )
-            }
-            .frame(height: 12)
-        }
-        .frame(height: 12)
-        .opacity(disabled ? 0.5 : 1.0)
-    }
-}
-
 // MARK: - Info Row
 
 private struct InfoRow: View {
@@ -414,6 +355,26 @@ private struct InfoRow: View {
 }
 
 // MARK: - Compensation Curve Visualization
+
+enum LoudnessGraphKey: Hashable { case refSPL, intensity }
+
+/// The compensation curve, resolving live overrides over the committed values.
+/// Lives in a `LiveGraphHost`, so a live update costs the layout of this view alone.
+private struct LoudnessGraphPane: View {
+    struct Base: Equatable { var refSPL, intensity: Float }
+    let base: Base
+    let isEnabled: Bool
+    @ObservedObject var live: GraphLive<LoudnessGraphKey>
+
+    var body: some View {
+        CompensationCurveView(
+            refSPL: live[.refSPL, or: base.refSPL],
+            intensity: live[.intensity, or: base.intensity],
+            isEnabled: isEnabled
+        )
+        .onChange(of: base) { _ in live.clear() }
+    }
+}
 
 private struct CompensationCurveView: View {
     let refSPL: Float

@@ -374,8 +374,8 @@ struct DashboardRow: View {
         case .peaking: return "PK"
         case .lowShelf: return "LS"
         case .highShelf: return "HS"
-        case .lowPass: return "LP"
-        case .highPass: return "HP"
+        case .lowPass: return "HC"
+        case .highPass: return "LC"
         case .notch: return "NO"
         case .allPass: return "AP"
         default: return params.type.shortLabel

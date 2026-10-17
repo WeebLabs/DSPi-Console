@@ -261,6 +261,61 @@ private struct LiveMeterBar: NSViewRepresentable {
     }
 }
 
+/// The Subharmonic Synth's per-output sub meter, following `SubharmMeter`
+/// itself as `LiveMeterBar` follows `DSPMeterModel`: the chip that owns it
+/// does not observe the meter, so a reading moves this layer and re-evaluates
+/// no SwiftUI view at all. (Observed through SwiftUI, a reading cost the
+/// layout of the whole chip row, about 10 ms, ten times a second.)
+struct SubharmLiveMeterBar: NSViewRepresentable {
+    let meter: SubharmMeter
+    let channel: Int
+    /// A masked-off output is never metered by the firmware; its rail stays
+    /// empty rather than showing a stale reading.
+    let enabled: Bool
+    let color: Color
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> MeterBarNSView {
+        let view = MeterBarNSView()
+        updateNSView(view, context: context)
+        return view
+    }
+
+    func updateNSView(_ view: MeterBarNSView, context: Context) {
+        view.color = NSColor(color)
+        context.coordinator.follow(meter, channel: channel, enabled: enabled, view: view)
+    }
+
+    static func dismantleNSView(_ view: MeterBarNSView, coordinator: Coordinator) {
+        coordinator.subscription = nil
+    }
+
+    final class Coordinator {
+        var subscription: AnyCancellable?
+        private weak var meter: SubharmMeter?
+        private var channel = -1
+        private var enabled = false
+
+        func follow(_ meter: SubharmMeter, channel: Int, enabled: Bool, view: MeterBarNSView) {
+            guard meter !== self.meter || channel != self.channel || enabled != self.enabled else { return }
+            self.meter = meter
+            self.channel = channel
+            self.enabled = enabled
+            guard enabled else {
+                subscription = nil
+                view.set(level: 0, clipping: false)
+                return
+            }
+            // @Published delivers the new value before storing it, so the
+            // level is read from the event rather than from the model.
+            subscription = meter.$levels.sink { [weak view] levels in
+                view?.set(level: channel < levels.count ? levels[channel] : 0, clipping: false)
+            }
+        }
+    }
+}
+
 struct CpuMeter: View {
     var core: Int
     var load: Int
@@ -278,13 +333,15 @@ struct CpuMeter: View {
     }
 }
 
+// Observes the meter model directly: DSPViewModel does not republish when
+// `meters.status` changes, so observing the view model froze the readings.
 struct CpuSection: View {
-    @ObservedObject var vm: DSPViewModel
+    @ObservedObject var meters: DSPMeterModel
     var body: some View {
         HStack {
-            CpuMeter(core: 0, load: vm.meters.status.cpu0)
+            CpuMeter(core: 0, load: meters.status.cpu0)
             Spacer()
-            CpuMeter(core: 1, load: vm.meters.status.cpu1)
+            CpuMeter(core: 1, load: meters.status.cpu1)
         }
     }
 }
@@ -703,6 +760,37 @@ struct ChannelSettingsView: View {
     @State private var localDelay: Float = 0
     @State private var isDraggingGain = false
     @State private var isDraggingDelay = false
+    @State private var showLimiterSettings = false
+
+    /// Height of each icon's slot when mute shares the column with the
+    /// limiter.  Also the click target, so it is kept generous.
+    private let iconSlot: CGFloat = 22
+
+    /// A click toggles the limiter and a right-click opens the settings
+    /// popover, as the sidebar module icons do.  In its own hosting view because the icon follows the meter,
+    /// polled at about 16 Hz, and a reading must not re-lay out the page.
+    private var limiterCell: some View {
+        LiveGraphHost(flexibleHeight: true) {
+            OutputLimiterCell(
+                limiter: vm.limiter,
+                meter: vm.limiter.meter,
+                output: outputIndex,
+                isConnected: vm.isDeviceConnected,
+                onToggle: {
+                    let on = outputIndex < vm.limiter.outputs.count && vm.limiter.outputs[outputIndex].enabled
+                    // Part of the output configuration in independent mode.
+                    SettingsSaveCoordinator.shared.beginOutputEdit()
+                    vm.setLimiterEnabled(output: outputIndex, !on)
+                },
+                onSettings: { showLimiterSettings = true })
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .popover(isPresented: $showLimiterSettings, arrowEdge: .bottom) {
+            OutputLimiterSettings(vm: vm, limiter: vm.limiter, output: outputIndex)
+        }
+        .onAppear { vm.limiter.watchers += 1 }
+        .onDisappear { vm.limiter.watchers -= 1 }
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -777,18 +865,47 @@ struct ChannelSettingsView: View {
 
             Divider()
 
-            // MUTE — fills full height and centers its icon, otherwise the
-            // top-aligned HStack would pin it to the top of the row.
-            Toggle(isOn: $isMuted) {
-                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.title2)
-                    .foregroundColor(isMuted ? .red : .secondary)
+            // MUTE over the output limiter, so the limiter costs the page no
+            // vertical space.  The two icons sit in equal fixed-height slots
+            // with equal gaps above, between and below them; centring each in
+            // half the column left twice the gap between them.  The icons'
+            // colours carry the state; a tinted half would read as a divider.
+            // Without limiter firmware, mute keeps the whole column and its
+            // tint as before.
+            VStack(spacing: 0) {
+                let split = vm.firmwareSupportsLimiter
+                if split { Spacer(minLength: 0) }
+                // Without the split it fills the height and centres its icon,
+                // otherwise the top-aligned HStack would pin it to the top.
+                Toggle(isOn: $isMuted) {
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(split ? .title3 : .title2)
+                        .foregroundColor(isMuted ? .red : .secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .frame(height: split ? iconSlot : nil)
+                .frame(maxHeight: split ? nil : .infinity)
+                .offset(y: split ? 1 : 0)
+
+                if split {
+                    Spacer(minLength: 0)
+                    // Equal slots do not give equal gaps between the ink: the
+                    // gauge sits low in its slot (the dial is open at the
+                    // bottom) and is taller than the speaker.  This offset and
+                    // the speaker's 1 pt, measured from a render, even
+                    // the three gaps to within half a point.
+                    limiterCell
+                        .frame(height: iconSlot)
+                        .offset(y: -2)
+                    Spacer(minLength: 0)
+                }
             }
-            .toggleStyle(.button)
-            .buttonStyle(.plain)
             .frame(width: 60)
-            .frame(maxHeight: .infinity)
-            .background(isMuted ? Color.red.opacity(0.1) : Color.clear)
+            .background(isMuted && !vm.firmwareSupportsLimiter ? Color.red.opacity(0.1) : Color.clear)
         }
         .frame(height: 68)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
@@ -830,14 +947,7 @@ private struct InputRoutingRow: View {
     private var inverted: Bool { vm.matrixInvert[input][output] }
     private var liveGain: Float { vm.matrixGain[input][output] }
     private var inputColor: Color { MatrixInput.color(for: input) }
-    private var name: String {
-        // In 8-channel mode use the 7.1 role names; stereo keeps the device's
-        // USB L/R channel names.
-        if vm.numMatrixInputs > BASE_MATRIX_INPUTS {
-            return MatrixInput.shortName(for: input, count: vm.numMatrixInputs)
-        }
-        return vm.channelNames.indices.contains(input) ? vm.channelNames[input] : "Input \(input + 1)"
-    }
+    private var name: String { vm.inputChannelName(input) }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1406,6 +1516,11 @@ struct FilterListView: View {
     /// EqParamPacket via onUpdate and avoids racing with in-flight edits.
     var onBypassToggle: ((Int, Bool) -> Void)? = nil
     var onClear: (() -> Void)? = nil
+    /// Set on PEQ lists whose bands are edited on the response graph: rows
+    /// then carry their band's graph colour, light up with its dot, select it
+    /// on a click of the number, and follow a graph drag live.
+    var graphSelection: PeqGraphSelection? = nil
+    var liveReadouts: PeqLiveReadouts? = nil
 
     var body: some View {
         // ScrollView contains the full list of rows.  Header and footer are
@@ -1414,19 +1529,31 @@ struct FilterListView: View {
         // lets us use `.ultraThinMaterial` for a true translucent vibrancy
         // effect that picks up the row colors moving behind.
         ScrollView {
-            LazyVStack(spacing: 1) {
-                ForEach(0..<bands.count, id: \.self) { index in
-                    FilterRowView(
-                        index: index,
-                        params: bands[index],
-                        availableTypes: availableTypes,
-                        bypassSupported: bypassSupported,
-                        isCrossoverMode: isCrossoverMode,
-                        onChange: { onUpdate(index, $0) },
-                        onBypassToggle: { newVal in
-                            onBypassToggle?(index, newVal)
-                        }
-                    )
+            // Rows are ids for the reader, so selecting a band on the graph
+            // can bring its row into view.
+            ScrollViewReader { proxy in
+                LazyVStack(spacing: 1) {
+                    ForEach(0..<bands.count, id: \.self) { index in
+                        FilterRowView(
+                            index: index,
+                            params: bands[index],
+                            availableTypes: availableTypes,
+                            bypassSupported: bypassSupported,
+                            isCrossoverMode: isCrossoverMode,
+                            onChange: { onUpdate(index, $0) },
+                            onBypassToggle: { newVal in
+                                onBypassToggle?(index, newVal)
+                            },
+                            graphSelection: graphSelection,
+                            liveReadouts: index < PeqLiveReadouts.bands ? liveReadouts : nil,
+                            isBandActive: { bands.indices.contains($0) && bands[$0].type != .flat }
+                        )
+                    }
+                }
+                .background {
+                    if let graphSelection {
+                        PeqRowScrollFollower(selection: graphSelection, proxy: proxy, rows: bands.count)
+                    }
                 }
             }
         }
@@ -1703,6 +1830,10 @@ struct FilterRowView: View {
     /// nil, the checkbox is rendered but its action no-ops; callers should
     /// always wire this when bypassSupported is true.
     var onBypassToggle: ((Bool) -> Void)? = nil
+    var graphSelection: PeqGraphSelection? = nil
+    var liveReadouts: PeqLiveReadouts? = nil
+    /// Which rows of the list hold a band, for a Shift-click's run.
+    var isBandActive: (Int) -> Bool = { _ in true }
 
     /// Presentation state for the Linkwitz Transform parameter popover.  LT has
     /// four parameters (f0, Q0, fp, Qp) that don't fit the shared 3-column row,
@@ -1723,6 +1854,12 @@ struct FilterRowView: View {
     var isActive: Bool { params.type != .flat }
     var isBypassed: Bool { params.bypass }
 
+    private var indexColor: Color {
+        guard isActive, !isBypassed else { return .secondary.opacity(0.5) }
+        if graphSelection != nil, !bypassSupported { return PeqBandPalette.color(index) }
+        return .primary
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             // Bypass checkbox (firmware 1.1.4+).  Filled disc only when the
@@ -1733,16 +1870,25 @@ struct FilterRowView: View {
                 BypassCheckbox(
                     isActive: isActive && !isBypassed,
                     isEnabled: isActive,
+                    color: graphSelection != nil && isActive ? PeqBandPalette.color(index) : nil,
                     onToggle: { onBypassToggle?(!isBypassed) }
                 )
                 .frame(width: 18, height: 18)
             }
 
-            // Index
+            // Index.  The bypass control carries the band's graph colour;
+            // without one (firmware before per-band bypass) the number does.
             Text("\(index + 1)")
                 .font(.system(.body))
-                .foregroundColor(isActive && !isBypassed ? .primary : .secondary.opacity(0.5))
+                .foregroundColor(indexColor)
                 .frame(width: 24, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard let graphSelection, isActive else { return }
+                let mods = NSEvent.modifierFlags
+                graphSelection.listClick(index, command: mods.contains(.command),
+                                         shift: mods.contains(.shift), isActive: isBandActive)
+            }
 
             if isCrossoverMode {
                 crossoverRowContent
@@ -1758,9 +1904,20 @@ struct FilterRowView: View {
         .background(
             ZStack {
                 if index % 2 == 0 { Color.white.opacity(0.03) }
+                if let graphSelection {
+                    PeqRowHighlight(selection: graphSelection, band: index, isActive: isActive)
+                }
             }
         )
         .contentShape(Rectangle())
+        .onHover { hovering in
+            guard let graphSelection else { return }
+            if hovering, isActive {
+                graphSelection.listHovered = index
+            } else if graphSelection.listHovered == index {
+                graphSelection.listHovered = nil
+            }
+        }
     }
 
     // MARK: PEQ-tab row layout
@@ -1782,13 +1939,15 @@ struct FilterRowView: View {
             } else {
                 HStack(spacing: 12) {
                     // Freq
-                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10) {
+                    ValueField(label: "Hz", value: params.freq, width: 80, scrollStep: 10, minValue: 10,
+                               liveReadout: liveReadouts?.freq[index]) {
                         var p = params; p.freq = $0; onChange(p)
                     }
 
                     // Gain
                     if params.type.usesGain {
-                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 3) {
+                        ValueField(label: "dB", value: params.gain, width: 60, maxDecimals: 3,
+                                   liveReadout: liveReadouts?.gain[index]) {
                             var p = params; p.gain = $0; onChange(p)
                         }
                     } else {
@@ -1798,7 +1957,8 @@ struct FilterRowView: View {
                     // Q (hidden for crossover and first-order PEQ types — firmware
                     // ignores Q on those).
                     if params.type.usesQ {
-                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true) {
+                        ValueField(label: "Q", value: params.q, width: 50, minValue: 0.1, maxDecimals: 3, stripTrailingZeros: true,
+                                   liveReadout: liveReadouts?.q[index]) {
                             var p = params; p.q = $0; onChange(p)
                         }
                     } else {
@@ -2232,24 +2392,26 @@ fileprivate enum CrossoverFamilyOption: Hashable {
 struct BypassCheckbox: View {
     let isActive: Bool
     let isEnabled: Bool
+    /// The band's graph colour, when the graph edits it; grey otherwise.
+    var color: Color? = nil
     let onToggle: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: onToggle) {
             ZStack {
-                // Active: solid accent fill with a subtle radial highlight
-                // for a glassy look.  Inactive: hollow ring on a near-clear
-                // disc so the hit area still covers the interior.
+                // Active: solid fill.  Inactive: hollow ring on a near-clear
+                // disc so the hit area still covers the interior.  A band
+                // colour tints both, so a bypassed band keeps its identity.
                 Circle()
-                    .fill(isActive ? Color(white: 0.5) : Color.white.opacity(0.001))
+                    .fill(isActive ? (color ?? Color(white: 0.5)) : Color.white.opacity(0.001))
                     .frame(width: 12, height: 12)
 
                 Circle()
                     .strokeBorder(
                         isActive
-                            ? Color(white: 0.5)
-                            : Color.secondary.opacity(0.55),
+                            ? (color ?? Color(white: 0.5))
+                            : (color?.opacity(0.6) ?? Color.secondary.opacity(0.55)),
                         lineWidth: 1.2
                     )
                     .frame(width: 12, height: 12)
@@ -2287,11 +2449,20 @@ struct ValueField: View {
     /// like "0.707" must still show full precision.
     var stripTrailingZeros: Bool = false
     var displayOverride: String? = nil
+    /// Set by a `ParameterRow` for the duration of a slider drag. The field
+    /// then shows the readout's text through an AppKit label that the drag
+    /// updates directly, so a value arriving per mouse event costs no SwiftUI
+    /// update, and therefore no layout, at all. See `ParameterRow`.
+    var liveReadout: LiveValueReadout? = nil
     let onCommit: (Float) -> Void
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
 
     private func format(_ v: Float) -> String {
+        Self.format(v, maxDecimals: maxDecimals, stripTrailingZeros: stripTrailingZeros)
+    }
+
+    static func format(_ v: Float, maxDecimals: Int, stripTrailingZeros: Bool) -> String {
         let full = String(format: "%.\(maxDecimals)f", v)
         // Trim trailing zeros from the decimal portion.
         let parts = full.split(separator: ".", maxSplits: 1)
@@ -2323,6 +2494,17 @@ struct ValueField: View {
                     .focused($isFocused)
                     .onSubmit { if let v = Float(text) { onCommit(v) } else { text = format(value) } }
                     .onChange(of: isFocused) { focused in if !focused { if let v = Float(text) { onCommit(v) } else { text = format(value) } } }
+
+                // Always present but hidden until a drag begins, and shown and
+                // hidden again purely in AppKit, so grabbing a slider changes
+                // nothing SwiftUI has to lay out. Same padding and width as the
+                // field, so the digits sit where the field's do.
+                if let liveReadout {
+                    LiveValueLabel(readout: liveReadout)
+                        .padding(4)
+                        .frame(width: width)
+                        .allowsHitTesting(false)
+                }
             }
             .fixedSize(horizontal: true, vertical: false)
 
@@ -2341,6 +2523,113 @@ struct ValueField: View {
         .onChange(of: displayOverride) { override in
             if !isFocused, let override { text = override } else { text = format(value) }
         }
+    }
+}
+
+// MARK: - Live Value Readout
+
+/// The channel between a slider drag and the AppKit label that shows its
+/// value. A plain class, deliberately not observable: writing to it changes
+/// nothing SwiftUI can see, which is the whole point. Begin and end are AppKit
+/// operations too, so the grab and the drag cost SwiftUI nothing; only the
+/// commit on release goes through the view model.
+final class LiveValueReadout {
+    var format: (Float) -> String = { String($0) }
+    fileprivate weak var label: LiveValueLabelView?
+    /// SwiftUI's own text field for the same value, hidden for the drag so the
+    /// two never overprint.
+    private weak var covered: NSView?
+
+    func beginLive(showing value: Float) {
+        guard let label else { return }
+        covered = Self.textField(overlapping: label)
+        covered?.isHidden = true
+        label.stringValue = format(value)
+        label.isHidden = false
+    }
+
+    func show(_ value: Float) {
+        label?.stringValue = format(value)
+    }
+
+    func endLive() {
+        label?.isHidden = true
+        covered?.isHidden = false
+        covered = nil
+    }
+
+    /// SwiftUI hosts a `TextField` as a platform `NSTextField` somewhere under
+    /// the same hosting view; find the one whose frame the label sits on.
+    private static func textField(overlapping label: NSView) -> NSView? {
+        guard let root = label.window?.contentView else { return nil }
+        let target = label.convert(label.bounds, to: nil)
+        func search(_ view: NSView) -> NSView? {
+            for sub in view.subviews {
+                if sub !== label, sub is NSTextField, !sub.isHidden,
+                   sub.convert(sub.bounds, to: nil).intersects(target) {
+                    return sub
+                }
+                if let found = search(sub) { return found }
+            }
+            return nil
+        }
+        return search(root)
+    }
+}
+
+/// The label itself: an `NSTextField` so its glyphs, padding and baseline are
+/// the ones SwiftUI's `TextField` draws with underneath. Its height is frozen
+/// once from the font, so it matches the field's and a new string can never
+/// start an Auto Layout pass or a SwiftUI re-layout; the width comes from the
+/// frame around it. (Reporting no intrinsic size at all left SwiftUI to hand
+/// it whatever height the row proposed, which stretched every row.)
+final class LiveValueLabelView: NSTextField {
+    private var frozenHeight: CGFloat = 0
+
+    /// Measure once, with a representative string, then never again.
+    func freezeHeight() {
+        let saved = stringValue
+        stringValue = "-000.0"
+        frozenHeight = super.intrinsicContentSize.height
+        stringValue = saved
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: frozenHeight)
+    }
+    override func invalidateIntrinsicContentSize() {}
+}
+
+private struct LiveValueLabel: NSViewRepresentable {
+    let readout: LiveValueReadout
+
+    func makeNSView(context: Context) -> LiveValueLabelView {
+        let label = LiveValueLabelView(labelWithString: "")
+        label.isHidden = true
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        label.alignment = .right
+        label.lineBreakMode = .byClipping
+        label.textColor = .labelColor
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.freezeHeight()
+        return label
+    }
+
+    func updateNSView(_ label: LiveValueLabelView, context: Context) {
+        readout.label = label
+    }
+}
+
+// MARK: - Tool Window Column
+
+extension View {
+    /// One column of a two-column tool window: an equal share of the width,
+    /// content pinned to the top so section labels line up across columns.
+    func toolColumn() -> some View {
+        self
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
@@ -2450,5 +2739,65 @@ struct SidebarIconButton: View {
         .help(tooltip)
         .frame(maxWidth: .infinity)
         .onHover { isHovered = $0 }
+    }
+}
+
+
+/// A band row's tint while its band is selected or hovered on the graph.  Its
+/// own small observer, so a selection change redraws this background and not
+/// the row.
+struct PeqRowHighlight: View {
+    @ObservedObject var selection: PeqGraphSelection
+    let band: Int
+    let isActive: Bool
+
+    var body: some View {
+        let selected = isActive && selection.selected.contains(band)
+        let hovered = isActive && selection.graphHovered == band
+        let color = PeqBandPalette.color(band)
+        HStack(spacing: 0) {
+            color.frame(width: 2).opacity(selected ? 1 : 0)
+            color.opacity(selected ? 0.13 : (hovered ? 0.07 : 0))
+        }
+        .animation(.easeOut(duration: 0.12), value: selected)
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .allowsHitTesting(false)
+    }
+}
+
+
+/// Scrolls the band list just far enough to show a band newly selected on
+/// the graph (not in the list itself), or one the pointer rests on there; a row already in view does
+/// not move.  Its own small observer, so a selection change redraws this and
+/// not the list.
+private struct PeqRowScrollFollower: View {
+    @ObservedObject var selection: PeqGraphSelection
+    let proxy: ScrollViewProxy
+    let rows: Int
+    @State private var previous: Set<Int> = []
+
+    var body: some View {
+        Color.clear
+            .onAppear { previous = selection.selected }
+            .onChange(of: selection.selected) { selected in
+                // With several new at once (a marquee), the first in the list.
+                let added = selected.subtracting(previous).sorted()
+                previous = selected
+                if selected == selection.madeByList { return }
+                selection.madeByList = nil
+                guard let band = added.first, band < rows else { return }
+                reveal(band)
+            }
+            .onReceive(selection.revealRow) { band in
+                guard band < rows else { return }
+                reveal(band)
+            }
+    }
+
+    private func reveal(_ band: Int) {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            // A nil anchor scrolls the least needed to show the row.
+            proxy.scrollTo(band, anchor: nil)
+        }
     }
 }

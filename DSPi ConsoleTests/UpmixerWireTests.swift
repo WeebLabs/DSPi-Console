@@ -52,8 +52,8 @@ final class UpmixerWireTests: XCTestCase {
     /// 5900, growing the flat layout to 5944 bytes; V26 claims its reserved byte
     /// +3 for presence_q1 with no size change (spec §7).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 30)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5980)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_UPMIX_OFFSET, 5900)
         XCTAssertEqual(UPMIX_CONFIG_PACKET_SIZE, 44)
         XCTAssertEqual(UPMIX_STATUS_SIZE, 16)
@@ -176,7 +176,7 @@ final class UpmixerWireTests: XCTestCase {
 
         // Enabled + adaptive surround: 5 rows, C/Ls/Rs above the stereo pair.
         vm.upmixEnabled = true
-        vm.upmixSurroundMode = UPMIX_SURROUND_MODE_ADAPTIVE
+        vm.upmix.surroundMode = UPMIX_SURROUND_MODE_ADAPTIVE
         XCTAssertTrue(vm.upmixDerivesRows)
         XCTAssertEqual(vm.matrixSourceRowCount, 5)
         XCTAssertEqual(vm.matrixRowShortName(2), "C")
@@ -185,7 +185,7 @@ final class UpmixerWireTests: XCTestCase {
         XCTAssertEqual(vm.matrixRowFullName(2), "Upmix Centre")
 
         // Surround OFF: only the Centre row is exposed (3 rows total).
-        vm.upmixSurroundMode = UPMIX_SURROUND_MODE_OFF
+        vm.upmix.surroundMode = UPMIX_SURROUND_MODE_OFF
         XCTAssertEqual(vm.matrixSourceRowCount, 3)
     }
 

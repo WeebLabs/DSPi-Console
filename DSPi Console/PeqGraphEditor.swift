@@ -1,0 +1,1759 @@
+import SwiftUI
+import AppKit
+import Combine
+import simd
+
+// On-graph PEQ band editing, modelled on FabFilter Pro-Q 4.
+//
+// Every interaction is handled here in AppKit and drawn by
+// `PeqGraphMetalView`, so a drag never reaches SwiftUI: the device follows at
+// up to 30 writes a second through `sendGraphBandsToDevice`, the band list
+// follows through AppKit readouts, and the model is written once, on release.
+// The editor also owns the active channel's combined curve, which
+// `BodePlotView` then leaves out of its own drawing.
+//
+// Mouse (Command is FabFilter's Ctrl):
+//   hover a band's fill  highlights it; only its dot takes clicks, so every
+//                         click gesture below treats a fill as empty graph
+//   hover empty graph     a faint dot where a double-click would create a
+//                         bell, with frequency and level readouts
+//   double-click empty graph   create it, always a bell
+//   Cmd-click empty graph a card of shapes opens there; click a shape, then
+//                         for a shelf, cut or all-pass its slope, to create
+//                         it where Cmd was clicked
+//   click empty graph     deselect
+//   drag the curve        pull a new bell (shelf near either end) out of it
+//   drag empty graph      marquee selection
+//   click a dot           select; Cmd toggles, Shift selects a range
+//   drag a dot            frequency and gain (Q for second-order cuts;
+//                         frequency only for notches, all-passes and
+//                         first-order cuts, whose dots sit at a fixed level)
+//   Cmd-drag              Q of the selection
+//   Shift-drag            fine;  Option-drag  lock to one axis
+//   Control-drag          scale a selection's gains in proportion (FabFilter's
+//                         default) instead of moving them by the same dB
+//   Option-click          bypass
+//   double-click a dot    type values (Tab moves between them)
+//   wheel over a band     Q; Cmd-wheel gain; Shift fine (dot or fill)
+//   right-click           band menu on a dot, graph menu elsewhere
+// A modifier held on a dot means a click if the mouse comes up where it went
+// down, and a drag modifier (fine, axis lock) if it moves first.
+// Keys: Delete removes the selection, Escape deselects, Cmd-A selects all,
+// arrows move frequency and gain (Option-arrows Q), Tab steps through bands.
+
+struct PeqGraphEditorConfig: Equatable {
+    /// The channel being edited; nil leaves only the dB zoom strip active.
+    var channel: Int?
+    var bands: [FilterParams] = []
+    var statics: [FilterParams] = []
+    var offsetDB: Float = 0
+    var flat = false
+    var curveColor = SIMD4<Float>(1, 1, 1, 1)
+    var lineWidth: Float = 2
+    var glow = true
+    var minFreq: Double = 20
+    var maxFreq: Double = 20000
+    var dbTop: Double = 25
+    var dbBottom: Double = -25
+    var availableTypes: [FilterType] = []
+    var bypassSupported = false
+    /// The frequency and level readouts shown while hovering empty graph.
+    var showFrequencyReadout = true
+    var showLevelReadout = true
+}
+
+struct PeqGraphEditorOverlay: NSViewRepresentable {
+    let vm: DSPViewModel
+    let config: PeqGraphEditorConfig
+
+    func makeNSView(context: Context) -> PeqGraphEditorView {
+        let view = PeqGraphEditorView(host: vm)
+        view.apply(config)
+        return view
+    }
+    func updateNSView(_ view: PeqGraphEditorView, context: Context) { view.apply(config) }
+    static func dismantleNSView(_ view: PeqGraphEditorView, coordinator: ()) { view.teardown() }
+}
+
+final class PeqGraphEditorView: NSView {
+    /// Whether this Mac can draw the editor at all.  Without Metal the graph
+    /// keeps its SwiftUI curves and offers no on-graph editing.
+    static var isAvailable: Bool { PeqGraphResources.shared != nil }
+
+    private enum Tuning {
+        static let nodeHitRadius: CGFloat = 10
+        static let curveHitDistance: CGFloat = 6
+        static let dragThreshold: CGFloat = 2
+        static let zoomZone: CGFloat = 40
+        static let qPointsPerOctave: Double = 60
+        static let fine: CGFloat = 0.12
+        static let bandAnimation: CFTimeInterval = 0.22
+        static let emphasisTau: Double = 0.07
+        static let commitDelay: TimeInterval = 0.45
+        static let deviceInterval: TimeInterval = 1.0 / 30.0
+        /// Wheel events closer together than this belong to one gesture.
+        static let wheelSession: CFTimeInterval = 0.5
+        /// How long the pointer rests on a band before its list row scrolls
+        /// into view.
+        static let revealDwell: TimeInterval = 0.25
+    }
+
+    private enum Gesture {
+        case idle
+        /// Mouse down on a band, not yet moved.
+        case press(band: Int, at: CGPoint, modifiers: NSEvent.ModifierFlags)
+        /// Mouse down on empty graph, not yet moved.
+        case background(at: CGPoint, onCurve: Bool, modifiers: NSEvent.ModifierFlags)
+        case drag(DragContext)
+        case marquee(from: CGPoint, to: CGPoint, base: Set<Int>)
+    }
+
+    private struct DragContext {
+        var grabbed: Int
+        var start: [Int: FilterParams]
+        var last: CGPoint
+        /// Pointer movement applied so far, after fine scaling and any lock.
+        var offset = CGPoint.zero
+        var qMode: Bool
+        /// The axis Option has locked the drag to; nil when free.
+        var axis: Axis?
+        /// Option is held but no axis is chosen yet: movement gathers here,
+        /// with the band held still, until it shows a direction.
+        var pending: CGPoint?
+        enum Axis { case horizontal, vertical }
+    }
+
+    private struct Emphasis {
+        var hover: Float = 0
+        var select: Float = 0
+        var hoverTarget: Float = 0
+        var selectTarget: Float = 0
+        var settled: Bool { hover == hoverTarget && select == selectTarget }
+    }
+
+    private weak var vm: PeqGraphEditorHost?
+    private let metal: PeqGraphMetalView?
+    private let hud = PeqBandHUD()
+    /// Where the chip's shape page opened; it stays there while open.
+    private var pagedOrigin: NSPoint?
+    /// The Cmd-click card, and the point its band will be created at.
+    private let card = PeqShapeCard()
+    private var cardPoint: CGPoint?
+    private let marqueeLayer = CAShapeLayer()
+    /// Readouts for the point under the pointer on empty graph: frequency
+    /// along the x-axis and level along the y-axis.
+    private let axisLabel = NSTextField(labelWithString: "")
+    private let gainLabel = NSTextField(labelWithString: "")
+    private var config = PeqGraphEditorConfig()
+    private var geometry = PeqGraphGeometry(size: .zero, minFreq: 20, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+    private var editing: Bool { config.channel != nil && metal != nil }
+    private var available: Set<FilterType> = []
+
+    // Bands: `committed` mirrors the model, `live` holds edits not yet
+    // committed, `shown` is what is drawn (committed, live or mid-animation).
+    private var committed: [FilterParams] = []
+    private var shown: [FilterParams] = []
+    private var live: [Int: FilterParams] = [:]
+    private var animationFrom: [FilterParams]?
+    private var animationStart: CFTimeInterval = 0
+
+    private var selection: Set<Int> = []
+    private var anchor: Int?
+    private var hovered: Int?
+    private var listHovered: Int?
+    private var ghost: FilterParams?
+    private var ghostShown: FilterParams?
+    private var ghostAmount: Float = 0
+    private var pointer: CGPoint?
+    private var gesture = Gesture.idle
+    private var emphasis = [Emphasis](repeating: Emphasis(), count: PeqGraphRenderer.bandRows)
+    private var lastFrame: CFTimeInterval = 0
+
+    private var hudBand: Int?
+    private var hudHideTimer: Timer?
+    private var revealTimer: Timer?
+    private var hudAdjustStart: FilterParams?
+    private var deviceTimer: Timer?
+    private var deviceDirty: Set<Int> = []
+    private var commitTimer: Timer?
+    private var wheelBand: Int?
+    private var wheelTime: CFTimeInterval = 0
+    private var hudWheelField: PeqHUDField?
+    private var hudWheelTime: CFTimeInterval = 0
+    private var subscriptions: Set<AnyCancellable> = []
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { editing }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init(host: PeqGraphEditorHost) {
+        self.vm = host
+        let vm = host
+        metal = PeqGraphResources.shared.map { PeqGraphMetalView(resources: $0) }
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+
+        if let metal {
+            metal.isHidden = true
+            metal.onFrame = { [weak self] now in self?.frame(now) ?? false }
+            addSubview(metal)
+        }
+        marqueeLayer.fillColor = NSColor(white: 1, alpha: 0.06).cgColor
+        marqueeLayer.strokeColor = NSColor(white: 1, alpha: 0.45).cgColor
+        marqueeLayer.lineWidth = 1
+        marqueeLayer.lineDashPattern = [4, 3]
+        marqueeLayer.isHidden = true
+        marqueeLayer.actions = ["path": NSNull(), "hidden": NSNull()]
+        layer?.addSublayer(marqueeLayer)
+
+        for label in [axisLabel, gainLabel] {
+            label.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+            label.textColor = NSColor(white: 1, alpha: 0.85)
+            label.alignment = .center
+            label.wantsLayer = true
+            label.layer?.backgroundColor = NSColor(srgbRed: 0.09, green: 0.09, blue: 0.11, alpha: 0.92).cgColor
+            label.layer?.cornerRadius = 4
+            label.isHidden = true
+            addSubview(label)
+        }
+
+        hud.isHidden = true
+        hud.alphaValue = 0
+        addSubview(hud)
+        card.isHidden = true
+        addSubview(card)
+        wireHUD()
+
+        vm.peqSelection.$listHovered
+            .removeDuplicates()
+            .sink { [weak self] band in
+                guard let self else { return }
+                self.listHovered = band
+                self.invalidate()
+            }
+            .store(in: &subscriptions)
+        vm.peqSelection.$selected
+            .removeDuplicates()
+            .sink { [weak self] set in
+                guard let self, set != self.selection else { return }
+                self.selection = set
+                self.anchor = set.count == 1 ? set.first : self.anchor
+                self.pinHUDToSelection()
+                self.invalidate()
+            }
+            .store(in: &subscriptions)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    #if DEBUG
+    var rendererForTesting: PeqGraphRenderer? { metal?.renderer }
+    var drawLoopPausedForTesting: Bool { metal?.isPaused ?? true }
+    /// Test hooks: hover a point as the mouse would, and settle every
+    /// animation at once.
+    func hoverForTesting(_ p: CGPoint) {
+        pointer = p
+        updateHover(at: p)
+    }
+    /// The chip's value field for `field`, to deliver events to it directly.
+    func hudFieldForTesting(_ field: PeqHUDField) -> NSView? {
+        hud.subviews.first { ($0 as? PeqHUDValueField)?.field == field }
+    }
+    /// The band the chip is showing, or nil when it is hidden.
+    var hudBandForTesting: Int? { hud.isHidden ? nil : hudBand }
+    var configForTesting: PeqGraphEditorConfig { config }
+    /// Whether the Cmd-click card is open (it may still be fading out).
+    var cardVisibleForTesting: Bool { cardPoint != nil }
+    var cardForTesting: PeqShapeChooser { card.chooser }
+    /// The chip's shape page, turned to as its shape button would.
+    func toggleShapePageForTesting() { toggleShapePage() }
+    var shapePageShownForTesting: Bool { !hud.isHidden && hud.showsShapes }
+    var hudFrameForTesting: NSRect? { hud.isHidden ? nil : hud.frame }
+    var cardFrameForTesting: NSRect? { cardPoint == nil ? nil : card.frame }
+    func shapePageButtonForTesting(_ shape: PeqShape) -> NSButton? { hud.chooserForTesting.shapeButtonForTesting(shape) }
+    func shapePageSlopeForTesting(_ order: Int) -> NSButton? { hud.chooserForTesting.slopeChoiceForTesting(order) }
+    var shapePageBackForTesting: NSButton { hud.chooserForTesting.backButtonForTesting }
+    /// The frequency and gain readouts shown on empty graph, nil when hidden.
+    var axisReadoutsForTesting: (freq: String?, gain: String?) {
+        (axisLabel.isHidden ? nil : axisLabel.stringValue, gainLabel.isHidden ? nil : gainLabel.stringValue)
+    }
+    /// Whether the chip can actually be seen, not just unhidden.
+    var hudVisibleForTesting: Bool { !hud.isHidden && hud.alphaValue > 0.99 }
+    func settleForTesting() {
+        updateEmphasisTargets()
+        metal?.renderer.picture = picture()
+        _ = frame(.infinity)
+    }
+    #endif
+
+    func teardown() {
+        commitLive()
+        metal?.stopAnimating()
+        subscriptions.removeAll()
+        [hudHideTimer, revealTimer, deviceTimer, commitTimer].forEach { $0?.invalidate() }
+    }
+
+    // MARK: - Configuration
+
+    func apply(_ new: PeqGraphEditorConfig) {
+        guard new != config else { return }
+        // A pending wheel or key edit belongs to the channel it was made on,
+        // so it is committed before the new one takes over.
+        if new.channel != config.channel { commitLive() }
+        let old = config
+        config = new
+        available = Set(new.availableTypes)
+        updateGeometry()
+        metal?.isHidden = !editing
+
+        if old.channel != new.channel || !editing {
+            resetInteraction()
+            committed = new.bands
+            shown = new.bands
+            animationFrom = nil
+        } else if new.bands != committed {
+            committed = new.bands
+            if case .idle = gesture, live.isEmpty {
+                startBandAnimation()
+            } else {
+                // Mid-edit, only the bands not being edited follow the model.
+                for i in shown.indices where live[i] == nil && i < committed.count { shown[i] = committed[i] }
+                if shown.count != committed.count { shown = committed.enumerated().map { live[$0.offset] ?? $0.element } }
+            }
+        }
+        refreshHUD()
+        invalidate()
+        // The layer still holds the last frame of whatever it showed before,
+        // which would flash until the next display cycle.
+        if editing, old.channel != new.channel { metal?.drawNow() }
+    }
+
+    private func resetInteraction() {
+        closeCard()
+        gesture = .idle
+        selection = []
+        anchor = nil
+        hovered = nil
+        listHovered = nil
+        ghost = nil
+        ghostShown = nil
+        ghostAmount = 0
+        marqueeLayer.isHidden = true
+        hideAxisLabels()
+        hideHUD(animated: false)
+        emphasis = [Emphasis](repeating: Emphasis(), count: PeqGraphRenderer.bandRows)
+    }
+
+    private func updateGeometry() {
+        geometry = PeqGraphGeometry(size: bounds.size, minFreq: config.minFreq, maxFreq: config.maxFreq,
+                                    dbTop: config.dbTop, dbBottom: config.dbBottom)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        metal?.redraw()
+    }
+
+    override func layout() {
+        super.layout()
+        // SwiftUI lays hosted views out often; only a new size needs a frame.
+        guard metal.map({ $0.frame != bounds }) ?? false || bounds.size != geometry.size else { return }
+        metal?.frame = bounds
+        updateGeometry()
+        layoutHUD()
+        invalidate()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        if editing { return super.hitTest(point) ?? self }
+        return local.x <= Tuning.zoomZone ? self : nil
+    }
+
+    // MARK: - Band queries
+
+    private var bandCount: Int { min(shown.count, PeqGraphRenderer.bandRows) }
+
+    private func isBand(_ i: Int) -> Bool { i >= 0 && i < bandCount && shown[i].isGraphBand }
+
+    private var graphBands: [Int] { (0..<bandCount).filter(isBand) }
+
+    private func role(_ p: FilterParams) -> PeqNodeRole { PeqNodeRole.of(p) }
+
+    private func nodePoint(_ p: FilterParams) -> CGPoint {
+        let y = geometry.y(role(p).db(for: p))
+        return CGPoint(x: geometry.x(Double(p.freq)), y: min(max(y, 6), max(bounds.height - 6, 6)))
+    }
+
+    private func bandDB(_ p: FilterParams, at freq: Double) -> Double {
+        var probe = p
+        probe.bypass = false
+        return Double(DSPMath.responseAt(freq: Float(freq), filters: [probe]))
+    }
+
+    private func combinedDB(at freq: Double) -> Double {
+        var db = Double(config.offsetDB)
+        guard !config.flat else { return db }
+        let audible = graphBands.map { shown[$0] }.filter { !$0.bypass }
+        db += Double(DSPMath.responseAt(freq: Float(freq), filters: audible + config.statics))
+        return db
+    }
+
+    /// The dot under `point`, preferring selected and hovered dots, which are
+    /// drawn on top.
+    private func node(at point: CGPoint) -> Int? {
+        var best: (band: Int, score: CGFloat)?
+        for b in graphBands {
+            let d = hypot(nodePoint(shown[b]).x - point.x, nodePoint(shown[b]).y - point.y)
+            guard d <= Tuning.nodeHitRadius else { continue }
+            let score = d - (selection.contains(b) ? 3 : 0) - (hovered == b ? 2 : 0)
+            if best == nil || score < best!.score { best = (b, score) }
+        }
+        return best?.band
+    }
+
+    /// The band whose filled area (between its curve and 0 dB) contains
+    /// `point`.  A fill highlights its band and takes the wheel, but clicks
+    /// go through it to the graph, so a band can be placed anywhere; only
+    /// the dot selects or grabs a band.
+    private func lobe(at point: CGPoint) -> Int? {
+        let freq = geometry.freq(point.x)
+        let zero = geometry.y(0)
+        var best: (band: Int, distance: CGFloat)?
+        for b in graphBands {
+            if case .locked = role(shown[b]) { continue }
+            let y = geometry.y(bandDB(shown[b], at: freq))
+            guard abs(y - zero) >= 3, point.y >= min(y, zero), point.y <= max(y, zero) else { continue }
+            let d = abs(point.y - y)
+            if best == nil || d < best!.distance { best = (b, d) }
+        }
+        return best?.band
+    }
+
+    /// The band the wheel adjusts at `point`: its dot or its fill.
+    private func band(at point: CGPoint) -> Int? { node(at: point) ?? lobe(at: point) }
+
+    private func isNearCurve(_ point: CGPoint) -> Bool {
+        abs(geometry.y(combinedDB(at: geometry.freq(point.x))) - point.y) <= Tuning.curveHitDistance
+    }
+
+    private var freeSlot: Int? {
+        (0..<min(committed.count, PeqGraphRenderer.bandRows)).first { committed[$0].type == .flat && live[$0] == nil }
+    }
+
+    private var freqRange: ClosedRange<Double> {
+        let lo = max(PeqLimits.freq.lowerBound, config.minFreq)
+        let hi = min(PeqLimits.freq.upperBound, config.maxFreq)
+        return lo...max(hi, lo)
+    }
+
+    private func frequencyOrder(_ bands: [Int]) -> [Int] {
+        bands.sorted { (shown[$0].freq, $0) < (shown[$1].freq, $1) }
+    }
+
+    // MARK: - Drawing
+
+    /// Requests a frame, running the display link while anything animates.
+    private func invalidate() {
+        guard let metal, editing else { return }
+        updateEmphasisTargets()
+        let animating = animationFrom != nil || ghostAmount != (ghost != nil ? 1 : 0)
+            || emphasis.contains { !$0.settled }
+        if animating { metal.animate() } else { metal.redraw() }
+    }
+
+    private func updateEmphasisTargets() {
+        var dragged: Set<Int> = []
+        if case .drag(let ctx) = gesture { dragged = Set(ctx.start.keys) }
+        for i in emphasis.indices {
+            let isShown = isBand(i)
+            emphasis[i].selectTarget = isShown && selection.contains(i) ? 1 : 0
+            emphasis[i].hoverTarget = isShown && (hovered == i || listHovered == i || dragged.contains(i) || hudBand == i) ? 1 : 0
+        }
+    }
+
+    /// Called by the Metal view before each frame: advances animations and
+    /// hands the renderer the picture.  `.infinity` finishes everything now.
+    private func frame(_ now: CFTimeInterval) -> Bool {
+        let dt = now.isFinite ? (lastFrame == 0 ? 1.0 / 60 : min(now - lastFrame, 0.1)) : 1
+        lastFrame = now.isFinite ? now : 0
+        var running = false
+
+        if let from = animationFrom {
+            let t = now.isFinite ? (now - animationStart) / Tuning.bandAnimation : 1
+            let target = committed.enumerated().map { live[$0.offset] ?? $0.element }
+            if t >= 1 || from.count != target.count {
+                shown = target
+                animationFrom = nil
+                refreshHUD()
+            } else {
+                let eased = 1 - pow(1 - t, 3)
+                shown = zip(from, target).map { $0.interpolated(to: $1, eased) }
+                running = true
+                layoutHUD()
+            }
+        }
+
+        let k = Float(1 - exp(-dt / Tuning.emphasisTau))
+        func approach(_ v: inout Float, _ target: Float) {
+            v += (target - v) * k
+            if abs(target - v) < 0.004 { v = target }
+        }
+        for i in emphasis.indices {
+            approach(&emphasis[i].hover, emphasis[i].hoverTarget)
+            approach(&emphasis[i].select, emphasis[i].selectTarget)
+            if !emphasis[i].settled { running = true }
+        }
+        approach(&ghostAmount, ghost != nil ? 1 : 0)
+        if ghost != nil { ghostShown = ghost }
+        if ghostAmount == 0 { ghostShown = nil }
+        if ghostAmount != (ghost != nil ? 1 : 0) { running = true }
+
+        metal?.renderer.picture = picture()
+        if !running { lastFrame = 0 }
+        return running
+    }
+
+    private func picture() -> PeqGraphPicture {
+        var p = PeqGraphPicture()
+        p.geometry = geometry
+        p.response.bands = (0..<PeqGraphRenderer.bandRows).map { isBand($0) ? shown[$0] : nil }
+        p.response.statics = config.statics
+        p.response.offsetDB = config.offsetDB
+        p.response.flat = config.flat
+        p.curveColor = config.curveColor
+        p.lineWidth = config.lineWidth
+        p.glow = config.glow
+        p.selectionCenter = graphBackground()
+
+        let dimAll: Float = config.flat ? 0.5 : 1
+        var nodes: [(order: Float, node: PeqNodeInstance)] = []
+        for b in graphBands {
+            let band = shown[b]
+            let e = emphasis[b]
+            let lift = max(e.hover, e.select)
+            var color = PeqBandPalette.simd(b)
+            if band.bypass {
+                let grey = (color.x + color.y + color.z) / 3
+                color = SIMD4(simd_mix(SIMD3(repeating: grey), SIMD3(color.x, color.y, color.z), SIMD3(repeating: 0.35)), 1)
+            }
+            // Every audible band keeps a faint fill and shows its outline while
+            // hovered or selected; a bypassed one stays as a grey ghost of both.
+            p.bandStyles.append(.init(row: b, color: color,
+                                      lineOpacity: (band.bypass ? 0.35 + 0.25 * lift : 0.9 * lift) * dimAll,
+                                      fillOpacity: (band.bypass ? 0.06 + 0.06 * lift : 0.22 + 0.2 * lift) * dimAll,
+                                      reach: lobeReach(band)))
+            let c = nodePoint(band)
+            // Flat discs; hovering enlarges them, selecting also adds a centre dot.
+            nodes.append((lift + e.select, PeqNodeInstance(
+                center: SIMD2(Float(c.x), Float(c.y)), radius: 5 + 1.5 * lift + 0.5 * e.select,
+                color: color, state: SIMD4(0, 0, (band.bypass ? 0.55 : 1) * dimAll, e.select))))
+        }
+        if let g = ghostShown, ghostAmount > 0 {
+            let c = nodePoint(g)
+            nodes.append((-1, PeqNodeInstance(center: SIMD2(Float(c.x), Float(c.y)), radius: 5,
+                                              color: SIMD4(1, 1, 1, 1), state: SIMD4(0, 0, 0.3 * ghostAmount, 0))))
+        }
+        // Emphasised dots last, so they draw on top.
+        p.nodes = nodes.sorted { $0.order < $1.order }.map(\.node)
+        return p
+    }
+
+    /// The graph's backdrop as it appears: GraphView's controlBackgroundColor
+    /// at 60% over the window background, resolved for this appearance.
+    private func graphBackground() -> SIMD4<Float> {
+        var out = SIMD4<Float>(0.15, 0.15, 0.15, 1)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            guard let top = NSColor.controlBackgroundColor.usingColorSpace(.sRGB),
+                  let under = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) else { return }
+            func mix(_ a: CGFloat, _ b: CGFloat) -> Float { Float(0.6 * a + 0.4 * b) }
+            out = SIMD4(mix(top.redComponent, under.redComponent),
+                        mix(top.greenComponent, under.greenComponent),
+                        mix(top.blueComponent, under.blueComponent), 1)
+        }
+        return out
+    }
+
+    /// The dB range a band's lobe spans, to bound its fill: 0 dB to the
+    /// gain for bells and shelves, down off the plot for cuts and notches.
+    private func lobeReach(_ p: FilterParams) -> ClosedRange<Double> {
+        let bottom = config.dbBottom - 1
+        switch p.type {
+        case .peaking, .lowShelf, .highShelf, .lowShelf1, .highShelf1:
+            return min(Double(p.gain), 0)...max(Double(p.gain), 0)
+        case .lowPass, .highPass:
+            return bottom...max(20 * log10(Double(max(p.q, 0.01))), 0)
+        case .allPass, .allPass1:
+            return 0...0
+        default:
+            return bottom...config.dbTop + 1
+        }
+    }
+
+    private func startBandAnimation() {
+        let target = committed
+        guard shown.count == target.count else { shown = target; return }
+        let significant = zip(shown, target).contains { a, b in
+            a.type != b.type || a.bypass != b.bypass || abs(a.gain - b.gain) > 0.02
+                || abs(log(Double(max(a.freq, 1)) / Double(max(b.freq, 1)))) > 0.002
+                || abs(log(Double(max(a.q, 0.01)) / Double(max(b.q, 0.01)))) > 0.002
+        }
+        if significant {
+            animationFrom = shown
+            animationStart = CACurrentMediaTime()
+        } else {
+            shown = target
+        }
+    }
+
+    // MARK: - Editing pipeline
+
+    /// A change in progress: drawn, shown in the HUD and the list, sent to the
+    /// device at most 30 times a second, and committed later.
+    private func setLive(_ changes: [Int: FilterParams]) {
+        guard !changes.isEmpty else { return }
+        if animationFrom != nil {
+            animationFrom = nil
+            shown = committed.enumerated().map { live[$0.offset] ?? $0.element }
+        }
+        for (b, p) in changes where b < shown.count {
+            live[b] = p
+            shown[b] = p
+            vm?.peqLive.show(band: b, p)
+        }
+        deviceDirty.formUnion(changes.keys)
+        if deviceTimer == nil { sendToDevice() }
+        refreshHUD()
+        invalidate()
+    }
+
+    private func sendToDevice() {
+        guard let ch = config.channel, !deviceDirty.isEmpty else { return }
+        let changes = deviceDirty.sorted().compactMap { b in live[b].map { (band: b, params: $0) } }
+        deviceDirty.removeAll()
+        vm?.sendGraphBandsToDevice(ch: ch, changes)
+        let timer = Timer(timeInterval: Tuning.deviceInterval, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.deviceTimer = nil
+            self.sendToDevice()
+        }
+        deviceTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// Writes live edits to the model, once.
+    private func commitLive() {
+        deviceTimer?.invalidate()
+        deviceTimer = nil
+        deviceDirty.removeAll()
+        commitTimer?.invalidate()
+        commitTimer = nil
+        vm?.peqLive.endAll()
+        let changes = live.keys.sorted().compactMap { b -> (band: Int, params: FilterParams)? in
+            guard let p = live[b], b < committed.count, p != committed[b] else { return nil }
+            return (b, p)
+        }
+        live.removeAll()
+        guard !changes.isEmpty, let ch = config.channel else { return }
+        for c in changes { committed[c.band] = c.params }
+        vm?.commitGraphBands(ch: ch, changes)
+    }
+
+    /// For wheel and key edits: live now, committed once they pause.
+    private func setLiveThenCommit(_ changes: [Int: FilterParams]) {
+        setLive(changes)
+        commitTimer?.invalidate()
+        let timer = Timer(timeInterval: Tuning.commitDelay, repeats: false) { [weak self] _ in self?.commitLive() }
+        commitTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// Discrete edits (create, delete, shape, typed values) commit at once.
+    private func commitNow(_ changes: [Int: FilterParams]) {
+        commitLive()
+        guard let ch = config.channel, !changes.isEmpty else { return }
+        animationFrom = nil
+        for (b, p) in changes where b < committed.count {
+            committed[b] = p
+            shown[b] = p
+        }
+        vm?.commitGraphBands(ch: ch, changes.keys.sorted().map { (band: $0, params: changes[$0]!) })
+        refreshHUD()
+        invalidate()
+    }
+
+    private func current(_ b: Int) -> FilterParams { live[b] ?? shown[b] }
+
+    private func setSelection(_ new: Set<Int>) {
+        let valid = new.filter(isBand)
+        guard valid != selection else { return }
+        selection = valid
+        if vm?.peqSelection.selected != valid { vm?.peqSelection.selected = valid }
+        pinHUDToSelection()
+        invalidate()
+    }
+
+    private func setHovered(_ band: Int?) {
+        guard band != hovered else { return }
+        hovered = band
+        if vm?.peqSelection.graphHovered != band { vm?.peqSelection.graphHovered = band }
+        scheduleReveal()
+        invalidate()
+    }
+
+    /// Once the pointer rests on a band, its list row scrolls into view.  A
+    /// sweep across the graph passes over bands too briefly to move the
+    /// list, and the list holds still while a band is dragged or wheeled.
+    private func scheduleReveal() {
+        revealTimer?.invalidate()
+        guard let band = hovered else { return }
+        let timer = Timer(timeInterval: Tuning.revealDwell, repeats: false) { [weak self] _ in
+            guard let self, self.hovered == band else { return }
+            guard case .idle = self.gesture, !self.graphWheelActive, !self.hudWheelActive else {
+                self.scheduleReveal()
+                return
+            }
+            self.vm?.peqSelection.revealRow.send(band)
+        }
+        revealTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    // MARK: - Band operations
+
+    @discardableResult
+    private func createBand(_ p: FilterParams, select: Bool = true) -> Int? {
+        guard let slot = freeSlot else { NSSound.beep(); return nil }
+        commitNow([slot: p])
+        if select {
+            setSelection([slot])
+            anchor = slot
+        }
+        ghost = nil
+        return slot
+    }
+
+    private func deleteBands(_ bands: Set<Int>) {
+        let targets = bands.filter(isBand)
+        guard !targets.isEmpty else { return }
+        var changes: [Int: FilterParams] = [:]
+        for b in targets { changes[b] = FilterParams() }
+        setSelection(selection.subtracting(targets))
+        if let h = hudBand, targets.contains(h) { hideHUD(animated: true) }
+        commitNow(changes)
+        pinHUDToSelection()
+    }
+
+    private func toggleBypass(_ bands: Set<Int>) {
+        guard config.bypassSupported, let ch = config.channel else { return }
+        let targets = bands.filter(isBand).sorted()
+        guard let first = targets.first else { return }
+        commitLive()
+        let bypass = !shown[first].bypass
+        animationFrom = nil
+        for b in targets {
+            committed[b].bypass = bypass
+            shown[b].bypass = bypass
+            vm?.setGraphBandBypass(ch: ch, band: b, bypass: bypass)
+        }
+        refreshHUD()
+        invalidate()
+    }
+
+    /// Changes shape (and order), keeping frequency, and carrying gain and Q
+    /// over where the new shape uses them.
+    private func setShape(_ bands: Set<Int>, shape: PeqShape, order: Int) {
+        var changes: [Int: FilterParams] = [:]
+        for b in bands.filter(isBand) {
+            guard let type = shape.type(order: order) ?? shape.type(order: 2), available.contains(type) else { continue }
+            var p = current(b).retyped(to: type)
+            if !type.usesGain { p.gain = 0 }
+            if type.usesQ, !current(b).type.usesQ { p.q = shape == .bell || shape == .notch ? 1 : 0.707 }
+            changes[b] = p
+        }
+        commitNow(changes)
+    }
+
+
+    /// FabFilter applies a band action to the whole selection when the band
+    /// is part of it, and to the band alone otherwise.
+    private func targets(for b: Int) -> Set<Int> { selection.contains(b) ? selection : [b] }
+
+    // MARK: - Mouse
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    private func location(_ event: NSEvent) -> CGPoint { convert(event.locationInWindow, from: nil) }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard editing else { return }
+        let p = location(event)
+        pointer = p
+        updateHover(at: p)
+    }
+
+    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+
+    override func mouseExited(with event: NSEvent) {
+        pointer = nil
+        guard case .idle = gesture else { return }
+        setHovered(nil)
+        ghost = nil
+        hideAxisLabels()
+        scheduleHUDHide()
+        NSCursor.arrow.set()
+        invalidate()
+    }
+
+    private func updateHover(at p: CGPoint) {
+        guard case .idle = gesture else { return }
+        guard bounds.contains(p) else {
+            setHovered(nil)
+            ghost = nil
+            hideAxisLabels()
+            scheduleHUDHide()
+            invalidate()
+            return
+        }
+        // While the Cmd-click card is open, the faint dot marks where its band
+        // will go, and nothing else on the graph responds to hovering.
+        if let at = cardPoint {
+            setHovered(nil)
+            ghost = PeqCreation.band(at: at, in: geometry, available: available, fromCurve: false)
+            hideAxisLabels()
+            NSCursor.arrow.set()
+            invalidate()
+            return
+        }
+        if !hud.isHidden, hud.frame.insetBy(dx: -4, dy: -4).contains(p) {
+            hudHideTimer?.invalidate()
+            ghost = nil
+            hideAxisLabels()
+            NSCursor.arrow.set()
+            invalidate()
+            return
+        }
+        let dot = node(at: p)
+        let hit = dot ?? lobe(at: p)
+        setHovered(hit)
+        if let pin = selectedChipBand {
+            // The chip stays on the selection; hovering another band lights
+            // it and its list row instead.
+            if hud.isHidden || hudBand != pin { showHUD(for: pin) }
+        } else if let dot {
+            if hudBand != dot || hud.isHidden { showHUD(for: dot) } else { hudHideTimer?.invalidate() }
+        } else if !hud.isHidden, !hud.isEditingText {
+            scheduleHUDHide()
+        }
+        if dot == nil {
+            if freeSlot != nil {
+                ghost = PeqCreation.band(at: p, in: geometry, available: available, fromCurve: false)
+                if config.showFrequencyReadout {
+                    showAxisLabel(PeqValueText.frequency(geometry.freq(p.x)), at: p.x)
+                } else {
+                    axisLabel.isHidden = true
+                }
+                // The pointer's level: the gain a double-clicked bell, or a
+                // bell or shelf from the Cmd-click card, takes.
+                if config.showLevelReadout {
+                    showGainLabel(PeqValueText.gain(PeqLimits.clamp(geometry.db(p.y), PeqLimits.gain)), at: p.y)
+                } else {
+                    gainLabel.isHidden = true
+                }
+            } else {
+                ghost = nil
+                gainLabel.isHidden = true
+                showAxisLabel("All \(min(committed.count, PeqGraphRenderer.bandRows)) bands in use", at: p.x)
+            }
+        } else {
+            ghost = nil
+            hideAxisLabels()
+        }
+        (dot != nil ? NSCursor.openHand : NSCursor.arrow).set()
+        invalidate()
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        guard editing else { super.cursorUpdate(with: event); return }
+        (pointer.flatMap(node(at:)) != nil ? NSCursor.openHand : NSCursor.arrow).set()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard editing else { return }
+        window?.makeFirstResponder(self)
+        closeShapePage()
+        if hud.isEditingText { hud.endEditing() }
+        let p = location(event)
+        let mods = event.modifierFlags.intersection([.command, .option, .shift, .control])
+
+        // The card takes its own clicks; one anywhere else dismisses it
+        // without acting on the graph.
+        if cardPoint != nil {
+            closeCard()
+            gesture = .idle
+            updateHover(at: p)
+            return
+        }
+
+        if event.clickCount == 2 {
+            if let b = node(at: p) {
+                showHUD(for: b)
+                hud.beginEditing(.freq)
+            } else {
+                createBand(PeqCreation.band(at: p, in: geometry, available: available, fromCurve: false))
+            }
+            gesture = .idle
+            return
+        }
+
+        if let b = node(at: p) {
+            // Modified presses wait for mouse-up (a click) or movement (a
+            // drag) before doing anything, so Option and Shift can mean both.
+            if mods.isDisjoint(with: [.command, .option, .shift]), !selection.contains(b) {
+                setSelection([b])
+                anchor = b
+            }
+            gesture = .press(band: b, at: p, modifiers: mods)
+            // A modified press on a band outside the selection leaves the
+            // chip on the selection.
+            showHUD(for: selection.isEmpty || selection.contains(b) ? b : (selectedChipBand ?? b))
+            return
+        }
+
+        if mods.contains(.command) {
+            openCard(at: p)
+            gesture = .idle
+            return
+        }
+        gesture = .background(at: p, onCurve: freeSlot != nil && isNearCurve(p), modifiers: mods)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard editing else { return }
+        let p = location(event)
+        pointer = p
+        switch gesture {
+        case .press(let b, let start, let mods):
+            guard hypot(p.x - start.x, p.y - start.y) >= Tuning.dragThreshold else { return }
+            var bands = selection.contains(b) ? selection : [b]
+            if mods.contains(.command) { bands.insert(b) }
+            if case .locked = role(current(b)) { gesture = .idle; return }
+            if mods.contains(.command), !selection.contains(b) {
+                setSelection(selection.union([b]))
+            } else if !selection.contains(b) {
+                setSelection([b])
+                anchor = b
+            }
+            beginDrag(grabbed: b, bands: bands, at: start, qMode: mods.contains(.command))
+            continueDrag(to: p, event: event)
+        case .background(let start, let onCurve, let mods):
+            guard hypot(p.x - start.x, p.y - start.y) >= Tuning.dragThreshold else { return }
+            ghost = nil
+            hideAxisLabels()
+            if onCurve, let slot = freeSlot {
+                // Pull a new band out of the curve, starting flat so the
+                // curve does not jump, then follow the pointer.
+                var band = PeqCreation.band(at: start, in: geometry, available: available, fromCurve: true)
+                band.gain = 0
+                live[slot] = band
+                if slot < shown.count { shown[slot] = band }
+                setSelection([slot])
+                anchor = slot
+                beginDrag(grabbed: slot, bands: [slot], at: start, qMode: false)
+                continueDrag(to: p, event: event)
+            } else {
+                // Cmd opens the shape card, so only Shift reaches here to add.
+                let base = mods.contains(.shift) ? selection : []
+                gesture = .marquee(from: start, to: p, base: base)
+                updateMarquee()
+            }
+        case .drag:
+            continueDrag(to: p, event: event)
+        case .marquee(let from, _, let base):
+            gesture = .marquee(from: from, to: p, base: base)
+            updateMarquee()
+        case .idle:
+            break
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard editing else { return }
+        let p = location(event)
+        switch gesture {
+        case .press(let b, _, let mods):
+            // Released without moving: a click.
+            if mods.contains(.option) {
+                toggleBypass(targets(for: b))
+            } else if mods.contains(.command) {
+                setSelection(selection.symmetricDifference([b]))
+                anchor = b
+            } else if mods.contains(.shift) {
+                let order = frequencyOrder(graphBands)
+                if let a = anchor, let i = order.firstIndex(of: a), let j = order.firstIndex(of: b) {
+                    setSelection(Set(order[min(i, j)...max(i, j)]))
+                } else {
+                    setSelection([b])
+                    anchor = b
+                }
+            } else {
+                setSelection([b])
+                anchor = b
+            }
+        case .background:
+            // A single click on empty graph only deselects; creating a band
+            // takes a double-click (or Cmd-click), so a click to focus or
+            // dismiss never adds one by accident.
+            setSelection([])
+            // An explicit deselect dismisses the chip, and with it the band's
+            // highlight, at once.  The hover grace delay is only there so the
+            // pointer can travel from a dot to its chip.
+            hideHUD(animated: true)
+        case .drag:
+            commitLive()
+            NSCursor.openHand.set()
+        case .marquee:
+            marqueeLayer.isHidden = true
+        case .idle:
+            break
+        }
+        gesture = .idle
+        invalidate()
+        updateHover(at: p)
+    }
+
+    private func beginDrag(grabbed: Int, bands: Set<Int>, at point: CGPoint, qMode: Bool) {
+        commitTimer?.invalidate()
+        var start: [Int: FilterParams] = [:]
+        for b in bands where isBand(b) || live[b] != nil { start[b] = current(b) }
+        start[grabbed] = current(grabbed)
+        gesture = .drag(DragContext(grabbed: grabbed, start: start, last: point, qMode: qMode))
+        ghost = nil
+        hideAxisLabels()
+        showHUD(for: grabbed)
+        (qMode ? NSCursor.resizeUpDown : NSCursor.closedHand).set()
+    }
+
+    /// Option locks the drag to one axis whenever it is held, not only from
+    /// the start, and never makes the band jump: while locked, movement on
+    /// the other axis is simply not applied, so that axis stays where it was
+    /// when the lock engaged, and releasing Option carries on from there.
+    /// Engaging mid-drag takes the axis the drag has mostly moved along;
+    /// with too little movement to tell (or Option held from the start), the
+    /// next few points of movement decide.
+    private func continueDrag(to p: CGPoint, event: NSEvent) {
+        guard case .drag(var ctx) = gesture else { return }
+        let scale = event.modifierFlags.contains(.shift) ? Tuning.fine : 1
+        let move = CGPoint(x: (p.x - ctx.last.x) * scale, y: (p.y - ctx.last.y) * scale)
+        ctx.last = p
+        func dominant(_ v: CGPoint) -> DragContext.Axis { abs(v.x) >= abs(v.y) ? .horizontal : .vertical }
+
+        if !event.modifierFlags.contains(.option) {
+            ctx.axis = nil
+            ctx.pending = nil
+            ctx.offset.x += move.x
+            ctx.offset.y += move.y
+        } else {
+            if ctx.axis == nil, ctx.pending == nil {
+                if hypot(ctx.offset.x, ctx.offset.y) >= 4 { ctx.axis = dominant(ctx.offset) } else { ctx.pending = .zero }
+            }
+            if var pending = ctx.pending {
+                pending.x += move.x
+                pending.y += move.y
+                if hypot(pending.x, pending.y) >= 4 {
+                    let axis = dominant(pending)
+                    ctx.axis = axis
+                    ctx.pending = nil
+                    if axis == .horizontal { ctx.offset.x += pending.x } else { ctx.offset.y += pending.y }
+                } else {
+                    ctx.pending = pending
+                }
+            } else if ctx.axis == .horizontal {
+                ctx.offset.x += move.x
+            } else {
+                ctx.offset.y += move.y
+            }
+        }
+        gesture = .drag(ctx)
+        setLive(dragResult(ctx, dx: ctx.offset.x, dy: ctx.offset.y, scaleGains: event.modifierFlags.contains(.control)))
+    }
+
+    /// Control can be pressed or released mid-drag without moving: the
+    /// selection switches between offset and scaled gains at once.
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        guard case .drag(let ctx) = gesture, !ctx.qMode else { return }
+        setLive(dragResult(ctx, dx: ctx.offset.x, dy: ctx.offset.y, scaleGains: event.modifierFlags.contains(.control)))
+    }
+
+    /// Applies a drag offset to the bands that were grabbed: the grabbed dot
+    /// follows the pointer and the others move by the same frequency ratio.
+    /// Their gains move by the same number of dB, or with `scaleGains`
+    /// (Control) are scaled in proportion, as FabFilter always does, so cuts
+    /// deepen as boosts grow.
+    private func dragResult(_ ctx: DragContext, dx: CGFloat, dy: CGFloat, scaleGains: Bool) -> [Int: FilterParams] {
+        guard let g0 = ctx.start[ctx.grabbed] else { return [:] }
+        var out: [Int: FilterParams] = [:]
+        let qFactor = pow(2, -Double(dy) / Tuning.qPointsPerOctave)
+        if ctx.qMode {
+            for (b, s) in ctx.start where s.type.usesQ {
+                var p = s
+                p.q = Float(PeqLimits.clamp(Double(s.q) * qFactor, PeqLimits.q))
+                out[b] = p
+            }
+            return out
+        }
+
+        let startX = geometry.x(Double(g0.freq))
+        let newFreq = PeqLimits.clamp(geometry.freq(startX + dx), freqRange)
+        let ratio = newFreq / Double(g0.freq)
+        let dbDelta = -Double(dy) * geometry.dbPerPoint
+        let r0 = role(g0)
+        var g = g0
+        g.freq = Float(newFreq)
+        switch r0 {
+        case .gain(let scale):
+            g.gain = Float(PeqLimits.clamp(Double(g0.gain) + dbDelta / scale, PeqLimits.gain))
+        case .resonance:
+            let db = r0.db(for: g0) + dbDelta
+            g.q = Float(PeqLimits.clamp(pow(10, db / 20), PeqLimits.q))
+        case .fixed:
+            // The dot sits at a fixed level (a notch or all-pass on 0 dB, a
+            // first-order cut at its corner), so it cannot follow the pointer
+            // vertically; a drag moves frequency only.  Q is the wheel's.
+            break
+        case .locked:
+            return [:]
+        }
+        out[ctx.grabbed] = g
+
+        let gainFactor: Double? = {
+            guard scaleGains, case .gain = r0, abs(g0.gain) >= 0.25 else { return nil }
+            return Double(g.gain) / Double(g0.gain)
+        }()
+        // Offset by what the grabbed band's gain actually moved, after its
+        // clamp; a grabbed band without gain passes on the pointer's travel.
+        let gainOffset: Double? = {
+            guard case .gain = r0 else { return nil }
+            return Double(g.gain - g0.gain)
+        }()
+        for (b, s) in ctx.start where b != ctx.grabbed {
+            var p = s
+            if case .locked = role(s) { continue }
+            p.freq = Float(PeqLimits.clamp(Double(s.freq) * ratio, freqRange))
+            if s.type.usesGain {
+                let gain = gainFactor.map { Double(s.gain) * $0 }
+                    ?? Double(s.gain) + (gainOffset ?? dbDelta / max(role(s).gainScale, 0.05))
+                p.gain = Float(PeqLimits.clamp(gain, PeqLimits.gain))
+            }
+            out[b] = p
+        }
+        return out
+    }
+
+    private func updateMarquee() {
+        guard case .marquee(let from, let to, let base) = gesture else { return }
+        let rect = CGRect(x: min(from.x, to.x), y: min(from.y, to.y), width: abs(to.x - from.x), height: abs(to.y - from.y))
+        marqueeLayer.path = CGPath(rect: rect, transform: nil)
+        marqueeLayer.isHidden = false
+        let inside = graphBands.filter { rect.contains(nodePoint(shown[$0])) }
+        setSelection(base.union(inside))
+        if let first = frequencyOrder(inside).first { anchor = first }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let p = location(event)
+        let raw = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
+        let delta = event.hasPreciseScrollingDeltas ? raw : raw * 8
+        // A new trackpad gesture always picks its band afresh; momentum and
+        // the rest of a gesture continue the one already picked.
+        let begins = event.phase == .began || event.phase == .mayBegin
+        if begins { hudWheelField = nil }
+        // A gesture that began on a chip field stays with that field, until
+        // Cmd turns it into a gain gesture.
+        if !begins, !event.modifierFlags.contains(.command), hudWheelActive, let field = hudWheelField {
+            scrollHUDField(field, delta: delta, fine: event.modifierFlags.contains(.shift))
+            return
+        }
+        guard handleWheel(at: p, delta: delta, modifiers: event.modifierFlags, begins: begins) else {
+            if p.x <= Tuning.zoomZone { zoom(with: event) } else { super.scrollWheel(with: event) }
+            return
+        }
+    }
+
+    /// Applies one wheel step; false when no band takes it, so the event can
+    /// zoom or scroll instead.  A scroll gesture stays with the band it
+    /// started on: Cmd-wheel gain moves the dot away from the pointer and a
+    /// cut shrinks the band's area, and looking the band up afresh on every
+    /// event lost it part-way, so the page scrolled instead and the gain
+    /// could not be brought back.
+    ///
+    /// An explicit selection owns the wheel: wherever the wheel would adjust
+    /// a band, it adjusts the selection instead, so drifting over another
+    /// band's dot or area mid-adjustment cannot switch to it.  Choosing a
+    /// different band takes a click.  Empty graph keeps zoom and scrolling.
+    @discardableResult
+    func handleWheel(at p: CGPoint, delta rawDelta: CGFloat, modifiers: NSEvent.ModifierFlags,
+                     begins: Bool = false) -> Bool {
+        guard editing else { return false }
+        let now = CACurrentMediaTime()
+        let owner = selectedChipBand
+        let target: Int? = {
+            if case .drag(let ctx) = gesture { return ctx.grabbed }
+            if !begins, let w = wheelBand, isBand(w), now - wheelTime < Tuning.wheelSession,
+               owner == nil || selection.contains(w) { return w }
+            // The chip is drawn over the graph, so it wins over a band area
+            // beneath it.
+            let chip: Int? = {
+                guard let h = hudBand, !hud.isHidden, hud.frame.contains(p) else { return nil }
+                return h
+            }()
+            guard let under = chip ?? band(at: p) else { return nil }
+            return owner ?? under
+        }()
+        guard let b = target else {
+            wheelBand = nil
+            return false
+        }
+        wheelBand = b
+        wheelTime = now
+        hudWheelField = nil
+        let fine = modifiers.contains(.shift)
+        let delta = rawDelta * (fine ? Tuning.fine : 1)
+        guard delta != 0 else { return true }
+        let bands = targets(for: b)
+
+        // Each wheel step is one transformation of a band, applied to the
+        // live band and, mid-drag, to the drag's starting snapshot too:
+        // every drag movement rebuilds the band from that snapshot, so
+        // changing only the live band let the next movement undo the wheel.
+        let transform: (FilterParams) -> FilterParams?
+        if modifiers.contains(.command) {
+            transform = { p in
+                guard p.type.usesGain else { return nil }
+                var q = p
+                q.gain = Float(PeqLimits.clamp(Double(p.gain) + Double(delta) * 0.05, PeqLimits.gain))
+                return q
+            }
+        } else {
+            // Q for every shape that has one, cuts included; slope is set
+            // from the chip's shape page or the band menu.
+            let factor = pow(2, Double(delta) / 100)
+            transform = { p in
+                guard p.type.usesQ else { return nil }
+                var q = p
+                q.q = Float(PeqLimits.clamp(Double(p.q) * factor, PeqLimits.q))
+                return q
+            }
+        }
+
+        var changes: [Int: FilterParams] = [:]
+        for i in bands { if let changed = transform(current(i)) { changes[i] = changed } }
+        if case .drag(var ctx) = gesture {
+            for (i, start) in ctx.start where changes[i] != nil {
+                if let changed = transform(start) { ctx.start[i] = changed }
+            }
+            gesture = .drag(ctx)
+            setLive(changes)
+        } else {
+            setLiveThenCommit(changes)
+        }
+        if hovered == nil { setHovered(b) }
+        showHUD(for: b)
+        return true
+    }
+
+    /// The selected band the chip is pinned to and the wheel adjusts: the one
+    /// the chip already shows if it is selected, else the selection anchor,
+    /// else the lowest.  `targets(for:)` widens it to the whole selection.
+    private var selectedChipBand: Int? {
+        if let h = hudBand, selection.contains(h) { return h }
+        if let a = anchor, selection.contains(a) { return a }
+        return frequencyOrder(Array(selection)).first
+    }
+
+    private func zoom(with event: NSEvent) {
+        let settings = AppSettings.shared
+        let delta = Double(event.scrollingDeltaY)
+        let sensitivity = event.hasPreciseScrollingDeltas ? 0.3 : 3.0
+        settings.graphDBRange = min(max(settings.graphDBRange - delta * sensitivity, 10), 100)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard editing else { super.rightMouseDown(with: event); return }
+        if cardPoint != nil {
+            closeCard()
+            gesture = .idle
+            return
+        }
+        let p = location(event)
+        closeShapePage()
+        let menu: NSMenu
+        if let b = node(at: p) {
+            if !selection.contains(b) { setSelection([b]); anchor = b }
+            menu = bandMenu(for: b)
+        } else {
+            menu = graphMenu()
+        }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    // MARK: - Keyboard
+
+    override func keyDown(with event: NSEvent) {
+        guard editing else { super.keyDown(with: event); return }
+        let mods = event.modifierFlags.intersection([.command, .option, .shift, .control])
+        switch Int(event.keyCode) {
+        case 51, 117: // delete, forward delete
+            deleteBands(selection)
+        case 53: // escape
+            if cardPoint != nil {
+                closeCard()
+                return
+            }
+            if !hud.isHidden, hud.showsShapes {
+                closeShapePage()
+                return
+            }
+            setSelection([])
+            hideHUD(animated: true)
+        case 48: // tab
+            stepSelection(backwards: mods.contains(.shift))
+        case 123, 124, 125, 126:
+            nudge(keyCode: Int(event.keyCode), mods: mods)
+        default:
+            if mods == .command, event.charactersIgnoringModifiers == "a" {
+                setSelection(Set(graphBands))
+            } else {
+                super.keyDown(with: event)
+            }
+        }
+    }
+
+    private func stepSelection(backwards: Bool) {
+        let order = frequencyOrder(graphBands)
+        guard !order.isEmpty else { return }
+        let from = anchor.flatMap { order.firstIndex(of: $0) }
+        let next = from.map { (($0 + (backwards ? -1 : 1)) % order.count + order.count) % order.count }
+            ?? (backwards ? order.count - 1 : 0)
+        setSelection([order[next]])
+        anchor = order[next]
+        showHUD(for: order[next])
+    }
+
+    private func nudge(keyCode: Int, mods: NSEvent.ModifierFlags) {
+        let fine = mods.contains(.shift)
+        var changes: [Int: FilterParams] = [:]
+        for b in selection where isBand(b) {
+            var p = current(b)
+            switch keyCode {
+            case 123, 124:
+                let octaves = (fine ? 1.0 / 96 : 1.0 / 12) * (keyCode == 124 ? 1 : -1)
+                p.freq = Float(PeqLimits.clamp(Double(p.freq) * pow(2, octaves), freqRange))
+            default:
+                let up = keyCode == 126
+                if mods.contains(.option) || !p.type.usesGain {
+                    guard p.type.usesQ else { continue }
+                    p.q = Float(PeqLimits.clamp(Double(p.q) * pow(2, (fine ? 0.02 : 0.1) * (up ? 1 : -1)), PeqLimits.q))
+                } else {
+                    p.gain = Float(PeqLimits.clamp(Double(p.gain) + (fine ? 0.1 : 0.5) * (up ? 1 : -1), PeqLimits.gain))
+                }
+            }
+            changes[b] = p
+        }
+        setLiveThenCommit(changes)
+        if let a = anchor, selection.contains(a) { showHUD(for: a) }
+    }
+
+    // MARK: - Menus
+
+    private func item(_ title: String, checked: Bool = false, enabled: Bool = true, _ action: @escaping () -> Void) -> NSMenuItem {
+        let item = PeqMenuItem(title: title, handler: action)
+        item.state = checked ? .on : .off
+        item.isEnabled = enabled
+        return item
+    }
+
+    private func bandMenu(for b: Int) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let bands = targets(for: b)
+        let p = current(b)
+        let header = NSMenuItem(title: bands.count > 1 ? "\(bands.count) Bands" : "Band \(b + 1)", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        // Shape and typed values are set on the chip; the menu does not
+        // repeat them.
+        if let (shape, order) = PeqShape.of(p.type) {
+            if let t1 = shape.type(order: 1), let t2 = shape.type(order: 2), available.contains(t1), available.contains(t2) {
+                let slope = NSMenuItem(title: shape == .allPass ? "Order" : "Slope", action: nil, keyEquivalent: "")
+                let sub = NSMenu()
+                sub.autoenablesItems = false
+                for o in [1, 2] {
+                    sub.addItem(item(shape.orderTitle(o), checked: o == order) { [weak self] in self?.setShape(bands, shape: shape, order: o) })
+                }
+                slope.submenu = sub
+                menu.addItem(slope)
+            }
+        }
+        menu.addItem(.separator())
+        if config.bypassSupported {
+            menu.addItem(item(p.bypass ? "Enable" : "Bypass") { [weak self] in self?.toggleBypass(bands) })
+        }
+        if p.type.usesGain {
+            menu.addItem(item("Invert Gain") { [weak self] in
+                guard let self else { return }
+                var changes: [Int: FilterParams] = [:]
+                for i in bands where self.current(i).type.usesGain {
+                    var q = self.current(i); q.gain = -q.gain; changes[i] = q
+                }
+                self.commitNow(changes)
+            })
+        }
+        menu.addItem(.separator())
+        menu.addItem(item(bands.count > 1 ? "Delete \(bands.count) Bands" : "Delete Band") { [weak self] in self?.deleteBands(bands) })
+        return menu
+    }
+
+    private func graphMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(item("Select All Bands", enabled: !graphBands.isEmpty) { [weak self] in
+            guard let self else { return }
+            self.setSelection(Set(self.graphBands))
+        })
+        menu.addItem(item("Deselect All", enabled: !selection.isEmpty) { [weak self] in self?.setSelection([]) })
+        if !selection.isEmpty {
+            menu.addItem(.separator())
+            let n = selection.count
+            menu.addItem(item(n > 1 ? "Delete \(n) Selected Bands" : "Delete Selected Band") { [weak self] in
+                guard let self else { return }
+                self.deleteBands(self.selection)
+            })
+        }
+        return menu
+    }
+
+    // MARK: - HUD
+
+    private func wireHUD() {
+        hud.onBypass = { [weak self] in
+            guard let self, let b = self.hudBand else { return }
+            self.toggleBypass(self.targets(for: b))
+        }
+        hud.onShapeButton = { [weak self] in self?.toggleShapePage() }
+        hud.onPageChanged = { [weak self] in self?.layoutHUD() }
+        hud.onEditingChanged = { [weak self] editing in
+            guard let self else { return }
+            if !editing { self.scheduleHUDHide() }
+        }
+        hud.onText = { [weak self] field, text in self?.applyTypedValue(field, text) ?? false }
+        hud.onAdjust = { [weak self] field, delta, fine, phase in self?.adjustFromHUD(field, delta, phase) }
+        hud.onScroll = { [weak self] field, delta, fine in self?.scrollHUDField(field, delta: delta, fine: fine) }
+        hud.forwardsScroll = { [weak self] in self?.graphWheelActive ?? false }
+        // A completed choice applies and turns the chip back to its values.
+        hud.onPick = { [weak self] shape, order in
+            guard let self, let b = self.hudBand else { return }
+            self.setShape(self.targets(for: b), shape: shape, order: order)
+            self.closeShapePage()
+        }
+    }
+
+    /// A scroll gesture on a chip field keeps that field, even when adjusting
+    /// it moves the dot, the chip follows, and another row (or the graph)
+    /// ends up under the pointer.
+    private func scrollHUDField(_ field: PeqHUDField, delta: CGFloat, fine: Bool) {
+        guard let b = hudBand else { return }
+        let now = CACurrentMediaTime()
+        let locked = hudWheelActive ? (hudWheelField ?? field) : field
+        hudWheelField = locked
+        hudWheelTime = now
+        wheelBand = nil
+        let d = delta * (fine ? Tuning.fine : 1)
+        if let p = adjusted(current(b), locked, by: d * 0.5) { setLiveThenCommit([b: p]) }
+    }
+
+    private var graphWheelActive: Bool {
+        wheelBand != nil && CACurrentMediaTime() - wheelTime < Tuning.wheelSession
+    }
+
+    private var hudWheelActive: Bool {
+        hudWheelField != nil && hudBand != nil && CACurrentMediaTime() - hudWheelTime < Tuning.wheelSession
+    }
+
+    private func adjusted(_ p: FilterParams, _ field: PeqHUDField, by delta: CGFloat) -> FilterParams? {
+        var q = p
+        switch field {
+        case .freq: q.freq = Float(PeqLimits.clamp(Double(p.freq) * pow(2, Double(delta) / 100), freqRange))
+        case .gain:
+            guard p.type.usesGain else { return nil }
+            q.gain = Float(PeqLimits.clamp(Double(p.gain) + Double(delta) * 0.1, PeqLimits.gain))
+        case .q:
+            guard p.type.usesQ else { return nil }
+            q.q = Float(PeqLimits.clamp(Double(p.q) * pow(2, Double(delta) / 80), PeqLimits.q))
+        }
+        return q
+    }
+
+    private func adjustFromHUD(_ field: PeqHUDField, _ delta: CGFloat, _ phase: PeqAdjustPhase) {
+        guard let b = hudBand else { return }
+        switch phase {
+        case .began:
+            commitTimer?.invalidate()
+            hudAdjustStart = current(b)
+        case .changed:
+            if let start = hudAdjustStart, let p = adjusted(start, field, by: delta) { setLive([b: p]) }
+        case .ended:
+            hudAdjustStart = nil
+            commitLive()
+        }
+    }
+
+    private func applyTypedValue(_ field: PeqHUDField, _ text: String) -> Bool {
+        guard let b = hudBand else { return false }
+        var p = current(b)
+        switch field {
+        case .freq:
+            guard let f = PeqValueText.parseFrequency(text) else { return false }
+            p.freq = Float(PeqLimits.clamp(f, PeqLimits.freq))
+        case .gain:
+            guard p.type.usesGain, let g = PeqValueText.parseNumber(text, unit: "db") else { return false }
+            p.gain = Float(PeqLimits.clamp(g, PeqLimits.gain))
+        case .q:
+            guard p.type.usesQ, let q = PeqValueText.parseNumber(text, unit: "") else { return false }
+            p.q = Float(PeqLimits.clamp(q, PeqLimits.q))
+        }
+        if p != current(b) { commitNow([b: p]) }
+        return true
+    }
+
+    private func showHUD(for b: Int) {
+        guard isBand(b) else { return }
+        hudHideTimer?.invalidate()
+        if hudBand != b { closeShapePage() }
+        hudBand = b
+        refreshHUD()
+        // A fade-out only marks the chip hidden when it ends, so a band taking
+        // the chip mid-fade finds it unhidden at zero alpha: fade it back in
+        // whenever it is not fully shown, not only when hidden.
+        if hud.isHidden || hud.alphaValue < 1 {
+            hud.isHidden = false
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                hud.animator().alphaValue = 1
+            }
+        }
+        invalidate()
+    }
+
+    private func refreshHUD() {
+        guard let b = hudBand else { return }
+        guard isBand(b) else { hideHUD(animated: true); return }
+        hud.show(current(b), color: PeqBandPalette.nsColor(b), bypassSupported: config.bypassSupported)
+        layoutHUD()
+    }
+
+    private func layoutHUD() {
+        guard let b = hudBand, isBand(b) else { return }
+        // The shape page stays where it opened: a pick moves the band's dot,
+        // and a chip that followed it would leave the pointer behind and hide.
+        if hud.showsShapes, let o = pagedOrigin {
+            hud.frame = NSRect(origin: o, size: hud.preferredSize)
+            return
+        }
+        pagedOrigin = nil
+        let p = current(b)
+        let frame = panelFrame(beside: nodePoint(p), size: hud.preferredSize, boost: role(p).db(for: p) >= 0)
+        hud.frame = frame
+        if hud.showsShapes { pagedOrigin = frame.origin }
+    }
+
+    /// Where a floating panel of `size` sits beside `point`.  Away from 0 dB
+    /// first, as FabFilter does, so a chip never sits on its band's own lobe;
+    /// then beside the point; the lobe side last.  The Cmd-click card shares
+    /// the rule so a new band's chip opens on the side the card was on.
+    private func panelFrame(beside point: CGPoint, size: NSSize, boost: Bool) -> NSRect {
+        let gap: CGFloat = 16
+        let area = bounds.insetBy(dx: 4, dy: 4)
+        func clampedX(_ x: CGFloat) -> CGFloat { min(max(x, area.minX), max(area.maxX - size.width, area.minX)) }
+        func clampedY(_ y: CGFloat) -> CGFloat { min(max(y, area.minY), max(area.maxY - size.height, area.minY)) }
+        let above = NSRect(x: clampedX(point.x - size.width / 2), y: point.y - gap - size.height, width: size.width, height: size.height)
+        let below = NSRect(x: clampedX(point.x - size.width / 2), y: point.y + gap, width: size.width, height: size.height)
+        let right = NSRect(x: point.x + gap, y: clampedY(point.y - size.height / 2), width: size.width, height: size.height)
+        let left = NSRect(x: point.x - gap - size.width, y: clampedY(point.y - size.height / 2), width: size.width, height: size.height)
+        let candidates = boost ? [above, right, left, below] : [below, right, left, above]
+        var frame = candidates.first { area.contains($0) } ?? candidates[0]
+        frame.origin = NSPoint(x: clampedX(frame.minX), y: clampedY(frame.minY))
+        return frame
+    }
+
+    /// While bands are selected the chip stays up on the selection, wherever
+    /// the pointer goes; with none selected it follows the hovered dot.
+    private func pinHUDToSelection() {
+        if let pin = selectedChipBand {
+            if case .marquee = gesture { return }
+            if hud.isHidden || hudBand != pin { showHUD(for: pin) }
+        } else if let h = hudBand, pointer.flatMap(node(at:)) != h {
+            scheduleHUDHide()
+        }
+    }
+
+    private func scheduleHUDHide() {
+        guard !hud.isHidden, !hud.isEditingText else { return }
+        if let h = hudBand, selection.contains(h) { return }
+        if case .drag = gesture { return }
+        hudHideTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in self?.hideHUD(animated: true) }
+        hudHideTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func hideHUD(animated: Bool) {
+        hudHideTimer?.invalidate()
+        closeShapePage()
+        if hud.isEditingText { hud.endEditing() }
+        hudBand = nil
+        guard !hud.isHidden else { return }
+        if animated {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.15
+                hud.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, self.hudBand == nil else { return }
+                self.hud.isHidden = true
+            })
+        } else {
+            hud.alphaValue = 0
+            hud.isHidden = true
+        }
+        invalidate()
+    }
+
+    /// Turns the chip to its shape page, or back to its values.
+    private func toggleShapePage() {
+        guard hudBand != nil else { return }
+        if hud.showsShapes { hud.showValues() } else { hud.showShapes(available: available) }
+        layoutHUD()
+    }
+
+    private func closeShapePage() {
+        guard hud.showsShapes else { return }
+        hud.showValues()
+        layoutHUD()
+    }
+
+    // MARK: - Shape card
+
+    /// A new band of `shape` at `order` placed at `p`: the pointer's
+    /// frequency, and its level as the gain for shapes that have one.
+    private func band(_ shape: PeqShape, order: Int, at p: CGPoint) -> FilterParams? {
+        guard let type = shape.type(order: order) else { return nil }
+        var band = FilterParams(type: type, freq: Float(PeqLimits.clamp(geometry.freq(p.x), freqRange)),
+                                q: shape == .bell || shape == .notch ? 1 : 0.707, gain: 0)
+        if type.usesGain { band.gain = Float(PeqLimits.clamp(geometry.db(p.y), PeqLimits.gain)) }
+        return band
+    }
+
+    /// Opens the shape card for a band at `p`, placed as the band's chip will
+    /// be.
+    private func openCard(at p: CGPoint) {
+        guard freeSlot != nil else {
+            // Every band is in use: nothing to create, and the press is not
+            // a click on the graph either.
+            NSSound.beep()
+            return
+        }
+        closeShapePage()
+        card.chooser.configure(available: available)
+        card.chooser.mark(own: nil, color: .white)
+        // The new band is selected, and its chip fades in as the card fades
+        // out, so the choice turns straight into the band's values.
+        card.chooser.onPick = { [weak self] shape, order in
+            guard let self, let at = self.cardPoint else { return }
+            let band = self.band(shape, order: order, at: at)
+            self.closeCard(animated: true)
+            if let band, let slot = self.createBand(band) { self.showHUD(for: slot) }
+        }
+        card.chooser.onBack = { [weak self] in self?.closeCard() }
+        // Boost or cut by the click's level, which is where a bell's dot lands.
+        card.setFrameOrigin(panelFrame(beside: p, size: card.frame.size, boost: geometry.db(p.y) >= 0).origin)
+        card.alphaValue = 1
+        card.isHidden = false
+        cardPoint = p
+        updateHover(at: p)
+    }
+
+    private func closeCard(animated: Bool = false) {
+        guard cardPoint != nil else { return }
+        cardPoint = nil
+        ghost = nil
+        invalidate()
+        guard animated else {
+            card.isHidden = true
+            card.chooser.reset()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.12
+            card.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            // A card opened again during the fade is left alone.
+            if self.cardPoint == nil {
+                self.card.isHidden = true
+                self.card.chooser.reset()
+            }
+            self.card.alphaValue = 1
+        })
+    }
+
+    private func showAxisLabel(_ text: String, at x: CGFloat) {
+        axisLabel.stringValue = text
+        let width = ceil(axisLabel.intrinsicContentSize.width) + 12
+        let h: CGFloat = 16
+        axisLabel.frame = NSRect(x: min(max(x - width / 2, 4), max(bounds.width - width - 4, 4)),
+                                 y: bounds.height - h - 3, width: width, height: h)
+        axisLabel.isHidden = false
+    }
+
+    private func showGainLabel(_ text: String, at y: CGFloat) {
+        gainLabel.stringValue = text
+        let width = ceil(gainLabel.intrinsicContentSize.width) + 12
+        let h: CGFloat = 16
+        gainLabel.frame = NSRect(x: 4, y: min(max(y - h / 2, 4), max(bounds.height - h - 4, 4)),
+                                 width: width, height: h)
+        gainLabel.isHidden = false
+    }
+
+    private func hideAxisLabels() {
+        axisLabel.isHidden = true
+        gainLabel.isHidden = true
+    }
+}
+
+private extension PeqNodeRole {
+    var gainScale: Double {
+        if case .gain(let scale) = self { return scale }
+        return 1
+    }
+}
+
+/// A menu item that runs a closure.
+final class PeqMenuItem: NSMenuItem {
+    private let handler: () -> Void
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError() }
+    @objc private func run() { handler() }
+}

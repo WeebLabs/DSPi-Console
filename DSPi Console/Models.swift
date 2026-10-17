@@ -15,6 +15,14 @@ class DSPMeterModel: ObservableObject {
     @Published var status = SystemStatus()
 }
 
+/// Values the device reports back on a timer rather than settings the user
+/// edits. Kept off `DSPViewModel` so a poll tick only re-evaluates the views
+/// that actually show them (see `PlatformInfo` for the same reasoning).
+final class DeviceTelemetry: ObservableObject {
+    /// Live device sample rate (REQ_GET_STATUS wValue=15), 0 until first read.
+    @Published var sampleRateHz: UInt32 = 0
+}
+
 /// Output gains while their slider is being dragged, keyed by output index.
 /// Only the response graph observes this, so a drag step moves the curve
 /// without re-evaluating every view that observes `DSPViewModel`; the release

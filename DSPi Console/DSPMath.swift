@@ -168,15 +168,17 @@ enum FilterType: Int, CaseIterable, Identifiable {
         case .peaking: return "PK"
         case .lowShelf: return "LS"
         case .highShelf: return "HS"
-        case .lowPass: return "LP"
-        case .highPass: return "HP"
+        // PEQ passes are shown as cuts, as their names are: a low pass is a
+        // high cut.  Crossovers keep LP and HP.
+        case .lowPass: return "HC"
+        case .highPass: return "LC"
         case .notch: return "NT"
         case .allPass: return "AP"
         case .allPass1: return "AP1"
         case .lowShelf1: return "LS1"
         case .highShelf1: return "HS1"
-        case .lowPass1: return "LP1"
-        case .highPass1: return "HP1"
+        case .lowPass1: return "HC1"
+        case .highPass1: return "LC1"
         case .linkwitzTransform: return "LT"
         case .lr2_lp: return "LR2 LP"
         case .lr2_hp: return "LR2 HP"
@@ -283,8 +285,16 @@ enum FilterType: Int, CaseIterable, Identifiable {
     /// re-import can't mistake them for a plain "LP".  nil for `.flat`, which is
     /// written as "OFF" instead of a type.
     var fileCode: String? {
-        guard self != .flat else { return nil }
-        return isCrossover ? shortLabel.replacingOccurrences(of: " ", with: "") : shortLabel
+        switch self {
+        case .flat: return nil
+        // Files keep REW's pass codes, which older builds also read; only the
+        // app's labels call these cuts.
+        case .lowPass: return "LP"
+        case .highPass: return "HP"
+        case .lowPass1: return "LP1"
+        case .highPass1: return "HP1"
+        default: return isCrossover ? shortLabel.replacingOccurrences(of: " ", with: "") : shortLabel
+        }
     }
 
     /// Resolve a filter-file token back to a type, accepting the aliases other
@@ -498,22 +508,20 @@ class DSPMath {
         return Float(10.0 * log10(magSquaredTotal))
     }
 
+    /// |H|^2 in terms of phi = sin^2(w/2), the form RBJ recommends for
+    /// plotting: identical to evaluating 1 + a1 cos w + a2 cos 2w, but without
+    /// its cancellation.  The old form lost the resonance of low, narrow
+    /// sections (a 10 Hz, Q 20 bell read 0 dB at its peak once the denominator
+    /// fell under a 1e-15 cut-off); this one stays exact there.
     private static func magnitudeSquared(coeffs: Coeffs, freq: Double) -> Double {
-        let w = 2.0 * Double.pi * freq / sampleRate
-        let cos_w = cos(w)
-        let cos_2w = cos(2.0 * w)
-        let sin_w = sin(w)
-        let sin_2w = sin(2.0 * w)
-        let num_r = coeffs.b0 + coeffs.b1 * cos_w + coeffs.b2 * cos_2w
-        let num_i = -(coeffs.b1 * sin_w + coeffs.b2 * sin_2w)
-        let den_r = 1.0 + coeffs.a1 * cos_w + coeffs.a2 * cos_2w
-        let den_i = -(coeffs.a1 * sin_w + coeffs.a2 * sin_2w)
-        let num_mag_sq = num_r*num_r + num_i*num_i
-        let den_mag_sq = den_r*den_r + den_i*den_i
-        if den_mag_sq > 1e-15 {
-            return num_mag_sq / den_mag_sq
-        }
-        return 1.0
+        let s = sin(Double.pi * freq / sampleRate)
+        let phi = s * s
+        let (b0, b1, b2, a1, a2) = (coeffs.b0, coeffs.b1, coeffs.b2, coeffs.a1, coeffs.a2)
+        let sb = b0 + b1 + b2, sa = 1 + a1 + a2
+        let num = sb * sb - 4 * (b0 * b1 + b1 * b2 + 4 * b0 * b2) * phi + 16 * b0 * b2 * phi * phi
+        let den = sa * sa - 4 * (a1 + a1 * a2 + 4 * a2) * phi + 16 * a2 * phi * phi
+        guard den > 0 else { return 1.0 }
+        return max(num, 0) / den
     }
 
     /// Phase contribution (radians) of a single biquad section at `freq`,

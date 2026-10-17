@@ -43,6 +43,8 @@ struct PresetDocument: Codable {
     var upmix: UpmixBlock?
     /// Absent when the source device had no subharmonic synthesizer (pre-V29).
     var subharm: SubharmBlock?
+    /// Absent when the source device had no tube modeller (pre-V31).  Additive.
+    var tube: TubeBlock?
     var channels: [ChannelBlock] = []
     var matrix: [CrosspointBlock] = []
     /// Physical wiring.  Applied only when the user opts in on import, since
@@ -62,6 +64,7 @@ struct PresetDocument: Codable {
         psybass = c.value(.psybass, nil)
         upmix = c.value(.upmix, nil)
         subharm = c.value(.subharm, nil)
+        tube = c.value(.tube, nil)
         channels = c.value(.channels, [])
         matrix = c.value(.matrix, [])
         io = c.value(.io, IoBlock())
@@ -264,6 +267,47 @@ struct PresetDocument: Codable {
         }
     }
 
+    /// Every value is stored as the firmware holds it, the four character knobs
+    /// included, so a file saved on a tube type restores that exact sound even if
+    /// a later firmware retunes the row.  Defaults are the firmware's factory
+    /// values (the 12AX7 row).
+    struct TubeBlock: Codable {
+        var enabled = false
+        var outputMask: Int = Int(TUBE_DEFAULT_OUTPUT_MASK)
+        var tubeType: Int = TUBE_DEFAULT_TUBE_TYPE
+        var driveDb: Float = TUBE_DEFAULT_DRIVE_DB
+        var biasPct: Float = TUBE_DEFAULT_BIAS_PCT
+        var asymDb: Float = TUBE_DEFAULT_ASYM_DB
+        var hardnessPct: Float = TUBE_DEFAULT_HARDNESS_PCT
+        var sagPct: Float = TUBE_DEFAULT_SAG_PCT
+        var rectifier: Int = TUBE_DEFAULT_RECTIFIER
+        var xfmrEnabled = TUBE_DEFAULT_XFMR_ENABLED
+        var xfmrDamping: Float = TUBE_DEFAULT_XFMR_DAMPING
+        var xfmrResHz: Float = TUBE_DEFAULT_XFMR_RES_HZ
+        var mixPct: Float = TUBE_DEFAULT_MIX_PCT
+        var trimDb: Float = TUBE_DEFAULT_TRIM_DB
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = c.value(.enabled, false)
+            outputMask = c.value(.outputMask, Int(TUBE_DEFAULT_OUTPUT_MASK))
+            tubeType = c.value(.tubeType, TUBE_DEFAULT_TUBE_TYPE)
+            driveDb = c.value(.driveDb, TUBE_DEFAULT_DRIVE_DB)
+            biasPct = c.value(.biasPct, TUBE_DEFAULT_BIAS_PCT)
+            asymDb = c.value(.asymDb, TUBE_DEFAULT_ASYM_DB)
+            hardnessPct = c.value(.hardnessPct, TUBE_DEFAULT_HARDNESS_PCT)
+            sagPct = c.value(.sagPct, TUBE_DEFAULT_SAG_PCT)
+            rectifier = c.value(.rectifier, TUBE_DEFAULT_RECTIFIER)
+            xfmrEnabled = c.value(.xfmrEnabled, TUBE_DEFAULT_XFMR_ENABLED)
+            xfmrDamping = c.value(.xfmrDamping, TUBE_DEFAULT_XFMR_DAMPING)
+            xfmrResHz = c.value(.xfmrResHz, TUBE_DEFAULT_XFMR_RES_HZ)
+            mixPct = c.value(.mixPct, TUBE_DEFAULT_MIX_PCT)
+            trimDb = c.value(.trimDb, TUBE_DEFAULT_TRIM_DB)
+        }
+    }
+
     struct UpmixBlock: Codable {
         var enabled = false
         var centerMode: Int = UPMIX_CENTER_MODE_ADAPTIVE
@@ -328,6 +372,11 @@ struct PresetDocument: Codable {
         /// additive: post-matrix output delay (REQ_SET_OUTPUT_DELAY), which is a
         /// separate value from `delayMs` and which the Windows document omits.
         var outputDelayMs: Float?
+        /// additive: this output's limiter (V32+).  Absent on inputs and when
+        /// the source device had no limiter, which leaves the device's alone.
+        /// Applied with the hardware I/O option, as the firmware keeps it with
+        /// the output configuration.
+        var limiter: LimiterBlock?
 
         var eq: [BandBlock] = []
         /// Crossover bands 0..3.  Empty for inputs and for pre-V11 sources.
@@ -348,8 +397,36 @@ struct PresetDocument: Codable {
             muted = c.value(.muted, false)
             enabled = c.value(.enabled, true)
             outputDelayMs = c.value(.outputDelayMs, nil)
+            limiter = c.value(.limiter, nil)
             eq = c.value(.eq, [])
             crossover = c.value(.crossover, [])
+        }
+    }
+
+    /// One output's limiter, as the firmware holds it.  Defaults are the
+    /// firmware's factory values.
+    struct LimiterBlock: Codable {
+        var enabled = false
+        var thresholdDb: Float = LIMITER_DEFAULT_THRESHOLD_DB
+        var releaseMs: Float = LIMITER_DEFAULT_RELEASE_MS
+        /// 0 = unlinked, 1..4.
+        var linkGroup: Int = 0
+
+        init() {}
+
+        init(_ s: LimiterOutputSettings) {
+            enabled = s.enabled
+            thresholdDb = s.thresholdDB
+            releaseMs = s.releaseMs
+            linkGroup = s.linkGroup
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = c.value(.enabled, false)
+            thresholdDb = c.value(.thresholdDb, LIMITER_DEFAULT_THRESHOLD_DB)
+            releaseMs = c.value(.releaseMs, LIMITER_DEFAULT_RELEASE_MS)
+            linkGroup = c.value(.linkGroup, 0)
         }
     }
 

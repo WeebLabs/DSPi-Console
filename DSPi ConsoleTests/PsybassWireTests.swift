@@ -29,8 +29,8 @@ final class PsybassWireTests: XCTestCase {
     /// V23 appends WirePsybassParams (24 bytes) as the final section at offset
     /// 5876, growing the flat layout from 5876 to 5900 bytes (spec §4).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 30)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5980)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_PSYBASS_OFFSET, 5876)
         // The psybass section is 24 bytes; the upmixer section follows it (V25).
         XCTAssertEqual(BULK_PSYBASS_OFFSET + 24, BULK_UPMIX_OFFSET)
@@ -88,13 +88,13 @@ final class PsybassWireTests: XCTestCase {
 
     func testOutputChannelMaskToggle() {
         let vm = DSPViewModel()
-        vm.psybassOutputMask = 0x0000
+        vm.psybass.outputMask = 0x0000
         vm.setPsybassOutputChannel(0, enabled: true)
-        XCTAssertEqual(vm.psybassOutputMask & 0x0001, 0x0001)
+        XCTAssertEqual(vm.psybass.outputMask & 0x0001, 0x0001)
         vm.setPsybassOutputChannel(8, enabled: true)   // PDM sub bit on RP2350
-        XCTAssertEqual(vm.psybassOutputMask & 0x0100, 0x0100)
+        XCTAssertEqual(vm.psybass.outputMask & 0x0100, 0x0100)
         vm.setPsybassOutputChannel(0, enabled: false)
-        XCTAssertEqual(vm.psybassOutputMask & 0x0001, 0x0000)
+        XCTAssertEqual(vm.psybass.outputMask & 0x0001, 0x0000)
     }
 
     // MARK: - Live-device round-trips (skip when no DSPi attached)

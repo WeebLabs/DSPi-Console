@@ -25,7 +25,8 @@ final class PresetSnapshotTests: XCTestCase {
         outputSlotTypes: [UInt8] = [0, 0, 0, 0],
         spdifRxPin: UInt8 = 11,
         adatEnabled: Bool? = nil,
-        adatPin: UInt8? = nil
+        adatPin: UInt8? = nil,
+        limiterOutputs: [LimiterOutputSettings] = LimiterParameters().outputs
     ) -> PresetSnapshot {
         PresetSnapshot(
             preampDB: preampDB,
@@ -62,6 +63,21 @@ final class PresetSnapshotTests: XCTestCase {
             subharmSelectHoldMs: 150,
             subharmCeilingDB: 0,
             subharmLinkPairs: true,
+            tubeEnabled: false,
+            tubeOutputMask: TUBE_DEFAULT_OUTPUT_MASK,
+            tubeType: TUBE_DEFAULT_TUBE_TYPE,
+            tubeDriveDB: TUBE_DEFAULT_DRIVE_DB,
+            tubeBiasPct: TUBE_DEFAULT_BIAS_PCT,
+            tubeAsymDB: TUBE_DEFAULT_ASYM_DB,
+            tubeHardnessPct: TUBE_DEFAULT_HARDNESS_PCT,
+            tubeSagPct: TUBE_DEFAULT_SAG_PCT,
+            tubeRectifier: TUBE_DEFAULT_RECTIFIER,
+            tubeXfmrEnabled: false,
+            tubeXfmrDamping: TUBE_DEFAULT_XFMR_DAMPING,
+            tubeXfmrResHz: TUBE_DEFAULT_XFMR_RES_HZ,
+            tubeMixPct: 100,
+            tubeTrimDB: 0,
+            limiterOutputs: limiterOutputs,
             upmixEnabled: false,
             upmixCenterMode: UPMIX_CENTER_MODE_ADAPTIVE,
             upmixSurroundMode: UPMIX_SURROUND_MODE_ADAPTIVE,
@@ -161,6 +177,29 @@ final class PresetSnapshotTests: XCTestCase {
         let newI = makeSnapshot(masterVolumeDB: -10, masterVolumeMode: MASTER_VOLUME_MODE_INDEPENDENT)
         XCTAssertFalse(PresetSnapshot.diff(from: oldI, to: newI, channelNames: names).hasChanges,
                        "master volume change should be ignored in INDEPENDENT mode")
+    }
+
+    /// The limiter follows output_config_mode like the pins: it dirties the
+    /// preset only in WITH_PRESET mode, one line per changed setting.
+    func testLimiterChangeGatedByOutputConfigMode() {
+        // RP2040, so output 1 is unified channel 3 ("Out R") in `names`.
+        var outs = LimiterParameters().outputs
+        outs[1].enabled = true
+        outs[1].thresholdDB = -3
+
+        let withPreset = OUTPUT_CONFIG_MODE_WITH_PRESET
+        let old = makeSnapshot(outputConfigMode: withPreset, platformName: "RP2040")
+        let new = makeSnapshot(outputConfigMode: withPreset, platformName: "RP2040", limiterOutputs: outs)
+        let diff = PresetSnapshot.diff(from: old, to: new, channelNames: names)
+        XCTAssertEqual(diff.changes.filter { $0.category == "Limiter" }.count, 2)
+        XCTAssertTrue(diff.changes.allSatisfy { $0.description.hasPrefix("Out R limiter") },
+                      "\(diff.changes.map(\.description))")
+
+        let independent = OUTPUT_CONFIG_MODE_INDEPENDENT
+        let oldI = makeSnapshot(outputConfigMode: independent, platformName: "RP2040")
+        let newI = makeSnapshot(outputConfigMode: independent, platformName: "RP2040", limiterOutputs: outs)
+        XCTAssertFalse(PresetSnapshot.diff(from: oldI, to: newI, channelNames: names).hasChanges,
+                       "a limiter change must not dirty the preset in INDEPENDENT mode")
     }
 
     func testAdatChangeGatedByOutputConfigMode() {

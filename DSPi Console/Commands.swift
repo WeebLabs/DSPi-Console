@@ -236,7 +236,9 @@ extension DSPViewModel {
               data.count >= 4 else { return }
         let rate = data.withUnsafeBytes { $0.load(as: UInt32.self) }
         DispatchQueue.main.async {
-            self.sampleRateHz = rate
+            // @Published fires on assignment, not on change; the rate repeats
+            // on every poll, so only publish when it actually moves.
+            if self.telemetry.sampleRateHz != rate { self.telemetry.sampleRateHz = rate }
             // Keep UI consistent with firmware/runtime policy:
             // 256x MCK is not available at 96 kHz.
             if rate >= 96000, self.mckMultiplier == 256 {
@@ -322,7 +324,21 @@ extension DSPViewModel {
         p.gain = (p.gain * 1000).rounded() / 1000
         if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
+        transport.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: eqParamPacket(ch: ch, band: band, p: p))
+        recomputeMagnitudes(for: ch)
+    }
 
+    /// Drag-time band write: the device follows, the model does not publish.
+    /// The graph editor draws the live curve itself and commits once through
+    /// `setFilter` on release, the same split as `sendOutputGainToDevice`.
+    func sendFilterToDevice(ch: Int, band: Int, p: FilterParams) {
+        var p = p
+        p.gain = (p.gain * 1000).rounded() / 1000
+        if p.gain == -0.0 { p.gain = 0.0 }
+        transport.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: eqParamPacket(ch: ch, band: band, p: p))
+    }
+
+    private func eqParamPacket(ch: Int, band: Int, p: FilterParams) -> Data {
         // EqParamPacket layout: [ch, band, type, bypass, freq(4), q(4), gain(4)] = 16 bytes.
         // Per band_bypass_spec §5: write exactly 0 or 1 — never 0xFF.
         // For the Linkwitz Transform (type 11) append the 2-byte `qp` sidecar
@@ -340,9 +356,7 @@ extension DSPViewModel {
         if p.type == .linkwitzTransform {
             var qp16 = p.qpEncoded; data.append(&qp16, length: 2)
         }
-
-        transport.sendControlRequest(request: REQ_SET_EQ_PARAM, value: 0, index: 0, data: data as Data)
-        recomputeMagnitudes(for: ch)
+        return data as Data
     }
     
     func fetchFilter(ch: Int, band: Int) {
@@ -524,7 +538,9 @@ extension DSPViewModel {
     func setPreamp(_ db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
-        self.preampDB = [val, val]
+        // The device sets every input, so every entry follows.  Replacing the
+        // array with two entries would leave inputs 2+ out of range.
+        self.preampDB = Array(repeating: val, count: preampDB.count)
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
     }
@@ -812,7 +828,7 @@ extension DSPViewModel {
     }
 
     func setLoudnessRef(_ spl: Float) {
-        self.loudnessRefSPL = spl
+        self.loudness.refSPL = spl
         var val = spl
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_LOUDNESS_REF, value: 0, index: 0, data: data)
@@ -822,15 +838,15 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_REF, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.loudnessRefSPL - val) > 0.01 {
-                    self.loudnessRefSPL = val
+                if abs(self.loudness.refSPL - val) > 0.01 {
+                    self.loudness.refSPL = val
                 }
             }
         }
     }
 
     func setLoudnessIntensity(_ pct: Float) {
-        self.loudnessIntensity = pct
+        self.loudness.intensity = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_LOUDNESS_INTENSITY, value: 0, index: 0, data: data)
@@ -840,8 +856,8 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_INTENSITY, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.loudnessIntensity - val) > 0.01 {
-                    self.loudnessIntensity = val
+                if abs(self.loudness.intensity - val) > 0.01 {
+                    self.loudness.intensity = val
                 }
             }
         }
@@ -851,7 +867,7 @@ extension DSPViewModel {
     /// output channel k.  Sent as a 2-byte little-endian uint16; the firmware
     /// switches masks glitch-free from the next packet (no recompute or reset).
     func setLoudnessMask(_ mask: UInt16) {
-        self.loudnessOutputMask = mask
+        self.loudness.outputMask = mask
         let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
         transport.sendControlRequest(request: REQ_SET_LOUDNESS_MASK, value: 0, index: 0, data: data)
     }
@@ -859,7 +875,7 @@ extension DSPViewModel {
     /// Toggles a single output channel's bit in the loudness mask and pushes it.
     func setLoudnessOutputChannel(_ output: Int, enabled: Bool) {
         guard output >= 0, output < 16 else { return }
-        var mask = loudnessOutputMask
+        var mask = loudness.outputMask
         if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
         setLoudnessMask(mask)
     }
@@ -867,7 +883,7 @@ extension DSPViewModel {
     func fetchLoudnessMask() {
         if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
             let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
-            DispatchQueue.main.async { self.loudnessOutputMask = val }
+            DispatchQueue.main.async { self.loudness.outputMask = val }
         }
     }
 
@@ -894,26 +910,26 @@ extension DSPViewModel {
     ]
 
     func setCrossfeedPreset(_ preset: Int) {
-        self.crossfeedPreset = preset
+        self.crossfeed.preset = preset
         var val = UInt8(preset)
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_PRESET, value: 0, index: 0, data: data)
         // Apply known preset values locally so the graph updates immediately
         if preset < DSPViewModel.presetValues.count {
-            self.crossfeedFreq = DSPViewModel.presetValues[preset].freq
-            self.crossfeedFeed = DSPViewModel.presetValues[preset].feed
+            self.crossfeed.freq = DSPViewModel.presetValues[preset].freq
+            self.crossfeed.feed = DSPViewModel.presetValues[preset].feed
         }
     }
 
     func fetchCrossfeedPreset() {
         if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_PRESET, value: 0, index: 0, length: 1) {
             let val = Int(d[0])
-            DispatchQueue.main.async { self.crossfeedPreset = val }
+            DispatchQueue.main.async { self.crossfeed.preset = val }
         }
     }
 
     func setCrossfeedFreq(_ freq: Float) {
-        self.crossfeedFreq = freq
+        self.crossfeed.freq = freq
         var val = freq
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_FREQ, value: 0, index: 0, data: data)
@@ -923,15 +939,15 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_FREQ, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.crossfeedFreq - val) > 0.01 {
-                    self.crossfeedFreq = val
+                if abs(self.crossfeed.freq - val) > 0.01 {
+                    self.crossfeed.freq = val
                 }
             }
         }
     }
 
     func setCrossfeedFeed(_ feed: Float) {
-        self.crossfeedFeed = feed
+        self.crossfeed.feed = feed
         var val = feed
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_FEED, value: 0, index: 0, data: data)
@@ -941,15 +957,15 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_FEED, value: 0, index: 0, length: 4) {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.crossfeedFeed - val) > 0.01 {
-                    self.crossfeedFeed = val
+                if abs(self.crossfeed.feed - val) > 0.01 {
+                    self.crossfeed.feed = val
                 }
             }
         }
     }
 
     func setCrossfeedITD(_ enabled: Bool) {
-        self.crossfeedITD = enabled
+        self.crossfeed.itd = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_ITD, value: 0, index: 0, data: data)
@@ -958,7 +974,7 @@ extension DSPViewModel {
     func fetchCrossfeedITD() {
         if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_ITD, value: 0, index: 0, length: 1) {
             let val = d[0] != 0
-            DispatchQueue.main.async { self.crossfeedITD = val }
+            DispatchQueue.main.async { self.crossfeed.itd = val }
         }
     }
 
@@ -966,7 +982,7 @@ extension DSPViewModel {
     /// pair p (outputs 2p / 2p+1).  Sent as a single byte; the firmware clamps it to
     /// the platform's valid pair bits and switches masks glitch-free (no recompute).
     func setCrossfeedMask(_ mask: UInt8) {
-        self.crossfeedOutputMask = mask
+        self.crossfeed.outputMask = mask
         var val = mask
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_OUTPUTS, value: 0, index: 0, data: data)
@@ -975,7 +991,7 @@ extension DSPViewModel {
     /// Toggles a single output pair's bit in the crossfeed mask and pushes it.
     func setCrossfeedOutputPair(_ pair: Int, enabled: Bool) {
         guard pair >= 0, pair < 8 else { return }
-        var mask = crossfeedOutputMask
+        var mask = crossfeed.outputMask
         if enabled { mask |= (UInt8(1) << pair) } else { mask &= ~(UInt8(1) << pair) }
         setCrossfeedMask(mask)
     }
@@ -983,11 +999,23 @@ extension DSPViewModel {
     func fetchCrossfeedMask() {
         if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_OUTPUTS, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0]
-            DispatchQueue.main.async { self.crossfeedOutputMask = val }
+            DispatchQueue.main.async { self.crossfeed.outputMask = val }
         }
     }
 
     // MARK: - Psychoacoustic Bass
+
+    /// Device-only live send for a drag on any plain float parameter, the
+    /// counterpart to `sendOutputGainToDevice` for the tool modules.  It
+    /// transmits without publishing, so the gesture re-renders nothing; the
+    /// matching `set*` commits once on release.  Clamping is the caller's, and
+    /// the firmware clamps again regardless.
+    func sendFloatParamToDevice(_ request: UInt8, _ value: Float,
+                                wValue: UInt16 = 0, wIndex: UInt16 = 0) {
+        var v = value
+        transport.sendControlRequest(request: request, value: wValue, index: wIndex,
+                                     data: Data(bytes: &v, count: 4))
+    }
 
     func setPsybass(_ enabled: Bool) {
         self.psybassEnabled = enabled
@@ -1004,7 +1032,7 @@ extension DSPViewModel {
     }
 
     func setPsybassCutoff(_ hz: Float) {
-        self.psybassCutoffHz = hz
+        self.psybass.cutoffHz = hz
         var val = hz
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: data)
@@ -1014,13 +1042,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.psybassCutoffHz - val) > 0.01 { self.psybassCutoffHz = val }
+                if abs(self.psybass.cutoffHz - val) > 0.01 { self.psybass.cutoffHz = val }
             }
         }
     }
 
     func setPsybassHarmonics(_ db: Float) {
-        self.psybassHarmonicsDB = db
+        self.psybass.harmonicsDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_HARMONICS, value: 0, index: 0, data: data)
@@ -1030,13 +1058,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_HARMONICS, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.psybassHarmonicsDB - val) > 0.01 { self.psybassHarmonicsDB = val }
+                if abs(self.psybass.harmonicsDB - val) > 0.01 { self.psybass.harmonicsDB = val }
             }
         }
     }
 
     func setPsybassDrive(_ db: Float) {
-        self.psybassDriveDB = db
+        self.psybass.driveDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_DRIVE, value: 0, index: 0, data: data)
@@ -1046,13 +1074,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_DRIVE, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.psybassDriveDB - val) > 0.01 { self.psybassDriveDB = val }
+                if abs(self.psybass.driveDB - val) > 0.01 { self.psybass.driveDB = val }
             }
         }
     }
 
     func setPsybassCharacter(_ pct: Float) {
-        self.psybassCharacterPct = pct
+        self.psybass.characterPct = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_CHARACTER, value: 0, index: 0, data: data)
@@ -1062,13 +1090,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_CHARACTER, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.psybassCharacterPct - val) > 0.01 { self.psybassCharacterPct = val }
+                if abs(self.psybass.characterPct - val) > 0.01 { self.psybass.characterPct = val }
             }
         }
     }
 
     func setPsybassOriginal(_ db: Float) {
-        self.psybassOriginalDB = db
+        self.psybass.originalDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_ORIGINAL, value: 0, index: 0, data: data)
@@ -1078,7 +1106,7 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_ORIGINAL, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.psybassOriginalDB - val) > 0.01 { self.psybassOriginalDB = val }
+                if abs(self.psybass.originalDB - val) > 0.01 { self.psybass.originalDB = val }
             }
         }
     }
@@ -1087,7 +1115,7 @@ extension DSPViewModel {
     /// as a 2-byte little-endian uint16.  The firmware switches masks glitch-free
     /// from the next packet (no recompute) and clears skipped outputs' state.
     func setPsybassMask(_ mask: UInt16) {
-        self.psybassOutputMask = mask
+        self.psybass.outputMask = mask
         let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
         transport.sendControlRequest(request: REQ_SET_PSYBASS_MASK, value: 0, index: 0, data: data)
     }
@@ -1095,7 +1123,7 @@ extension DSPViewModel {
     /// Toggles a single output channel's bit in the psybass mask and pushes it.
     func setPsybassOutputChannel(_ output: Int, enabled: Bool) {
         guard output >= 0, output < 16 else { return }
-        var mask = psybassOutputMask
+        var mask = psybass.outputMask
         if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
         setPsybassMask(mask)
     }
@@ -1103,7 +1131,7 @@ extension DSPViewModel {
     func fetchPsybassMask() {
         if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
             let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
-            DispatchQueue.main.async { self.psybassOutputMask = val }
+            DispatchQueue.main.async { self.psybass.outputMask = val }
         }
     }
 
@@ -1130,7 +1158,7 @@ extension DSPViewModel {
     }
 
     func setSubharmLow(_ db: Float) {
-        self.subharmLowDB = db
+        self.subharm.lowDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: data)
@@ -1141,13 +1169,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmLowDB - val) > 0.01 { self.subharmLowDB = val }
+                if abs(self.subharm.lowDB - val) > 0.01 { self.subharm.lowDB = val }
             }
         }
     }
 
     func setSubharmHigh(_ db: Float) {
-        self.subharmHighDB = db
+        self.subharm.highDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_HIGH, value: 0, index: 0, data: data)
@@ -1158,13 +1186,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HIGH, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmHighDB - val) > 0.01 { self.subharmHighDB = val }
+                if abs(self.subharm.highDB - val) > 0.01 { self.subharm.highDB = val }
             }
         }
     }
 
     func setSubharmTop(_ db: Float) {
-        self.subharmTopDB = db
+        self.subharm.topDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_TOP, value: 0, index: 0, data: data)
@@ -1175,13 +1203,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_TOP, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmTopDB - val) > 0.01 { self.subharmTopDB = val }
+                if abs(self.subharm.topDB - val) > 0.01 { self.subharm.topDB = val }
             }
         }
     }
 
     func setSubharmBoost(_ db: Float) {
-        self.subharmBoostDB = db
+        self.subharm.boostDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: data)
@@ -1192,7 +1220,7 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmBoostDB - val) > 0.01 { self.subharmBoostDB = val }
+                if abs(self.subharm.boostDB - val) > 0.01 { self.subharm.boostDB = val }
             }
         }
     }
@@ -1203,7 +1231,7 @@ extension DSPViewModel {
     /// outputs' state so re-enabling one is transient-free.  The headroom figure
     /// does not depend on the mask, so this SET needs no re-read.
     func setSubharmMask(_ mask: UInt16) {
-        self.subharmOutputMask = mask
+        self.subharm.outputMask = mask
         let data = Data([UInt8(mask & 0xFF), UInt8(mask >> 8)])
         transport.sendControlRequest(request: REQ_SET_SUBHARM_MASK, value: 0, index: 0, data: data)
     }
@@ -1211,7 +1239,7 @@ extension DSPViewModel {
     /// Toggles a single output channel's bit in the subharm mask and pushes it.
     func setSubharmOutputChannel(_ output: Int, enabled: Bool) {
         guard output >= 0, output < 16 else { return }
-        var mask = subharmOutputMask
+        var mask = subharm.outputMask
         if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
         setSubharmMask(mask)
     }
@@ -1219,7 +1247,7 @@ extension DSPViewModel {
     func fetchSubharmMask() {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
             let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
-            DispatchQueue.main.async { self.subharmOutputMask = val }
+            DispatchQueue.main.async { self.subharm.outputMask = val }
         }
     }
 
@@ -1230,7 +1258,7 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HEADROOM, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmHeadroomDB - val) > 0.001 { self.subharmHeadroomDB = val }
+                if abs(self.subharm.headroomDB - val) > 0.001 { self.subharm.headroomDB = val }
             }
         }
     }
@@ -1252,7 +1280,7 @@ extension DSPViewModel {
     /// on a read-back.
     func setSubharmSelectMode(_ mode: Int) {
         let clamped = min(max(mode, SUBHARM_SELECT_ALL), SUBHARM_SELECT_SUSTAINED)
-        self.subharmSelectMode = clamped
+        self.subharm.selectMode = clamped
         var val = UInt8(clamped)
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_SELECT, value: 0, index: 0, data: data)
@@ -1262,12 +1290,12 @@ extension DSPViewModel {
     func fetchSubharmSelectMode() {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = min(Int(d[0]), SUBHARM_SELECT_SUSTAINED)
-            DispatchQueue.main.async { self.subharmSelectMode = val }
+            DispatchQueue.main.async { self.subharm.selectMode = val }
         }
     }
 
     func setSubharmSelectDepth(_ pct: Float) {
-        self.subharmSelectDepthPct = pct
+        self.subharm.selectDepthPct = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_DEPTH, value: 0, index: 0, data: data)
@@ -1278,13 +1306,13 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_DEPTH, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmSelectDepthPct - val) > 0.01 { self.subharmSelectDepthPct = val }
+                if abs(self.subharm.selectDepthPct - val) > 0.01 { self.subharm.selectDepthPct = val }
             }
         }
     }
 
     func setSubharmSelectHold(_ ms: Float) {
-        self.subharmSelectHoldMs = ms
+        self.subharm.selectHoldMs = ms
         var val = ms
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_HOLD, value: 0, index: 0, data: data)
@@ -1295,7 +1323,7 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HOLD, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmSelectHoldMs - val) > 0.01 { self.subharmSelectHoldMs = val }
+                if abs(self.subharm.selectHoldMs - val) > 0.01 { self.subharm.selectHoldMs = val }
             }
         }
     }
@@ -1304,7 +1332,7 @@ extension DSPViewModel {
     /// is mixed in, so the firmware's headroom figure drops to whatever the
     /// ceiling allows - which is why this SET re-reads it like a level does.
     func setSubharmCeiling(_ dbfs: Float) {
-        self.subharmCeilingDB = dbfs
+        self.subharm.ceilingDB = dbfs
         var val = dbfs
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: data)
@@ -1315,7 +1343,7 @@ extension DSPViewModel {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4), d.count >= 4 {
             let val = d.withUnsafeBytes { $0.load(as: Float.self) }
             DispatchQueue.main.async {
-                if abs(self.subharmCeilingDB - val) > 0.01 { self.subharmCeilingDB = val }
+                if abs(self.subharm.ceilingDB - val) > 0.01 { self.subharm.ceilingDB = val }
             }
         }
     }
@@ -1324,7 +1352,7 @@ extension DSPViewModel {
     /// firmware, so there is no recompute and the headroom cannot change: a
     /// mono sum is never larger than the louder of the two channels.
     func setSubharmLinkPairs(_ linked: Bool) {
-        self.subharmLinkPairs = linked
+        self.subharm.linkPairs = linked
         var val: UInt8 = linked ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_LINK, value: 0, index: 0, data: data)
@@ -1333,7 +1361,7 @@ extension DSPViewModel {
     func fetchSubharmLinkPairs() {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_LINK, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0] != 0
-            DispatchQueue.main.async { self.subharmLinkPairs = val }
+            DispatchQueue.main.async { self.subharm.linkPairs = val }
         }
     }
 
@@ -1342,7 +1370,7 @@ extension DSPViewModel {
     /// 0x2D rather than expecting it from `fetchAllParams`, and clears it when
     /// the window closes so a device is never left playing without program.
     func setSubharmSolo(_ solo: Bool) {
-        self.subharmSolo = solo
+        self.subharm.solo = solo
         var val: UInt8 = solo ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_SOLO, value: 0, index: 0, data: data)
@@ -1351,7 +1379,7 @@ extension DSPViewModel {
     func fetchSubharmSolo() {
         if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_SOLO, value: 0, index: 0, length: 1), !d.isEmpty {
             let val = d[0] != 0
-            DispatchQueue.main.async { self.subharmSolo = val }
+            DispatchQueue.main.async { self.subharm.solo = val }
         }
     }
 
@@ -1370,7 +1398,7 @@ extension DSPViewModel {
             let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
             levels.append(Float(raw) / SUBHARM_METER_FULL_SCALE)
         }
-        DispatchQueue.main.async { self.subharmSubMeter = levels }
+        DispatchQueue.main.async { self.subharm.meter.levels = levels }
     }
 
     /// Reads back the two subharm values the bulk image does not carry: solo,
@@ -1382,6 +1410,334 @@ extension DSPViewModel {
             guard let self else { return }
             self.fetchSubharmHeadroom()
             if self.firmwareSupportsSubharmExtended { self.fetchSubharmSolo() }
+        }
+    }
+
+    // MARK: - Tube Modeller (V31, cmds 0x3E/0x3F)
+
+    // One indexed SET/GET pair carries all fourteen parameters as float32, the
+    // bools, mask and enums included.  Every SET is fire-and-forget and updates
+    // app state first; the app clamps exactly as the firmware does, and mirrors
+    // the two cross-field rules (a type loads its row, a character edit drops the
+    // type to Custom) because the firmware's notifications for our own writes are
+    // filtered out as HOST-sourced and would never correct us.
+
+    private func sendTubeParam(_ index: UInt16, _ value: Float) {
+        var val = value
+        let data = Data(bytes: &val, count: 4)
+        transport.sendControlRequest(request: REQ_SET_TUBE_PARAM, value: index, index: 0, data: data)
+    }
+
+    /// Reads one parameter; nil when the GET STALLs (index out of range, or
+    /// firmware older than V31).
+    func fetchTubeParam(_ index: UInt16) -> Float? {
+        guard let d = transport.getControlRequest(request: REQ_GET_TUBE_PARAM, value: index, index: 0, length: 4),
+              d.count >= 4 else { return nil }
+        return d.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
+    private static func clampTube(_ v: Float, _ lo: Float, _ hi: Float) -> Float {
+        min(max(v, lo), hi)
+    }
+
+    /// Device-only live send for a drag, mirroring `sendOutputGainToDevice`.
+    /// It clamps and transmits but publishes nothing, so a gesture never
+    /// re-renders the window; `ParameterRow` commits once on release through
+    /// the matching `setTube*`.
+    func sendTubeParamToDevice(_ index: UInt16, _ value: Float, _ lo: Float, _ hi: Float) {
+        sendTubeParam(index, Self.clampTube(value, lo, hi))
+    }
+
+    func setTube(_ enabled: Bool) {
+        self.tubeEnabled = enabled
+        sendTubeParam(TUBE_PARAM_ENABLED, enabled ? 1 : 0)
+    }
+
+    /// Sets the per-output mask.  The firmware reads it live each packet with no
+    /// recompute, and resets a masked-off output's state so it re-enters cleanly.
+    func setTubeMask(_ mask: UInt16) {
+        self.tube.outputMask = mask
+        sendTubeParam(TUBE_PARAM_OUTPUT_MASK, Float(mask))
+    }
+
+    func setTubeOutputChannel(_ output: Int, enabled: Bool) {
+        guard output >= 0, output < 16 else { return }
+        var mask = tube.outputMask
+        if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
+        setTubeMask(mask)
+    }
+
+    /// Selects a tube style.  1..16 copies that row into the four character
+    /// knobs; 0 (Custom) leaves them where they are.
+    func setTubeType(_ type: Int) {
+        let t = min(max(type, TUBE_TYPE_CUSTOM), TUBE_TYPE_MAX)
+        self.tube.type = t
+        if t < TUBE_TYPE_ROWS.count, let row = TUBE_TYPE_ROWS[t] {
+            self.tube.biasPct = row.biasPct
+            self.tube.asymDB = row.asymDB
+            self.tube.hardnessPct = row.hardnessPct
+            self.tube.sagPct = row.sagPct
+        }
+        sendTubeParam(TUBE_PARAM_TUBE_TYPE, Float(t))
+    }
+
+    func setTubeDrive(_ db: Float) {
+        let v = Self.clampTube(db, TUBE_DRIVE_MIN, TUBE_DRIVE_MAX)
+        self.tube.driveDB = v
+        sendTubeParam(TUBE_PARAM_DRIVE_DB, v)
+    }
+
+    /// Shared by the four character knobs.  Only a real change drops the type
+    /// to Custom, matching the firmware: re-sending the stored value keeps it.
+    private func setTubeCharacter(_ index: UInt16, _ value: Float,
+                                  _ lo: Float, _ hi: Float,
+                                  _ field: ReferenceWritableKeyPath<TubeParameters, Float>) {
+        let v = Self.clampTube(value, lo, hi)
+        if tube[keyPath: field] != v {
+            tube[keyPath: field] = v
+            self.tube.type = TUBE_TYPE_CUSTOM
+        }
+        sendTubeParam(index, v)
+    }
+
+    func setTubeBias(_ pct: Float) {
+        setTubeCharacter(TUBE_PARAM_BIAS_PCT, pct, TUBE_BIAS_MIN, TUBE_BIAS_MAX, \.biasPct)
+    }
+
+    func setTubeAsym(_ db: Float) {
+        setTubeCharacter(TUBE_PARAM_ASYM_DB, db, TUBE_ASYM_MIN, TUBE_ASYM_MAX, \.asymDB)
+    }
+
+    func setTubeHardness(_ pct: Float) {
+        setTubeCharacter(TUBE_PARAM_HARDNESS_PCT, pct, TUBE_HARDNESS_MIN, TUBE_HARDNESS_MAX, \.hardnessPct)
+    }
+
+    func setTubeSag(_ pct: Float) {
+        setTubeCharacter(TUBE_PARAM_SAG_PCT, pct, TUBE_SAG_MIN, TUBE_SAG_MAX, \.sagPct)
+    }
+
+    func setTubeRectifier(_ rect: Int) {
+        let r = min(max(rect, TUBE_RECT_SOLID_STATE), TUBE_RECT_MAX)
+        self.tube.rectifier = r
+        sendTubeParam(TUBE_PARAM_RECTIFIER, Float(r))
+    }
+
+    func setTubeXfmr(_ enabled: Bool) {
+        self.tube.xfmrEnabled = enabled
+        sendTubeParam(TUBE_PARAM_XFMR_ENABLED, enabled ? 1 : 0)
+    }
+
+    func setTubeXfmrDamping(_ df: Float) {
+        let v = Self.clampTube(df, TUBE_XFMR_DAMPING_MIN, TUBE_XFMR_DAMPING_MAX)
+        self.tube.xfmrDamping = v
+        sendTubeParam(TUBE_PARAM_XFMR_DAMPING, v)
+    }
+
+    func setTubeXfmrRes(_ hz: Float) {
+        let v = Self.clampTube(hz, TUBE_XFMR_RES_MIN, TUBE_XFMR_RES_MAX)
+        self.tube.xfmrResHz = v
+        sendTubeParam(TUBE_PARAM_XFMR_RES_HZ, v)
+    }
+
+    func setTubeMix(_ pct: Float) {
+        let v = Self.clampTube(pct, TUBE_MIX_MIN, TUBE_MIX_MAX)
+        self.tube.mixPct = v
+        sendTubeParam(TUBE_PARAM_MIX_PCT, v)
+    }
+
+    func setTubeTrim(_ db: Float) {
+        let v = Self.clampTube(db, TUBE_TRIM_MIN, TUBE_TRIM_MAX)
+        self.tube.trimDB = v
+        sendTubeParam(TUBE_PARAM_TRIM_DB, v)
+    }
+
+    // MARK: - Output Limiter (V32, cmd 0x81)
+
+    // One opcode, wValue = (output << 8) | index, float32 payload for every
+    // parameter.  SETs are fire-and-forget and update app state first, clamped
+    // and rounded exactly as the firmware does, because notifications for our
+    // own writes are filtered out and would never correct us.
+    //
+    // The settings follow output_config_mode like the pins, so in INDEPENDENT
+    // mode an edit is part of the unsaved output configuration: user-facing
+    // callers must mark it (SettingsSaveCoordinator.beginOutputEdit).
+    //
+    // Linked outputs are ganged by the firmware (spec §2.2): one SET reaches
+    // the whole group, and a joining output adopts the group's settings.  The
+    // app mirrors that through `LimiterGang` so it shows what the device holds.
+
+    private func sendLimiterParam(output: UInt8, _ index: UInt8, _ value: Float) {
+        var val = value
+        let data = Data(bytes: &val, count: 4)
+        transport.sendControlRequest(request: REQ_LIMITER, value: (UInt16(output) << 8) | UInt16(index),
+                                     index: 0, data: data)
+    }
+
+    /// Reads one parameter; nil when the GET STALLs (bad output or index, or
+    /// firmware older than V32).
+    func fetchLimiterParam(output: Int, _ index: UInt8) -> Float? {
+        guard output >= 0, output < 0xFF,
+              let d = transport.getControlRequest(request: REQ_LIMITER,
+                                                  value: (UInt16(output) << 8) | UInt16(index),
+                                                  index: 0, length: 4),
+              d.count >= 4 else { return nil }
+        return d.withUnsafeBytes { $0.load(as: Float.self) }
+    }
+
+    static func clampLimiterThreshold(_ db: Float) -> Float {
+        min(max(db, LIMITER_THRESHOLD_MIN), LIMITER_THRESHOLD_MAX)
+    }
+
+    static func clampLimiterRelease(_ ms: Float) -> Float {
+        min(max(ms, LIMITER_RELEASE_MIN), LIMITER_RELEASE_MAX)
+    }
+
+    /// The firmware rounds to the nearest group after clamping.
+    static func clampLimiterLinkGroup(_ group: Int) -> Int {
+        min(max(group, 0), LIMITER_LINK_GROUP_MAX)
+    }
+
+    private func isLimiterOutput(_ output: Int) -> Bool {
+        output >= 0 && output < min(numOutputChannels, limiter.outputs.count)
+    }
+
+    /// Device-only live send for a threshold or release drag.  Publishes
+    /// nothing; `ParameterRow` commits once on release through the setter.
+    func sendLimiterParamToDevice(output: Int, _ index: UInt8, _ value: Float) {
+        guard isLimiterOutput(output) else { return }
+        let v = index == LIMITER_PARAM_RELEASE_MS ? Self.clampLimiterRelease(value)
+                                                  : Self.clampLimiterThreshold(value)
+        sendLimiterParam(output: UInt8(output), index, v)
+    }
+
+    /// Mirrors an enable, threshold or release SET: it reaches the whole
+    /// group of a linked output.  Published once, as a single array write.
+    private func editLimiterGanged(_ output: Int, _ change: (inout LimiterOutputSettings) -> Void) {
+        var outs = limiter.outputs
+        LimiterGang.edit(output, in: &outs, count: numOutputChannels, change)
+        limiter.outputs = outs
+    }
+
+    func setLimiterEnabled(output: Int, _ enabled: Bool) {
+        guard isLimiterOutput(output) else { return }
+        editLimiterGanged(output) { $0.enabled = enabled }
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_ENABLED, enabled ? 1 : 0)
+    }
+
+    func setLimiterThreshold(output: Int, _ db: Float) {
+        guard isLimiterOutput(output), !db.isNaN else { return }
+        let v = Self.clampLimiterThreshold(db)
+        editLimiterGanged(output) { $0.thresholdDB = v }
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_THRESHOLD_DB, v)
+    }
+
+    func setLimiterRelease(output: Int, _ ms: Float) {
+        guard isLimiterOutput(output), !ms.isNaN else { return }
+        let v = Self.clampLimiterRelease(ms)
+        editLimiterGanged(output) { $0.releaseMs = v }
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_RELEASE_MS, v)
+    }
+
+    /// Joining a group adopts the settings of its lowest-numbered existing
+    /// member; the first member keeps its own, and leaving keeps the current
+    /// ones.
+    func setLimiterLinkGroup(output: Int, _ group: Int) {
+        guard isLimiterOutput(output) else { return }
+        let g = Self.clampLimiterLinkGroup(group)
+        var outs = limiter.outputs
+        LimiterGang.setGroup(output, g, in: &outs, count: numOutputChannels)
+        limiter.outputs = outs
+        sendLimiterParam(output: UInt8(output), LIMITER_PARAM_LINK_GROUP, Float(g))
+    }
+
+    /// Puts outputs back to exact per-output settings, for Revert and for a
+    /// preset-file import.  Ganging would otherwise scramble a plain
+    /// write-each-field pass: a threshold written to an output still in its old
+    /// group would spread to that group.  So the targets leave their groups
+    /// first, take their own values unlinked, then rejoin in ascending order,
+    /// which makes the lowest member of each group its leader, as the firmware
+    /// does.  Enable is written last so a limiter engages on its new threshold.
+    func applyLimiterSettings(_ targets: [Int: LimiterOutputSettings]) {
+        let outs = targets.keys.filter(isLimiterOutput).sorted()
+        for k in outs where limiter.outputs[k].linkGroup != 0 {
+            setLimiterLinkGroup(output: k, 0)
+        }
+        for k in outs {
+            let t = targets[k]!
+            setLimiterThreshold(output: k, t.thresholdDB)
+            setLimiterRelease(output: k, t.releaseMs)
+            setLimiterEnabled(output: k, t.enabled)
+        }
+        for k in outs where targets[k]!.linkGroup != 0 {
+            setLimiterLinkGroup(output: k, targets[k]!.linkGroup)
+        }
+    }
+
+    /// Writes one output's settings to every output with a single SET per
+    /// parameter (output 0xFF), which is what the firmware's all-outputs form
+    /// is for.  The link group is left alone: copying it would link every
+    /// output into one group.  Every output gets the same values, so groups
+    /// stay ganged without any mirroring.
+    func copyLimiterToAllOutputs(from output: Int) {
+        guard isLimiterOutput(output) else { return }
+        let src = limiter.outputs[output]
+        var outs = limiter.outputs
+        for k in 0..<min(numOutputChannels, outs.count) {
+            outs[k].enabled = src.enabled
+            outs[k].thresholdDB = src.thresholdDB
+            outs[k].releaseMs = src.releaseMs
+        }
+        limiter.outputs = outs
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_THRESHOLD_DB, src.thresholdDB)
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_RELEASE_MS, src.releaseMs)
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_ENABLED, src.enabled ? 1 : 0)
+    }
+
+    /// Switches every output's limiter on or off with one all-outputs SET.
+    func setLimiterEnabledOnAll(_ enabled: Bool) {
+        guard firmwareSupportsLimiter else { return }
+        var outs = limiter.outputs
+        for k in 0..<min(numOutputChannels, outs.count) { outs[k].enabled = enabled }
+        limiter.outputs = outs
+        sendLimiterParam(output: LIMITER_ALL_OUTPUTS, LIMITER_PARAM_ENABLED, enabled ? 1 : 0)
+    }
+
+    /// Sets the link group of every output at once, one SET each, in ascending
+    /// order, so each group's lowest output keeps its settings and the rest
+    /// adopt them.  `groups` shorter than the output count leaves the rest
+    /// unlinked.
+    func setLimiterLinkGroups(_ groups: [Int]) {
+        for k in 0..<min(numOutputChannels, limiter.outputs.count) {
+            setLimiterLinkGroup(output: k, k < groups.count ? groups[k] : 0)
+        }
+    }
+
+    /// Polls the gain-reduction meter (0x80) when `meter` is set, and clears
+    /// it once otherwise.  Called from the shared poll timer, off the main
+    /// thread.  Publishes only what changed.
+    func pollLimiter(meter: Bool) {
+        guard firmwareSupportsLimiter else { return }
+        let want = numOutputChannels
+        guard want > 0 else { return }
+        guard meter else {
+            // Nothing can be limiting; clear the bars once rather than polling.
+            DispatchQueue.main.async {
+                if self.limiter.meter.reductionDB.contains(where: { $0 != 0 }) {
+                    self.limiter.meter.reductionDB = []
+                }
+            }
+            return
+        }
+        guard let d = transport.getControlRequest(request: REQ_LIMITER, value: UInt16(LIMITER_GET_METER),
+                                                  index: 0, length: UInt16(want * 2)), d.count >= 2 else { return }
+        var gr: [Float] = []
+        gr.reserveCapacity(min(want, d.count / 2))
+        for i in 0..<min(want, d.count / 2) {
+            let raw = UInt16(d[i * 2]) | (UInt16(d[i * 2 + 1]) << 8)
+            gr.append(Float(raw) / 100)
+        }
+        DispatchQueue.main.async {
+            if self.limiter.meter.reductionDB != gr { self.limiter.meter.reductionDB = gr }
         }
     }
 
@@ -1402,69 +1758,74 @@ extension DSPViewModel {
     }
 
     func setUpmixCenterMode(_ mode: Int) {
-        self.upmixCenterMode = mode
+        self.upmix.centerMode = mode
         sendUpmixParam(UPMIX_PARAM_CENTER_MODE, Float(mode))
     }
 
     func setUpmixSurroundMode(_ mode: Int) {
-        self.upmixSurroundMode = mode
+        self.upmix.surroundMode = mode
         sendUpmixParam(UPMIX_PARAM_SURROUND_MODE, Float(mode))
     }
 
+    /// Device-only live send for a drag; see `sendFloatParamToDevice`.
+    func sendUpmixParamToDevice(_ index: UInt16, _ value: Float) {
+        sendUpmixParam(index, value)
+    }
+
     func setUpmixStrength(_ pct: Float) {
-        self.upmixStrengthPct = pct
+        self.upmix.strengthPct = pct
         sendUpmixParam(UPMIX_PARAM_STRENGTH, pct)
     }
 
     func setUpmixCenterWidth(_ pct: Float) {
-        self.upmixCenterWidthPct = pct
+        self.upmix.centerWidthPct = pct
         sendUpmixParam(UPMIX_PARAM_CENTER_WIDTH, pct)
     }
 
     func setUpmixThreshold(_ pct: Float) {
-        self.upmixThresholdPct = pct
+        self.upmix.thresholdPct = pct
         sendUpmixParam(UPMIX_PARAM_THRESHOLD, pct)
     }
 
     func setUpmixAttack(_ ms: Float) {
-        self.upmixAttackMs = ms
+        self.upmix.attackMs = ms
         sendUpmixParam(UPMIX_PARAM_ATTACK, ms)
     }
 
     func setUpmixRelease(_ ms: Float) {
-        self.upmixReleaseMs = ms
+        self.upmix.releaseMs = ms
         sendUpmixParam(UPMIX_PARAM_RELEASE, ms)
     }
 
     func setUpmixDetectorHpf(_ hz: Float) {
-        self.upmixDetectorHpfHz = hz
+        self.upmix.detectorHpfHz = hz
         sendUpmixParam(UPMIX_PARAM_DET_HPF, hz)
     }
 
     func setUpmixSurroundDelay(_ ms: Float) {
-        self.upmixSurroundDelayMs = ms
+        self.upmix.surroundDelayMs = ms
         sendUpmixParam(UPMIX_PARAM_SUR_DELAY, ms)
     }
 
     func setUpmixSurroundHpf(_ hz: Float) {
-        self.upmixSurroundHpfHz = hz
+        self.upmix.surroundHpfHz = hz
         sendUpmixParam(UPMIX_PARAM_SUR_HPF, hz)
     }
 
     func setUpmixSurroundLpf(_ hz: Float) {
-        self.upmixSurroundLpfHz = hz
+        self.upmix.surroundLpfHz = hz
         sendUpmixParam(UPMIX_PARAM_SUR_LPF, hz)
     }
 
     func setUpmixDecorr(_ pct: Float) {
-        self.upmixDecorrPct = pct
+        self.upmix.decorrPct = pct
         sendUpmixParam(UPMIX_PARAM_DECORR, pct)
     }
 
     /// Centre presence bell gain (dB).  SET_PARAM carries a plain float dB (the
     /// firmware quantizes to 0.5 dB steps when it packs the config packet).
     func setUpmixPresence(_ db: Float) {
-        self.upmixPresenceDB = db
+        self.upmix.presenceDB = db
         sendUpmixParam(UPMIX_PARAM_PRESENCE, db)
     }
 
@@ -1485,19 +1846,19 @@ extension DSPViewModel {
         let detHpf = f(24), surDelay = f(28), surHpf = f(32), surLpf = f(36), decorr = f(40)
         DispatchQueue.main.async {
             self.upmixEnabled = enabled
-            self.upmixCenterMode = centerMode
-            self.upmixSurroundMode = surroundMode
-            self.upmixPresenceDB = presence
-            self.upmixStrengthPct = strength
-            self.upmixCenterWidthPct = width
-            self.upmixThresholdPct = threshold
-            self.upmixAttackMs = attack
-            self.upmixReleaseMs = release
-            self.upmixDetectorHpfHz = detHpf
-            self.upmixSurroundDelayMs = surDelay
-            self.upmixSurroundHpfHz = surHpf
-            self.upmixSurroundLpfHz = surLpf
-            self.upmixDecorrPct = decorr
+            self.upmix.centerMode = centerMode
+            self.upmix.surroundMode = surroundMode
+            self.upmix.presenceDB = presence
+            self.upmix.strengthPct = strength
+            self.upmix.centerWidthPct = width
+            self.upmix.thresholdPct = threshold
+            self.upmix.attackMs = attack
+            self.upmix.releaseMs = release
+            self.upmix.detectorHpfHz = detHpf
+            self.upmix.surroundDelayMs = surDelay
+            self.upmix.surroundHpfHz = surHpf
+            self.upmix.surroundLpfHz = surLpf
+            self.upmix.decorrPct = decorr
         }
     }
 
@@ -1515,13 +1876,13 @@ extension DSPViewModel {
         let lsGain = d.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt16.self) }
         let rsGain = d.withUnsafeBytes { $0.load(fromByteOffset: 10, as: UInt16.self) }
         DispatchQueue.main.async {
-            self.upmixActive = active
-            self.upmixParkedReason = parked
-            self.upmixCorr = Float(corr) / 16384.0        // Q14, [-1, +1]
-            self.upmixBalance = Float(balance) / 16384.0  // Q14, 0..1
-            self.upmixCenterGain = Float(centerGain) / 32767.0  // Q15, 0..1
-            self.upmixLsGain = Float(lsGain) / 32767.0
-            self.upmixRsGain = Float(rsGain) / 32767.0
+            self.upmix.telemetry.active = active
+            self.upmix.telemetry.parkedReason = parked
+            self.upmix.telemetry.corr = Float(corr) / 16384.0        // Q14, [-1, +1]
+            self.upmix.telemetry.balance = Float(balance) / 16384.0  // Q14, 0..1
+            self.upmix.telemetry.centerGain = Float(centerGain) / 32767.0  // Q15, 0..1
+            self.upmix.telemetry.lsGain = Float(lsGain) / 32767.0
+            self.upmix.telemetry.rsGain = Float(rsGain) / 32767.0
         }
     }
 
@@ -1535,35 +1896,35 @@ extension DSPViewModel {
     }
 
     func setLevellerAmount(_ amount: Float) {
-        self.levellerAmount = amount
+        self.leveller.amount = amount
         var val = amount
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_LEVELLER_AMOUNT, value: 0, index: 0, data: data)
     }
 
     func setLevellerSpeed(_ speed: Int) {
-        self.levellerSpeed = speed
+        self.leveller.speed = speed
         var val = UInt8(speed)
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_LEVELLER_SPEED, value: 0, index: 0, data: data)
     }
 
     func setLevellerMaxGain(_ db: Float) {
-        self.levellerMaxGainDB = db
+        self.leveller.maxGainDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_LEVELLER_MAXGAIN, value: 0, index: 0, data: data)
     }
 
     func setLevellerLookahead(_ enabled: Bool) {
-        self.levellerLookahead = enabled
+        self.leveller.lookahead = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_LEVELLER_LOOKAHEAD, value: 0, index: 0, data: data)
     }
 
     func setLevellerGate(_ db: Float) {
-        self.levellerGateDB = db
+        self.leveller.gateDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_LEVELLER_GATE, value: 0, index: 0, data: data)
@@ -1574,8 +1935,8 @@ extension DSPViewModel {
     /// shared gain. Bit k = input channel k. Sent as a single 2-byte payload;
     /// the firmware switches masks glitch-free without a state reset.
     func setLevellerMasks(detector: UInt8, apply: UInt8) {
-        self.levellerDetectorMask = detector
-        self.levellerApplyMask = apply
+        self.leveller.detectorMask = detector
+        self.leveller.applyMask = apply
         let data = Data([detector, apply])
         transport.sendControlRequest(request: REQ_SET_LEVELLER_MASKS, value: 0, index: 0, data: data)
     }
@@ -1583,17 +1944,17 @@ extension DSPViewModel {
     /// Toggles a single channel's bit in the detector mask and pushes both masks.
     func setLevellerDetectorChannel(_ channel: Int, enabled: Bool) {
         guard channel >= 0, channel < 8 else { return }
-        var mask = levellerDetectorMask
+        var mask = leveller.detectorMask
         if enabled { mask |= (1 << channel) } else { mask &= ~(UInt8(1) << channel) }
-        setLevellerMasks(detector: mask, apply: levellerApplyMask)
+        setLevellerMasks(detector: mask, apply: leveller.applyMask)
     }
 
     /// Toggles a single channel's bit in the apply mask and pushes both masks.
     func setLevellerApplyChannel(_ channel: Int, enabled: Bool) {
         guard channel >= 0, channel < 8 else { return }
-        var mask = levellerApplyMask
+        var mask = leveller.applyMask
         if enabled { mask |= (1 << channel) } else { mask &= ~(UInt8(1) << channel) }
-        setLevellerMasks(detector: levellerDetectorMask, apply: mask)
+        setLevellerMasks(detector: leveller.detectorMask, apply: mask)
     }
 
     // MARK: - Matrix Mixer
@@ -3064,7 +3425,7 @@ extension DSPViewModel {
         return CsIrLearnResult.fromData(d)
     }
 
-    // MARK: - Test Signal Generator
+    // MARK: - Signal Generator
 
     /// Enumerate siggen capabilities + live state at connect.  The caps
     /// header (REQ_SIGGEN_GET_CAPS, wValue=0xFFFF) doubles as the feature
@@ -3152,7 +3513,7 @@ extension DSPViewModel {
     /// (index + 1) pentatonic blips at that channel's pitch (spec §2.2).  Two
     /// passes then auto-complete to idle - brief but unmistakable.
     ///
-    /// Transient, never persisted; leaves the Test Signals editing draft
+    /// Transient, never persisted; leaves the Signal Generator editing draft
     /// untouched (a running user signal is restarted as the ident and resumes
     /// only if the user restarts it).  No-op when the firmware has no
     /// generator.  Dispatches the blocking USB work off the caller's thread,
@@ -3194,8 +3555,8 @@ extension DSPViewModel {
         // accepted.  A short or wrong-version payload means incompatible
         // firmware - the device is still connected, so don't disconnect (avoids
         // a reconnect loop); just record the version so the UI can react.
-        // Requiring the full V30 size keeps the last section (subharm, offset
-        // 5944..5979) in range along with every section before it.
+        // Requiring the full V32 size keeps the last section (limiter, offset
+        // 6028..6135) in range along with every section before it.
         guard data.count >= Int(BULK_PARAMS_SIZE), Int(data[0]) == WIRE_FORMAT_VERSION else {
             DispatchQueue.main.async { self.firmwareWireFormatVersion = Int(data.first ?? 0) }
             return false
@@ -3451,6 +3812,38 @@ extension DSPViewModel {
         let shSelectMode = min(Int(data[BULK_SUBHARM_OFFSET + 32]), SUBHARM_SELECT_SUSTAINED)
         let shLinkPairs = data[BULK_SUBHARM_OFFSET + 33] != 0
 
+        // --- Tube Modeller (offset 5980, WireTubeParams 48 bytes) ---
+        // Restored verbatim, with no row lookup: a preset saved as a type keeps
+        // its stored knobs even if a later firmware retunes that row.
+        let tbEnabled = data[BULK_TUBE_OFFSET] != 0
+        let tbType = min(Int(data[BULK_TUBE_OFFSET + 1]), TUBE_TYPE_MAX)
+        let tbRectifier = min(Int(data[BULK_TUBE_OFFSET + 2]), TUBE_RECT_MAX)
+        let tbXfmrEnabled = data[BULK_TUBE_OFFSET + 3] != 0
+        let tbOutputMask = UInt16(data[BULK_TUBE_OFFSET + 4]) | (UInt16(data[BULK_TUBE_OFFSET + 5]) << 8)
+        func tbF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: BULK_TUBE_OFFSET + off, as: Float.self) } }
+        let tbDrive = tbF(8), tbBias = tbF(12), tbAsym = tbF(16), tbHardness = tbF(20), tbSag = tbF(24)
+        let tbXfmrDamping = tbF(28), tbXfmrRes = tbF(32), tbMix = tbF(36), tbTrim = tbF(40)
+
+        // --- Output Limiter (offset 6028, WireLimiterParams 108 bytes) ---
+        // One record per wire slot; slots past this device's outputs are zero
+        // and are read as defaults rather than as a -0 dBFS, 0 ms limiter.
+        var lmOutputs = [LimiterOutputSettings](repeating: LimiterOutputSettings(),
+                                                count: WIRE_MAX_OUTPUT_CHANNELS)
+        for k in 0..<min(numOutCh, WIRE_MAX_OUTPUT_CHANNELS) {
+            let o = BULK_LIMITER_OFFSET + k * WIRE_LIMITER_OUTPUT_SIZE
+            func lmF(_ off: Int) -> Float { data.withUnsafeBytes { $0.load(fromByteOffset: o + off, as: Float.self) } }
+            lmOutputs[k] = LimiterOutputSettings(
+                enabled: data[o] != 0,
+                thresholdDB: Self.clampLimiterThreshold(lmF(4)),
+                releaseMs: Self.clampLimiterRelease(lmF(8)),
+                linkGroup: LimiterGang.storedGroup(data[o + 1]))
+        }
+        // A restore can leave a group disagreeing (an older preset).  The
+        // firmware gangs it at its next recompute and notifies each change;
+        // doing the same here keeps a read taken before that from showing
+        // settings that are about to change.
+        LimiterGang.gangAll(&lmOutputs, count: min(numOutCh, WIRE_MAX_OUTPUT_CHANNELS))
+
         // --- Apply all parsed values on main thread ---
         DispatchQueue.main.async {
             self.platformName = platform
@@ -3461,51 +3854,68 @@ extension DSPViewModel {
             self.masterVolumeDB = masterVol
             self.bypass = bypassVal
             self.loudnessEnabled = loudnessEn
-            self.loudnessOutputMask = loudnessMask
-            self.loudnessRefSPL = loudnessRef
-            self.loudnessIntensity = loudnessInt
+            self.loudness.outputMask = loudnessMask
+            self.loudness.refSPL = loudnessRef
+            self.loudness.intensity = loudnessInt
 
             self.crossfeedEnabled = cfEnabled
-            self.crossfeedPreset = cfPreset
-            self.crossfeedITD = cfITD
-            self.crossfeedFreq = cfFreq
-            self.crossfeedFeed = cfFeed
-            self.crossfeedOutputMask = cfOutputMask
+            self.crossfeed.preset = cfPreset
+            self.crossfeed.itd = cfITD
+            self.crossfeed.freq = cfFreq
+            self.crossfeed.feed = cfFeed
+            self.crossfeed.outputMask = cfOutputMask
 
             self.psybassEnabled = pbEnabled
-            self.psybassOutputMask = pbOutputMask
-            self.psybassCutoffHz = pbCutoff
-            self.psybassHarmonicsDB = pbHarmonics
-            self.psybassDriveDB = pbDrive
-            self.psybassCharacterPct = pbCharacter
-            self.psybassOriginalDB = pbOriginal
+            self.psybass.outputMask = pbOutputMask
+            self.psybass.cutoffHz = pbCutoff
+            self.psybass.harmonicsDB = pbHarmonics
+            self.psybass.driveDB = pbDrive
+            self.psybass.characterPct = pbCharacter
+            self.psybass.originalDB = pbOriginal
 
             self.subharmEnabled = shEnabled
-            self.subharmOutputMask = shOutputMask
-            self.subharmLowDB = shLow
-            self.subharmHighDB = shHigh
-            self.subharmTopDB = shTop
-            self.subharmBoostDB = shBoost
-            self.subharmSelectMode = shSelectMode
-            self.subharmSelectDepthPct = shDepth
-            self.subharmSelectHoldMs = shHold
-            self.subharmCeilingDB = shCeiling
-            self.subharmLinkPairs = shLinkPairs
+            self.subharm.outputMask = shOutputMask
+            self.subharm.lowDB = shLow
+            self.subharm.highDB = shHigh
+            self.subharm.topDB = shTop
+            self.subharm.boostDB = shBoost
+            self.subharm.selectMode = shSelectMode
+            self.subharm.selectDepthPct = shDepth
+            self.subharm.selectHoldMs = shHold
+            self.subharm.ceilingDB = shCeiling
+            self.subharm.linkPairs = shLinkPairs
+
+            self.tubeEnabled = tbEnabled
+            self.tube.outputMask = tbOutputMask
+            self.tube.type = tbType
+            self.tube.driveDB = tbDrive
+            self.tube.biasPct = tbBias
+            self.tube.asymDB = tbAsym
+            self.tube.hardnessPct = tbHardness
+            self.tube.sagPct = tbSag
+            self.tube.rectifier = tbRectifier
+            self.tube.xfmrEnabled = tbXfmrEnabled
+            self.tube.xfmrDamping = tbXfmrDamping
+            self.tube.xfmrResHz = tbXfmrRes
+            self.tube.mixPct = tbMix
+            self.tube.trimDB = tbTrim
+
+            self.limiter.outputs = lmOutputs
 
             self.upmixEnabled = umEnabled
-            self.upmixCenterMode = umCenterMode
-            self.upmixSurroundMode = umSurroundMode
-            self.upmixPresenceDB = umPresence
-            self.upmixStrengthPct = umStrength
-            self.upmixCenterWidthPct = umWidth
-            self.upmixThresholdPct = umThreshold
-            self.upmixAttackMs = umAttack
-            self.upmixReleaseMs = umRelease
-            self.upmixDetectorHpfHz = umDetHpf
-            self.upmixSurroundDelayMs = umSurDelay
-            self.upmixSurroundHpfHz = umSurHpf
-            self.upmixSurroundLpfHz = umSurLpf
-            self.upmixDecorrPct = umDecorr
+            self.upmix.centerMode = umCenterMode
+            self.upmix.surroundMode = umSurroundMode
+            self.upmix.presenceDB = umPresence
+            self.upmix.strengthPct = umStrength
+            self.upmix.centerWidthPct = umWidth
+            self.upmix.thresholdPct = umThreshold
+            self.upmix.attackMs = umAttack
+            self.upmix.releaseMs = umRelease
+            self.upmix.detectorHpfHz = umDetHpf
+            self.upmix.surroundDelayMs = umSurDelay
+            self.upmix.surroundHpfHz = umSurHpf
+            self.upmix.surroundLpfHz = umSurLpf
+            self.upmix.decorrPct = umDecorr
 
             self.channelDelays = delays
 
@@ -3535,13 +3945,13 @@ extension DSPViewModel {
             if bckPinSlaveRaw != 0 { self.i2sBckPinSlave = bckPinSlaveRaw }
 
             self.levellerEnabled = lvlEnabled
-            self.levellerAmount = lvlAmount
-            self.levellerSpeed = lvlSpeed
-            self.levellerMaxGainDB = lvlMaxGain
-            self.levellerLookahead = lvlLookahead
-            self.levellerGateDB = lvlGateDB
-            self.levellerDetectorMask = lvlDetectorMask
-            self.levellerApplyMask = lvlApplyMask
+            self.leveller.amount = lvlAmount
+            self.leveller.speed = lvlSpeed
+            self.leveller.maxGainDB = lvlMaxGain
+            self.leveller.lookahead = lvlLookahead
+            self.leveller.gateDB = lvlGateDB
+            self.leveller.detectorMask = lvlDetectorMask
+            self.leveller.applyMask = lvlApplyMask
 
             self.channelData = channelFilters
             self.channelNames = names
@@ -3911,8 +4321,8 @@ extension DSPViewModel {
     /// Persist the current live output configuration into the directory's
     /// independent storage so it survives a reboot. Relevant in
     /// `OUTPUT_CONFIG_MODE_INDEPENDENT`, where per-field edits (pins, output
-    /// types, I2S clocks, S/PDIF RX pin) apply live but only persist after an
-    /// explicit save. IN-shaped action command: device responds with a 1-byte
+    /// types, I2S clocks, S/PDIF RX pin, output limiters) apply live but only
+    /// persist after an explicit save. IN-shaped action command: device responds with a 1-byte
     /// status (0 = PRESET_OK); the flash write is deferred on-device. Returns
     /// true on success, false if the device disconnected or the transfer failed.
     @discardableResult
@@ -3956,7 +4366,7 @@ extension DSPViewModel {
     /// The listed offsets are decoded in place: EQ and crossover bands, channel
     /// names, dac_hw_mute, user volume, LG, and the input / I2S / ADAT config.
     /// Anything else - the DSP feature blocks (loudness, crossfeed, leveller,
-    /// psybass, upmixer, preamp, output gain / mute / delay) - falls through to
+    /// psybass, subharm, tube, limiter, upmixer, preamp, output gain / mute / delay) - falls through to
     /// a coalesced full re-read instead, which costs one bulk transfer but
     /// needs no per-block decoder here and cannot drift out of step with the
     /// wire format.  That path is what lets a bound pot or IR button move those

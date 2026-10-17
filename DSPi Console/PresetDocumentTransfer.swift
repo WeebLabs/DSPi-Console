@@ -44,77 +44,96 @@ extension PresetDocument {
 
         // Feature blocks
         doc.loudness.enabled = vm.loudnessEnabled
-        doc.loudness.refSpl = vm.loudnessRefSPL
-        doc.loudness.intensityPct = vm.loudnessIntensity
-        doc.loudness.outputMask = Int(vm.loudnessOutputMask)
+        doc.loudness.refSpl = vm.loudness.refSPL
+        doc.loudness.intensityPct = vm.loudness.intensity
+        doc.loudness.outputMask = Int(vm.loudness.outputMask)
 
         doc.crossfeed.enabled = vm.crossfeedEnabled
-        doc.crossfeed.preset = vm.crossfeedPreset
-        doc.crossfeed.freqHz = vm.crossfeedFreq
-        doc.crossfeed.feedDb = vm.crossfeedFeed
-        doc.crossfeed.itd = vm.crossfeedITD
-        doc.crossfeed.outputPairMask = Int(vm.crossfeedOutputMask)
+        doc.crossfeed.preset = vm.crossfeed.preset
+        doc.crossfeed.freqHz = vm.crossfeed.freq
+        doc.crossfeed.feedDb = vm.crossfeed.feed
+        doc.crossfeed.itd = vm.crossfeed.itd
+        doc.crossfeed.outputPairMask = Int(vm.crossfeed.outputMask)
 
         doc.leveller.enabled = vm.levellerEnabled
-        doc.leveller.speed = vm.levellerSpeed
-        doc.leveller.lookahead = vm.levellerLookahead
-        doc.leveller.amountPct = vm.levellerAmount
-        doc.leveller.maxGainDb = vm.levellerMaxGainDB
-        doc.leveller.gateDb = vm.levellerGateDB
-        doc.leveller.detectorMask = Int(vm.levellerDetectorMask)
-        doc.leveller.applyMask = Int(vm.levellerApplyMask)
+        doc.leveller.speed = vm.leveller.speed
+        doc.leveller.lookahead = vm.leveller.lookahead
+        doc.leveller.amountPct = vm.leveller.amount
+        doc.leveller.maxGainDb = vm.leveller.maxGainDB
+        doc.leveller.gateDb = vm.leveller.gateDB
+        doc.leveller.detectorMask = Int(vm.leveller.detectorMask)
+        doc.leveller.applyMask = Int(vm.leveller.applyMask)
 
         // Optional blocks are written only when the source device had the
         // feature, so a document never claims something the device never had.
         if vm.firmwareSupportsPsybass {
             var block = PsybassBlock()
             block.enabled = vm.psybassEnabled
-            block.cutoffHz = vm.psybassCutoffHz
-            block.harmonicsDb = vm.psybassHarmonicsDB
-            block.driveDb = vm.psybassDriveDB
-            block.characterPct = vm.psybassCharacterPct
-            block.originalDb = vm.psybassOriginalDB
-            block.outputMask = Int(vm.psybassOutputMask)
+            block.cutoffHz = vm.psybass.cutoffHz
+            block.harmonicsDb = vm.psybass.harmonicsDB
+            block.driveDb = vm.psybass.driveDB
+            block.characterPct = vm.psybass.characterPct
+            block.originalDb = vm.psybass.originalDB
+            block.outputMask = Int(vm.psybass.outputMask)
             doc.psybass = block
         }
 
         if vm.firmwareSupportsUpmixer {
             var block = UpmixBlock()
             block.enabled = vm.upmixEnabled
-            block.centerMode = vm.upmixCenterMode
-            block.surroundMode = vm.upmixSurroundMode
-            block.strengthPct = vm.upmixStrengthPct
-            block.centerWidthPct = vm.upmixCenterWidthPct
-            block.thresholdPct = vm.upmixThresholdPct
-            block.attackMs = vm.upmixAttackMs
-            block.releaseMs = vm.upmixReleaseMs
-            block.detectorHpfHz = vm.upmixDetectorHpfHz
-            block.surroundDelayMs = vm.upmixSurroundDelayMs
-            block.surroundHpfHz = vm.upmixSurroundHpfHz
-            block.surroundLpfHz = vm.upmixSurroundLpfHz
-            block.decorrPct = vm.upmixDecorrPct
-            block.presenceDb = vm.upmixPresenceDB
+            block.centerMode = vm.upmix.centerMode
+            block.surroundMode = vm.upmix.surroundMode
+            block.strengthPct = vm.upmix.strengthPct
+            block.centerWidthPct = vm.upmix.centerWidthPct
+            block.thresholdPct = vm.upmix.thresholdPct
+            block.attackMs = vm.upmix.attackMs
+            block.releaseMs = vm.upmix.releaseMs
+            block.detectorHpfHz = vm.upmix.detectorHpfHz
+            block.surroundDelayMs = vm.upmix.surroundDelayMs
+            block.surroundHpfHz = vm.upmix.surroundHpfHz
+            block.surroundLpfHz = vm.upmix.surroundLpfHz
+            block.decorrPct = vm.upmix.decorrPct
+            block.presenceDb = vm.upmix.presenceDB
             doc.upmix = block
         }
 
         if vm.firmwareSupportsSubharm {
             var block = SubharmBlock()
             block.enabled = vm.subharmEnabled
-            block.lowDb = vm.subharmLowDB
-            block.highDb = vm.subharmHighDB
-            block.boostDb = vm.subharmBoostDB
-            block.outputMask = Int(vm.subharmOutputMask)
+            block.lowDb = vm.subharm.lowDB
+            block.highDb = vm.subharm.highDB
+            block.boostDb = vm.subharm.boostDB
+            block.outputMask = Int(vm.subharm.outputMask)
             // V30 fields keep their defaults on V29 firmware, which has no such
             // state to capture.  Solo is never written: it is runtime-only.
             if vm.firmwareSupportsSubharmExtended {
-                block.topDb = vm.subharmTopDB
-                block.selectMode = vm.subharmSelectMode
-                block.selectDepthPct = vm.subharmSelectDepthPct
-                block.selectHoldMs = vm.subharmSelectHoldMs
-                block.ceilingDb = vm.subharmCeilingDB
-                block.linkPairs = vm.subharmLinkPairs
+                block.topDb = vm.subharm.topDB
+                block.selectMode = vm.subharm.selectMode
+                block.selectDepthPct = vm.subharm.selectDepthPct
+                block.selectHoldMs = vm.subharm.selectHoldMs
+                block.ceilingDb = vm.subharm.ceilingDB
+                block.linkPairs = vm.subharm.linkPairs
             }
             doc.subharm = block
+        }
+
+        if vm.firmwareSupportsTube {
+            var block = TubeBlock()
+            block.enabled = vm.tubeEnabled
+            block.outputMask = Int(vm.tube.outputMask)
+            block.tubeType = vm.tube.type
+            block.driveDb = vm.tube.driveDB
+            block.biasPct = vm.tube.biasPct
+            block.asymDb = vm.tube.asymDB
+            block.hardnessPct = vm.tube.hardnessPct
+            block.sagPct = vm.tube.sagPct
+            block.rectifier = vm.tube.rectifier
+            block.xfmrEnabled = vm.tube.xfmrEnabled
+            block.xfmrDamping = vm.tube.xfmrDamping
+            block.xfmrResHz = vm.tube.xfmrResHz
+            block.mixPct = vm.tube.mixPct
+            block.trimDb = vm.tube.trimDB
+            doc.tube = block
         }
 
         // Channels: every input the platform has (not just the ones currently
@@ -164,6 +183,9 @@ extension PresetDocument {
             block.muted = vm.outputMuted[output]
             block.enabled = vm.outputEnabled[output]
             block.outputDelayMs = vm.outputDelayMS[output]
+            if vm.firmwareSupportsLimiter, output < vm.limiter.outputs.count {
+                block.limiter = LimiterBlock(vm.limiter.outputs[output])
+            }
             block.crossover = (vm.xoverData[eqCh] ?? []).map { BandBlock($0) }
         }
 
@@ -222,8 +244,9 @@ struct PresetApplyOptions {
     /// system would otherwise change how loud the room gets on import.
     var volumeLevels = false
 
-    /// GPIO pin assignments, clocking, ADAT and the S/PDIF & I2S input wiring.
-    /// Off by default - these describe a board, not a listening setup.
+    /// GPIO pin assignments, clocking, ADAT, the S/PDIF & I2S input wiring and
+    /// the output limiters.  Off by default - these describe a board, not a
+    /// listening setup.
     var hardwareIO = false
 }
 
@@ -299,6 +322,7 @@ enum PresetDocumentApply {
         }
         if options.hardwareIO {
             steps.append(Step(blocking: true) { applyIO(doc, vm: vm, report: report) })
+            steps.append(Step(blocking: false) { applyLimiters(byRef, vm: vm, report: report) })
         }
 
         // The device ends up holding the document but nothing is written to
@@ -393,6 +417,31 @@ enum PresetDocumentApply {
         steps.append(Step(blocking: false) { applyMatrix(doc, vm: vm, report: report) })
         steps.append(Step(blocking: false) { applyFeatureBlocks(doc, vm: vm, report: report) })
         return steps
+    }
+
+    /// Output limiters, from each output's block.  They follow the firmware's
+    /// output_config_mode like the pins - a limiter protects the hardware on an
+    /// output - so they come with the hardware I/O option rather than with the
+    /// audio processing.  In independent mode the import leaves them live but
+    /// unsaved, so it marks the output configuration dirty.  Additive: a block
+    /// without a limiter leaves that output's alone.
+    private static func applyLimiters(_ byRef: [PresetChannelRef: PresetDocument.ChannelBlock],
+                                      vm: DSPViewModel, report: PresetApplyReport) {
+        let blocks = (0..<vm.numOutputChannels).compactMap { out in
+            byRef[.output(out)]?.limiter.map { (out, $0) }
+        }
+        guard !blocks.isEmpty else { return }
+        guard vm.firmwareSupportsLimiter else {
+            report.skip("Output limiter (not supported by this firmware)")
+            return
+        }
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        var targets: [Int: LimiterOutputSettings] = [:]
+        for (output, lm) in blocks {
+            targets[output] = LimiterOutputSettings(enabled: lm.enabled, thresholdDB: lm.thresholdDb,
+                                                    releaseMs: lm.releaseMs, linkGroup: lm.linkGroup)
+        }
+        vm.applyLimiterSettings(targets)
     }
 
     private static func preamp(_ doc: PresetDocument, input: Int) -> Float {
@@ -567,6 +616,31 @@ enum PresetDocumentApply {
                 vm.setSubharm(subharm.enabled)
             } else {
                 report.skip("Subharmonic synthesizer (not supported by this firmware)")
+            }
+        }
+
+        if let tube = doc.tube {
+            if vm.firmwareSupportsTube {
+                // The type goes first: it loads its row, and the stored knobs
+                // written after it only drop the type to Custom if they differ
+                // from that row.  So a file matching the row keeps its type,
+                // and one that does not still restores its exact sound.
+                vm.setTubeType(tube.tubeType)
+                vm.setTubeBias(tube.biasPct)
+                vm.setTubeAsym(tube.asymDb)
+                vm.setTubeHardness(tube.hardnessPct)
+                vm.setTubeSag(tube.sagPct)
+                vm.setTubeDrive(tube.driveDb)
+                vm.setTubeRectifier(tube.rectifier)
+                vm.setTubeXfmrDamping(tube.xfmrDamping)
+                vm.setTubeXfmrRes(tube.xfmrResHz)
+                vm.setTubeXfmr(tube.xfmrEnabled)
+                vm.setTubeMix(tube.mixPct)
+                vm.setTubeTrim(tube.trimDb)
+                vm.setTubeMask(UInt16(truncatingIfNeeded: tube.outputMask))
+                vm.setTube(tube.enabled)
+            } else {
+                report.skip("Tube preamp (not supported by this firmware)")
             }
         }
 

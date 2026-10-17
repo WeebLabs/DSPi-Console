@@ -1,0 +1,9 @@
+# Build products and Xcode state. The repository had no ignore file at all;
+# `build/` alone was 2.4 GB of xcodebuild output one `git add -A` away from
+# being committed.
+build/
+DerivedData/
+*.xcresult
+xcuserdata/
+*.xcuserstate
+.DS_Store

@@ -73,6 +73,23 @@ struct PresetSnapshot: Equatable {
     let subharmSelectHoldMs: Float
     let subharmCeilingDB: Float
     let subharmLinkPairs: Bool
+    let tubeEnabled: Bool
+    let tubeOutputMask: UInt16
+    let tubeType: Int
+    let tubeDriveDB: Float
+    let tubeBiasPct: Float
+    let tubeAsymDB: Float
+    let tubeHardnessPct: Float
+    let tubeSagPct: Float
+    let tubeRectifier: Int
+    let tubeXfmrEnabled: Bool
+    let tubeXfmrDamping: Float
+    let tubeXfmrResHz: Float
+    let tubeMixPct: Float
+    let tubeTrimDB: Float
+    /// One entry per wire slot; slots past the device's outputs stay at the
+    /// defaults on both sides, so they never show as a change.
+    let limiterOutputs: [LimiterOutputSettings]
     let upmixEnabled: Bool
     let upmixCenterMode: Int
     let upmixSurroundMode: Int
@@ -287,6 +304,76 @@ extension PresetSnapshot {
         }
         if old.subharmBoostDB != new.subharmBoostDB {
             changes.append(.init(category: "Subharm", description: "Subharm LF boost: \(formatVal(old.subharmBoostDB)) dB → \(formatVal(new.subharmBoostDB)) dB"))
+        }
+
+        // Tube Modeller.  A type change also moves the four character knobs, so
+        // those lines are expected alongside it rather than being noise.
+        if old.tubeEnabled != new.tubeEnabled {
+            changes.append(.init(category: "Tube", description: "Tube Modeller: \(new.tubeEnabled ? "enabled" : "disabled")"))
+        }
+        if old.tubeOutputMask != new.tubeOutputMask {
+            changes.append(.init(category: "Tube", description: "Tube outputs: \(String(format: "0x%04X", old.tubeOutputMask)) → \(String(format: "0x%04X", new.tubeOutputMask))"))
+        }
+        if old.tubeType != new.tubeType {
+            changes.append(.init(category: "Tube", description: "Tube type: \(tubeTypeName(old.tubeType)) → \(tubeTypeName(new.tubeType))"))
+        }
+        if old.tubeDriveDB != new.tubeDriveDB {
+            changes.append(.init(category: "Tube", description: "Tube drive: \(formatVal(old.tubeDriveDB)) dB → \(formatVal(new.tubeDriveDB)) dB"))
+        }
+        if old.tubeBiasPct != new.tubeBiasPct {
+            changes.append(.init(category: "Tube", description: "Tube bias: \(formatVal(old.tubeBiasPct))% → \(formatVal(new.tubeBiasPct))%"))
+        }
+        if old.tubeAsymDB != new.tubeAsymDB {
+            changes.append(.init(category: "Tube", description: "Tube asymmetry: \(formatVal(old.tubeAsymDB)) dB → \(formatVal(new.tubeAsymDB)) dB"))
+        }
+        if old.tubeHardnessPct != new.tubeHardnessPct {
+            changes.append(.init(category: "Tube", description: "Tube knee hardness: \(formatVal(old.tubeHardnessPct))% → \(formatVal(new.tubeHardnessPct))%"))
+        }
+        if old.tubeSagPct != new.tubeSagPct {
+            changes.append(.init(category: "Tube", description: "Tube sag: \(formatVal(old.tubeSagPct))% → \(formatVal(new.tubeSagPct))%"))
+        }
+        if old.tubeRectifier != new.tubeRectifier {
+            changes.append(.init(category: "Tube", description: "Tube rectifier: \(tubeRectifierName(old.tubeRectifier)) → \(tubeRectifierName(new.tubeRectifier))"))
+        }
+        if old.tubeXfmrEnabled != new.tubeXfmrEnabled {
+            changes.append(.init(category: "Tube", description: "Tube output stage: \(new.tubeXfmrEnabled ? "enabled" : "disabled")"))
+        }
+        if old.tubeXfmrDamping != new.tubeXfmrDamping {
+            changes.append(.init(category: "Tube", description: "Tube damping factor: \(formatVal(old.tubeXfmrDamping)) → \(formatVal(new.tubeXfmrDamping))"))
+        }
+        if old.tubeXfmrResHz != new.tubeXfmrResHz {
+            changes.append(.init(category: "Tube", description: "Tube speaker resonance: \(formatVal(old.tubeXfmrResHz)) → \(formatVal(new.tubeXfmrResHz)) Hz"))
+        }
+        if old.tubeMixPct != new.tubeMixPct {
+            changes.append(.init(category: "Tube", description: "Tube mix: \(formatVal(old.tubeMixPct))% → \(formatVal(new.tubeMixPct))%"))
+        }
+        if old.tubeTrimDB != new.tubeTrimDB {
+            changes.append(.init(category: "Tube", description: "Tube output trim: \(formatVal(old.tubeTrimDB)) dB → \(formatVal(new.tubeTrimDB)) dB"))
+        }
+
+        // Output Limiter, per output.  It follows output_config_mode like the
+        // pins: a preset load restores it only in WITH_PRESET mode, so only
+        // there does a change make the preset dirty.  In INDEPENDENT mode it
+        // is saved with the output configuration instead.  Output i's channel
+        // name is at i + chOut1.
+        let limiterChOut1 = new.platformName == "RP2040" ? BASE_MATRIX_INPUTS : MAX_MATRIX_INPUTS
+        for i in 0..<min(old.limiterOutputs.count, new.limiterOutputs.count)
+        where new.outputConfigMode == OUTPUT_CONFIG_MODE_WITH_PRESET {
+            let o = old.limiterOutputs[i], n = new.limiterOutputs[i]
+            guard o != n else { continue }
+            let name = (i + limiterChOut1) < channelNames.count ? channelNames[i + limiterChOut1] : "Output \(i)"
+            if o.enabled != n.enabled {
+                changes.append(.init(category: "Limiter", description: "\(name) limiter: \(n.enabled ? "enabled" : "disabled")"))
+            }
+            if o.thresholdDB != n.thresholdDB {
+                changes.append(.init(category: "Limiter", description: "\(name) limiter threshold: \(String(format: "%.1f", o.thresholdDB)) → \(String(format: "%.1f", n.thresholdDB)) dBFS"))
+            }
+            if o.releaseMs != n.releaseMs {
+                changes.append(.init(category: "Limiter", description: "\(name) limiter release: \(formatVal(o.releaseMs)) ms → \(formatVal(n.releaseMs)) ms"))
+            }
+            if o.linkGroup != n.linkGroup {
+                changes.append(.init(category: "Limiter", description: "\(name) limiter link: \(limiterLinkGroupName(o.linkGroup)) → \(limiterLinkGroupName(n.linkGroup))"))
+            }
         }
 
         // Stereo Upmixer

@@ -1,0 +1,1192 @@
+import XCTest
+import AppKit
+import SwiftUI
+import Combine
+@testable import DSPi_Console
+
+/// On-graph PEQ editing: the single-precision response the GPU evaluates, the
+/// dot and creation rules, value parsing, and the editor driven by real mouse
+/// and key events against a recording host.  No device traffic: the editor
+/// only ever talks to `RecordingHost`.
+final class PeqGraphEditorTests: XCTestCase {
+
+    // MARK: - Fixtures
+
+    private static let hardBands: [FilterParams] = [
+        FilterParams(type: .peaking, freq: 10, q: 20, gain: 24),
+        FilterParams(type: .peaking, freq: 12, q: 20, gain: -24),
+        FilterParams(type: .peaking, freq: 25, q: 8, gain: 12),
+        FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6),
+        FilterParams(type: .peaking, freq: 18000, q: 5, gain: -12),
+        FilterParams(type: .lowShelf, freq: 30, q: 0.707, gain: 15),
+        FilterParams(type: .highShelf, freq: 8000, q: 1.2, gain: -9),
+        FilterParams(type: .lowShelf1, freq: 200, q: 0.707, gain: 6),
+        FilterParams(type: .highShelf1, freq: 3000, q: 0.707, gain: -6),
+        FilterParams(type: .highPass, freq: 15, q: 10, gain: 0),
+        FilterParams(type: .highPass, freq: 80, q: 0.5, gain: 0),
+        FilterParams(type: .lowPass, freq: 12000, q: 2, gain: 0),
+        FilterParams(type: .highPass1, freq: 40, q: 0.707, gain: 0),
+        FilterParams(type: .lowPass1, freq: 5000, q: 0.707, gain: 0),
+        FilterParams(type: .allPass, freq: 500, q: 3, gain: 0),
+        FilterParams(type: .allPass1, freq: 500, q: 0.707, gain: 0),
+        FilterParams(type: .notch, freq: 60, q: 4, gain: 0),
+        FilterParams(type: .lr4_hp, freq: 80, q: 0.707, gain: 0),
+        FilterParams(type: .bw8_lp, freq: 2500, q: 0.707, gain: 0),
+    ]
+
+    private func logFrequencies(_ count: Int, from lo: Double = 10, to hi: Double = 20000) -> [Double] {
+        (0..<count).map { lo * pow(hi / lo, Double($0) / Double(count - 1)) }
+    }
+
+    // MARK: - Response math
+
+    /// An independent Double reference: each section's |H|^2 evaluated as
+    /// the complex ratio B(e^jw)/A(e^jw) with the numerator and denominator
+    /// expanded about w = 0 (1 - cos w written as 2 sin^2(w/2)), so neither
+    /// cancels at low frequency.
+    private func referenceDB(_ bands: [FilterParams], _ f: Double) -> Double {
+        var db = 0.0
+        for band in bands where band.type != .flat && !band.bypass {
+            let coeffs = band.type.isCrossover ? DSPMath.crossoverSections(p: band) : [DSPMath.calculateCoefficients(p: band)]
+            for c in coeffs {
+                let w = 2 * Double.pi * f / DSPMath.sampleRate
+                let h1 = 2 * pow(sin(w / 2), 2), h2 = 2 * pow(sin(w), 2)   // 1 - cos w, 1 - cos 2w
+                func mag(_ x0: Double, _ x1: Double, _ x2: Double) -> Double {
+                    let re = (x0 + x1 + x2) - x1 * h1 - x2 * h2
+                    let im = -(x1 * sin(w) + x2 * sin(2 * w))
+                    return re * re + im * im
+                }
+                db += 10 * log10(max(mag(c.b0, c.b1, c.b2), 1e-300) / mag(1, c.a1, c.a2))
+            }
+        }
+        return db
+    }
+
+    /// The phi form in Float must track a Double reference, including the
+    /// high-Q, low-frequency sections that motivated Double in the first
+    /// place.  Near a notch's floor the numerator itself cancels, so the
+    /// tolerance widens below -30 dB; nothing below -60 dB is drawn.
+    func testPhiFormMatchesDoublePrecision() {
+        for band in Self.hardBands {
+            let sections = PeqPhiSection.sections(for: band)
+            XCTAssertFalse(sections.isEmpty, "\(band.type)")
+            for f in logFrequencies(600) {
+                let reference = referenceDB([band], f)
+                guard reference > -60 else { continue }
+                let phi = Double(sections.reduce(Float(0)) { $0 + $1.db(freq: f) })
+                XCTAssertEqual(phi, reference, accuracy: reference > -30 ? 0.02 : 0.1,
+                               "\(band.type) \(band.freq) Hz Q\(band.q) at \(f) Hz")
+            }
+        }
+    }
+
+    /// DSPMath, which draws every other curve and places the dots, agrees
+    /// with the reference too, including at the resonance it used to lose.
+    func testDSPMathKeepsLowNarrowResonances() {
+        for band in Self.hardBands {
+            for f in logFrequencies(600) {
+                let reference = referenceDB([band], f)
+                guard reference > -60 else { continue }
+                XCTAssertEqual(Double(DSPMath.responseAt(freq: Float(f), filters: [band])), reference, accuracy: 0.01,
+                               "\(band.type) \(band.freq) Hz Q\(band.q) at \(f) Hz")
+            }
+        }
+        let bell = FilterParams(type: .peaking, freq: 10, q: 20, gain: 24)
+        XCTAssertEqual(DSPMath.responseAt(freq: 10, filters: [bell]), 24, accuracy: 0.01)
+    }
+
+    func testBypassedAndOffBandsContributeNothing() {
+        var p = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6)
+        p.bypass = true
+        XCTAssertTrue(PeqPhiSection.sections(for: p).isEmpty)
+        XCTAssertTrue(PeqPhiSection.sections(for: FilterParams()).isEmpty)
+    }
+
+    func testShaderABI() throws {
+        XCTAssertEqual(MemoryLayout<PeqPhiSection>.stride, 32)
+        XCTAssertEqual(MemoryLayout<PeqCurveRange>.stride, 16)
+        XCTAssertEqual(MemoryLayout<PeqResponseParams>.stride, 32)
+        XCTAssertEqual(MemoryLayout<PeqDrawUniforms>.stride, 80)
+        XCTAssertEqual(MemoryLayout<PeqNodeInstance>.stride, 48)
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("No Metal device") }
+        XCTAssertNotNil(PeqGraphResources.shared, "PEQ graph shaders must compile and link")
+    }
+
+    /// The kernel itself, read back from the GPU: every band row and the
+    /// combined row against DSPMath at each column's frequency.
+    func testGPUResponseMatchesDSPMath() throws {
+        guard let resources = PeqGraphResources.shared else { throw XCTSkip("No Metal device") }
+        let renderer = PeqGraphRenderer(resources: resources)
+        let bands = Array(Self.hardBands.prefix(PeqGraphRenderer.bandRows))
+        let statics = [FilterParams(type: .lr4_hp, freq: 60, q: 0.707, gain: 0)]
+        renderer.picture.geometry = PeqGraphGeometry(size: CGSize(width: 800, height: 300),
+                                                     minFreq: 10, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+        renderer.picture.response = .init(bands: bands, statics: statics, offsetDB: -3)
+        let columns = 700
+        guard let table = renderer.evaluateForTesting(columns: columns) else { return XCTFail("kernel did not run") }
+        let freqs = logFrequencies(columns)
+        func check(row: Int, _ expected: (Double) -> Double, _ label: String) {
+            for (col, f) in freqs.enumerated() {
+                let e = expected(f)
+                guard e > -60 else { continue }
+                XCTAssertEqual(Double(table[row * columns + col]), e, accuracy: e > -30 ? 0.05 : 0.15, "\(label) at \(f) Hz")
+            }
+        }
+        for (row, band) in bands.enumerated() {
+            check(row: row, { self.referenceDB([band], $0) }, "band \(row) \(band.type)")
+        }
+        check(row: PeqGraphRenderer.staticRow, { self.referenceDB(statics, $0) - 3 }, "statics")
+        check(row: PeqGraphRenderer.combinedRow, { self.referenceDB(bands + statics, $0) - 3 }, "combined")
+    }
+
+    // MARK: - Geometry and dots
+
+    func testGeometryRoundTripsAndMatchesTheGraph() {
+        let g = PeqGraphGeometry(size: CGSize(width: 900, height: 250), minFreq: 15, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+        XCTAssertEqual(g.x(15), 0, accuracy: 1e-6)
+        XCTAssertEqual(g.x(20000), 900, accuracy: 1e-6)
+        XCTAssertEqual(g.y(25), 0, accuracy: 1e-6)
+        XCTAssertEqual(g.y(0), 125, accuracy: 1e-6)
+        for f in [20.0, 440, 1000, 12345] { XCTAssertEqual(g.freq(g.x(f)), f, accuracy: f * 1e-9) }
+        for db in [-20.0, 0, 7.5] { XCTAssertEqual(g.db(g.y(db)), db, accuracy: 1e-9) }
+    }
+
+    func testDotsSitOnTheirBandsOwnCurve() {
+        for band in Self.hardBands where PeqShape.of(band.type) != nil {
+            let role = PeqNodeRole.of(band)
+            let dot = role.db(for: band)
+            switch band.type {
+            case .notch, .allPass, .allPass1:
+                XCTAssertEqual(dot, 0, "\(band.type) sits on 0 dB")
+            default:
+                let curve = Double(DSPMath.responseAt(freq: band.freq, filters: [band]))
+                XCTAssertEqual(dot, curve, accuracy: 0.05, "\(band.type) dot on its curve")
+            }
+        }
+        guard case .gain(let scale) = PeqNodeRole.of(FilterParams(type: .lowShelf, freq: 100, q: 0.707, gain: 6)) else {
+            return XCTFail("a shelf's dot follows its gain")
+        }
+        XCTAssertEqual(scale, 0.5, accuracy: 0.001, "an RBJ shelf is half its gain at the corner")
+        XCTAssertEqual(PeqNodeRole.of(FilterParams(type: .lowPass, freq: 100, q: 2, gain: 0)), .resonance)
+    }
+
+    /// A double-click always makes a bell at the pointer's frequency and
+    /// level, whatever part of the graph it lands on.
+    func testDoubleClickAlwaysMakesABell() {
+        let g = PeqGraphGeometry(size: CGSize(width: 1000, height: 300), minFreq: 20, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+        let all = Set(FilterType.allCases)
+        for point in [CGPoint(x: 20, y: 150), CGPoint(x: 980, y: 150), CGPoint(x: 500, y: 290), CGPoint(x: 500, y: 60)] {
+            let band = PeqCreation.band(at: point, in: g, available: all, fromCurve: false)
+            XCTAssertEqual(band.type, .peaking, "at \(point)")
+            XCTAssertEqual(Double(band.freq), g.freq(point.x), accuracy: 0.01)
+            XCTAssertEqual(Double(band.gain), g.db(point.y), accuracy: 0.01)
+        }
+        func curveType(_ x: CGFloat) -> FilterType {
+            PeqCreation.band(at: CGPoint(x: x, y: 150), in: g, available: all, fromCurve: true).type
+        }
+        XCTAssertEqual(curveType(60), .lowShelf, "pulling the curve near the left makes a shelf")
+        XCTAssertEqual(curveType(940), .highShelf)
+        XCTAssertEqual(curveType(500), .peaking)
+    }
+
+    func testShapeMappingRoundTrips() {
+        for shape in PeqShape.allCases {
+            for order in [1, 2] {
+                guard let t = shape.type(order: order) else { continue }
+                XCTAssertEqual(PeqShape.of(t)?.shape, shape)
+                XCTAssertEqual(PeqShape.of(t)?.order, order)
+            }
+        }
+        XCTAssertNil(PeqShape.of(.linkwitzTransform))
+        XCTAssertNil(PeqShape.of(.lr4_lp))
+    }
+
+    func testValueEntryAcceptsFabFilterShortcuts() {
+        XCTAssertEqual(PeqValueText.parseFrequency("2k")!, 2000, accuracy: 1e-9)
+        XCTAssertEqual(PeqValueText.parseFrequency("1.5 kHz")!, 1500, accuracy: 1e-9)
+        XCTAssertEqual(PeqValueText.parseFrequency("100hz")!, 100, accuracy: 1e-9)
+        XCTAssertEqual(PeqValueText.parseFrequency("A4")!, 440, accuracy: 1e-9)
+        XCTAssertEqual(PeqValueText.parseFrequency("C4")!, 261.6256, accuracy: 1e-3)
+        XCTAssertEqual(PeqValueText.parseFrequency("Bb3")!, 233.0819, accuracy: 1e-3)
+        XCTAssertEqual(PeqValueText.parseFrequency("C#2+13")!, 69.2957 * pow(2, 13.0 / 1200), accuracy: 1e-3)
+        XCTAssertNil(PeqValueText.parseFrequency("loud"))
+        XCTAssertEqual(PeqValueText.parseNumber("+3.5 dB", unit: "db"), 3.5)
+        XCTAssertEqual(PeqValueText.parseNumber("Q 2", unit: ""), 2)
+    }
+
+    /// The chip shows two decimals, truncated, never rounded up.
+    func testChipValuesTruncateToTwoDecimals() {
+        XCTAssertEqual(PeqBandHUD.truncated(4.999), "4.99")
+        XCTAssertEqual(PeqBandHUD.truncated(Double(Float(1.1))), "1.10")
+        XCTAssertEqual(PeqBandHUD.truncated(-6.506, sign: true), "-6.50")
+        XCTAssertEqual(PeqBandHUD.truncated(5, sign: true), "+5.00")
+        XCTAssertEqual(PeqBandHUD.truncated(-0.004, sign: true), "+0.00")
+        XCTAssertEqual(PeqBandHUD.truncated(1799.99 / 1000), "1.79")
+    }
+
+    // MARK: - Band list
+
+    /// Selecting a band on the graph scrolls the band list to show its row,
+    /// by the least amount, and a row already in view does not move it.
+    @MainActor
+    func testBandListScrollsToABandSelectedOnTheGraph() throws {
+        let selection = PeqGraphSelection()
+        let bands = (0..<10).map { FilterParams(type: .peaking, freq: Float(100 * ($0 + 1)), q: 1, gain: 3) }
+        let list = FilterListView(bands: bands, channelId: 0, availableTypes: FilterType.allCases,
+                                  bypassSupported: true, onUpdate: { _, _ in }, graphSelection: selection)
+            .frame(width: 700, height: 220)
+            .environment(\.colorScheme, .dark)
+        let host = NSHostingView(rootView: list)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 700, height: 220),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        spin(0.3)
+        func find(_ view: NSView) -> NSScrollView? {
+            if let s = view as? NSScrollView { return s }
+            for sub in view.subviews { if let s = find(sub) { return s } }
+            return nil
+        }
+        let scroll = try XCTUnwrap(find(host))
+        let top = scroll.contentView.bounds.origin.y
+        selection.selected = [1]
+        spin(0.5)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, top, accuracy: 0.5, "a visible row does not scroll")
+        selection.selected = [9]
+        spin(0.6)
+        let scrolled = scroll.contentView.bounds.origin.y
+        XCTAssertGreaterThan(scrolled, top + 20, "the last band's row is scrolled into view")
+        selection.selected = [0]
+        spin(0.6)
+        XCTAssertLessThan(scroll.contentView.bounds.origin.y, scrolled - 20, "and back up for the first")
+        let first = scroll.contentView.bounds.origin.y
+        selection.revealRow.send(9)
+        spin(0.6)
+        XCTAssertGreaterThan(scroll.contentView.bounds.origin.y, first + 20, "a band rested on in the graph is revealed too")
+    }
+
+    // MARK: - Editor interaction
+
+    private final class RecordingHost: PeqGraphEditorHost {
+        let peqSelection = PeqGraphSelection()
+        let peqLive = PeqLiveReadouts()
+        var commits: [[(band: Int, params: FilterParams)]] = []
+        var sends = 0
+        var bypasses: [(band: Int, bypass: Bool)] = []
+        func commitGraphBands(ch: Int, _ changes: [(band: Int, params: FilterParams)]) { commits.append(changes) }
+        func sendGraphBandsToDevice(ch: Int, _ changes: [(band: Int, params: FilterParams)]) { sends += 1 }
+        func setGraphBandBypass(ch: Int, band: Int, bypass: Bool) { bypasses.append((band, bypass)) }
+    }
+
+    private struct Rig {
+        let host: RecordingHost
+        let view: PeqGraphEditorView
+        let window: NSWindow
+        let geometry: PeqGraphGeometry
+    }
+
+    private func makeRig(bands: [FilterParams] = Array(repeating: FilterParams(), count: 10)) throws -> Rig {
+        guard PeqGraphEditorView.isAvailable else { throw XCTSkip("No Metal device") }
+        let host = RecordingHost()
+        let view = PeqGraphEditorView(host: host)
+        let size = CGSize(width: 800, height: 300)
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: size.width, height: size.height),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+        var config = PeqGraphEditorConfig()
+        config.channel = 0
+        config.bands = bands
+        config.minFreq = 20
+        config.maxFreq = 20000
+        config.availableTypes = FilterType.allCases.filter { !$0.isCrossover }
+        config.bypassSupported = true
+        view.apply(config)
+        view.layoutSubtreeIfNeeded()
+        let geometry = PeqGraphGeometry(size: size, minFreq: 20, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+        return Rig(host: host, view: view, window: window, geometry: geometry)
+    }
+
+    private func mouse(_ type: NSEvent.EventType, _ rig: Rig, _ p: CGPoint,
+                       _ mods: NSEvent.ModifierFlags = [], clicks: Int = 1) -> NSEvent {
+        let w = rig.view.convert(p, to: nil)
+        return NSEvent.mouseEvent(with: type, location: w, modifierFlags: mods, timestamp: ProcessInfo.processInfo.systemUptime,
+                                  windowNumber: rig.window.windowNumber, context: nil, eventNumber: 0,
+                                  clickCount: clicks, pressure: 1)!
+    }
+
+    private func click(_ rig: Rig, _ p: CGPoint, _ mods: NSEvent.ModifierFlags = []) {
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p, mods))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p, mods))
+    }
+
+    private func drag(_ rig: Rig, from a: CGPoint, to b: CGPoint, _ mods: NSEvent.ModifierFlags = [], steps: Int = 8) {
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, a, mods))
+        for i in 1...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+            rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, p, mods))
+        }
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, b, mods))
+    }
+
+    private func key(_ rig: Rig, code: UInt16, chars: String, _ mods: NSEvent.ModifierFlags = []) {
+        let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: mods, timestamp: 0,
+                                 windowNumber: rig.window.windowNumber, context: nil, characters: chars,
+                                 charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)!
+        rig.view.keyDown(with: e)
+    }
+
+    /// A trackpad-style scroll event with its amounts set explicitly, not
+    /// left for the system to derive, so the delta the editor reads is fixed.
+    /// `windowPoint` places it: such an event has no window, so its
+    /// `locationInWindow` is its screen location, which is set to match.
+    private func scrollEvent(points: Int64, flags: CGEventFlags = [], windowPoint: CGPoint? = nil) throws -> NSEvent {
+        let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                       wheel1: Int32(points), wheel2: 0, wheel3: 0))
+        cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        cg.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: points)
+        cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: 0)
+        cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
+        cg.flags = flags
+        if let w = windowPoint, let top = NSScreen.screens.first?.frame.maxY {
+            cg.location = CGPoint(x: w.x, y: top - w.y)
+        }
+        let event = try XCTUnwrap(NSEvent(cgEvent: cg))
+        XCTAssertEqual(event.scrollingDeltaY, CGFloat(points), "the event carries the delta it was given")
+        return event
+    }
+
+    private func spin(_ seconds: Double) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+
+    private func doubleClick(_ rig: Rig, _ p: CGPoint) {
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p))
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, p, clicks: 2))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, p, clicks: 2))
+    }
+
+    @MainActor
+    func testSingleClickOnEmptyGraphCreatesNothing() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        click(rig, CGPoint(x: 400, y: 90))
+        XCTAssertTrue(rig.host.commits.isEmpty, "a single click never creates a band")
+    }
+
+    @MainActor
+    func testDoubleClickOnEmptyGraphCreatesTheBandUnderThePointer() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        let p = CGPoint(x: 400, y: 90)
+        doubleClick(rig, p)
+        XCTAssertEqual(rig.host.commits.count, 1, "exactly one band")
+        let created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.band, 0, "the first free slot")
+        XCTAssertEqual(created.params.type, .peaking)
+        XCTAssertEqual(Double(created.params.freq), rig.geometry.freq(p.x), accuracy: 0.01)
+        XCTAssertEqual(Double(created.params.gain), rig.geometry.db(p.y), accuracy: 0.01)
+        XCTAssertEqual(rig.host.peqSelection.selected, [0], "a new band is selected")
+    }
+
+    @MainActor
+    func testClickOnEmptyGraphDeselectsWhenBandsAreSelected() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[3] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(6))
+        click(rig, dot)
+        XCTAssertEqual(rig.host.peqSelection.selected, [3])
+        click(rig, CGPoint(x: 150, y: 60))
+        XCTAssertEqual(rig.host.peqSelection.selected, [], "the click deselects")
+        XCTAssertTrue(rig.host.commits.isEmpty, "and creates nothing")
+    }
+
+    /// A drag reaches the device while it happens and the model exactly once,
+    /// on release: the whole point of keeping it out of SwiftUI.
+    @MainActor
+    func testDragCommitsOnceOnRelease() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[2] = FilterParams(type: .peaking, freq: 1000, q: 1.5, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let start = CGPoint(x: g.x(1000), y: g.y(3))
+        let end = CGPoint(x: g.x(2000), y: g.y(9))
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, start))
+        for i in 1...10 {
+            let t = CGFloat(i) / 10
+            rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig,
+                CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)))
+        }
+        XCTAssertTrue(rig.host.commits.isEmpty, "nothing reaches the model mid-drag")
+        XCTAssertGreaterThan(rig.host.sends, 0, "the device follows the drag")
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, end))
+        XCTAssertEqual(rig.host.commits.count, 1)
+        let moved = try XCTUnwrap(rig.host.commits.first?.first)
+        XCTAssertEqual(moved.band, 2)
+        XCTAssertEqual(Double(moved.params.freq), 2000, accuracy: 2)
+        XCTAssertEqual(Double(moved.params.gain), 9, accuracy: 0.05)
+        XCTAssertEqual(moved.params.q, 1.5, "a plain drag leaves Q alone")
+    }
+
+    /// Scrolling Q in the middle of a drag must survive further movement:
+    /// the drag rebuilds the band from its starting snapshot each event.
+    @MainActor
+    func testWheelQDuringDragSurvivesMovement() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1.5, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(3))
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, dot))
+        rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, CGPoint(x: dot.x + 10, y: dot.y)))
+        let wheel = try scrollEvent(points: 100)
+        rig.view.scrollWheel(with: wheel)
+        rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, CGPoint(x: dot.x + 30, y: dot.y - 10)))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, CGPoint(x: dot.x + 30, y: dot.y - 10)))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertGreaterThan(p.q, 1.6, "the scrolled Q is kept after the drag moves on")
+        XCTAssertGreaterThan(p.freq, 1000, "and the drag still moved the band")
+    }
+
+    /// Cmd-wheel gain moves the dot away from the pointer; the gesture must
+    /// stay with its band so the gain can come back up.
+    @MainActor
+    func testCommandWheelGainStaysWithItsBand() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 4, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(3))
+        // Down 9 dB: the dot, and the narrow band's area, leave the pointer.
+        for _ in 0..<18 { XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command)) }
+        spin(0.3) // a pause within the gesture, shorter than its timeout
+        // Back up two thirds of the way from the same pointer position.
+        for _ in 0..<12 { XCTAssertTrue(rig.view.handleWheel(at: dot, delta: 10, modifiers: .command)) }
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.gain, 0, accuracy: 0.01, "down 9 dB then up 6 dB, all on the one band")
+    }
+
+    /// The chip follows its dot, so Cmd-wheel gain can slide a chip field
+    /// under the pointer.  The gesture must keep adjusting gain, not that
+    /// field.
+    @MainActor
+    func testGraphWheelGestureIgnoresChipFieldSlidingUnderPointer() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(6))
+        rig.view.hoverForTesting(dot)
+        XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command))
+        // The next event of the same gesture lands on the chip's Width field.
+        let wheel = try scrollEvent(points: -10, flags: .maskCommand)
+        try XCTUnwrap(rig.view.hudFieldForTesting(.q)).scrollWheel(with: wheel)
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.q, 2, "Width was not touched")
+        XCTAssertLessThan(p.gain, 5.6, "both steps went to the gain")
+    }
+
+    /// A pause longer than a gesture ends the graph's hold on the band, but
+    /// Cmd-wheel on a chip field is still the band's gain, never the field.
+    @MainActor
+    func testCommandWheelOnChipFieldAfterPauseAdjustsGain() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(6))
+        rig.view.hoverForTesting(dot)
+        XCTAssertTrue(rig.view.handleWheel(at: dot, delta: -10, modifiers: .command))
+        spin(0.7) // longer than a gesture
+        for field in [PeqHUDField.q, .freq] {
+            let target = try XCTUnwrap(rig.view.hudFieldForTesting(field))
+            let onField = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: rig.view)
+            let wheel = try scrollEvent(points: -10, flags: .maskCommand, windowPoint: rig.view.convert(onField, to: nil))
+            let seen = rig.view.convert(wheel.locationInWindow, from: nil)
+            XCTAssertEqual(seen.x, onField.x, accuracy: 1, "the editor sees the event on the field")
+            XCTAssertEqual(seen.y, onField.y, accuracy: 1)
+            target.scrollWheel(with: wheel)
+        }
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.q, 2, "Width was not touched")
+        XCTAssertEqual(p.freq, 1000, "nor Frequency")
+        XCTAssertEqual(p.gain, 4.5, accuracy: 0.01, "all three steps went to the gain")
+    }
+
+    /// An explicit selection owns the wheel: scrolling over another band's
+    /// dot or area adjusts the selection, not the band under the pointer.
+    @MainActor
+    func testSelectionOwnsTheWheel() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let selectedDot = CGPoint(x: g.x(1000), y: g.y(6))
+        let otherDot = CGPoint(x: g.x(4000), y: g.y(6))
+        let otherArea = CGPoint(x: g.x(4000), y: g.y(3))
+        func latest() -> [Int: FilterParams] {
+            var out: [Int: FilterParams] = [:]
+            for commit in rig.host.commits { for c in commit { out[c.band] = c.params } }
+            return out
+        }
+        click(rig, selectedDot)
+        XCTAssertEqual(rig.host.peqSelection.selected, [0])
+
+        // Each step starts a fresh gesture, so no gesture hold is involved.
+        XCTAssertTrue(rig.view.handleWheel(at: otherDot, delta: -10, modifiers: .command, begins: true))
+        XCTAssertTrue(rig.view.handleWheel(at: otherArea, delta: 100, modifiers: [], begins: true))
+        XCTAssertFalse(rig.view.handleWheel(at: CGPoint(x: g.x(200), y: g.y(-15)), delta: 10, modifiers: .command, begins: true),
+                       "empty graph still zooms or scrolls")
+        spin(1.1)
+        var p = latest()
+        XCTAssertEqual(try XCTUnwrap(p[0]).gain, 5.5, accuracy: 0.01, "the gain step went to the selection")
+        XCTAssertEqual(try XCTUnwrap(p[0]).q, 4, accuracy: 0.01, "and so did the Q step")
+        XCTAssertNil(p[1], "the band under the pointer was not touched")
+        XCTAssertEqual(rig.view.hudBandForTesting, 0, "the chip is on the selection")
+
+        // The selected band's own chip fields still take the wheel.
+        let target = try XCTUnwrap(rig.view.hudFieldForTesting(.freq))
+        let onField = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: rig.view)
+        target.scrollWheel(with: try scrollEvent(points: 100, windowPoint: rig.view.convert(onField, to: nil)))
+        spin(0.7)
+        XCTAssertGreaterThan(try XCTUnwrap(latest()[0]).freq, 1000, "the selected band's Frequency field works")
+
+        // With nothing selected the wheel adjusts the band under the pointer.
+        click(rig, CGPoint(x: g.x(200), y: g.y(-15)))
+        XCTAssertEqual(rig.host.peqSelection.selected, [])
+        XCTAssertTrue(rig.view.handleWheel(at: otherDot, delta: -10, modifiers: .command, begins: true))
+        spin(0.7)
+        p = latest()
+        XCTAssertEqual(try XCTUnwrap(p[1]).gain, 5.5, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(p[0]).gain, 5.5, accuracy: 0.01, "the earlier band is unchanged")
+    }
+
+    /// With a selection the chip stays on it, wherever the pointer goes;
+    /// with none it follows the hovered dot.
+    @MainActor
+    func testChipStaysOnTheSelection() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot0 = CGPoint(x: g.x(1000), y: g.y(6))
+        let dot1 = CGPoint(x: g.x(4000), y: g.y(6))
+        let empty = CGPoint(x: g.x(200), y: g.y(-15))
+        click(rig, dot0)
+        rig.view.hoverForTesting(dot1)
+        XCTAssertEqual(rig.view.hudBandForTesting, 0, "hovering another dot leaves the chip on the selection")
+        XCTAssertEqual(rig.host.peqSelection.graphHovered, 1, "while the hovered band still lights up")
+        rig.view.hoverForTesting(empty)
+        spin(0.6)
+        XCTAssertEqual(rig.view.hudBandForTesting, 0, "leaving the dot does not hide it")
+
+        rig.host.peqSelection.selected = [1]
+        XCTAssertEqual(rig.view.hudBandForTesting, 1, "a band selected in the list takes the chip")
+
+        click(rig, empty)
+        XCTAssertEqual(rig.host.peqSelection.selected, [])
+        XCTAssertNil(rig.view.hudBandForTesting, "clicking empty graph dismisses the chip at once, without the hover delay")
+        spin(0.6)
+        XCTAssertNil(rig.view.hudBandForTesting, "clearing the selection lets the chip go")
+        rig.view.hoverForTesting(dot1)
+        XCTAssertEqual(rig.view.hudBandForTesting, 1, "with nothing selected the chip follows the hovered dot")
+    }
+
+    /// A band's fill highlights it and takes the wheel, but clicks go
+    /// through to the graph: only the dot selects, so a band can be placed
+    /// anywhere, including inside another band's fill.
+    @MainActor
+    func testClicksPassThroughBandFills() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 0.5, gain: 10)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(10))
+        let fill = CGPoint(x: g.x(400), y: g.y(3))
+
+        rig.view.hoverForTesting(fill)
+        XCTAssertEqual(rig.host.peqSelection.graphHovered, 0, "the fill still highlights its band")
+        XCTAssertNotNil(rig.view.axisReadoutsForTesting.freq, "and shows where a band would go")
+
+        click(rig, dot)
+        XCTAssertEqual(rig.host.peqSelection.selected, [0], "the dot selects")
+        click(rig, fill)
+        XCTAssertEqual(rig.host.peqSelection.selected, [], "a click on the fill deselects, as on empty graph")
+
+        doubleClick(rig, fill)
+        let created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.band, 1, "a double-click on the fill places a new band")
+        XCTAssertEqual(created.params.type, .peaking)
+        XCTAssertEqual(Double(created.params.freq), 400, accuracy: 4)
+        XCTAssertEqual(Double(created.params.gain), 3, accuracy: 0.2)
+    }
+
+    /// Cmd-click on empty graph opens the shape card there.  A shape with one
+    /// order creates the band at once; one with two asks for the order, and
+    /// that click creates it.  The band goes where Cmd was clicked, and a
+    /// click elsewhere, the back arrow, right-click or Escape cancels.
+    @MainActor
+    func testCmdClickCardCreatesShapeThenSlope() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let card = rig.view.cardForTesting
+        func reaches(_ button: NSButton) -> Bool {
+            let p = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            return rig.window.contentView?.hitTest(p) === button
+        }
+
+        // A bell is made at once, where Cmd was clicked, at its level.
+        let at = CGPoint(x: g.x(300), y: g.y(4))
+        click(rig, at, .command)
+        XCTAssertTrue(rig.view.cardVisibleForTesting)
+        XCTAssertTrue(rig.host.commits.isEmpty, "opening the card makes nothing")
+        let bell = try XCTUnwrap(card.shapeButtonForTesting(.bell))
+        XCTAssertTrue(reaches(bell), "the card takes its own clicks")
+        bell.performClick(nil)
+        XCTAssertFalse(rig.view.cardVisibleForTesting)
+        var created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(rig.host.peqSelection.selected, [created.band], "the new band is selected")
+        XCTAssertEqual(rig.view.hudBandForTesting, created.band, "and the card turns into its chip")
+        spin(0.3)
+        XCTAssertTrue(rig.view.hudVisibleForTesting)
+        XCTAssertEqual(created.params.type, .peaking)
+        XCTAssertEqual(Double(created.params.freq), g.freq(at.x), accuracy: 0.5, "at the clicked point")
+        XCTAssertEqual(Double(created.params.gain), 4, accuracy: 0.05)
+
+        // A shelf asks for its slope first, with neither marked.
+        let shelfAt = CGPoint(x: g.x(120), y: g.y(-6))
+        click(rig, shelfAt, .command)
+        let count = rig.host.commits.count
+        try XCTUnwrap(card.shapeButtonForTesting(.lowShelf)).performClick(nil)
+        XCTAssertEqual(rig.host.commits.count, count, "the shape alone makes nothing")
+        let six = try XCTUnwrap(card.slopeChoiceForTesting(1))
+        XCTAssertFalse((six as? PeqHUDButton)?.isOn ?? true, "no slope is preselected")
+        XCTAssertTrue(reaches(six))
+        six.performClick(nil)
+        created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .lowShelf1, "a 6 dB low shelf")
+        XCTAssertEqual(Double(created.params.freq), g.freq(shelfAt.x), accuracy: 0.5)
+        XCTAssertEqual(Double(created.params.gain), -6, accuracy: 0.05)
+        XCTAssertFalse(rig.view.cardVisibleForTesting)
+
+        // A cut at 12 dB.
+        click(rig, CGPoint(x: g.x(8000), y: g.y(0)), .command)
+        try XCTUnwrap(card.shapeButtonForTesting(.highCut)).performClick(nil)
+        try XCTUnwrap(card.slopeChoiceForTesting(2)).performClick(nil)
+        XCTAssertEqual(try XCTUnwrap(rig.host.commits.last?.first).params.type, .lowPass)
+
+        // Every way out cancels without making anything.
+        let before = rig.host.commits.count
+        let away = CGPoint(x: g.x(2000), y: g.y(-20))
+        click(rig, CGPoint(x: g.x(1000), y: g.y(0)), .command)
+        try XCTUnwrap(card.shapeButtonForTesting(.lowCut)).performClick(nil)
+        card.backButtonForTesting.performClick(nil)
+        XCTAssertNil(card.slopeChoiceForTesting(1), "back returns to the shapes")
+        card.backButtonForTesting.performClick(nil)
+        XCTAssertFalse(rig.view.cardVisibleForTesting, "and back again cancels")
+        click(rig, CGPoint(x: g.x(1000), y: g.y(0)), .command)
+        key(rig, code: 53, chars: "\u{1b}")
+        XCTAssertFalse(rig.view.cardVisibleForTesting, "Escape cancels")
+        click(rig, CGPoint(x: g.x(1000), y: g.y(0)), .command)
+        click(rig, away)
+        XCTAssertFalse(rig.view.cardVisibleForTesting, "a click away dismisses it")
+        XCTAssertEqual(rig.host.commits.count, before, "none of these creates a band")
+    }
+
+    /// A band number in the list takes the graph's click modifiers: Cmd
+    /// toggles one band, Shift takes the run of rows from the last click,
+    /// skipping empty rows, and a plain click selects the band alone.
+    func testListNumberClicksSelectLikeDots() {
+        let selection = PeqGraphSelection()
+        let active: (Int) -> Bool = { $0 != 4 }
+        selection.listClick(2, command: false, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [2])
+        selection.listClick(6, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [2, 3, 5, 6], "a run of rows, without the empty one")
+        selection.listClick(0, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [0, 1, 2], "a second Shift-click reshapes the run from the same row")
+        selection.listClick(8, command: true, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [0, 1, 2, 8], "Cmd adds a band")
+        selection.listClick(1, command: true, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [0, 2, 8], "and takes one away")
+        XCTAssertEqual(selection.madeByList, [0, 2, 8], "the list does not scroll to its own clicks")
+
+        // A band selected on the graph is where a Shift-click in the list runs from.
+        selection.selected = [7]
+        selection.listClick(9, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [7, 8, 9])
+        selection.selected = [1, 5]
+        selection.listClick(9, command: false, shift: true, isActive: active)
+        XCTAssertEqual(selection.selected, [9], "with no single band to run from, it selects alone")
+        selection.listClick(3, command: false, shift: false, isActive: active)
+        XCTAssertEqual(selection.selected, [3])
+    }
+
+    /// The Cmd-click card and the chip of the bell it makes sit on the same
+    /// side of the point: away from 0 dB where there is room, else beside it.
+    @MainActor
+    func testCmdClickCardAndNewChipShareASide() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        func side(_ f: NSRect, of p: CGPoint) -> String {
+            if f.maxY <= p.y { return "north" }
+            if f.minY >= p.y { return "south" }
+            return f.minX >= p.x ? "east" : "west"
+        }
+        for (freq, db, expected) in [(100.0, 4.0, "north"), (300.0, 22.0, "east"),
+                                     (1000.0, -3.0, "south"), (3000.0, -22.0, "east")] {
+            let at = CGPoint(x: g.x(freq), y: g.y(db))
+            click(rig, at, .command)
+            let cardSide = side(try XCTUnwrap(rig.view.cardFrameForTesting), of: at)
+            try XCTUnwrap(rig.view.cardForTesting.shapeButtonForTesting(.bell)).performClick(nil)
+            let chipSide = side(try XCTUnwrap(rig.view.hudFrameForTesting), of: at)
+            XCTAssertEqual(cardSide, expected, "the card at \(db) dB")
+            XCTAssertEqual(chipSide, cardSide, "the chip opens where the card was, at \(db) dB")
+        }
+    }
+
+    /// The chip's shape button turns it to a two-step page, the size of its
+    /// values and held still: a shape with one order applies at once; one with
+    /// two asks for the order, and that click applies both.  Either way the
+    /// chip returns to its values, and nothing changes before the last click.
+    @MainActor
+    func testChipShapePagePicksShapeThenSlope() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .lowShelf1, freq: 200, q: 0.707, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        func latest() throws -> FilterParams { try XCTUnwrap(rig.host.commits.last?.first?.params) }
+        func settle(_ type: FilterType) {
+            var b = bands
+            b[0].type = type
+            var c = rig.view.configForTesting
+            c.bands = b
+            rig.view.apply(c)
+        }
+        func reaches(_ button: NSButton) -> Bool {
+            let p = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            return rig.window.contentView?.hitTest(p) === button
+        }
+
+        rig.host.peqSelection.selected = [0]
+        let valuesFrame = try XCTUnwrap(rig.view.hudFrameForTesting)
+        rig.view.toggleShapePageForTesting()
+        XCTAssertTrue(rig.view.shapePageShownForTesting)
+        XCTAssertEqual(rig.view.hudFrameForTesting, valuesFrame, "the page is the size of the values, in their place")
+
+        // A shelf has two orders: step two, with nothing applied yet.
+        let count = rig.host.commits.count
+        let highShelf = try XCTUnwrap(rig.view.shapePageButtonForTesting(.highShelf))
+        XCTAssertTrue(reaches(highShelf), "the page's buttons take their own clicks")
+        highShelf.performClick(nil)
+        XCTAssertEqual(rig.host.commits.count, count, "the shape alone changes nothing")
+        let six = try XCTUnwrap(rig.view.shapePageSlopeForTesting(1), "the shelf asks for its slope")
+        XCTAssertFalse((six as? PeqHUDButton)?.isOn ?? true, "another shape's slope starts unselected")
+        XCTAssertEqual(rig.view.hudFrameForTesting, valuesFrame, "step two holds still")
+
+        // The band's own shape shows its order.
+        rig.view.shapePageBackForTesting.performClick(nil)
+        try XCTUnwrap(rig.view.shapePageButtonForTesting(.lowShelf)).performClick(nil)
+        XCTAssertTrue((rig.view.shapePageSlopeForTesting(1) as? PeqHUDButton)?.isOn == true, "the band's own 6 dB is shown")
+        XCTAssertFalse((rig.view.shapePageSlopeForTesting(2) as? PeqHUDButton)?.isOn ?? true)
+
+        // Back returns to the shapes; the slope then completes the choice.
+        rig.view.shapePageBackForTesting.performClick(nil)
+        XCTAssertNil(rig.view.shapePageSlopeForTesting(1))
+        XCTAssertTrue(rig.view.shapePageShownForTesting)
+        highShelf.performClick(nil)
+        let twelve = try XCTUnwrap(rig.view.shapePageSlopeForTesting(2))
+        XCTAssertTrue(reaches(twelve))
+        twelve.performClick(nil)
+        XCTAssertEqual(try latest().type, .highShelf, "a 12 dB high shelf, in one change")
+        XCTAssertEqual(rig.host.commits.count, count + 1)
+        XCTAssertFalse(rig.view.shapePageShownForTesting, "the chip is back on its values")
+        settle(.highShelf)
+
+        // A bell has one order, so it applies straight away.
+        rig.view.toggleShapePageForTesting()
+        try XCTUnwrap(rig.view.shapePageButtonForTesting(.bell)).performClick(nil)
+        XCTAssertEqual(try latest().type, .peaking)
+        XCTAssertFalse(rig.view.shapePageShownForTesting)
+        settle(.peaking)
+
+        // Escape abandons a choice half made.
+        let before = rig.host.commits.count
+        rig.view.toggleShapePageForTesting()
+        try XCTUnwrap(rig.view.shapePageButtonForTesting(.lowCut)).performClick(nil)
+        XCTAssertNotNil(rig.view.shapePageSlopeForTesting(2))
+        key(rig, code: 53, chars: "\u{1b}")
+        XCTAssertFalse(rig.view.shapePageShownForTesting)
+        XCTAssertEqual(rig.host.commits.count, before, "nothing changed")
+        XCTAssertEqual(rig.host.peqSelection.selected, [0])
+    }
+
+    /// Hovering empty graph reads out the pointer's frequency and level;
+    /// over a band neither shows.
+    @MainActor
+    func testEmptyGraphReadsOutFrequencyAndGain() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+
+        rig.view.hoverForTesting(CGPoint(x: g.x(200), y: g.y(4)))
+        var r = rig.view.axisReadoutsForTesting
+        XCTAssertNotNil(r.freq)
+        XCTAssertEqual(r.gain, "+4.00 dB")
+
+        rig.view.hoverForTesting(CGPoint(x: 2, y: g.y(-3)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNotNil(r.freq)
+        XCTAssertEqual(r.gain, "-3.00 dB", "the level shows at the edges too")
+
+        rig.view.hoverForTesting(CGPoint(x: g.x(1000), y: g.y(6)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNil(r.freq, "over a band neither readout shows")
+        XCTAssertNil(r.gain)
+
+        // Each readout can be switched off from Graph Setup.
+        var config = rig.view.configForTesting
+        config.showFrequencyReadout = false
+        rig.view.apply(config)
+        rig.view.hoverForTesting(CGPoint(x: g.x(200), y: g.y(4)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNil(r.freq, "the frequency readout is off")
+        XCTAssertEqual(r.gain, "+4.00 dB", "the gain readout is independent of it")
+        config.showFrequencyReadout = true
+        config.showLevelReadout = false
+        rig.view.apply(config)
+        rig.view.hoverForTesting(CGPoint(x: g.x(300), y: g.y(4)))
+        r = rig.view.axisReadoutsForTesting
+        XCTAssertNotNil(r.freq)
+        XCTAssertNil(r.gain, "the gain readout is off")
+    }
+
+    /// A band that takes the chip while it is still fading out must bring it
+    /// back: the chip is only marked hidden once the fade ends, so it used to
+    /// stay unhidden at zero alpha and never appear again on dot hover.
+    @MainActor
+    func testChipReappearsWhenTakenMidFade() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot0 = CGPoint(x: g.x(1000), y: g.y(6))
+        let dot1 = CGPoint(x: g.x(4000), y: g.y(6))
+        let empty = CGPoint(x: g.x(200), y: g.y(-15))
+
+        rig.view.hoverForTesting(dot0)
+        spin(0.3)
+        XCTAssertTrue(rig.view.hudVisibleForTesting)
+
+        // Leave the dot: the hide fires after 0.35 s and fades for 0.15 s.
+        // Land inside that fade, then hover the other band's dot.
+        rig.view.hoverForTesting(empty)
+        spin(0.42)
+        rig.view.hoverForTesting(dot1)
+        spin(0.4)
+        XCTAssertEqual(rig.view.hudBandForTesting, 1)
+        XCTAssertTrue(rig.view.hudVisibleForTesting, "the chip fades back in, not stuck at zero alpha")
+
+        // The same holds when the wheel over a band takes the chip mid-fade.
+        rig.view.hoverForTesting(empty)
+        spin(0.42)
+        XCTAssertTrue(rig.view.handleWheel(at: dot0, delta: 10, modifiers: [], begins: true))
+        spin(0.4)
+        XCTAssertEqual(rig.view.hudBandForTesting, 0)
+        XCTAssertTrue(rig.view.hudVisibleForTesting, "wheeling a band shows its chip")
+    }
+
+    /// The list scrolls to a band only once the pointer rests on it, and not
+    /// while a band is being wheeled.
+    @MainActor
+    func testRestingOnABandRevealsItsRow() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 2, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 4000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot0 = CGPoint(x: g.x(1000), y: g.y(6))
+        let dot1 = CGPoint(x: g.x(4000), y: g.y(6))
+        var revealed: [Int] = []
+        let watch = rig.host.peqSelection.revealRow.sink { revealed.append($0) }
+        defer { watch.cancel() }
+
+        // Passing over band 0 on the way to band 1 reveals only band 1.
+        rig.view.hoverForTesting(dot0)
+        spin(0.1)
+        rig.view.hoverForTesting(dot1)
+        XCTAssertEqual(revealed, [], "nothing before the pointer rests")
+        spin(0.4)
+        XCTAssertEqual(revealed, [1])
+
+        // Wheeling band 1 then drifting onto band 0 waits for the wheel to stop.
+        XCTAssertTrue(rig.view.handleWheel(at: dot1, delta: -10, modifiers: .command, begins: true))
+        rig.view.hoverForTesting(dot0)
+        spin(0.35)
+        XCTAssertEqual(revealed, [1], "the list holds still while a band is wheeled")
+        spin(0.6)
+        XCTAssertEqual(revealed, [1, 0], "and follows once the wheel stops")
+    }
+
+    /// Option held on a dot: a drag locks to one axis, a click bypasses.
+    @MainActor
+    func testOptionDragLocksToOneAxis() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 3)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(3))
+        // Mostly sideways, a little down: the lock takes frequency only.
+        drag(rig, from: dot, to: CGPoint(x: dot.x + 60, y: dot.y + 12), .option)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertGreaterThan(p.freq, 1100)
+        XCTAssertEqual(p.gain, 3, "the vertical part of the drag was locked out")
+        XCTAssertTrue(rig.host.bypasses.isEmpty, "a drag is not a bypass click")
+    }
+
+    /// Option pressed part-way through a drag locks to the axis moved along
+    /// so far, freezing the other where it is (no jump); releasing it frees
+    /// the drag again from there, also without a jump.
+    @MainActor
+    func testOptionMidDragLocksWithoutAJump() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(0))
+        func move(_ p: CGPoint, _ mods: NSEvent.ModifierFlags = []) {
+            rig.view.mouseDragged(with: mouse(.leftMouseDragged, rig, p, mods))
+        }
+        rig.view.mouseDown(with: mouse(.leftMouseDown, rig, dot))
+        // Free drag, mostly sideways, drifting up to +2 dB.
+        let a = CGPoint(x: dot.x + 60, y: g.y(2))
+        move(CGPoint(x: dot.x + 30, y: g.y(1)))
+        move(a)
+        // Option now: locked to frequency; gain holds at +2 dB.
+        move(CGPoint(x: a.x + 20, y: g.y(8)), .option)
+        let b = CGPoint(x: a.x + 40, y: g.y(-5))
+        move(b, .option)
+        // Release Option: vertical movement counts again, from +2 dB.
+        move(CGPoint(x: b.x, y: b.y - (g.y(0) - g.y(3))))
+        rig.view.mouseUp(with: mouse(.leftMouseUp, rig, CGPoint(x: b.x, y: b.y)))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(Double(p.freq), g.freq(dot.x + 100), accuracy: 2, "frequency followed all the sideways movement")
+        XCTAssertEqual(Double(p.gain), 5, accuracy: 0.05, "held at +2 dB while locked, then +3 dB more once free")
+    }
+
+    /// Shift held on a dot: a drag is fine adjustment, not a range select.
+    @MainActor
+    func testShiftDragIsFine() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(1000), y: g.y(0))
+        drag(rig, from: dot, to: CGPoint(x: dot.x, y: g.y(10)), .shift)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(Double(p.gain), 10 * 0.12, accuracy: 0.15, "fine drag moves about an eighth as far")
+    }
+
+    /// Dragging one of several selected bands moves every gain by the same
+    /// number of dB; Control scales them in proportion instead, FabFilter's
+    /// way, so a cut deepens as a boost grows.
+    @MainActor
+    func testSelectionGainsOffsetAndControlScales() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 200, q: 1, gain: -4)
+        let g = PeqGraphGeometry(size: CGSize(width: 800, height: 300), minFreq: 20, maxFreq: 20000, dbTop: 25, dbBottom: -25)
+        let dot = CGPoint(x: g.x(1000), y: g.y(6))
+        let up = CGPoint(x: dot.x, y: g.y(9))
+        func gains(_ mods: NSEvent.ModifierFlags) throws -> (Double, Double) {
+            let rig = try makeRig(bands: bands)
+            defer { rig.window.orderOut(nil) }
+            rig.host.peqSelection.selected = [0, 1]
+            drag(rig, from: dot, to: up, mods)
+            let last = try XCTUnwrap(rig.host.commits.last)
+            let a = try XCTUnwrap(last.first { $0.band == 0 }).params.gain
+            let b = try XCTUnwrap(last.first { $0.band == 1 }).params.gain
+            return (Double(a), Double(b))
+        }
+        let offset = try gains([])
+        XCTAssertEqual(offset.0, 9, accuracy: 0.1)
+        XCTAssertEqual(offset.1, -1, accuracy: 0.1, "the cut moves up by the same 3 dB")
+        let scaled = try gains(.control)
+        XCTAssertEqual(scaled.0, 9, accuracy: 0.1)
+        XCTAssertEqual(scaled.1, -6, accuracy: 0.1, "the cut deepens by the boost's 1.5 times")
+    }
+
+    @MainActor
+    func testNotchDragMovesFrequencyOnly() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .notch, freq: 1000, q: 3, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(0))
+        drag(rig, from: dot, to: CGPoint(x: dot.x + 40, y: dot.y - 50))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertGreaterThan(p.freq, 1050)
+        XCTAssertEqual(p.q, 3, "vertical movement does not touch a notch's Q")
+    }
+
+    @MainActor
+    func testWheelOnACutChangesQNotSlope() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .highPass, freq: 100, q: 0.707, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(100), y: rig.geometry.y(20 * log10(0.707)))
+        for _ in 0..<5 { XCTAssertTrue(rig.view.handleWheel(at: dot, delta: 20, modifiers: [])) }
+        spin(0.7)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.type, .highPass, "still second order")
+        XCTAssertGreaterThan(p.q, 0.9, "the wheel raised Q")
+    }
+
+    @MainActor
+    func testCommandDragChangesOnlyQ() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 500, q: 1, gain: 4)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(500), y: rig.geometry.y(4))
+        drag(rig, from: dot, to: CGPoint(x: dot.x + 40, y: dot.y - 60), .command)
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(p.freq, 500)
+        XCTAssertEqual(p.gain, 4)
+        XCTAssertEqual(Double(p.q), 2, accuracy: 0.01, "60 points up doubles Q")
+    }
+
+    @MainActor
+    func testDraggingASecondOrderCutSetsQFromItsHeight() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .highPass, freq: 100, q: 0.707, gain: 0)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let dot = CGPoint(x: g.x(100), y: g.y(20 * log10(0.707)))
+        drag(rig, from: dot, to: CGPoint(x: dot.x, y: g.y(6)))
+        let p = try XCTUnwrap(rig.host.commits.last?.first?.params)
+        XCTAssertEqual(Double(p.q), pow(10, 6.0 / 20), accuracy: 0.02, "the dot follows the pointer to +6 dB")
+    }
+
+    @MainActor
+    func testMultiSelectionMovesTogether() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 200, q: 1, gain: 4)
+        bands[1] = FilterParams(type: .peaking, freq: 2000, q: 1, gain: -2)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        rig.host.peqSelection.selected = [0, 1]
+        let dot = CGPoint(x: g.x(200), y: g.y(4))
+        drag(rig, from: dot, to: CGPoint(x: g.x(400), y: g.y(8)))
+        let changes = try XCTUnwrap(rig.host.commits.last)
+        let byBand = Dictionary(uniqueKeysWithValues: changes.map { ($0.band, $0.params) })
+        XCTAssertEqual(Double(byBand[0]!.freq), 400, accuracy: 1)
+        XCTAssertEqual(Double(byBand[1]!.freq), 4000, accuracy: 4, "same frequency ratio")
+        XCTAssertEqual(Double(byBand[1]!.gain), 2, accuracy: 0.05, "gains move by the same 4 dB")
+    }
+
+    @MainActor
+    func testOptionClickBypassesAndDeleteKeyRemoves() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[5] = FilterParams(type: .peaking, freq: 3000, q: 2, gain: -6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let dot = CGPoint(x: rig.geometry.x(3000), y: rig.geometry.y(-6))
+        click(rig, dot, .option)
+        XCTAssertEqual(rig.host.bypasses.last?.band, 5)
+        XCTAssertEqual(rig.host.bypasses.last?.bypass, true)
+        click(rig, dot)
+        key(rig, code: 51, chars: "\u{7f}")
+        let removed = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(removed.band, 5)
+        XCTAssertEqual(removed.params.type, .flat)
+        XCTAssertEqual(rig.host.peqSelection.selected, [])
+    }
+
+    @MainActor
+    func testPullingTheCurveCreatesABandFromFlat() throws {
+        let rig = try makeRig()
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        let onCurve = CGPoint(x: g.x(800), y: g.y(0))
+        drag(rig, from: onCurve, to: CGPoint(x: onCurve.x, y: g.y(-7)))
+        let created = try XCTUnwrap(rig.host.commits.last?.first)
+        XCTAssertEqual(created.params.type, .peaking)
+        XCTAssertEqual(Double(created.params.gain), -7, accuracy: 0.05)
+        XCTAssertEqual(Double(created.params.freq), 800, accuracy: 1)
+    }
+
+    @MainActor
+    func testMarqueeSelectsTheDotsInside() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 100, q: 1, gain: 6)
+        bands[1] = FilterParams(type: .peaking, freq: 300, q: 1, gain: 6)
+        bands[2] = FilterParams(type: .peaking, freq: 5000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let g = rig.geometry
+        drag(rig, from: CGPoint(x: g.x(70), y: g.y(12)), to: CGPoint(x: g.x(500), y: g.y(2)))
+        XCTAssertEqual(rig.host.peqSelection.selected, [0, 1])
+        XCTAssertTrue(rig.host.commits.isEmpty)
+    }
+
+    /// Idle means idle: once hover animations settle the draw loop stops, and
+    /// hovering a dot redraws without recomputing any curve.
+    @MainActor
+    func testRendersOnDemandOnly() throws {
+        var bands = Array(repeating: FilterParams(), count: 10)
+        bands[0] = FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6)
+        let rig = try makeRig(bands: bands)
+        defer { rig.window.orderOut(nil) }
+        let renderer = try XCTUnwrap(rig.view.rendererForTesting)
+        // A window-visibility change (another test's window closing) draws
+        // one fresh frame by design, so let those land first.
+        spin(1.0)
+        // An occluded window draws nothing at all, by design; that says
+        // nothing about on-demand drawing.
+        guard rig.window.occlusionState.contains(.visible), renderer.frames > 0 else {
+            throw XCTSkip("Test window is not visible on screen")
+        }
+        let passes = renderer.responsePasses
+        let frames = renderer.frames
+        spin(0.4)
+        // A running loop would draw ~50 frames here; a window-visibility
+        // change may legitimately draw one.
+        XCTAssertTrue(rig.view.drawLoopPausedForTesting, "no draw loop while nothing changes")
+        XCTAssertLessThanOrEqual(renderer.frames - frames, 1, "no frames while nothing changes")
+        let dot = CGPoint(x: rig.geometry.x(1000), y: rig.geometry.y(6))
+        rig.view.mouseMoved(with: mouse(.mouseMoved, rig, dot))
+        spin(0.5)
+        XCTAssertGreaterThan(renderer.frames, frames, "the hover animates")
+        XCTAssertEqual(renderer.responsePasses, passes, "hovering a dot recomputes nothing")
+        let settled = renderer.frames
+        spin(0.4)
+        XCTAssertTrue(rig.view.drawLoopPausedForTesting, "and the loop stops once it settles")
+        XCTAssertLessThanOrEqual(renderer.frames - settled, 1)
+    }
+}

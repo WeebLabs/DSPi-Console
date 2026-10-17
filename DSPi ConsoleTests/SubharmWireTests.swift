@@ -78,14 +78,14 @@ final class SubharmWireTests: XCTestCase {
     /// 5944; V30 grew it to 36 by tail-appending, taking the flat layout from
     /// 5960 to 5980 bytes (spec §4).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 30)
-        XCTAssertEqual(BULK_PARAMS_SIZE, 5980)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_SUBHARM_OFFSET, 5944)
         XCTAssertEqual(WIRE_SUBHARM_PARAMS_SIZE, 36)
         // It sits immediately after the 44-byte upmixer section (V25).
         XCTAssertEqual(BULK_UPMIX_OFFSET + 44, BULK_SUBHARM_OFFSET)
-        // And it is still the last section: 36 bytes take the image to full size.
-        XCTAssertEqual(BULK_SUBHARM_OFFSET + WIRE_SUBHARM_PARAMS_SIZE, Int(BULK_PARAMS_SIZE))
+        // V31 appended the tube section after it, so subharm is no longer last.
+        XCTAssertEqual(BULK_SUBHARM_OFFSET + WIRE_SUBHARM_PARAMS_SIZE, BULK_TUBE_OFFSET)
     }
 
     // MARK: - WireSubharmParams field decode (spec §4 table)
@@ -154,11 +154,11 @@ final class SubharmWireTests: XCTestCase {
     func testSelectModeClamps() {
         let vm = DSPViewModel()
         vm.setSubharmSelectMode(7)
-        XCTAssertEqual(vm.subharmSelectMode, SUBHARM_SELECT_SUSTAINED)
+        XCTAssertEqual(vm.subharm.selectMode, SUBHARM_SELECT_SUSTAINED)
         vm.setSubharmSelectMode(-3)
-        XCTAssertEqual(vm.subharmSelectMode, SUBHARM_SELECT_ALL)
+        XCTAssertEqual(vm.subharm.selectMode, SUBHARM_SELECT_ALL)
         vm.setSubharmSelectMode(SUBHARM_SELECT_PERCUSSIVE)
-        XCTAssertEqual(vm.subharmSelectMode, SUBHARM_SELECT_PERCUSSIVE)
+        XCTAssertEqual(vm.subharm.selectMode, SUBHARM_SELECT_PERCUSSIVE)
     }
 
     /// Factory defaults the app starts from, so a fresh device and an
@@ -166,16 +166,16 @@ final class SubharmWireTests: XCTestCase {
     func testDefaultsMatchTheFirmware() {
         let vm = DSPViewModel()
         XCTAssertFalse(vm.subharmEnabled)
-        XCTAssertEqual(vm.subharmLowDB, 0.0)
-        XCTAssertEqual(vm.subharmHighDB, 0.0)
-        XCTAssertEqual(vm.subharmTopDB, SUBHARM_LEVEL_MIN)   // third band ships off
-        XCTAssertEqual(vm.subharmBoostDB, 0.0)
-        XCTAssertEqual(vm.subharmSelectMode, SUBHARM_SELECT_ALL)
-        XCTAssertEqual(vm.subharmSelectDepthPct, 100.0)
-        XCTAssertEqual(vm.subharmSelectHoldMs, 150.0)
-        XCTAssertEqual(vm.subharmCeilingDB, 0.0)             // 0 dBFS = ceiling off
-        XCTAssertTrue(vm.subharmLinkPairs)
-        XCTAssertFalse(vm.subharmSolo)
+        XCTAssertEqual(vm.subharm.lowDB, 0.0)
+        XCTAssertEqual(vm.subharm.highDB, 0.0)
+        XCTAssertEqual(vm.subharm.topDB, SUBHARM_LEVEL_MIN)   // third band ships off
+        XCTAssertEqual(vm.subharm.boostDB, 0.0)
+        XCTAssertEqual(vm.subharm.selectMode, SUBHARM_SELECT_ALL)
+        XCTAssertEqual(vm.subharm.selectDepthPct, 100.0)
+        XCTAssertEqual(vm.subharm.selectHoldMs, 150.0)
+        XCTAssertEqual(vm.subharm.ceilingDB, 0.0)             // 0 dBFS = ceiling off
+        XCTAssertTrue(vm.subharm.linkPairs)
+        XCTAssertFalse(vm.subharm.solo)
     }
 
     /// Both platforms run subharm, unlike the upmixer: the gate must not depend
@@ -193,17 +193,17 @@ final class SubharmWireTests: XCTestCase {
 
     func testOutputChannelMaskToggle() {
         let vm = DSPViewModel()
-        vm.subharmOutputMask = 0x0000
+        vm.subharm.outputMask = 0x0000
         vm.setSubharmOutputChannel(0, enabled: true)
-        XCTAssertEqual(vm.subharmOutputMask & 0x0001, 0x0001)
+        XCTAssertEqual(vm.subharm.outputMask & 0x0001, 0x0001)
         vm.setSubharmOutputChannel(8, enabled: true)   // PDM sub bit on RP2350
-        XCTAssertEqual(vm.subharmOutputMask & 0x0100, 0x0100)
+        XCTAssertEqual(vm.subharm.outputMask & 0x0100, 0x0100)
         vm.setSubharmOutputChannel(0, enabled: false)
-        XCTAssertEqual(vm.subharmOutputMask & 0x0001, 0x0000)
+        XCTAssertEqual(vm.subharm.outputMask & 0x0001, 0x0000)
         // Bits outside the 16-bit mask are rejected rather than wrapping.
-        let before = vm.subharmOutputMask
+        let before = vm.subharm.outputMask
         vm.setSubharmOutputChannel(16, enabled: true)
-        XCTAssertEqual(vm.subharmOutputMask, before)
+        XCTAssertEqual(vm.subharm.outputMask, before)
     }
 
     // MARK: - Preset document round-trip

@@ -1133,6 +1133,13 @@ private struct GraphSetupPage: View {
             GraphOptionsToggleRow(title: "Frequency Labels", isOn: $settings.showFrequencyLabels)
             GraphOptionsToggleRow(title: "dB Grid", isOn: $settings.showDBGrid)
             GraphOptionsToggleRow(title: "dB Labels", isOn: $settings.showDBLabels)
+            GraphOptionsToggleRow(title: "Frequency Readout", isOn: $settings.showFrequencyReadout)
+            GraphOptionsToggleRow(title: "Gain Readout", isOn: $settings.showLevelReadout)
+            sliderRow("Grid Opacity", value: "\(Int((settings.graphGridOpacity * 100).rounded()))%",
+                      binding: $settings.graphGridOpacity, in: 0...2)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 2)
+                .disabled(!settings.showFrequencyGrid && !settings.showDBGrid)
 
             sectionHeader("CURVES")
             sliderRow("Line Width", value: String(format: "%.1f pt", settings.graphLineWidth),
@@ -1494,7 +1501,13 @@ class SpectrumAnalyserWindowController: NSObject, ObservableObject {
                 defer: false
             )
             window?.title = "Spectrum Analyser"
-            window?.contentView = NSHostingView(rootView: view)
+            let hosting = NSHostingView(rootView: view)
+            // The window's size limits are set here, not derived from the
+            // tree: left at its defaults the hosting view re-measures the
+            // whole tree for them on every display cycle, which is most of
+            // what a meter reading or a drag used to cost in this window.
+            hosting.sizingOptions = []
+            window?.contentView = hosting
             window?.isReleasedWhenClosed = false
             window?.delegate = self
             window?.contentMinSize = NSSize(width: 620, height: 420)
