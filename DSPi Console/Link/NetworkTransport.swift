@@ -37,8 +37,10 @@ final class NetworkTransport: DeviceTransport {
     private var generationValue: UInt64 = 0
     private let generationLock = NSLock()
 
+    /// Reconnect state is touched on the main thread only; callers on GCD
+    /// queues (the bulk-read failure paths) hop there first.
     private var reconnectAttempt = 0
-    private var reconnectTimer: Timer?
+    private var reconnectWork: DispatchWorkItem?
     private var wantConnection = false
 
     /// Called on the main thread when the hub needs a PIN.  Returns the PIN
@@ -77,10 +79,20 @@ final class NetworkTransport: DeviceTransport {
 
     /// Open (or re-open) the connection to the hub.
     func connect(to url: URL) {
-        self.url = url
-        wantConnection = true
-        reconnectAttempt = 0
-        client.connect(to: url, clientName: clientName, token: tokens.token(forHub: hubID))
+        onMain {
+            self.url = url
+            self.wantConnection = true
+            self.reconnectAttempt = 0
+            self.reconnectWork?.cancel()
+            self.reconnectWork = nil
+            self.client.connect(to: url, clientName: self.clientName, token: self.tokens.token(forHub: self.hubID))
+        }
+    }
+
+    /// Run now when already on the main thread (so tests and view actions see
+    /// the effect synchronously), otherwise hop there.
+    private func onMain(_ body: @escaping () -> Void) {
+        if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
     }
 
     /// Bind to one of the hub's devices.  The device list may not have
@@ -145,17 +157,22 @@ final class NetworkTransport: DeviceTransport {
         }
     }
 
-    /// 1 s, 2 s, 4 s ... capped at 30 s (spec 5).
+    /// 1 s, 2 s, 4 s ... capped at 30 s (spec 5).  Main thread only: the
+    /// delayed work is queued on the main queue, which every caller has a
+    /// run loop for, unlike a Timer created on a GCD worker.
     private func scheduleReconnect() {
         guard wantConnection, let url = url else { return }
         let delay = min(30.0, pow(2.0, Double(reconnectAttempt)))
         reconnectAttempt += 1
-        reconnectTimer?.invalidate()
-        reconnectTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        reconnectWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.wantConnection else { return }
+            self.reconnectWork = nil
             self.client.connect(to: url, clientName: self.clientName,
                                 token: self.tokens.token(forHub: self.hubID))
         }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func remoteDevicesChanged(_ infos: [LinkDeviceInfo]) {
@@ -193,8 +210,27 @@ final class NetworkTransport: DeviceTransport {
 
     func selectDevice(_ device: DSPiDevice) { bind(serial: device.serial) }
     func reconnect() { if let url = url { connect(to: url) } }
-    func disconnect() { wantConnection = false; reconnectTimer?.invalidate(); client.disconnect() }
-    func markDisconnected() { scheduleReconnect() }
+    func disconnect() {
+        onMain {
+            self.wantConnection = false
+            self.reconnectWork?.cancel()
+            self.reconnectWork = nil
+            self.client.disconnect()
+        }
+    }
+
+    /// The command layer gave up on the link (a bulk read that never
+    /// answered).  Drop the socket so the view model sees connected=false and
+    /// re-runs its connect sequence on the next ready, then come back with
+    /// backoff.  Called from GCD queues, so everything happens on main.
+    func markDisconnected() {
+        onMain {
+            guard self.wantConnection else { return }
+            self.client.disconnect()
+            if self.connectedSubject.value { self.connectedSubject.send(false) }
+            self.scheduleReconnect()
+        }
+    }
 
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
         guard let handle = boundHandle else { return }

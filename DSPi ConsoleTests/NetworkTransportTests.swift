@@ -123,4 +123,38 @@ final class NetworkTransportTests: XCTestCase {
         client.setState(.failed("x")); client.setState(.ready)
         XCTAssertEqual(t.generation, g0 + 2)
     }
+    func testMarkDisconnectedFromAWorkerPublishesOfflineAndReconnects() {
+        let (t, client, _) = make()
+        t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
+        t.bind(serial: "AAAA")
+        client.setDevices([info("AAAA", handle: 0)])
+        client.setState(.ready)
+        XCTAssertTrue(t.isConnected)
+
+        var seen: [Bool] = []
+        let sub = t.isConnectedPublisher.dropFirst().sink { seen.append($0) }
+        defer { sub.cancel() }
+
+        // The command layer declares the link dead from its poll queue, where
+        // a Timer would never fire.
+        let offline = expectation(description: "offline")
+        DispatchQueue.global().async {
+            t.markDisconnected()
+            DispatchQueue.main.async { offline.fulfill() }
+        }
+        wait(for: [offline], timeout: 3)
+        XCTAssertEqual(seen.first, false, "the view model needs a false before the next true")
+        XCTAssertFalse(t.isConnected)
+        XCTAssertEqual(client.disconnectCalls, 1)
+
+        // First backoff step is 1 s; the reconnect must land on this run loop.
+        let reconnected = expectation(description: "reconnect")
+        reconnected.assertForOverFulfill = false
+        let probe = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            if client.connectCalls.count >= 2 { reconnected.fulfill() }
+        }
+        wait(for: [reconnected], timeout: 3)
+        probe.invalidate()
+        XCTAssertEqual(client.connectCalls.count, 2)
+    }
 }
