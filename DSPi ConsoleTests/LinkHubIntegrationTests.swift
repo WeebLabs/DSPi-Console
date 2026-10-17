@@ -347,6 +347,66 @@ final class LinkHubIntegrationTests: XCTestCase {
         XCTAssertEqual(origin, nine.id, "the failed write left nothing in the queue")
     }
 
+    // MARK: Local USB path audit (2026-10-17)
+
+    /// Unplugging with reads queued: every blocked local GET returns (NO_DEVICE
+    /// for the ones the device never saw), so the view model's poll queue is
+    /// free to run the next connect.
+    func testUnplugWithQueuedGetsDoesNotWedgeTheTransport() {
+        let (hub, usb) = makeHub()
+        let device = LinkFakeDevice()
+        let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
+        device.responder = { req in
+            // The hub's own snapshot warm-up read goes straight through.
+            guard req.bRequest != REQ_GET_ALL_PARAMS else { return LinkCmdResponse(tag: req.tag, status: .ok) }
+            entered.signal(); gate.wait()
+            return LinkCmdResponse(tag: req.tag, status: .ok, payload: Data([1, 2, 3, 4]))
+        }
+        hub.attachDevice(device)
+        let transport = HubTransport(hub: hub, usb: usb)
+
+        let first = expectation(description: "first returns"), second = expectation(description: "second returns")
+        var secondResult: Result<Data, LinkStatus>?
+        DispatchQueue.global().async {
+            _ = transport.getControlResult(request: 0x50, value: 9, index: 2, length: 4)
+            first.fulfill()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        DispatchQueue.global().async {
+            secondResult = transport.getControlResult(request: 0x50, value: 9, index: 2, length: 4)
+            second.fulfill()
+        }
+        Thread.sleep(forTimeInterval: 0.1)   // let the second read queue behind the first
+
+        hub.detachDevice()
+        gate.signal()
+        wait(for: [first, second], timeout: 3)
+        XCTAssertEqual(secondResult, .failure(.noDevice))
+        XCTAssertEqual(device.executedCodes.filter { $0 == 0x50 }.count, 1,
+                       "the queued read never reached the device")
+    }
+
+    /// The synchronous wait is bounded even if the router never answers.
+    func testSynchronousGetWaitIsBounded() {
+        let (hub, usb) = makeHub()
+        let device = LinkFakeDevice()
+        let gate = DispatchSemaphore(value: 0)
+        device.responder = { req in
+            if req.bRequest != REQ_GET_ALL_PARAMS { gate.wait() }
+            return LinkCmdResponse(tag: req.tag, status: .ok)
+        }
+        hub.attachDevice(device)
+        let transport = HubTransport(hub: hub, usb: usb)
+        transport.syncWaitTimeout = 0.2
+
+        let started = Date()
+        let result = transport.getControlResult(request: 0x50, value: 9, index: 2, length: 4)
+        XCTAssertEqual(result, .failure(.timeout))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
+                          "the transport gave up on its own bound, not the router's 2 s")
+        gate.signal()
+    }
+
     /// Closing a session clears the callbacks it owns, so a callback that
     /// captured the session cannot keep it alive.
     func testClosedSessionDeallocates() {

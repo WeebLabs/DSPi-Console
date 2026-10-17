@@ -222,6 +222,9 @@ final class LinkHub {
         let handle = attachedHandle
         scheduler?.stop()
         scheduler = nil
+        // Queued commands answer NO_DEVICE; a local GET blocked on one of them
+        // returns instead of waiting on a router nobody will run.
+        router?.shutdown()
         router = nil
         device = nil
         attachedHandle = 0

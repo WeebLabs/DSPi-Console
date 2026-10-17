@@ -71,6 +71,9 @@ final class CommandRouter {
     }
     private var recentWriters: [WriterEntry] = []
     private var nextWriterToken: UInt64 = 0
+    /// Set by `shutdown()`: every command still queued, and any submitted
+    /// later, answers NO_DEVICE without touching the device.
+    private var isShutDown = false
     private let stateLock = NSLock()
 
     /// How long to wait for the device before giving up.  Bulk gets longer.
@@ -112,6 +115,10 @@ final class CommandRouter {
         // 2. Lock: while another session holds the device, only that session's
         // commands run.  An expired lock is treated as released.
         stateLock.lock()
+        if isShutDown {
+            stateLock.unlock()
+            return completion(reject(request, .noDevice))
+        }
         if let holder = lockHolder, holder != session.id {
             if let dl = lockDeadline, dl < Date() {
                 lockHolder = nil; lockDeadline = nil
@@ -138,8 +145,11 @@ final class CommandRouter {
         // board that replaced the one it was issued for.
         let gen = device?.generation
 
-        queue.async { [weak self] in
-            guard let self = self else { return }
+        // The block holds the router: a caller blocked on `completion` (the
+        // local transport's synchronous GET) must hear back even if the hub has
+        // already dropped the router, so a queued command can never be
+        // discarded unanswered.
+        queue.async {
             defer {
                 self.stateLock.lock()
                 self.inflight[session.id, default: 1] -= 1
@@ -147,7 +157,8 @@ final class CommandRouter {
                 self.stateLock.unlock()
             }
 
-            guard let device = self.device, device.isConnected, device.generation == gen else {
+            self.stateLock.lock(); let shutDown = self.isShutDown; self.stateLock.unlock()
+            guard !shutDown, let device = self.device, device.isConnected, device.generation == gen else {
                 return completion(self.reject(request, .noDevice))
             }
 
@@ -231,6 +242,14 @@ final class CommandRouter {
 
     private func reject(_ request: LinkCmdRequest, _ status: LinkStatus) -> RoutedResult {
         RoutedResult(response: LinkCmdResponse(tag: request.tag, status: status), attributedTo: 0)
+    }
+
+    /// Tear the router down: commands still queued complete with NO_DEVICE
+    /// instead of running against a device that is gone (or replaced), and so
+    /// does anything submitted afterwards.  A command already inside the
+    /// device finishes on its own; its result is reported as usual.
+    func shutdown() {
+        stateLock.lock(); isShutDown = true; stateLock.unlock()
     }
 
     // MARK: - Locks

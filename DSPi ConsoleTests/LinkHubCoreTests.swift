@@ -286,6 +286,58 @@ final class LinkHubCoreTests: XCTestCase {
         XCTAssertEqual(dev.executedOrder.count, 1, "the queued write never reached the new board")
     }
 
+    // MARK: Teardown
+
+    /// Shutting the router down answers everything still queued with NO_DEVICE
+    /// and keeps it off the device; a command already inside the device
+    /// finishes on its own.
+    func testShutdownFailsQueuedCommandsWithoutTouchingTheDevice() {
+        let dev = FakeDevice()
+        let gate = DispatchSemaphore(value: 0); dev.gate = gate
+        let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
+                               wValue: 9, wIndex: 2, wLength: 4)
+
+        let first = expectation(description: "first"), second = expectation(description: "second")
+        router.submit(r, session: control(1)) { result in
+            XCTAssertEqual(result.response.status, .ok); first.fulfill()
+        }
+        XCTAssertEqual(dev.entered.wait(timeout: .now() + 2), .success)
+        router.submit(r, session: control(1)) { result in
+            XCTAssertEqual(result.response.status, .noDevice); second.fulfill()
+        }
+
+        router.shutdown()
+        gate.signal(); gate.signal()
+        wait(for: [first, second], timeout: 3)
+        XCTAssertEqual(dev.executedOrder.count, 1, "the queued read never ran")
+
+        let late = expectation(description: "late")
+        router.submit(r, session: control(1)) { result in
+            XCTAssertEqual(result.response.status, .noDevice); late.fulfill()
+        }
+        wait(for: [late], timeout: 2)
+    }
+
+    /// A router its owner has dropped still answers what it was handed: a
+    /// caller blocked on the completion must hear back.
+    func testQueuedCommandsCompleteWhenTheRouterIsDropped() {
+        let dev = FakeDevice()
+        let gate = DispatchSemaphore(value: 0); dev.gate = gate
+        var router: CommandRouter? = CommandRouter(handle: 0, device: dev, policy: makePolicy())
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
+                               wValue: 9, wIndex: 2, wLength: 4)
+
+        let done = expectation(description: "both answered"); done.expectedFulfillmentCount = 2
+        router!.submit(r, session: control(1)) { _ in done.fulfill() }
+        XCTAssertEqual(dev.entered.wait(timeout: .now() + 2), .success)
+        router!.submit(r, session: control(1)) { _ in done.fulfill() }
+
+        router = nil
+        gate.signal(); gate.signal()
+        wait(for: [done], timeout: 3)
+    }
+
     // MARK: Registry
 
     func testRegistryAssignsHandleAndEmitsAdded() {

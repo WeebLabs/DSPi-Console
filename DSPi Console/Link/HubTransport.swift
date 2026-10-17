@@ -23,6 +23,12 @@ final class HubTransport: DeviceTransport {
     var session: LinkSessionID { localSession.id }
     var generation: UInt64 { usb.generation }
 
+    /// Longest a synchronous GET waits for the router.  The router bounds each
+    /// command itself (2 s, bulk 5 s) and answers every one it is handed, so
+    /// this is only a last line of defence against a wedged poll queue; it is
+    /// well past any legitimate queue depth.
+    var syncWaitTimeout: TimeInterval = 10
+
     init(hub: LinkHub, usb: USBDevice) {
         self.hub = hub
         self.usb = usb
@@ -81,15 +87,26 @@ final class HubTransport: DeviceTransport {
         // The command layer calls this synchronously off the main thread and
         // expects the bytes back, so block on the hub's completion.  The router
         // always completes exactly once, and runs the device call on its own
-        // queues, so this cannot deadlock against itself.
+        // queues, so this cannot deadlock against itself.  The wait is bounded
+        // all the same: a completion that never came would otherwise freeze
+        // the caller's thread for good.
         let sem = DispatchSemaphore(value: 0)
-        var out: Result<Data, LinkStatus> = .failure(.timeout)
+        let box = ResultBox()
         hub.submit(req, from: localSession.id) { response in
-            out = response.status == .ok ? .success(response.payload) : .failure(response.status)
+            box.set(response.status == .ok ? .success(response.payload) : .failure(response.status))
             sem.signal()
         }
-        sem.wait()
-        return out
+        guard sem.wait(timeout: .now() + syncWaitTimeout) == .success else { return .failure(.timeout) }
+        return box.get() ?? .failure(.timeout)
+    }
+
+    /// The completion may land after a timed-out wait has returned; the box
+    /// keeps that late write off the caller's stack.
+    private final class ResultBox {
+        private var value: Result<Data, LinkStatus>?
+        private let lock = NSLock()
+        func set(_ v: Result<Data, LinkStatus>) { lock.lock(); value = v; lock.unlock() }
+        func get() -> Result<Data, LinkStatus>? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     func addNotificationObserver(_ handler: @escaping (LinkNotification) -> Void) -> AnyCancellable {
