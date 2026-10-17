@@ -1,5 +1,22 @@
 [
   {
+    "version": "1.1.6-beta5",
+    "headline": "Share your DSPi on the network, and Console now updates itself",
+    "items": [
+      "DSPi Link shares the devices plugged into this Mac with phones, browsers and other Consoles on your local network. Switch it on under Settings > Networking, then pair each new client with a six-digit code and choose whether it can only watch, change settings, or administer the hub.",
+      "A browser on the same network can open the hub's address to reach a web control page served by Console itself.",
+      "Console can find devices shared by other Consoles on the network and lists them in the device menu, marked with the hub they live on.",
+      "Console can run quietly in the menu bar as a sharing gateway, and can start at login. Turn this on under Settings > Networking, or use Window > Minimise to Menu Bar (Cmd+Option+M).",
+      "Console checks for new releases and can download, verify and install them in place. Find it under Settings > Software Update, or choose Check for Updates from the app menu.",
+      "With firmware beta 5, slave mode tracks an S/PDIF, ADAT or I2S source far more closely and with cleaner output clocks, and the RP2350 accepts 4-channel 24-bit USB audio.",
+      "Changing the computer's volume is once again followed by the device.",
+      "Stats shows S/PDIF and I2S output buffer fill in fine steps, and its time since the last starvation keeps counting while the window is open.",
+      "I2S input data pins may use GPIOs parked on unused pairs, which are listed under Unused pairs.",
+      "Applying an AutoEQ profile trims only the two inputs it equalises, instead of every input on the device.",
+      "The main window's content now fills a tall window, and scrolled settings pages no longer draw over the title bar."
+    ]
+  },
+  {
     "version": "1.1.6-beta4",
     "headline": "Tube modelling, output limiters and filters you shape on the graph",
     "items": [
