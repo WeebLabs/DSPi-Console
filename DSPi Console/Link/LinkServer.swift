@@ -66,7 +66,9 @@ final class LinkServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let hub = self.hub, auth = self.auth, policy = self.policy, tuning = self.tuning
 
-        let bootstrap = ServerBootstrap(group: group)
+        // A factory, since options accumulate on a bootstrap and the IPv4
+        // fallback must not inherit the IPv6-only option.
+        let makeBootstrap = { ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
@@ -100,9 +102,20 @@ final class LinkServer {
             .childChannelOption(ChannelOptions.writeBufferWaterMark,
                                 value: WriteBufferWaterMark(low: tuning.writeBufferLow,
                                                             high: tuning.writeBufferHigh))
+        }
 
         do {
-            let ch = try bootstrap.bind(host: "0.0.0.0", port: port).wait()
+            // Dual-stack "::" so IPv6 peers (Bonjour advertises AAAA) reach
+            // us too; IPv4 then arrives as ::ffff:a.b.c.d, which the peer
+            // gate unwraps.  A host without IPv6 falls back to IPv4 only.
+            let dualStack = ChannelOptions.Types.SocketOption(level: .ipv6, name: .ipv6_v6only)
+            let ch: NIOCore.Channel
+            do {
+                ch = try makeBootstrap().serverChannelOption(dualStack, value: 0)
+                    .bind(host: "::", port: port).wait()
+            } catch {
+                ch = try makeBootstrap().bind(host: "0.0.0.0", port: port).wait()
+            }
             self.group = group
             self.channel = ch
         } catch {
@@ -146,7 +159,7 @@ final class LinkServer {
 
     // MARK: - Peer locality
 
-    /// True for loopback, private and link-local peers only.  A UNIX-domain or
+    /// True for loopback, private, link-local and CGNAT peers only.  A UNIX-domain or
     /// address-less peer counts as local; a routable public address does not.
     static func isLocalPeer(_ address: SocketAddress) -> Bool {
         guard let ip = address.ipAddress else { return true }
@@ -179,6 +192,9 @@ final class LinkServer {
         case (172, 16...31):               return true   // 172.16.0.0/12
         case (192, 168):                   return true   // 192.168.0.0/16
         case (169, 254):                   return true   // 169.254.0.0/16 link-local
+        // 100.64.0.0/10 CGNAT: where a Tailscale peer arrives from, which
+        // spec 6.4 recommends for remote access.
+        case (100, 64...127):              return true
         default:                           return false
         }
     }

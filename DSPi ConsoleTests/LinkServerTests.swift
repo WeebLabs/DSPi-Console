@@ -308,3 +308,34 @@ extension LinkServerTests {
         withExtendedLifetime(client) {}
     }
 }
+
+// MARK: - Peer gate and bind address
+
+extension LinkServerTests {
+    func testPeerGateAcceptsLANAndRejectsPublicAddresses() {
+        let accepted = ["127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
+                        "169.254.1.1", "100.64.0.1", "100.127.255.255",
+                        "::1", "fe80::1", "fe80::1%en0", "fd00::1", "::ffff:192.168.0.1"]
+        let rejected = ["8.8.8.8", "172.32.0.1", "100.128.0.1", "100.63.255.255", "1.1.1.1",
+                        "2001:db8::1", "::ffff:8.8.8.8"]
+        for ip in accepted { XCTAssertTrue(LinkServer.isLocalIP(ip), "\(ip) is local") }
+        for ip in rejected { XCTAssertFalse(LinkServer.isLocalIP(ip), "\(ip) is not local") }
+    }
+
+    /// The server listens dual-stack: IPv4, IPv6 loopback and the name
+    /// "localhost" all reach it.
+    func testServerIsReachableOverIPv4AndIPv6() throws {
+        let (server, port) = try startServer()
+        defer { server.stop() }
+        for host in ["127.0.0.1", "[::1]", "localhost"] {
+            let done = expectation(description: host)
+            var status: Int?
+            URLSession.shared.dataTask(with: URL(string: "http://\(host):\(port)/dspi/v1/info")!) { _, response, _ in
+                status = (response as? HTTPURLResponse)?.statusCode
+                done.fulfill()
+            }.resume()
+            wait(for: [done], timeout: 5)
+            XCTAssertEqual(status, 200, "info over \(host)")
+        }
+    }
+}
