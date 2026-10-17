@@ -274,4 +274,50 @@ final class LinkSessionHandlerTests: XCTestCase {
         h.receiveText(text(.deviceList(LinkDeviceListRequest(id: 9))))
         XCTAssertEqual(sink.lastErr()?.code, "unauthenticated", "nothing routes after revocation")
     }
+
+    // MARK: - Review round 3
+
+    /// A revocation arrives on the main actor while the connection's loop
+    /// may be reading `session`; the handler's state changes on its loop only.
+    func testRevocationFromAnotherThreadChangesStateOnTheLoop() throws {
+        let (hub, auth, policy) = makeStack()
+        hub.attachDevice(LinkFakeDevice())
+        let sink = Sink()
+        let loopLock = NSLock()
+        var loop: [() -> Void] = []   // the fake event loop; this thread drains it
+        let h = LinkSessionHandler(hub: hub, auth: auth, policy: policy, peer: "192.168.1.5",
+                                   perform: { block in loopLock.lock(); loop.append(block); loopLock.unlock() },
+                                   emit: { sink.receive($0) })
+        let pin = auth.beginPairing()
+        h.receiveText(text(.authPair(LinkAuthPair(id: 1, pin: pin, name: "Phone", role: .admin))))
+        XCTAssertTrue(h.isAuthenticated)
+        let cid = try XCTUnwrap(auth.clients.first?.id)
+
+        let revoked = expectation(description: "revoked off the loop")
+        DispatchQueue.global().async { auth.revoke(cid: cid); revoked.fulfill() }
+        wait(for: [revoked], timeout: 2)
+        XCTAssertTrue(h.isAuthenticated, "nothing off the loop touches handler state")
+        XCTAssertTrue(sink.closes.isEmpty)
+
+        // A CMD read before the hop runs meets a hub session that is gone.
+        let cmd = LinkFrame.cmdRequest(LinkCmdRequest(tag: 9, handle: hub.currentHandle, direction: .set,
+                                                      bRequest: 0xD2, wIndex: 2,
+                                                      payload: Data([0, 0, 0, 0]))).encode()
+        h.receiveBinary(cmd)
+        guard case .cmdResponse(let refused)? = sink.binary.last.flatMap({ try? LinkFrame.decode($0) }) else {
+            return XCTFail("expected a CMD response")
+        }
+        XCTAssertEqual(refused.tag, 9)
+        XCTAssertEqual(refused.status, .noDevice, "a revoked session's command is not routed")
+
+        loopLock.lock(); let blocks = loop; loop.removeAll(); loopLock.unlock()
+        XCTAssertEqual(blocks.count, 1, "the close was handed to the loop")
+        blocks.forEach { $0() }
+        XCTAssertFalse(h.isAuthenticated)
+        XCTAssertEqual(sink.closes, [4002])
+
+        let before = sink.binary.count
+        h.receiveBinary(cmd)
+        XCTAssertEqual(sink.binary.count, before, "after the close nothing routes")
+    }
 }

@@ -202,8 +202,7 @@ final class LinkHubIntegrationTests: XCTestCase {
                                                         requestedRole: .admin, from: "10.0.0.9") else {
             return XCTFail("pair")
         }
-        let s = hub.openSession(role: .admin)
-        s.clientID = paired.client.id
+        let s = hub.openSession(role: .admin, clientID: paired.client.id)
         var closedByHub = false
         s.onClosedByHub = { closedByHub = true }
         let before = hub.sessionCount
@@ -228,8 +227,7 @@ final class LinkHubIntegrationTests: XCTestCase {
                                                         requestedRole: .viewer, from: "10.0.0.9") else {
             return XCTFail("pair")
         }
-        let s = hub.openSession(role: .viewer)
-        s.clientID = paired.client.id
+        let s = hub.openSession(role: .viewer, clientID: paired.client.id)
         let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
                                  wIndex: 2, payload: Data([0,0,0,0]))
 

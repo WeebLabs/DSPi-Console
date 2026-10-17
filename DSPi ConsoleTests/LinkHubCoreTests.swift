@@ -570,4 +570,23 @@ extension LinkHubCoreTests {
         XCTAssertEqual(hub.sessionCount, 4)
         withExtendedLifetime(local) {}
     }
+
+    /// A role change lands on the main thread while commands read the role
+    /// on the connection's loop; the next command sees the new role.
+    func testRoleChangeAppliesToTheNextCommand() {
+        let hub = makeHub()
+        hub.attachDevice(LinkFakeDevice())
+        let session = hub.openSession(role: .viewer, clientID: 42)
+        hub.setRole(forClient: 42, .control)
+        XCTAssertEqual(session.role, .control)
+
+        let done = expectation(description: "set answered")
+        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
+                                 wIndex: 2, payload: Data([0, 0, 0, 0]))
+        hub.submit(req, from: session.id) { response in
+            XCTAssertEqual(response.status, .ok, "a viewer promoted to control may set the volume")
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+    }
 }

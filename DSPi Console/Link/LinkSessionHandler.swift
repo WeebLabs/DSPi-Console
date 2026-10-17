@@ -28,6 +28,10 @@ final class LinkSessionHandler {
     private let peer: String
     /// Every outbound message goes here; the adapter writes it to the socket.
     private let emit: (LinkOutbound) -> Void
+    /// Runs a block on the connection's event loop.  Hub callbacks that change
+    /// handler state arrive on other threads (a revocation from the main
+    /// actor) and must go through this.  Inline by default, for tests.
+    private let perform: (@escaping () -> Void) -> Void
 
     private var helloReceived = false
     private var session: LinkHubSession?
@@ -42,11 +46,13 @@ final class LinkSessionHandler {
     static let maxFrame = 65536
 
     init(hub: LinkHub, auth: LinkAuthStore, policy: LinkPolicy,
-         peer: String, emit: @escaping (LinkOutbound) -> Void) {
+         peer: String, perform: @escaping (@escaping () -> Void) -> Void = { $0() },
+         emit: @escaping (LinkOutbound) -> Void) {
         self.hub = hub
         self.auth = auth
         self.policy = policy
         self.peer = peer
+        self.perform = perform
         self.emit = emit
     }
 
@@ -175,8 +181,7 @@ final class LinkSessionHandler {
     /// (open access on hello).
     private func openSession(cid: Int?, role: LinkRole, reply: Int?, token: String?) {
         if let old = session { hub.closeSession(old.id) }
-        let s = hub.openSession(role: role)
-        s.clientID = cid
+        let s = hub.openSession(role: role, clientID: cid)
         self.session = s
         wireSessionCallbacks(s)
         if let id = reply {
@@ -190,10 +195,13 @@ final class LinkSessionHandler {
     private func wireSessionCallbacks(_ s: LinkHubSession) {
         // Revoked while connected: the hub has already closed the session;
         // drop our reference so nothing routes, and close with code 4002.
+        // The revocation comes from the main actor, so hop to our loop.
         s.onClosedByHub = { [weak self, weak s] in
-            guard let self = self, let s = s, self.session === s else { return }
-            self.session = nil
-            self.emit(.close(4002))
+            self?.perform { [weak self, weak s] in
+                guard let self = self, let s = s, self.session === s else { return }
+                self.session = nil
+                self.emit(.close(4002))
+            }
         }
         s.onNotify = { [weak self] frame in self?.emit(.binary(LinkFrame.notify(frame).encode())) }
         s.onResync = { [weak self] frame in self?.emit(.binary(LinkFrame.resync(frame).encode())) }

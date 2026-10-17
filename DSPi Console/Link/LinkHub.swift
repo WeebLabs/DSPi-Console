@@ -23,11 +23,19 @@ import Combine
 /// the WebSocket server registers one per connection.
 final class LinkHubSession {
     let id: LinkSessionID
-    var role: LinkRole
+    /// Written by a role change on the main thread, read by every command on
+    /// the connection's event loop, hence the lock.
+    var role: LinkRole {
+        get { roleLock.lock(); defer { roleLock.unlock() }; return storedRole }
+        set { roleLock.lock(); storedRole = newValue; roleLock.unlock() }
+    }
+    private var storedRole: LinkRole
+    private let roleLock = NSLock()
     /// The paired client this session authenticated as (`cid`), so a
     /// revocation or role change reaches it while it is connected.  nil for
-    /// the local UI and for open-access sessions.
-    var clientID: Int?
+    /// the local UI and for open-access sessions.  Set before the session is
+    /// registered, so a revocation can never miss it.
+    let clientID: Int?
     /// Fired when the hub closes the session itself (revocation), so the
     /// transport can close the socket with the right code.
     var onClosedByHub: (() -> Void)?
@@ -37,9 +45,10 @@ final class LinkHubSession {
     var onPoll: ((LinkPollFrame) -> Void)?
     var onDeviceEvent: ((DeviceRegistryEvent) -> Void)?
 
-    init(id: LinkSessionID, role: LinkRole) {
+    init(id: LinkSessionID, role: LinkRole, clientID: Int? = nil) {
         self.id = id
-        self.role = role
+        self.storedRole = role
+        self.clientID = clientID
     }
 }
 
@@ -323,10 +332,10 @@ final class LinkHub {
 
     /// Register a session.  The local UI passes `localSessionID`; remote
     /// sessions omit the id and get the next free one.
-    func openSession(role: LinkRole, id: LinkSessionID? = nil) -> LinkHubSession {
+    func openSession(role: LinkRole, id: LinkSessionID? = nil, clientID: Int? = nil) -> LinkHubSession {
         sessionLock.lock()
         let sid = id ?? allocateSessionIDLocked()
-        let session = LinkHubSession(id: sid, role: role)
+        let session = LinkHubSession(id: sid, role: role, clientID: clientID)
         sessions[sid] = session
         sessionLock.unlock()
 

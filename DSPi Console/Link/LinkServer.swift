@@ -313,12 +313,12 @@ private final class LinkWebSocketHandler: ChannelInboundHandler {
         self.channel = channel
         let peer = channel.remoteAddress?.ipAddress ?? "?"
 
-        self.session = LinkSessionHandler(hub: hub, auth: auth, policy: policy, peer: peer) { [weak self] outbound in
-            if eventLoop.inEventLoop {
-                self?.send(outbound)
-            } else {
-                eventLoop.execute { self?.send(outbound) }
-            }
+        let onLoop: (@escaping () -> Void) -> Void = { block in
+            if eventLoop.inEventLoop { block() } else { eventLoop.execute(block) }
+        }
+        self.session = LinkSessionHandler(hub: hub, auth: auth, policy: policy, peer: peer,
+                                          perform: onLoop) { [weak self] outbound in
+            onLoop { self?.send(outbound) }
         }
 
         // Keepalive: ping every 10 s (spec 4).  The client's pongs keep it alive;
