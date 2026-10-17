@@ -210,4 +210,55 @@ final class NetworkTransportTests: XCTestCase {
         XCTAssertFalse(t.isOwnWrite(origin: 0), "origin 0 is unattributed, not ours")
         XCTAssertFalse(t.isOwnWrite(origin: 4), "another client's write")
     }
+    func testAuthDeadlineDuringThePromptDoesNotOpenASecondPrompt() {
+        let (t, client, _) = make()
+        var prompts = 0
+        t.pairingPrompt = { _ in
+            prompts += 1
+            // While the user reads the alert the hub's 30 s auth deadline
+            // closes the socket (4001) and the reconnect asks for a PIN again.
+            if prompts == 1 {
+                client.setState(.failed("authentication timed out"))
+                client.setState(.awaitingAuth(needsPairing: true))
+            }
+            return "123456"
+        }
+        t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
+        client.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(prompts, 1, "one alert, not one per reconnect")
+        XCTAssertEqual(client.pairCalls, ["123456"])
+    }
+
+    func testPINTypedAfterTheSocketClosedIsSentOnTheNextConnection() {
+        let (t, client, _) = make()
+        var prompts = 0
+        t.pairingPrompt = { _ in
+            prompts += 1
+            client.setState(.failed("authentication timed out"))
+            return "123456"
+        }
+        t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
+        client.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(client.pairCalls, [], "nothing to pair with yet")
+
+        // The reconnect reaches the hub and asks again: the held PIN answers.
+        client.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(client.pairCalls, ["123456"])
+    }
+
+    func testCancellingPairingThenSelectingTheDeviceAgainReconnects() {
+        let (t, client, _) = make()
+        t.pairingPrompt = { _ in nil }
+        t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
+        t.bind(serial: "AAAA")
+        client.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(client.disconnectCalls, 1)
+        XCTAssertEqual(client.connectCalls.count, 1)
+
+        t.selectDevice(DSPiDevice(serial: "AAAA", locationID: 0,
+                                  hub: RemoteHubRef(hubID: "hub-1", hubName: "Studio", handle: 255),
+                                  remoteName: nil))
+        XCTAssertEqual(client.connectCalls.count, 2, "selecting again asks for a new connection")
+    }
 }

@@ -46,6 +46,12 @@ final class NetworkTransport: DeviceTransport {
     /// Called on the main thread when the hub needs a PIN.  Returns the PIN
     /// or nil to give up.  The app installs a modal prompt.
     var pairingPrompt: ((String) -> String?)?
+    /// True while the prompt is up.  The modal spins the run loop, so a
+    /// reconnect can ask for a PIN again underneath it; that ask waits.
+    private var pairingPromptShowing = false
+    /// A PIN typed after the hub's auth deadline closed the socket: sent on
+    /// the next connection that asks, instead of prompting again.
+    private var pendingPIN: String?
 
     init(client: LinkClientProtocol, hubID: String, hubName: String,
          tokens: LinkTokenStore, clientName: String) {
@@ -97,10 +103,13 @@ final class NetworkTransport: DeviceTransport {
 
     /// Bind to one of the hub's devices.  The device list may not have
     /// arrived yet, so bind by serial and resolve the handle when it does.
+    /// Selecting a device again after the user cancelled pairing (which gave
+    /// the connection up) is how they ask to try again.
     func bind(serial: String) {
         boundSerial = serial
         resolveBinding()
         publishConnected()
+        if !wantConnection, let url = url { connect(to: url) }
     }
 
     private func resolveBinding() {
@@ -121,7 +130,12 @@ final class NetworkTransport: DeviceTransport {
             generationLock.lock(); generationValue &+= 1; generationLock.unlock()
             errorSubject.send(nil)
         case .awaitingAuth(let needsPairing) where needsPairing:
-            pair()
+            if let pin = pendingPIN {
+                pendingPIN = nil
+                sendPIN(pin)
+            } else {
+                pair()
+            }
         case .failed(let reason):
             errorSubject.send(reason)
             scheduleReconnect()
@@ -138,11 +152,27 @@ final class NetworkTransport: DeviceTransport {
             errorSubject.send("This hub needs pairing.")
             return
         }
-        guard let pin = prompt(hubName) else {
+        guard !pairingPromptShowing else { return }
+        pairingPromptShowing = true
+        let pin = prompt(hubName)
+        pairingPromptShowing = false
+        guard let pin = pin else {
             wantConnection = false
+            reconnectWork?.cancel()
+            reconnectWork = nil
             client.disconnect()
             return
         }
+        // The hub gives a client 30 s to authenticate; a slower answer finds
+        // the socket closed and a reconnect under way.  Hold the PIN for it.
+        guard case .awaitingAuth = client.state else {
+            pendingPIN = pin
+            return
+        }
+        sendPIN(pin)
+    }
+
+    private func sendPIN(_ pin: String) {
         client.pair(pin: pin, clientName: clientName, role: .control) { [weak self] result in
             guard let self = self else { return }
             switch result {
