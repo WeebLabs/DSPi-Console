@@ -536,3 +536,38 @@ extension LinkHubCoreTests {
                        "the failed repeat must not leave an extra attribution")
     }
 }
+
+// MARK: - Session ids
+
+extension LinkHubCoreTests {
+    private func makeHub() -> LinkHub {
+        let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("lhc-\(UUID().uuidString).json"))
+        return LinkHub(usb: USBDevice(startMonitoring: false), policy: makePolicy(), auth: auth)
+    }
+
+    /// A socket that re-authenticates ~65k times wraps the counter; the new
+    /// id must never be a reserved one or one still open, least of all 1.
+    func testSessionIDWrapSkipsReservedAndOpenIDs() {
+        let hub = makeHub()
+        let local = hub.openSession(role: .admin, id: LinkHub.localSessionID)
+
+        hub.nextSessionID = 0xFFFE
+        let a = hub.openSession(role: .control)
+        let b = hub.openSession(role: .control)
+        let c = hub.openSession(role: .control)
+        XCTAssertEqual(a.id, 0xFFFE)
+        XCTAssertEqual(b.id, 2, "0xFFFF, 0 and 1 are reserved")
+        XCTAssertEqual(c.id, 3)
+
+        // Wrap again with 0xFFFE, 2 and 3 still open.
+        hub.nextSessionID = 0xFFFE
+        let d = hub.openSession(role: .control)
+        XCTAssertEqual(d.id, 4, "open ids are skipped, not replaced")
+        XCTAssertEqual(hub.sessionCount, 5, "no entry was overwritten")
+
+        hub.closeSession(d.id)
+        XCTAssertEqual(hub.sessionCount, 4)
+        withExtendedLifetime(local) {}
+    }
+}

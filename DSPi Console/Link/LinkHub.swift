@@ -74,7 +74,8 @@ final class LinkHub {
     /// ids from 2 up.  Session 0xFFFF is the hub's own internal session, used
     /// for the snapshot reads it issues on its own behalf.
     private var sessions: [LinkSessionID: LinkHubSession] = [:]
-    private var nextSessionID: LinkSessionID = 2
+    /// Next id to try.  Internal so tests can start it near the wrap.
+    var nextSessionID: LinkSessionID = 2
     private let sessionLock = NSLock()
 
     private var notifyCancellable: AnyCancellable?
@@ -324,7 +325,7 @@ final class LinkHub {
     /// sessions omit the id and get the next free one.
     func openSession(role: LinkRole, id: LinkSessionID? = nil) -> LinkHubSession {
         sessionLock.lock()
-        let sid = id ?? { let n = nextSessionID; nextSessionID &+= 1; return n }()
+        let sid = id ?? allocateSessionIDLocked()
         let session = LinkHubSession(id: sid, role: role)
         sessions[sid] = session
         sessionLock.unlock()
@@ -333,6 +334,18 @@ final class LinkHub {
                          deliver: { [weak session] frame in session?.onNotify?(frame) },
                          resync: { [weak session] frame in session?.onResync?(frame) })
         return session
+    }
+
+    /// Caller holds `sessionLock`.  The counter wraps, and one socket can
+    /// re-authenticate indefinitely, so skip the reserved ids and any still
+    /// open: landing on 1 would replace the local UI's entry.
+    private func allocateSessionIDLocked() -> LinkSessionID {
+        while true {
+            let n = nextSessionID
+            nextSessionID &+= 1
+            if n == 0 || n == Self.localSessionID || n == Self.internalSessionID { continue }
+            if sessions[n] == nil { return n }
+        }
     }
 
     func closeSession(_ id: LinkSessionID) {
