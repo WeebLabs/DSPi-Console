@@ -279,11 +279,21 @@ final class LinkSessionHandler {
 
     // MARK: - Locks
 
+    /// Longest lock a client may take.  The local UI is not exempt from
+    /// locks, so an uncapped timeout would let any client freeze it for days.
+    static let maxLockTimeoutMs = 60_000
+
     private func handleLockAcquire(_ m: LinkLockAcquire) {
         guard let session = session else { return }
-        let timeout = Double(m.timeoutMs ?? 10000) / 1000.0
-        if hub.acquireLock(session: session.id, timeout: timeout) {
-            sendOk(id: m.id, body: [String: JSONValue]())
+        // A viewer cannot write, so a lock would only block everyone else.
+        guard role != .viewer else { return emit(err(m.id, LinkErrorCode.denied)) }
+        let requested = m.timeoutMs ?? 10000
+        guard requested >= 0 else {
+            return emit(err(m.id, LinkErrorCode.badRequest, "timeout_ms must not be negative"))
+        }
+        let granted = min(requested, Self.maxLockTimeoutMs)
+        if hub.acquireLock(session: session.id, timeout: Double(granted) / 1000.0) {
+            sendOk(id: m.id, body: ["timeout_ms": .number(Double(granted))])
         } else {
             emit(err(m.id, LinkErrorCode.locked))
         }

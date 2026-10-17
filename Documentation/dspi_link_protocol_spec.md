@@ -453,7 +453,10 @@ take an exclusive lock:
 
 While locked, commands from other sessions get status `0x85 LOCKED` and
 `device.changed` carries `locked_by`. The hub releases a lock when its
-session closes or the timeout elapses. A hub without the `lock` capability
+session closes or the timeout elapses. A hub caps `timeout_ms` at 60000 and
+reports the value it granted as `timeout_ms` in the `ok`, answers a negative
+one with `bad_request`, and refuses `lock.acquire` from a viewer with
+`denied`, since a viewer cannot write. A hub without the `lock` capability
 serialises commands as usual and clients skip the lock step.
 
 ### 7.8 Firmware install (Console hubs)

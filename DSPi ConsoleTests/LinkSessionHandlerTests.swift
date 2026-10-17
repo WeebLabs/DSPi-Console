@@ -320,4 +320,51 @@ final class LinkSessionHandlerTests: XCTestCase {
         h.receiveBinary(cmd)
         XCTAssertEqual(sink.binary.count, before, "after the close nothing routes")
     }
+
+    // MARK: - Lock timeout and role
+
+    private func lockAcquire(_ h: LinkSessionHandler, id: Int, timeoutMs: Int?) {
+        h.receiveText(text(.lockAcquire(LinkLockAcquire(id: id, handle: 0, reason: "x", timeoutMs: timeoutMs))))
+    }
+
+    /// The local UI is not exempt from locks, so a client must not be able
+    /// to hold one for days: the timeout is capped and the cap reported.
+    func testLockTimeoutIsCappedAndReported() throws {
+        let (hub, auth, policy) = makeStack()
+        hub.attachDevice(LinkFakeDevice())
+        let sink = Sink()
+        let h = authedAdmin(hub, auth, policy, sink)
+        lockAcquire(h, id: 5, timeoutMs: 3_600_000)
+        let ok = try XCTUnwrap(sink.lastOk())
+        XCTAssertEqual(ok.id, 5)
+        XCTAssertEqual(ok.body["timeout_ms"], .number(60_000), "an hour is cut to 60 s")
+        h.receiveText(text(.lockRelease(LinkLockRelease(id: 6, handle: 0))))
+
+        lockAcquire(h, id: 7, timeoutMs: nil)
+        XCTAssertEqual(sink.lastOk()?.body["timeout_ms"], .number(10_000), "the default is granted as is")
+    }
+
+    func testNegativeLockTimeoutIsRejected() {
+        let (hub, auth, policy) = makeStack()
+        hub.attachDevice(LinkFakeDevice())
+        let sink = Sink()
+        let h = authedAdmin(hub, auth, policy, sink)
+        lockAcquire(h, id: 5, timeoutMs: -1)
+        XCTAssertEqual(sink.lastErr()?.code, "bad_request")
+        XCTAssertEqual(sink.lastErr()?.id, 5)
+        XCTAssertNil(sink.lastOk().flatMap { $0.id == 5 ? $0 : nil })
+    }
+
+    func testViewerCannotTakeTheLock() {
+        let (hub, auth, policy) = makeStack()
+        hub.attachDevice(LinkFakeDevice())
+        let pin = auth.beginPairing()
+        let sink = Sink()
+        let h = handler(hub, auth, policy, sink)
+        h.receiveText(text(.authPair(LinkAuthPair(id: 1, pin: pin, name: "TV", role: .viewer))))
+        XCTAssertTrue(h.isAuthenticated)
+        lockAcquire(h, id: 5, timeoutMs: 5000)
+        XCTAssertEqual(sink.lastErr()?.code, "denied")
+        XCTAssertEqual(sink.lastErr()?.id, 5)
+    }
 }
