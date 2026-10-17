@@ -141,11 +141,18 @@ final class LinkAuthStore {
         }
         set {
             lock.lock()
+            let changed = state.hubName != newValue
             state.hubName = newValue
             saveLocked()
             lock.unlock()
+            if changed { onHubNameChanged?(newValue) }
         }
     }
+
+    /// Fired after the name changes, outside the lock, on the setter's
+    /// thread: a Link hub.rename sets it from the event loop, and the
+    /// service must follow it to re-advertise.
+    var onHubNameChanged: ((String) -> Void)?
 
     var authMode: LinkAuthMode {
         get {

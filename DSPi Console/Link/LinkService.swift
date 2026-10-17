@@ -23,12 +23,21 @@ protocol LinkServing: AnyObject {
     var boundPort: Int? { get }
 }
 
+/// The DNS-SD advertiser; a protocol so tests can watch re-advertisement.
+protocol LinkAdvertising: AnyObject {
+    func start(name: String, port: Int, ad: LinkAdvertisement)
+    func updateTXT(_ ad: LinkAdvertisement)
+    func stop()
+}
+
+extension LinkDiscovery: LinkAdvertising {}
+
 @MainActor
 final class LinkService: ObservableObject {
     private let hub: LinkHub
     private let auth: LinkAuthStore
     private let server: LinkServing
-    private let discovery = LinkDiscovery()
+    private let discovery: LinkAdvertising
 
     // Persisted preferences.
     @Published var sharingEnabled: Bool { didSet { defaults.set(sharingEnabled, forKey: Keys.enabled) } }
@@ -46,8 +55,18 @@ final class LinkService: ObservableObject {
     // Live state, mirrored for the UI.
     @Published private(set) var isRunning = false
     @Published private(set) var lastError: String?
-    @Published var hubName: String { didSet { auth.hubName = hubName } }
-    @Published var authMode: LinkAuthMode { didSet { auth.authMode = authMode } }
+    /// The instance name is part of the DNS-SD registration, so a rename
+    /// re-registers; the auth mode lives in the TXT record.
+    @Published var hubName: String {
+        didSet {
+            guard hubName != oldValue else { return }
+            auth.hubName = hubName
+            if isRunning { advertise() }
+        }
+    }
+    @Published var authMode: LinkAuthMode {
+        didSet { auth.authMode = authMode; refreshAdvertisement() }
+    }
     @Published private(set) var clients: [PairedClient] = []
     @Published private(set) var activePIN: String?
     @Published private(set) var pairingExpires: Date?
@@ -62,11 +81,13 @@ final class LinkService: ObservableObject {
         static let preventSleep = "LinkPreventSleep"
     }
 
-    init(hub: LinkHub, auth: LinkAuthStore, server: LinkServing, defaults: UserDefaults = .standard) {
+    init(hub: LinkHub, auth: LinkAuthStore, server: LinkServing, defaults: UserDefaults = .standard,
+         discovery: LinkAdvertising = LinkDiscovery()) {
         self.hub = hub
         self.auth = auth
         self.server = server
         self.defaults = defaults
+        self.discovery = discovery
         self.sharingEnabled = defaults.object(forKey: Keys.enabled) as? Bool ?? false
         self.port = defaults.object(forKey: Keys.port) as? Int ?? LinkDiscovery.defaultPort
         self.preventSleepWhileConnected = defaults.object(forKey: Keys.preventSleep) as? Bool ?? false
@@ -77,6 +98,14 @@ final class LinkService: ObservableObject {
         // Refresh the advertisement and the status line when devices change.
         hub.onRegistryChange = { [weak self] in
             Task { @MainActor in self?.refreshAdvertisement() }
+        }
+        // A Link client renamed the hub.  Only a name the store still holds
+        // is applied, so a stale hop cannot undo a later Settings edit.
+        auth.onHubNameChanged = { [weak self] name in
+            Task { @MainActor in
+                guard let self = self, self.auth.hubName == name, self.hubName != name else { return }
+                self.hubName = name
+            }
         }
 
         if sharingEnabled { start() }

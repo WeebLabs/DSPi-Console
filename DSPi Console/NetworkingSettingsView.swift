@@ -31,6 +31,7 @@ struct NetworkingSettingsTab: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Networking")
+        .onChange(of: service.hubName) { name in hubNameDraft = name }   // a remote rename
         .onAppear {
             hubNameDraft = service.hubName
             portDraft = String(service.port)
