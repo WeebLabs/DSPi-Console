@@ -440,11 +440,10 @@ private struct SettingsWindowConfigurator: NSViewRepresentable {
             guard let window = window else { return }
             window.toolbarStyle = .unifiedCompact
             window.titleVisibility = .hidden   // no "DSPi Console Settings" text
-            // Fully transparent title bar (paired with a hidden toolbar
-            // background in SwiftUI). A scroll-driven material overlay supplies
-            // the blur once content scrolls under the bar, so at rest the bar is
-            // transparent - the macOS Settings behavior.
-            window.titlebarAppearsTransparent = true
+            // Leave the title bar opaque and the SwiftUI toolbar background
+            // automatic: AppKit then blends the bar with the page at rest and
+            // adds its own material and separator once a page scrolls under it,
+            // as System Settings does. A transparent title bar disables that.
             // Now that Settings is a plain `Window` scene (not a `Settings`
             // scene), pin a stable identifier so open/close tracking can find it
             // deterministically, and opt out of state restoration so it doesn't
@@ -565,9 +564,6 @@ struct SettingsView: View {
                             .font(.headline)
                     }
                 }
-                // Hide the toolbar's own material so the title-bar area shows the
-                // detail content background - fully integrated, like macOS Settings.
-                .toolbarBackground(.hidden, for: .windowToolbar)
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minHeight: 480, idealHeight: 580)

@@ -30,7 +30,6 @@ struct NetworkingSettingsTab: View {
             infoSection
         }
         .formStyle(.grouped)
-        .navigationTitle("Networking")
         .onChange(of: service.hubName) { name in hubNameDraft = name }   // a remote rename
         .onAppear {
             hubNameDraft = service.hubName
@@ -75,12 +74,14 @@ struct NetworkingSettingsTab: View {
         Section("Hub") {
             LabeledContent("Name") {
                 TextField("Hub name", text: $hubNameDraft)
+                    .labelsHidden()
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 220)
                     .onSubmit { service.hubName = hubNameDraft.isEmpty ? service.hubName : hubNameDraft }
             }
             LabeledContent("Port") {
                 TextField("Port", text: $portDraft)
+                    .labelsHidden()
                     .multilineTextAlignment(.trailing)
                     .frame(width: 80)
                     .disabled(service.isRunning)
