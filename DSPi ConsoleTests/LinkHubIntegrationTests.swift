@@ -20,6 +20,11 @@ final class LinkHubIntegrationTests: XCTestCase {
         let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("hubint-\(UUID().uuidString).json"))
         let hub = LinkHub(usb: usb, policy: LinkPolicy.bundled ?? LinkPolicy.empty, auth: auth)
+        // The hub follows USB on the main run loop, and the inert USBDevice's
+        // initial `false` is still in flight.  Deliver it now so a test that
+        // drives usbConnectionChanged itself and then spins the run loop does
+        // not see it land mid-test as a disconnect.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         return (hub, usb)
     }
 
@@ -275,13 +280,14 @@ final class LinkHubIntegrationTests: XCTestCase {
         hub.usbDeviceFactory = { _ in next }
 
         hub.usbConnectionChanged(connected: true, generation: 1)
-        XCTAssertEqual(hub.registry.device(serial: a.info.serial)?.state, .online)
+        XCTAssertTrue(spinMain { hub.registry.device(serial: a.info.serial)?.state == .online })
         hub.usbConnectionChanged(connected: true, generation: 1)   // repeat: same open
+        _ = spinMain(timeout: 0.1) { false }
         XCTAssertEqual(hub.registry.devices.count, 1, "a repeated true for the same open attaches nothing new")
 
         next = b
         hub.usbConnectionChanged(connected: true, generation: 2)   // switch, no false between
-        XCTAssertEqual(hub.registry.device(serial: b.info.serial)?.state, .online)
+        XCTAssertTrue(spinMain { hub.registry.device(serial: b.info.serial)?.state == .online })
         XCTAssertEqual(hub.registry.device(serial: a.info.serial)?.state, .offline)
         XCTAssertEqual(hub.currentHandle, 1)
 
@@ -405,6 +411,51 @@ final class LinkHubIntegrationTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 1.0,
                           "the transport gave up on its own bound, not the router's 2 s")
         gate.signal()
+    }
+
+    /// Spin the main run loop until `condition` holds or `timeout` passes; the
+    /// hub attaches on the main queue after its identity read.
+    private func spinMain(timeout: TimeInterval = 3, until condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        return condition()
+    }
+
+    /// A board that does not answer its first identity read (re-enumeration
+    /// after a flash, still booting) is tried again, and attaches once it does.
+    func testIdentityReadIsRetriedWhileTheDeviceBoots() {
+        let (hub, _) = makeHub()
+        let device = LinkFakeDevice()
+        var probes = 0
+        hub.usbDeviceFactory = { _ in probes += 1; return probes < 3 ? nil : device }
+
+        hub.usbConnectionChanged(connected: true, generation: 1)
+        XCTAssertTrue(spinMain { hub.isDeviceAttached }, "the hub attached once the device answered")
+        XCTAssertEqual(probes, 3)
+        XCTAssertEqual(hub.registry.device(serial: device.info.serial)?.state, .online)
+    }
+
+    /// The retry gives up cleanly when the device goes away or is replaced
+    /// while it is still being probed.
+    func testIdentityRetryStopsWhenTheConnectionChanges() {
+        let (hub, _) = makeHub()
+        hub.identityRetryDelays = [0, 0.05, 0.05, 0.05, 0.05, 0.05]
+        var probes = 0
+        let probeLock = NSLock()
+        hub.usbDeviceFactory = { _ in probeLock.lock(); probes += 1; probeLock.unlock(); return nil }
+
+        hub.usbConnectionChanged(connected: true, generation: 1)
+        _ = spinMain(timeout: 0.08) { false }
+        hub.usbConnectionChanged(connected: false, generation: 1)
+        _ = spinMain(timeout: 0.15) { false }
+        probeLock.lock(); let afterUnplug = probes; probeLock.unlock()
+        _ = spinMain(timeout: 0.3) { false }
+        probeLock.lock(); let later = probes; probeLock.unlock()
+        XCTAssertFalse(hub.isDeviceAttached)
+        XCTAssertEqual(later, afterUnplug, "no probe after the device went")
+        XCTAssertLessThan(later, 6, "the loop stopped before running out of retries")
     }
 
     /// Closing a session clears the callbacks it owns, so a callback that

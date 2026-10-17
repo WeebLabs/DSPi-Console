@@ -146,44 +146,65 @@ final class LinkHub {
 
     private var reaper: Timer?
 
-    /// Generation of the USB connection the attached device belongs to, or nil
-    /// when the attached device did not come from USB (tests) or none is.
-    private var attachedUSBGeneration: UInt64?
+    /// Generation of the USB connection the hub is attached to, or still
+    /// probing for its identity; nil when USB reports none (or the attached
+    /// device did not come from USB, as in tests).  Written on the main queue,
+    /// read by the probe loop, hence the lock.
+    private var usbGenerationStore: UInt64?
+    private let usbGenerationLock = NSLock()
+    private var usbGeneration: UInt64? {
+        get { usbGenerationLock.lock(); defer { usbGenerationLock.unlock() }; return usbGenerationStore }
+        set { usbGenerationLock.lock(); usbGenerationStore = newValue; usbGenerationLock.unlock() }
+    }
 
-    /// Builds the HubDevice for the current USB connection.  Tests replace it
-    /// to drive the switch logic without hardware.
+    /// Builds the HubDevice for the current USB connection; nil means the
+    /// device did not answer and is probed again.  Tests replace it to drive
+    /// the switch and retry logic without hardware.
     var usbDeviceFactory: ((USBDevice) -> HubDevice?)?
+
+    /// Pauses before each identity probe, first one immediate: about 2.5 s in
+    /// all, the same patience fetchAll(afterConnect:) has for a board that is
+    /// still booting after re-enumeration.  Internal so tests can shorten it.
+    var identityRetryDelays: [TimeInterval] = [0, 0.1, 0.2, 0.4, 0.8, 1.0]
 
     /// The USB connection changed.  `generation` identifies the open; a switch
     /// between boards is a new generation with no `false` in between.  Internal
     /// so tests can drive it.
     func usbConnectionChanged(connected: Bool, generation: UInt64) {
         if connected {
-            guard attachedUSBGeneration != generation else { return }   // same open
+            guard usbGeneration != generation else { return }   // same open
+            usbGeneration = generation
             usbDidConnect(generation: generation)
-        } else if attachedUSBGeneration != nil {
-            attachedUSBGeneration = nil
+        } else if usbGeneration != nil {
+            usbGeneration = nil
             detachDevice()
         }
     }
 
     // MARK: - Device lifecycle
 
+    /// Read the new connection's identity and attach it.  A board that STALLs
+    /// or ignores its first REQ_GET_PLATFORM (still booting after a firmware
+    /// flash) is probed again with backoff; the loop stops as soon as the
+    /// connection it was started for is gone or replaced.
     private func usbDidConnect(generation: UInt64) {
         let usb = self.usb
-        if let factory = usbDeviceFactory {
-            guard let device = factory(usb) else { return }
-            attachedUSBGeneration = generation
-            attachDevice(device)
-            return
-        }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let probe: (USBDevice) -> HubDevice? = usbDeviceFactory ?? { usb in
             let fallback = usb.selectedDevice?.serial ?? "unknown"
-            guard let info = USBHubDevice.readInfo(from: usb, serialFallback: fallback) else { return }
-            DispatchQueue.main.async {
-                guard let self = self, usb.isConnected, usb.generation == generation else { return }
-                self.attachedUSBGeneration = generation
-                self.attachDevice(USBHubDevice(usb: usb, info: info))
+            return USBHubDevice.readInfo(from: usb, serialFallback: fallback)
+                .map { USBHubDevice(usb: usb, info: $0) }
+        }
+        let delays = identityRetryDelays
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            for delay in delays {
+                if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+                guard let self = self, self.usbGeneration == generation else { return }
+                guard let device = probe(usb) else { continue }
+                DispatchQueue.main.async {
+                    guard self.usbGeneration == generation else { return }
+                    self.attachDevice(device)
+                }
+                return
             }
         }
     }
