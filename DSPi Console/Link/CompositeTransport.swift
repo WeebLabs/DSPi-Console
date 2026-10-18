@@ -39,6 +39,10 @@ final class CompositeTransport: DeviceTransport {
     private var activeNotifyToken: AnyCancellable?
     private var remoteDeviceCancellables: [String: AnyCancellable] = [:]
     private var localDevicesCancellable: AnyCancellable?
+    /// The local list as last emitted.  USBDevice publishes from @Published,
+    /// which fires before the property is stored, so reading
+    /// `local.availableDevices` inside the sink would see the previous list.
+    private var localDevices: [DSPiDevice] = []
 
     init(local: HubTransport, tokens: LinkTokenStore, clientName: String,
          makeClient: @escaping () -> LinkClientProtocol) {
@@ -49,7 +53,11 @@ final class CompositeTransport: DeviceTransport {
         self.active = local
         attach(to: local)
         localDevicesCancellable = local.availableDevicesPublisher
-            .sink { [weak self] _ in self?.recomputeDevices() }
+            .sink { [weak self] devices in
+                guard let self = self else { return }
+                self.stateLock.lock(); self.localDevices = devices; self.stateLock.unlock()
+                self.recomputeDevices()
+            }
     }
 
     // MARK: - Hubs
@@ -83,12 +91,12 @@ final class CompositeTransport: DeviceTransport {
     // MARK: - Device list
 
     private func recomputeDevices() {
-        var merged = local.availableDevices
-        var seen = Set(merged.map { $0.serial })
         stateLock.lock()
+        var merged = localDevices
         let hubs = knownHubs
         let connected = remotes
         stateLock.unlock()
+        var seen = Set(merged.map { $0.serial })
         for hub in hubs {
             if let t = connected[hub.id], !t.availableDevices.isEmpty {
                 for d in t.availableDevices where !seen.contains(d.serial) {

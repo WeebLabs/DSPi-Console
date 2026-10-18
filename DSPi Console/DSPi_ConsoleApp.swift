@@ -10819,6 +10819,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if resumeSharing {
             _ = AppState.shared.linkService
         }
+        // Likewise the hub browser: shared devices from other hubs reach the
+        // picker only once the coordinator exists, so build it now if it has
+        // anything to look for.
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "LinkLookForHubs")
+            || !(defaults.stringArray(forKey: "LinkManualHubs") ?? []).isEmpty {
+            _ = AppState.shared.linkClientCoordinator
+        }
 
         // Find the main window once it appears and set ourselves as its delegate
         // so we can intercept the close button with windowShouldClose.
