@@ -363,6 +363,11 @@ struct ConnectionStatusIndicator: View {
             if vm.availableDevices.isEmpty {
                 Text("No Devices").font(.caption).foregroundColor(.red)
             } else {
+                // The popup falls back to showing the first device when none is
+                // selected; it must stay clickable then, even as the only one,
+                // or a device shown there can never actually be chosen.
+                let pickable = vm.availableDevices.count > 1
+                    || !(vm.selectedDevice.map { vm.availableDevices.contains($0) } ?? false)
                 BorderlessPopUpButton(
                     items: vm.availableDevices,
                     titleForItem: { $0.displayName },
@@ -377,12 +382,12 @@ struct ConnectionStatusIndicator: View {
                         set: { vm.switchToDevice($0) }
                     ),
                     font: .systemFont(ofSize: NSFont.smallSystemFontSize),
-                    enabled: vm.availableDevices.count > 1,
+                    enabled: pickable,
                     showsHoverBorder: false,
                     onRightClick: { vm.transport.reconnect() }
                 )
                 .overlay(alignment: .trailing) {
-                    if vm.availableDevices.count > 1 {
+                    if pickable {
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundColor(.secondary)
@@ -392,7 +397,7 @@ struct ConnectionStatusIndicator: View {
                     }
                 }
                 .fixedSize()
-                .allowsHitTesting(vm.availableDevices.count > 1)
+                .allowsHitTesting(pickable)
             }
         }
     }

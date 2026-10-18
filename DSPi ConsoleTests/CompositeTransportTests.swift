@@ -35,6 +35,42 @@ final class CompositeTransportTests: XCTestCase {
         XCTAssertEqual(remote.first?.displayName, "DSPi (00REMOTE) via Studio")
     }
 
+    /// With no local board, a device on an open hub is picked and connected
+    /// on its own, as USBDevice does for a local one.  The picker used to show
+    /// it while nothing ever selected it, so the link never opened.
+    func testLoneRemoteDeviceOnOpenHubIsSelectedAutomatically() {
+        let (local, _, _) = makeLocal()
+        let fake = LinkClientFake()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { fake }
+        var open = hub("bridge-1", serials: ["REMOTE0000REMOTE"])
+        open.authMode = "none"
+        composite.updateHubs([open])
+        XCTAssertTrue(composite.isRemoteActive)
+        XCTAssertEqual(fake.connectCalls.count, 1, "connects once, not again on the re-entrant recompute")
+
+        composite.updateHubs([open])
+        XCTAssertEqual(fake.connectCalls.count, 1, "a later browse update does not reconnect")
+    }
+
+    /// A PIN hub is left for the user to choose: selecting it would raise a
+    /// pairing prompt nobody asked for.  A stored token means no prompt.
+    func testPinHubIsAutoSelectedOnlyWithAStoredToken() {
+        let (local, _, _) = makeLocal()
+        let fake = LinkClientFake()
+        let tokens = LinkTokenStore(service: "t-\(UUID())")
+        let composite = CompositeTransport(local: local, tokens: tokens, clientName: "T") { fake }
+        composite.updateHubs([hub("hub-1", serials: ["REMOTE0000REMOTE"])])
+        XCTAssertFalse(composite.isRemoteActive)
+        XCTAssertTrue(fake.connectCalls.isEmpty)
+
+        tokens.setToken("tok", forHub: "hub-2")
+        composite.updateHubs([hub("hub-2", serials: ["REMOTE0000REMOTE"])])
+        XCTAssertTrue(composite.isRemoteActive)
+        XCTAssertEqual(fake.connectCalls.count, 1)
+        tokens.removeToken(forHub: "hub-2")
+    }
+
     func testSelectingRemoteConnectsBindsAndSwitches() {
         let (local, _, _) = makeLocal()
         let fake = LinkClientFake()

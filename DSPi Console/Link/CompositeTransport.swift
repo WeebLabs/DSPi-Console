@@ -43,6 +43,9 @@ final class CompositeTransport: DeviceTransport {
     /// which fires before the property is stored, so reading
     /// `local.availableDevices` inside the sink would see the previous list.
     private var localDevices: [DSPiDevice] = []
+    /// Set while autoSelectRemoteIfIdle runs: connecting subscribes to the
+    /// remote's device list, which emits at once and recomputes re-entrantly.
+    private var autoSelecting = false
 
     init(local: HubTransport, tokens: LinkTokenStore, clientName: String,
          makeClient: @escaping () -> LinkClientProtocol) {
@@ -113,6 +116,26 @@ final class CompositeTransport: DeviceTransport {
             }
         }
         devicesSubject.send(merged)
+        autoSelectRemoteIfIdle(merged, hubs: hubs)
+    }
+
+    /// USBDevice selects the first local board on its own; nothing did the
+    /// same for a remote one, so with only a shared device on the network the
+    /// picker showed it but never connected.  Pick it when no local board is
+    /// present or selected, and only on a hub that will not stop to ask for a
+    /// PIN: a pairing prompt nobody asked for at launch is worse than a click.
+    private func autoSelectRemoteIfIdle(_ merged: [DSPiDevice], hubs: [DiscoveredHub]) {
+        guard !autoSelecting, active === local, local.selectedDevice == nil else { return }
+        stateLock.lock(); let noLocal = localDevices.isEmpty; stateLock.unlock()
+        guard noLocal else { return }
+        let candidate = merged.first { device in
+            guard let ref = device.hub, let hub = hubs.first(where: { $0.id == ref.hubID }) else { return false }
+            return hub.authMode == "none" || tokens.token(forHub: hub.id) != nil
+        }
+        guard let device = candidate else { return }
+        autoSelecting = true
+        defer { autoSelecting = false }
+        selectDevice(device)
     }
 
     // MARK: - Switching
