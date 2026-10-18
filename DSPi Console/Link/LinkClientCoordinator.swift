@@ -13,7 +13,7 @@ import Combine
 
 @MainActor
 final class LinkClientCoordinator: ObservableObject {
-    let browser = HubBrowser()
+    let browser: HubBrowser
     private let composite: CompositeTransport
     private let defaults: UserDefaults
     private var cancellables = Set<AnyCancellable>()
@@ -35,7 +35,11 @@ final class LinkClientCoordinator: ObservableObject {
         static let manual = "LinkManualHubs"
     }
 
-    init(composite: CompositeTransport, defaults: UserDefaults = .standard) {
+    /// `ownHubID` is this Console's hub id, so its own advertisement is not
+    /// listed as another hub.
+    init(composite: CompositeTransport, ownHubID: String? = nil,
+         defaults: UserDefaults = .standard) {
+        self.browser = HubBrowser(ownHubID: ownHubID)
         self.composite = composite
         self.defaults = defaults
         self.lookForHubs = defaults.object(forKey: Keys.lookForHubs) as? Bool ?? false
@@ -45,7 +49,7 @@ final class LinkClientCoordinator: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] hubs in
                 self?.hubs = hubs
-                self?.composite.updateHubs(hubs)
+                self?.composite.updateHubs(hubs.filter { !$0.isSelf })
             }
             .store(in: &cancellables)
 

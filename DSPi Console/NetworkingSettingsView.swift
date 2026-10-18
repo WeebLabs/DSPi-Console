@@ -225,7 +225,9 @@ struct NetworkingSettingsTab: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(hub.name)
                             // verbatim: a localized Text would print the port as "11,915".
-                            Text(verbatim: "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s"), \(hub.authMode == "none" ? "open" : "pairing required")")
+                            Text(verbatim: hub.isSelf
+                                 ? "\(hub.displayAddress), this Console's own hub, not used"
+                                 : "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s"), \(hub.authMode == "none" ? "open" : "pairing required")")
                                 .font(.caption2).foregroundColor(.secondary)
                         }
                         Spacer()

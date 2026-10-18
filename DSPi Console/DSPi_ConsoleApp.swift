@@ -57,7 +57,8 @@ class AppState: ObservableObject {
     /// Console as a client: the hub browser and the "look for hubs" preference,
     /// feeding the composite so shared devices reach the device picker.
     @MainActor lazy var linkClientCoordinator: LinkClientCoordinator =
-        LinkClientCoordinator(composite: transport)
+        LinkClientCoordinator(composite: transport,
+                              ownHubID: linkHub.auth.hubID.uuidString.lowercased())
 
     lazy var viewModel: DSPViewModel = DSPViewModel(transport: transport)
 

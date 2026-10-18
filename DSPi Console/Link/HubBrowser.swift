@@ -30,6 +30,9 @@ struct DiscoveredHub: Identifiable, Equatable {
     var host: String
     var port: Int
     var isManual: Bool
+    /// A typed address that turned out to be this Console's own hub.  Kept
+    /// in the list so the user can remove it, never offered as a device source.
+    var isSelf = false
 
     private var isIPv6Literal: Bool { host.contains(":") }
 
@@ -39,6 +42,13 @@ struct DiscoveredHub: Identifiable, Equatable {
         let urlHost = isIPv6Literal
             ? "[\(host.replacingOccurrences(of: "%", with: "%25"))]" : host
         return URL(string: "\(tls ? "wss" : "ws")://\(urlHost):\(port)\(path)")
+    }
+
+    /// The plain-HTTP discovery endpoint (spec 3.2), which names the hub.
+    var infoURL: URL? {
+        guard var url = webSocketURL?.absoluteString else { return nil }
+        url = url.replacingOccurrences(of: tls ? "wss://" : "ws://", with: tls ? "https://" : "http://")
+        return URL(string: url + "/info")
     }
 
     /// "host:port" for display, bracketing an IPv6 literal.
@@ -56,6 +66,24 @@ final class HubBrowser: ObservableObject {
     private var manual: [DiscoveredHub] = []
     private var browsed: [String: DiscoveredHub] = [:]   // keyed by service name
     private var resolvers: [String: NWConnection] = [:]
+
+    /// This Console's own hub id.  Bonjour hands back our own advertisement
+    /// along with everyone else's; it is not an "other" hub.
+    private let ownHubID: String?
+    /// Fetches a hub's info document; injected so tests need no server.
+    private let fetchInfo: (URL, @escaping (Data?) -> Void) -> Void
+
+    init(ownHubID: String? = nil,
+         fetchInfo: @escaping (URL, @escaping (Data?) -> Void) -> Void = HubBrowser.fetchOverHTTP) {
+        self.ownHubID = ownHubID?.lowercased()
+        self.fetchInfo = fetchInfo
+    }
+
+    nonisolated static func fetchOverHTTP(_ url: URL, _ completion: @escaping (Data?) -> Void) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { data, _, _ in completion(data) }.resume()
+    }
 
     func start() {
         guard browser == nil else { return }
@@ -115,6 +143,24 @@ final class HubBrowser: ObservableObject {
         manual.removeAll { $0.id == hub.id }
         manual.append(hub)
         publish()
+        checkManualIsSelf(hub)
+    }
+
+    /// A typed address carries no hub id until something asks.  The info
+    /// endpoint answers without a session, so ask it whether this is us.
+    private func checkManualIsSelf(_ hub: DiscoveredHub) {
+        guard let own = ownHubID, let url = hub.infoURL else { return }
+        let id = hub.id
+        fetchInfo(url) { [weak self] data in
+            struct Info: Decodable { struct Hub: Decodable { let id: String }; let hub: Hub }
+            guard let data = data, let info = try? JSONDecoder().decode(Info.self, from: data),
+                  info.hub.id.lowercased() == own else { return }
+            Task { @MainActor in
+                guard let self = self, let index = self.manual.firstIndex(where: { $0.id == id }) else { return }
+                self.manual[index].isSelf = true
+                self.publish()
+            }
+        }
     }
 
     func removeManual(_ hub: DiscoveredHub) {
@@ -125,16 +171,30 @@ final class HubBrowser: ObservableObject {
     // MARK: - Browsing
 
     private func apply(_ results: Set<NWBrowser.Result>) {
+        ingest(results.compactMap { result in
+            guard case let .service(name, _, _, _) = result.endpoint else { return nil }
+            if case let .bonjour(txt) = result.metadata { return (name, txt, result.endpoint) }
+            return (name, nil, result.endpoint)
+        })
+    }
+
+    /// One browse snapshot.  Internal so a test can feed services without
+    /// Bonjour; a nil TXT keeps whatever is already known for that name.
+    func ingest(_ services: [(name: String, txt: NWTXTRecord?, endpoint: NWEndpoint)]) {
         var seen = Set<String>()
-        for result in results {
-            guard case let .service(name, _, _, _) = result.endpoint else { continue }
+        for (name, txt, endpoint) in services {
             seen.insert(name)
-            guard case let .bonjour(txt) = result.metadata else { continue }
+            guard let txt = txt else { continue }
             var hub = Self.hub(fromTXT: txt, serviceName: name)
+            // Left out of `seen`, so the sweep below drops it if it was listed.
+            if let own = ownHubID, hub.id.lowercased() == own { seen.remove(name); continue }
             // Keep an already resolved host/port; resolve the rest.
             if let known = browsed[name] { hub.host = known.host; hub.port = known.port }
+            if hub.host.isEmpty, case let .hostPort(host, port) = endpoint {
+                hub.host = Self.hostText(host); hub.port = Int(port.rawValue)
+            }
             browsed[name] = hub
-            if hub.host.isEmpty { resolve(name: name, endpoint: result.endpoint) }
+            if hub.host.isEmpty { resolve(name: name, endpoint: endpoint) }
         }
         for name in browsed.keys where !seen.contains(name) {
             browsed[name] = nil
