@@ -23,15 +23,27 @@ struct DiscoveredHub: Identifiable, Equatable {
     var serials: [String]
     var path: String
     var tls: Bool
-    /// Where to connect.  For a browsed service the endpoint; for a manual
-    /// entry the host and port.
+    /// Where to connect.  For a browsed service the resolved address; for a
+    /// manual entry what the user typed.  IPv6 literals are stored without
+    /// brackets and keep their zone ID ("fe80::1%en0"): a link-local address
+    /// is unroutable without it on a Mac with several interfaces.
     var host: String
     var port: Int
     var isManual: Bool
 
-    /// The WebSocket URL to open.
+    private var isIPv6Literal: Bool { host.contains(":") }
+
+    /// The WebSocket URL to open.  A zone ID is written "%25" (RFC 6874),
+    /// which URLSession accepts; a raw "%" makes URL(string:) fail.
     var webSocketURL: URL? {
-        URL(string: "\(tls ? "wss" : "ws")://\(host):\(port)\(path)")
+        let urlHost = isIPv6Literal
+            ? "[\(host.replacingOccurrences(of: "%", with: "%25"))]" : host
+        return URL(string: "\(tls ? "wss" : "ws")://\(urlHost):\(port)\(path)")
+    }
+
+    /// "host:port" for display, bracketing an IPv6 literal.
+    var displayAddress: String {
+        isIPv6Literal ? "[\(host)]:\(port)" : "\(host):\(port)"
     }
 }
 
@@ -69,14 +81,34 @@ final class HubBrowser: ObservableObject {
         isBrowsing = false
     }
 
-    /// Add a hub by "host" or "host:port".  Resolved to a real id on hello.
-    func addManual(_ text: String) {
+    /// Split "host", "host:port", "[v6]", "[v6]:port" or a bare IPv6
+    /// literal into host and port.  A bare literal has several colons, so its
+    /// last group is never mistaken for a port.
+    nonisolated static func parseAddress(_ text: String) -> (host: String, port: Int)? {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return }
-        var host = trimmed, port = LinkDiscovery.defaultPort
-        if let colon = trimmed.lastIndex(of: ":"), let p = Int(trimmed[trimmed.index(after: colon)...]) {
-            host = String(trimmed[..<colon]); port = p
+        guard !trimmed.isEmpty else { return nil }
+        let defaultPort = LinkDiscovery.defaultPort
+        if trimmed.hasPrefix("[") {
+            guard let close = trimmed.firstIndex(of: "]") else { return nil }
+            let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
+            let rest = trimmed[trimmed.index(after: close)...]
+            if rest.isEmpty { return host.isEmpty ? nil : (host, defaultPort) }
+            guard rest.hasPrefix(":"), let p = Int(rest.dropFirst()), !host.isEmpty else { return nil }
+            return (host, p)
         }
+        if trimmed.filter({ $0 == ":" }).count > 1 { return (trimmed, defaultPort) }
+        if let colon = trimmed.lastIndex(of: ":") {
+            guard let p = Int(trimmed[trimmed.index(after: colon)...]) else { return nil }
+            let host = String(trimmed[..<colon])
+            return host.isEmpty ? nil : (host, p)
+        }
+        return (trimmed, defaultPort)
+    }
+
+    /// Add a hub by typed address (see parseAddress).  Resolved to a real id
+    /// on hello.
+    func addManual(_ text: String) {
+        guard let (host, port) = Self.parseAddress(text) else { return }
         let hub = DiscoveredHub(id: "manual:\(host):\(port)", name: host, kind: "unknown",
                                 authMode: "pin", deviceCount: 0, serials: [], path: "/dspi/v1",
                                 tls: false, host: host, port: port, isManual: true)
@@ -120,16 +152,10 @@ final class HubBrowser: ObservableObject {
             guard case .ready = state, let path = conn?.currentPath,
                   let remote = path.remoteEndpoint,
                   case let .hostPort(host, port) = remote else { return }
-            let hostText: String
-            switch host {
-            case .ipv4(let a): hostText = "\(a)"
-            case .ipv6(let a): hostText = "[\(a)]"
-            case .name(let n, _): hostText = n
-            @unknown default: hostText = "\(host)"
-            }
+            let hostText = Self.hostText(host)
             Task { @MainActor in
                 guard let self = self, var hub = self.browsed[name] else { return }
-                hub.host = hostText.replacingOccurrences(of: "%.*", with: "", options: .regularExpression)
+                hub.host = hostText
                 hub.port = Int(port.rawValue)
                 self.browsed[name] = hub
                 self.resolvers[name]?.cancel(); self.resolvers[name] = nil
@@ -138,6 +164,26 @@ final class HubBrowser: ObservableObject {
         }
         resolvers[name] = conn
         conn.start(queue: .global(qos: .utility))
+    }
+
+    /// The resolved address as DiscoveredHub.host stores it.  Bonjour on a
+    /// LAN without IPv6 routing resolves to a link-local address, so the zone
+    /// ID must survive; add it from the interface if the text lacks it.
+    nonisolated static func hostText(_ host: NWEndpoint.Host) -> String {
+        switch host {
+        case .ipv4(let a):
+            return "\(a)".components(separatedBy: "%")[0]
+        case .ipv6(let a):
+            let text = "\(a)"
+            if a.isLinkLocal, !text.contains("%"), let iface = a.interface {
+                return "\(text)%\(iface.name)"
+            }
+            return text
+        case .name(let n, _):
+            return n
+        @unknown default:
+            return "\(host)"
+        }
     }
 
     private func publish() {

@@ -171,7 +171,73 @@ final class LinkServer {
     /// address-less peer counts as local; a routable public address does not.
     static func isLocalPeer(_ address: SocketAddress) -> Bool {
         guard let ip = address.ipAddress else { return true }
-        return isLocalIP(ip)
+        return isLocalIP(ip) || isOnLink(ip, subnets: localSubnets())
+    }
+
+    /// One interface address and its netmask, as raw bytes (4 or 16).
+    struct Subnet: Equatable {
+        let address: [UInt8]
+        let mask: [UInt8]
+    }
+
+    /// True when the peer shares a subnet with one of this Mac's interfaces.
+    /// A home network with ISP IPv6 hands every machine a public address, so
+    /// a client on the same LAN arrives from one that isLocalIP rejects.
+    static func isOnLink(_ raw: String, subnets: [Subnet]) -> Bool {
+        guard let peer = ipBytes(raw) else { return false }
+        return subnets.contains { net in
+            // An all-zero mask (a default route) would match the whole internet.
+            net.address.count == peer.count && net.mask.contains { $0 != 0 }
+                && zip(zip(peer, net.address), net.mask).allSatisfy { ($0.0 & $1) == ($0.1 & $1) }
+        }
+    }
+
+    /// The address as bytes, zone ID dropped; an IPv4-mapped IPv6 address
+    /// comes back as its 4 IPv4 bytes so it compares against IPv4 subnets.
+    static func ipBytes(_ raw: String) -> [UInt8]? {
+        let ip = raw.components(separatedBy: "%")[0]
+        var v4 = in_addr()
+        if inet_pton(AF_INET, ip, &v4) == 1 {
+            return withUnsafeBytes(of: &v4) { Array($0) }
+        }
+        var v6 = in6_addr()
+        guard inet_pton(AF_INET6, ip, &v6) == 1 else { return nil }
+        let bytes = withUnsafeBytes(of: &v6) { Array($0) }
+        if bytes[0..<10].allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
+            return Array(bytes[12...])
+        }
+        return bytes
+    }
+
+    /// The subnets of every interface that is up, read fresh per connection
+    /// so a DHCP or router-advertisement change is picked up.
+    static func localSubnets() -> [Subnet] {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return [] }
+        defer { freeifaddrs(head) }
+        var subnets: [Subnet] = []
+        for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let ifa = ptr.pointee
+            guard (ifa.ifa_flags & UInt32(IFF_UP)) != 0,
+                  let addr = ifa.ifa_addr, let mask = ifa.ifa_netmask else { continue }
+            switch Int32(addr.pointee.sa_family) {
+            case AF_INET:
+                let a = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { p in
+                    withUnsafeBytes(of: p.pointee.sin_addr) { Array($0) } }
+                let m = mask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { p in
+                    withUnsafeBytes(of: p.pointee.sin_addr) { Array($0) } }
+                subnets.append(Subnet(address: a, mask: m))
+            case AF_INET6:
+                let a = addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { p in
+                    withUnsafeBytes(of: p.pointee.sin6_addr) { Array($0) } }
+                let m = mask.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { p in
+                    withUnsafeBytes(of: p.pointee.sin6_addr) { Array($0) } }
+                subnets.append(Subnet(address: a, mask: m))
+            default:
+                continue
+            }
+        }
+        return subnets
     }
 
     static func isLocalIP(_ raw: String) -> Bool {

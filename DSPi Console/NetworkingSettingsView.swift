@@ -224,7 +224,8 @@ struct NetworkingSettingsTab: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(hub.name)
-                            Text("\(hub.host):\(hub.port), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s"), \(hub.authMode == "none" ? "open" : "pairing required")")
+                            // verbatim: a localized Text would print the port as "11,915".
+                            Text(verbatim: "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s"), \(hub.authMode == "none" ? "open" : "pairing required")")
                                 .font(.caption2).foregroundColor(.secondary)
                         }
                         Spacer()

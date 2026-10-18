@@ -324,6 +324,24 @@ extension LinkServerTests {
         for ip in rejected { XCTAssertFalse(LinkServer.isLocalIP(ip), "\(ip) is not local") }
     }
 
+    /// A peer on one of this Mac's own subnets is local even with a public
+    /// address, as every machine on a LAN with ISP IPv6 has one.
+    func testPeerGateAcceptsOnLinkPublicAddresses() {
+        let v6 = LinkServer.Subnet(address: LinkServer.ipBytes("2001:db8:1:2::10")!,
+                                   mask: [UInt8](repeating: 0xff, count: 8) + [UInt8](repeating: 0, count: 8))
+        let v4 = LinkServer.Subnet(address: LinkServer.ipBytes("203.0.113.5")!, mask: [255, 255, 255, 0])
+        let defaultRoute = LinkServer.Subnet(address: LinkServer.ipBytes("::")!, mask: [UInt8](repeating: 0, count: 16))
+        let nets = [v6, v4, defaultRoute]
+        XCTAssertTrue(LinkServer.isOnLink("2001:db8:1:2:abcd::1", subnets: nets))
+        XCTAssertTrue(LinkServer.isOnLink("203.0.113.200", subnets: nets))
+        XCTAssertTrue(LinkServer.isOnLink("::ffff:203.0.113.9", subnets: nets))
+        XCTAssertFalse(LinkServer.isOnLink("2001:db8:1:3::1", subnets: nets))
+        XCTAssertFalse(LinkServer.isOnLink("203.0.114.1", subnets: nets))
+        XCTAssertFalse(LinkServer.isOnLink("8.8.8.8", subnets: nets), "a zero mask matches nothing")
+        XCTAssertFalse(LinkServer.isOnLink("not an ip", subnets: nets))
+        XCTAssertFalse(LinkServer.localSubnets().isEmpty, "loopback at least is up")
+    }
+
     /// The server listens dual-stack: IPv4, IPv6 loopback and the name
     /// "localhost" all reach it.
     func testServerIsReachableOverIPv4AndIPv6() throws {

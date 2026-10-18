@@ -150,8 +150,12 @@ final class CompositeTransport: DeviceTransport {
             return
         }
         stateLock.lock(); let hub = knownHubs.first { $0.id == ref.hubID }; stateLock.unlock()
-        guard let hub = hub, let transport = remoteConnecting(to: hub) else {
+        guard let hub = hub else {
             errorSubject.send("Hub \(ref.hubName) is no longer on the network.")
+            return
+        }
+        guard let transport = remoteConnecting(to: hub) else {
+            errorSubject.send("Hub \(ref.hubName) has an address Console cannot connect to (\(hub.displayAddress)).")
             return
         }
         transport.bind(serial: device.serial)

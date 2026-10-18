@@ -61,7 +61,10 @@ final class LinkClientCoordinator: ObservableObject {
     }
 
     func removeManual(_ hub: DiscoveredHub) {
-        manualAddresses.removeAll { $0 == hub.host || $0 == "\(hub.host):\(hub.port)" }
+        manualAddresses.removeAll {
+            guard let parsed = HubBrowser.parseAddress($0) else { return false }
+            return parsed.host == hub.host && parsed.port == hub.port
+        }
         browser.removeManual(hub)
     }
 }
