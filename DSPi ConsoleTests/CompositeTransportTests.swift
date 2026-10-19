@@ -71,6 +71,84 @@ final class CompositeTransportTests: XCTestCase {
         tokens.removeToken(forHub: "hub-2")
     }
 
+    /// A local board with nothing attached to the hub: only USBDevice's
+    /// published list and selection, which is all the composite watches.
+    private func makeBareLocal() -> (HubTransport, USBDevice) {
+        let usb = USBDevice(startMonitoring: false)
+        let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("ct-\(UUID().uuidString).json"))
+        let hub = LinkHub(usb: usb, policy: LinkPolicy.bundled ?? .empty, auth: auth)
+        return (HubTransport(hub: hub, usb: usb), usb)
+    }
+
+    private func openBridge() -> DiscoveredHub {
+        var bridge = hub("bridge-1", serials: ["REMOTE0000REMOTE"])
+        bridge.authMode = "none"
+        return bridge
+    }
+
+    /// USBDevice.onTerminated empties its list before it clears the
+    /// selection.  The auto-select used to look only at the list change, find
+    /// the board still selected, and never run again, leaving the bridge's
+    /// device in the picker with a red dot until something republished hubs.
+    func testUnpluggingTheLocalBoardSelectsAnOpenRemote() {
+        let (local, usb) = makeBareLocal()
+        let fake = LinkClientFake()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { fake }
+        let board = DSPiDevice(serial: "LOCAL0000LOCAL00", locationID: 1)
+        usb.availableDevices = [board]
+        usb.selectedDevice = board
+        composite.updateHubs([openBridge()])
+        XCTAssertFalse(composite.isRemoteActive, "the local board is in use")
+
+        // onTerminated's order.
+        usb.availableDevices.removeAll()
+        usb.isConnected = false
+        usb.selectedDevice = nil
+
+        XCTAssertTrue(composite.isRemoteActive)
+        XCTAssertEqual(fake.connectCalls.count, 1)
+    }
+
+    /// A remote the composite picked on its own gives way to a board USBDevice
+    /// opens, as after a USB firmware flash: the installer verifies whichever
+    /// device the view model is on.
+    func testAutoSelectedRemoteHandsBackToALocalBoard() {
+        let (local, usb) = makeBareLocal()
+        let fake = LinkClientFake()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { fake }
+        composite.updateHubs([openBridge()])
+        XCTAssertTrue(composite.isRemoteActive)
+
+        // Listed but not yet opened: stay on the remote.
+        let board = DSPiDevice(serial: "LOCAL0000LOCAL00", locationID: 1)
+        usb.availableDevices = [board]
+        XCTAssertTrue(composite.isRemoteActive)
+
+        usb.selectedDevice = board
+        XCTAssertFalse(composite.isRemoteActive)
+        XCTAssertEqual(composite.session, LinkHub.localSessionID)
+        XCTAssertEqual(composite.selectedDevice, board)
+    }
+
+    /// A remote the user chose stays chosen when a local board turns up.
+    func testUserChosenRemoteIsKeptWhenALocalBoardAppears() {
+        let (local, usb) = makeBareLocal()
+        let fake = LinkClientFake()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { fake }
+        composite.updateHubs([openBridge()])
+        composite.selectDevice(composite.availableDevices.first { $0.isRemote }!)
+        XCTAssertTrue(composite.isRemoteActive)
+
+        let board = DSPiDevice(serial: "LOCAL0000LOCAL00", locationID: 1)
+        usb.availableDevices = [board]
+        usb.selectedDevice = board
+        XCTAssertTrue(composite.isRemoteActive)
+    }
+
     func testSelectingRemoteConnectsBindsAndSwitches() {
         let (local, _, _) = makeLocal()
         let fake = LinkClientFake()

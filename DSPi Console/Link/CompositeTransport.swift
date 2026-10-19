@@ -43,9 +43,19 @@ final class CompositeTransport: DeviceTransport {
     /// which fires before the property is stored, so reading
     /// `local.availableDevices` inside the sink would see the previous list.
     private var localDevices: [DSPiDevice] = []
+    /// The local selection as last emitted, for the same reason.  USBDevice
+    /// empties its list on unplug before it clears the selection, so the
+    /// auto-select must run again when the selection clears, not only when
+    /// the list changes.
+    private var localSelected: DSPiDevice?
+    private var localSelectedCancellable: AnyCancellable?
     /// Set while autoSelectRemoteIfIdle runs: connecting subscribes to the
     /// remote's device list, which emits at once and recomputes re-entrantly.
     private var autoSelecting = false
+    /// True while the active remote was picked by autoSelectRemoteIfIdle
+    /// rather than by the user.  Such a remote yields to a local board that
+    /// USBDevice opens, as it would have with no hub on the network.
+    private var remoteWasAutoSelected = false
 
     init(local: HubTransport, tokens: LinkTokenStore, clientName: String,
          makeClient: @escaping () -> LinkClientProtocol) {
@@ -61,6 +71,27 @@ final class CompositeTransport: DeviceTransport {
                 self.stateLock.lock(); self.localDevices = devices; self.stateLock.unlock()
                 self.recomputeDevices()
             }
+        localSelectedCancellable = local.selectedDevicePublisher
+            .sink { [weak self] device in self?.localSelectionChanged(device) }
+    }
+
+    /// A board USBDevice has opened takes back from a remote it picked on its
+    /// own: a USB firmware flash unplugs the board for a moment, and the
+    /// installer verifies whichever device the view model is on.  A cleared
+    /// selection gives the auto-select its chance at a remote device.
+    private func localSelectionChanged(_ device: DSPiDevice?) {
+        stateLock.lock(); localSelected = device; stateLock.unlock()
+        if device != nil {
+            if remoteWasAutoSelected && active !== local {
+                remoteWasAutoSelected = false
+                attach(to: local)
+                // Subscribing inside @Published's willSet replays the old
+                // (nil) selection; publish the one being stored.
+                selectedSubject.send(device)
+            }
+        } else {
+            recomputeDevices()
+        }
     }
 
     // MARK: - Hubs
@@ -125,8 +156,8 @@ final class CompositeTransport: DeviceTransport {
     /// present or selected, and only on a hub that will not stop to ask for a
     /// PIN: a pairing prompt nobody asked for at launch is worse than a click.
     private func autoSelectRemoteIfIdle(_ merged: [DSPiDevice], hubs: [DiscoveredHub]) {
-        guard !autoSelecting, active === local, local.selectedDevice == nil else { return }
-        stateLock.lock(); let noLocal = localDevices.isEmpty; stateLock.unlock()
+        guard !autoSelecting, active === local else { return }
+        stateLock.lock(); let noLocal = localDevices.isEmpty && localSelected == nil; stateLock.unlock()
         guard noLocal else { return }
         let candidate = merged.first { device in
             guard let ref = device.hub, let hub = hubs.first(where: { $0.id == ref.hubID }) else { return false }
@@ -135,7 +166,8 @@ final class CompositeTransport: DeviceTransport {
         guard let device = candidate else { return }
         autoSelecting = true
         defer { autoSelecting = false }
-        selectDevice(device)
+        select(device)
+        remoteWasAutoSelected = active !== local
     }
 
     // MARK: - Switching
@@ -166,7 +198,14 @@ final class CompositeTransport: DeviceTransport {
     var errorMessage: String? { errorSubject.value }
     var errorMessagePublisher: AnyPublisher<String?, Never> { errorSubject.eraseToAnyPublisher() }
 
+    /// The user's choice: a remote picked here stays put when a local board
+    /// appears.
     func selectDevice(_ device: DSPiDevice) {
+        remoteWasAutoSelected = false
+        select(device)
+    }
+
+    private func select(_ device: DSPiDevice) {
         guard let ref = device.hub else {
             if active !== local { attach(to: local) }
             local.selectDevice(device)
