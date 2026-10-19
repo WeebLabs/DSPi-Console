@@ -116,6 +116,13 @@ This README is the user guide for Console. It explains every part of the app and
   - [Updating from the Console](#updating-from-the-console)
   - [Bootloader Mode](#bootloader-mode)
   - [Firmware Update Messages](#firmware-update-messages)
+- [DSPi Link](#dspi-link)
+  - [Sharing a DSPi from This Mac](#sharing-a-dspi-from-this-mac)
+  - [Pairing a Client](#pairing-a-client)
+  - [Using a Shared DSPi from Another Mac](#using-a-shared-dspi-from-another-mac)
+  - [Using a Browser](#using-a-browser)
+  - [Setting Up an ESP32 Bridge](#setting-up-an-esp32-bridge)
+  - [DSPi Link Troubleshooting](#dspi-link-troubleshooting)
 - [Help Menu](#help-menu)
 - [Keyboard Shortcut Reference](#keyboard-shortcut-reference)
 - [Building from Source](#building-from-source)
@@ -1311,7 +1318,7 @@ The sidebar groups the pages:
 
 | Group | Pages |
 |---|---|
-| **Application** | [About](#about), [Advanced](#advanced) |
+| **Application** | [About](#about), [Advanced](#advanced), [Networking](#dspi-link) |
 | **Display** | [Graphing](#graphing), [Spectrum Analyser](#spectrum-analyser-settings) |
 | **System** | [Overview](#pin-overview), [Inputs](#inputs), [Outputs](#outputs), [I2S Configuration](#i2s-configuration), [Global Parameters](#global-parameters) |
 | **Control** | [Control Surfaces](#control-surfaces), [Control Interfaces](#control-interfaces), [Channel Groups](#channel-groups), [Macros](#macros), [Auxiliary Outputs](#auxiliary-outputs) |
@@ -1824,6 +1831,157 @@ To flash a firmware file of your own, click **Enter bootloader mode without inst
 | Writing the firmware failed | Copying to the board failed; try again with a different cable or port. |
 | The firmware was written but the device did not reappear | Unplug the board, plug it back in, and check whether it works. |
 | The device came back running a different firmware | The update didn't take; try again. |
+
+---
+
+## DSPi Link
+
+DSPi Link lets you control a DSPi over your local network instead of a USB cable. A DSPi is shared by a **hub**, and anything that connects to a hub is a **client**.
+
+There are two kinds of hub:
+
+- **A Mac running Console** shares the DSPi devices plugged into it by USB.
+- **An ESP32 bridge** is a small Wi-Fi board wired to a DSPi's serial port. It needs no computer, so the DSPi can sit anywhere on your network.
+
+There are two kinds of client:
+
+- **Console on another Mac** lists shared devices in its device menu and controls them exactly as it controls a local one.
+- **A web browser** on a phone, tablet or computer opens a control page that the hub serves itself.
+
+DSPi Link works only on your local network. Do not forward its port (11915) on your router. To reach your devices away from home, use a VPN such as Tailscale or WireGuard.
+
+The first time Console uses the network, macOS asks whether it may find devices on your local network. Choose **Allow**. If you chose otherwise, turn Console on under **System Settings > Privacy & Security > Local Network**.
+
+### Sharing a DSPi from This Mac
+
+1. Plug the DSPi into this Mac.
+2. Open **Settings > Networking**.
+3. Turn on **Share devices on this network**. The **Status** line turns green and shows the address clients can use, such as `192.168.1.53:11915`.
+4. Under **Hub**, give the hub a **Name**. Clients see it after each device's name, for example **via Studio Mac**.
+5. Under **Security**, choose who may connect:
+   - **Require pairing** (the default). Each new client must enter a six-digit code before it can connect. See [Pairing a Client](#pairing-a-client).
+   - **Open (no pairing)**. Anyone on the network gets full control, as an Admin, without a code. Use this only on a network you trust.
+
+Clients stay connected only while this Mac is awake and Console is running. To keep sharing without the main window open, use **Run as a Gateway** on the same page:
+
+- **Show in the menu bar** puts Console in the menu bar. Closing the main window then hides Console there instead of quitting, and sharing carries on. **Window > Minimise to Menu Bar** (**Cmd+Option+M**) does the same.
+- **Start at login** opens Console when you log in, and **Start hidden in the menu bar** keeps the window closed when it starts.
+- **Prevent this Mac from sleeping while sharing is on** stops the Mac sleeping while clients rely on it.
+
+### Pairing a Client
+
+When the hub requires pairing, a client asks for a code the first time it connects. The code proves the client is yours; after that, the client remembers its pairing and connects without asking again.
+
+1. On the hub Mac, open **Settings > Networking** and click **Allow a new client** under **Clients**. A six-digit **Pairing code** appears. It lasts two minutes.
+2. On the client, choose the shared device. Console shows **Pair with** followed by the hub's name. Type the code and click **Pair**. A browser shows a similar box.
+3. The client appears in the hub's **Clients** list, with when it was last seen.
+
+Each paired client has a role, which you can change at any time from the menu next to its name:
+
+| Role | What the client can do |
+|---|---|
+| **Viewer** | Watch levels, meters and settings, but change nothing. |
+| **Control** | Change the sound live: EQ, volume, routing, delays and effects. A Control client cannot save presets to the device, change pins or wiring, edit control surfaces or factory reset it. A new Console client pairs as Control. |
+| **Admin** | Everything, including saving presets, pins and wiring, control surfaces and factory reset, and managing the hub: renaming it, and changing or removing its paired clients. |
+
+To save presets or change wiring from another Mac, set that client's role to **Admin** on the hub.
+
+To stop a client connecting, click the trash button next to it. If it is connected at that moment, it is disconnected straight away. To use it again, pair it again.
+
+### Using a Shared DSPi from Another Mac
+
+1. On the Mac you want to control from, open **Settings > Networking**.
+2. Under **Other Hubs**, turn on **Look for DSPi devices shared on this network**. Every hub Console finds is listed with its address, how many devices it shares, and whether it needs pairing.
+3. Shared devices now appear in the device menu at the top right of the main window, named with the hub they are on, for example **DSPi 4454 via DSPi Bridge 1B34**.
+4. Choose the device. If the hub requires pairing, enter its code (see [Pairing a Client](#pairing-a-client)). The status dot turns green when the device is ready.
+
+If no DSPi is plugged into this Mac, Console picks a shared device by itself, as long as its hub needs no pairing or this Mac has already paired with it. Otherwise choose it from the device menu.
+
+If a hub does not appear in the list, type its address into **Add a hub by address** and click **Add**. Any of these forms work:
+
+- An IP address or name, such as `192.168.1.58` or `dspi-bridge-1b34.local`. The standard port, 11915, is assumed.
+- An address with a port, such as `192.168.1.58:12000`.
+- An IPv6 address in square brackets, such as `[fe80::1%en0]:11915`.
+
+Addresses you add stay in the list, with a trash button to remove them. The list never includes this Mac's own hub; if you add this Mac's address, the row says it is this Console's own hub and Console ignores it.
+
+Firmware updates do not work over DSPi Link. To install firmware, plug the DSPi into a Mac by USB (see [Firmware Updates](#firmware-updates)). Through an ESP32 bridge, the DSPi's [Control Interfaces](#control-interfaces) settings cannot be changed either, because the DSPi accepts them only over USB.
+
+### Using a Browser
+
+Open the hub's address in a browser on the same network, with `http://` in front:
+
+- For a Mac hub, use the address shown on the **Status** line in **Settings > Networking**, such as `http://192.168.1.53:11915`.
+- For an ESP32 bridge, use the address its setup page showed, such as `http://dspi-bridge-1b34.local:11915`.
+
+If the hub requires pairing, the page asks for a code the first time, as Console does.
+
+### Setting Up an ESP32 Bridge
+
+An ESP32 bridge turns a common ESP32 development board into a DSPi Link hub. It connects to the DSPi with three wires and joins your Wi-Fi. It works with boards built on the ESP32, ESP32-S3, ESP32-C3 or ESP32-C6, with at least 4 MB of flash. The bridge has its own [guide](https://github.com/WeebLabs/DSPi-Link/tree/main/bridge/esp32), which covers updating, resets and troubleshooting in more detail.
+
+**1. Turn on the DSPi's serial port.** With the DSPi plugged into your Mac by USB, open **Settings > Control Interfaces** (see [Control Interfaces](#control-interfaces)) and set the UART as follows. Then click **Apply**.
+
+| Setting | Value |
+|---|---|
+| **Enable UART** | On |
+| **TX Pin** | GPIO 16 |
+| **RX Pin** | GPIO 17 |
+| **Baud Rate** | 1000000 |
+| **Push Notifications** | On |
+
+The DSPi keeps these settings, even through a factory reset, so this is a one-time step.
+
+**2. Wire the bridge to the DSPi.** Connect three wires, keeping them under 30 cm. TX on one board always goes to RX on the other.
+
+| ESP32 board | DSPi |
+|---|---|
+| UART TX pin (from the table below) | GPIO 17 (UART RX) |
+| UART RX pin (from the table below) | GPIO 16 (UART TX) |
+| GND | GND |
+
+| Chip | UART TX | UART RX |
+|---|---|---|
+| ESP32 | GPIO 19 | GPIO 18 |
+| ESP32-S3 | GPIO 17 | GPIO 18 |
+| ESP32-C3 | GPIO 5 | GPIO 4 |
+| ESP32-C6 | GPIO 22 | GPIO 23 |
+
+Both boards use 3.3 V logic, so no level shifter is needed. Power the ESP32 board from its own USB socket or a 5 V supply, never from the DSPi's 3.3 V pin. Wi-Fi draws more current than the DSPi can supply, and the result looks like random crashes on both boards. The ground wire is needed either way.
+
+**3. Install the bridge firmware.** Plug the ESP32 board into a computer by USB and open the [bridge installer](https://weeblabs.github.io/DSPi-Link/installer/) in Chrome or Edge. Click **Install** and choose the board's port. The installer erases the board first. If no port appears, try another cable, since some carry power only.
+
+**4. Join the bridge to your Wi-Fi.** After installing, the bridge creates an open Wi-Fi network called **DSPi Bridge** followed by four characters, such as `DSPi Bridge 1B34`.
+
+1. Join that network from your phone. The setup page opens by itself; if it does not, browse to `http://192.168.4.1/`.
+2. Choose your home network and enter its password. ESP32 boards use 2.4 GHz Wi-Fi only.
+3. Give the bridge a name, and choose whether to protect it with a PIN. Write the PIN down: the only way past a forgotten PIN is a factory reset.
+4. The page shows the bridge's address once it has joined your network. Note it down for using a browser later.
+
+**5. Use it.** On your Mac, turn on **Look for DSPi devices shared on this network** (see [Using a Shared DSPi from Another Mac](#using-a-shared-dspi-from-another-mac)). The bridge appears under **Other Hubs**, and its DSPi appears in the device menu. If you set a PIN, Console asks for it the first time; enter the PIN you chose in step 4.
+
+To change the bridge's Wi-Fi, PIN, name or pins later, open its address in a browser and choose **Bridge settings**. If your home network disappears for three minutes, the bridge brings its setup network back, so you can move it to a new network from your phone.
+
+The board's **BOOT** button resets the bridge. Hold it, then let go:
+
+| Hold for | What happens |
+|---|---|
+| 5 to 15 seconds | Forgets the Wi-Fi network and restarts into its setup network. Everything else is kept. |
+| 15 to 30 seconds | Factory reset: erases everything, including the PIN. |
+
+### DSPi Link Troubleshooting
+
+| Problem | What to try |
+|---|---|
+| A hub does not appear under **Other Hubs** | Make sure both are on the same network. A guest network, a separate VLAN or "client isolation" on the access point hides hubs from each other. Check that Console is allowed under **System Settings > Privacy & Security > Local Network**. You can also add the hub by its IP address. |
+| The device is listed, but the dot stays red | Choose the device from the device menu, or right-click the device name to reconnect. If you cancelled pairing, choosing the device again asks for the code again. Hover the red dot to see the last error. |
+| Pairing failed | A Mac hub's code lasts two minutes. Click **Allow a new client** for a fresh one. For a bridge, use the PIN you chose when setting it up. |
+| Clients keep disconnecting | The hub Mac went to sleep, or Console quit. Turn on **Prevent this Mac from sleeping while sharing is on**, and use **Show in the menu bar** so closing the window does not quit Console. |
+| The bridge says "DSPi not found" or "DSPi not answering" | The DSPi's UART is off, TX and RX are swapped, the ground wire is missing, or the UART was moved to other pins. Check step 1 and step 2 of [Setting Up an ESP32 Bridge](#setting-up-an-esp32-bridge). |
+| The bridge restarts at random | It is almost always power. Run the ESP32 board from its own USB supply, not from the DSPi. |
+| A `.local` address does not open | Some systems, including older Windows and Android, cannot look up `.local` names. Use the IP address instead. |
+| A setting is refused from another Mac | The client is a Viewer or Control client. On the hub, set its role to **Admin** to save presets or change wiring. |
+| I cannot update firmware over the network | Firmware updates need the DSPi plugged into a Mac by USB. |
 
 ---
 
