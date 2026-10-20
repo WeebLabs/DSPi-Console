@@ -234,6 +234,68 @@ final class RtaSharingTests: XCTestCase {
         XCTAssertEqual(engine.ownership, .following(origin: 7))
     }
 
+    /// Showing a second display of the same selection (the bars beside the
+    /// graph) is not a choice, so it must not push over the console we follow.
+    func testShowingAnotherDisplayDoesNotTakeControl() {
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1, wantsBins: true))
+        tick()
+        fake.config = out(0b100)
+        engine.deviceAnnounced(out(0b100), origin: 7)
+        let pushes = fake.pushes.count
+
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick(3)
+        XCTAssertEqual(engine.ownership, .following(origin: 7))
+        XCTAssertEqual(fake.pushes.count, pushes)
+    }
+
+    /// Hiding the only display and showing it again keeps following.
+    func testReshowingAfterHidingAllKeepsFollowing() {
+        let id = engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick()
+        fake.config = out(0b100)
+        engine.deviceAnnounced(out(0b100), origin: 7)
+        let pushes = fake.pushes.count
+
+        engine.release(id)
+        pump()
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick(3)
+        XCTAssertEqual(engine.ownership, .following(origin: 7))
+        XCTAssertEqual(fake.pushes.count, pushes)
+    }
+
+    /// While driving, showing a display again does not push the same
+    /// configuration over again: the device kept it.
+    func testReshowingWhileDrivingDoesNotRepush() {
+        let id = engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick()
+        engine.deviceAnnounced(out(0b1), origin: fake.session)
+        engine.release(id)
+        pump()
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick(3)
+        XCTAssertEqual(fake.pushes.count, 1)
+        XCTAssertEqual(engine.ownership, .driving)
+    }
+
+    /// A change someone else makes while nothing here watches is followed
+    /// when a display comes back, not pushed over.
+    func testChangeWhileHiddenIsFollowedOnReshow() {
+        let id = engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick()
+        engine.deviceAnnounced(out(0b1), origin: fake.session)
+        engine.release(id)
+        pump()
+        fake.config = out(0b100)
+        engine.deviceAnnounced(out(0b100), origin: 7)
+
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick(3)
+        XCTAssertEqual(engine.ownership, .following(origin: 7))
+        XCTAssertEqual(fake.pushes.count, 1)
+    }
+
     // MARK: Bar displays
 
     /// While following at the other tap the bars draw the device's channels,

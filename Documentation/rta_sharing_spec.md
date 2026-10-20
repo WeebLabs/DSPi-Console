@@ -78,8 +78,10 @@ updates the followed configuration in place.
 Any of these pushes the engine's own configuration again and returns it to
 `.driving`:
 
-- a view subscribes or updates its request to something different (the user
-  picked a channel or a tap);
+- the configuration the console's views ask for changes (the user picked a
+  channel or a tap). Showing or hiding a display of the same selection (the
+  response-graph overlay, the bar strip, the analyser window) is not a
+  change, so toggling one never takes control from another console;
 - `setOptions` changes a device-side option (FFT order, averaging, decay);
 - the user presses **Take control** in the graph options popover.
 
@@ -101,13 +103,19 @@ draw are still only the channels they asked for.
 `avgMs` is stored separately for the bin average, so a clamped value is not
 read as a difference and pushed again on every echo.
 
-A request that re-publishes the same thing does not take control (the
-existing `update` short-circuit), so a window being shown again does not
-steal the analyser.
+The engine remembers the configuration its views last asked for, through
+periods when no view watches, and compares each new request against it. A
+request that re-publishes the same thing, or a display shown again after all
+of them were hidden, does not take control.
 
 ### 3.4 Stopping
 
-Releasing the last subscription still sends `RTA_CTL_STOP`. On a hub it is
+Releasing the last subscription still sends `RTA_CTL_STOP`, but keeps the
+ownership state: the device holds its configuration through STOP and
+auto-off, so a display shown again resumes driving or following without a
+push. An `RTA_CONFIG` event that arrives while nothing watches is judged
+against the remembered configuration, so a change made meanwhile is followed
+when a display returns. On a hub it is
 swallowed while another session watches (section 4). Over plain USB with no
 other host it stops the engine at once as before, and if a UART bridge is
 reading, its next read restarts the analyser.

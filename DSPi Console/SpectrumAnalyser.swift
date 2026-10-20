@@ -462,6 +462,10 @@ final class RtaEngine: ObservableObject {
     /// from our own, so a channel the user unchecks really goes.
     private var sharedMask: UInt16 = 0
     private var sharedTap: UInt8 = RTA_TAP_OUTPUT
+    /// The configuration our views last asked for, kept while none is
+    /// watching, so a display shown again is told apart from a new choice and
+    /// events received meanwhile are judged against it.
+    private var lastOwn: RtaConfig? = nil
     /// A readback agreed since the last new push.  Only then does a
     /// disagreeing readback mean another host, rather than a refusal.
     private var everAgreed = false
@@ -515,8 +519,14 @@ final class RtaEngine: ObservableObject {
         if existing?.request == request { lock.unlock(); return }
         requestSeq += 1
         requests[id] = (requestSeq, request)
-        // A real change of what the user is looking at takes the analyser back.
-        takeControlLocked()
+        // Only a change of what this console asks for takes the analyser
+        // back.  Showing another display of the same selection (the graph,
+        // the bars, the window) is not a choice, and must not blank the
+        // picture of a console we are following.
+        if let mine = ownConfigLocked() {
+            if mine != lastOwn { takeControlLocked() }
+            lastOwn = mine
+        }
         lock.unlock()
         publishSharing()
     }
@@ -525,15 +535,11 @@ final class RtaEngine: ObservableObject {
         lock.lock()
         requests.removeValue(forKey: id)
         let empty = requests.isEmpty
-        if empty {
-            appliedConfig = nil
-            lastAttempted = nil
-            pushAttempts = 0
-            following = nil
-            everAgreed = false
-            pushOutstanding = false
-            stateEpoch += 1
-        }
+        // Ownership survives the last view going away: the device keeps its
+        // configuration through STOP and auto-off, and events keep arriving,
+        // so showing a display again resumes driving or following rather
+        // than pushing over another console.
+        if empty { stateEpoch += 1 }
         lock.unlock()
         guard empty else { return }
         publishSharing()
@@ -637,7 +643,9 @@ final class RtaEngine: ObservableObject {
         lock.lock()
         eventSeen = true
         stateEpoch += 1
-        let mine = ownConfigLocked()
+        // While no view watches, judge it against what we last asked for, so
+        // a display shown later follows a change made in the meantime.
+        let mine = ownConfigLocked() ?? lastOwn
         if !own { learnForeignLocked(config, mine: mine) }
         if let mine {
             if config.satisfies(mine) {
