@@ -95,11 +95,15 @@ struct GettingStartedView: View {
         }
         .frame(minWidth: 620, minHeight: 520)
         .onAppear { installer.beginWatching() }
-        .onDisappear { installer.stopWatching() }
+        .onDisappear {
+            installer.stopWatching()
+            vm.releaseFirmwareInstallLock()
+        }
         .onChange(of: installer.state) { _, state in
             switch state {
             case .ready(let board): lastSeenChip = board.chip
             case .waitingForVolume(let chip): lastSeenChip = chip
+            case .verified, .failed: vm.releaseFirmwareInstallLock()
             default: break
             }
         }
@@ -371,9 +375,8 @@ struct GettingStartedView: View {
         installer.installWhenReady()
         guard !rebootRequested else { return }
         rebootRequested = true
-        let transport = vm.transport
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        vm.enterBootloaderForInstall { sent in
+            if !sent { installer.abandon(.deviceLocked) }
         }
     }
 

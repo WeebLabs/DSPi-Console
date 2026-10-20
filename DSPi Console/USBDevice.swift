@@ -781,4 +781,8 @@ extension USBDevice: DeviceTransport {
     func addNotificationObserver(_ handler: @escaping (LinkNotification) -> Void) -> AnyCancellable {
         notifications.add(handler)
     }
+
+    /// Driven directly, with no hub, there is no other session to lock out.
+    func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool { true }
+    func releaseDeviceLock() {}
 }

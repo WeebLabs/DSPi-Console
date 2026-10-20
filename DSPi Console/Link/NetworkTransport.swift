@@ -266,7 +266,9 @@ final class NetworkTransport: DeviceTransport {
         guard let handle = boundHandle else { return }
         let req = LinkCmdRequest(tag: 0, handle: handle, direction: .set, bRequest: request,
                                  wValue: value, wIndex: index, payload: data)
-        client.command(req) { _ in }
+        client.command(req) { response in
+            if response.status == .locked { DeviceLock.notice.post() }
+        }
     }
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
@@ -292,7 +294,36 @@ final class NetworkTransport: DeviceTransport {
                 done()
             }
         }
+        if case .failure(.locked) = out { DeviceLock.notice.post() }
         return out
+    }
+
+    // MARK: - Lock
+
+    /// A hub without the `lock` capability serialises commands itself, so the
+    /// step is skipped (spec 7.7).  Any other failure to get the lock fails
+    /// the flow rather than letting it run unlocked.
+    func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool {
+        guard client.capabilities.contains(LinkCapability.lock.rawValue) else { return true }
+        guard let handle = boundHandle else { return false }
+        let ms = Int(min(timeout, DeviceLock.maxTimeout) * 1000)
+        var granted = false
+        waitFor { done in
+            self.client.acquireLock(handle: handle, reason: reason, timeoutMs: ms) { result in
+                if case .success = result { granted = true }
+                done()
+            }
+        }
+        if !granted { DeviceLock.notice.post() }
+        return granted
+    }
+
+    /// Fire and forget: the release travels on the same socket after the
+    /// flow's last command, and a lost one expires on the hub.
+    func releaseDeviceLock() {
+        guard client.capabilities.contains(LinkCapability.lock.rawValue),
+              let handle = boundHandle else { return }
+        client.releaseLock(handle: handle)
     }
 
     private func awaitSnapshot(handle: UInt8) -> Data? {

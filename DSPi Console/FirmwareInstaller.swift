@@ -61,6 +61,9 @@ enum FirmwareInstallError: Error, Equatable {
     case writeFailed(String)
     case deviceDidNotReturn
     case versionMismatch(expected: String, got: String)
+    /// Another DSPi Link session held the device lock, so the device was
+    /// never asked to restart.
+    case deviceLocked
 
     /// One sentence fit to show a user.
     var message: String {
@@ -81,6 +84,8 @@ enum FirmwareInstallError: Error, Equatable {
             return "The firmware was written but the device did not reappear. Unplug it, plug it back in, and check whether it works."
         case .versionMismatch(let expected, let got):
             return "The device came back running firmware \(got) instead of \(expected)."
+        case .deviceLocked:
+            return "\(DeviceLock.lockedMessage). Try again when it has finished."
         }
     }
 }
@@ -306,6 +311,16 @@ final class FirmwareInstaller: ObservableObject {
 
     /// Whether an update has been committed to but not yet started.
     var isArmed: Bool { armed }
+
+    /// Abandons a committed update before anything is written, reporting why
+    /// (the device could not be restarted into the bootloader).  Frozen like
+    /// any other failure until `reset()`.
+    func abandon(_ error: FirmwareInstallError) {
+        guard !installing else { return }
+        armed = false
+        installing = true
+        publish(.failed(error))
+    }
 
     /// Writes the bundled image for `board` and verifies the result.
     /// Call only from a state of `.ready`, after the user has confirmed.

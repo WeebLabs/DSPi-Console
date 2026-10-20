@@ -167,7 +167,7 @@ struct ContentView: View {
                 DispatchQueue.main.async {
                     let alert = NSAlert()
                     alert.messageText = "Save Failed"
-                    alert.informativeText = "Failed to save preset (error \(status))."
+                    alert.informativeText = "Failed to save preset (\(presetFailureText(status)))."
                     alert.alertStyle = .warning
                     alert.addButton(withTitle: "OK")
                     alert.runModal()
@@ -244,7 +244,7 @@ struct ContentView: View {
                 DispatchQueue.main.async {
                     let alert = NSAlert()
                     alert.messageText = "Copy Failed"
-                    alert.informativeText = "Failed to copy preset (error \(status))."
+                    alert.informativeText = "Failed to copy preset (\(presetFailureText(status)))."
                     alert.alertStyle = .warning
                     alert.addButton(withTitle: "OK")
                     alert.runModal()
@@ -604,7 +604,7 @@ struct ContentView: View {
                                                             vm.activePresetSlot = previousSlot
                                                             let alert = NSAlert()
                                                             alert.messageText = "Save Failed"
-                                                            alert.informativeText = "Failed to save preset (error \(saveStatus)). Preset switch aborted."
+                                                            alert.informativeText = "Failed to save preset (\(presetFailureText(saveStatus))). Preset switch aborted."
                                                             alert.alertStyle = .warning
                                                             alert.addButton(withTitle: "OK")
                                                             alert.runModal()

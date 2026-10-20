@@ -140,11 +140,15 @@ struct FirmwareUpdateView: View {
             switch state {
             case .ready(let board): lastSeenChip = board.chip
             case .waitingForVolume(let chip): lastSeenChip = chip
+            case .verified, .failed: vm.releaseFirmwareInstallLock()
             default: break
             }
         }
         .onAppear { installer.beginWatching() }
-        .onDisappear { installer.stopWatching() }
+        .onDisappear {
+            installer.stopWatching()
+            vm.releaseFirmwareInstallLock()
+        }
     }
 
     // MARK: Header
@@ -404,11 +408,8 @@ struct FirmwareUpdateView: View {
         installer.installWhenReady()
         guard vm.isDeviceConnected, !rebootRequested else { return }
         rebootRequested = true
-        // The device drops off the bus answering this, so there is no reply to
-        // wait for.
-        let transport = vm.transport
-        DispatchQueue.global(qos: .userInitiated).async {
-            _ = transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+        vm.enterBootloaderForInstall { sent in
+            if !sent { installer.abandon(.deviceLocked) }
         }
     }
 

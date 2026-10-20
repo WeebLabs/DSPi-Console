@@ -241,6 +241,22 @@ final class CompositeTransport: DeviceTransport {
         notifyFanout.add(handler)
     }
 
+    /// The transport a lock was taken on, so a device switch mid-flow still
+    /// releases it where it was granted.  Guarded by `stateLock`.
+    private var lockedTransport: (any DeviceTransport)?
+
+    func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool {
+        let transport = active
+        guard transport.acquireDeviceLock(reason: reason, timeout: timeout) else { return false }
+        stateLock.lock(); lockedTransport = transport; stateLock.unlock()
+        return true
+    }
+
+    func releaseDeviceLock() {
+        stateLock.lock(); let transport = lockedTransport; lockedTransport = nil; stateLock.unlock()
+        transport?.releaseDeviceLock()
+    }
+
     /// True while the view model is driving a device on another hub.
     var isRemoteActive: Bool { active !== local }
 }

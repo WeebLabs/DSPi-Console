@@ -3405,24 +3405,79 @@ extension DSPViewModel {
 
     /// Arm the IR learn listener (REQ_CS_IR_LEARN wValue=1; spec §3.6.1).  The
     /// device listens on the receiver for up to 10 s for the next cleanly
-    /// decoded remote button.  Returns true on the acknowledgement byte; false
-    /// if it STALLs (no live IR component -> CS_STATUS_NO_IR).  USB-only.
+    /// decoded remote button.  `.noReceiver` if it STALLs (no live IR
+    /// component -> CS_STATUS_NO_IR).  USB-only.
+    ///
+    /// Takes the device lock for the whole learn window, so another session
+    /// cannot rewrite the IR setup mid-learn.  It is released by the read
+    /// that ends the learn, by cancel, or by `csIrLearnEnd`.
     @discardableResult
-    func csIrLearnArm() -> Bool {
-        transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_ARM, index: 2, length: 1) != nil
+    func csIrLearnArm() -> CsIrLearnArmResult {
+        guard transport.acquireDeviceLock(reason: "Learning an IR code", timeout: Self.irLearnLockTimeout) else {
+            return .locked
+        }
+        irLearnLock.held = true
+        guard transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_ARM, index: 2, length: 1) != nil else {
+            csIrLearnEnd()
+            return .noReceiver
+        }
+        return .armed
     }
+
+    /// The 10 s learn window plus the UI's polling margin.
+    static let irLearnLockTimeout: TimeInterval = 15
 
     /// Cancel an armed IR learn (REQ_CS_IR_LEARN wValue=0); state returns to idle.
     func csIrLearnCancel() {
+        defer { csIrLearnEnd() }
         _ = transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_CANCEL, index: 2, length: 1)
     }
 
     /// Read the current IR learn result (REQ_CS_IR_LEARN wValue=2 -> 8 bytes;
     /// spec §3.6.1): the state and, when done, the captured protocol + code.
-    /// USB-only; safe to poll while armed.
+    /// USB-only; safe to poll while armed.  A result that is no longer armed
+    /// ends the learn and releases its lock.
     func csIrLearnRead() -> CsIrLearnResult? {
         guard let d = transport.getControlRequest(request: REQ_CS_IR_LEARN, value: CS_IR_LEARN_READ, index: 2, length: 8) else { return nil }
-        return CsIrLearnResult.fromData(d)
+        let result = CsIrLearnResult.fromData(d)
+        if let r = result, r.state != CS_IR_LEARN_STATE_ARMED { csIrLearnEnd() }
+        return result
+    }
+
+    /// Release the learn's lock without a device round-trip (the window
+    /// closed, the device switched, or polling gave up).  Idempotent, so it
+    /// never drops a lock a later flow of this session took.
+    func csIrLearnEnd() {
+        guard irLearnLock.take() else { return }
+        transport.releaseDeviceLock()
+    }
+
+    // MARK: - Firmware install
+
+    /// Restart the device into the bootloader for an install, holding the
+    /// device lock so no other session writes to a device about to vanish.
+    /// The lock normally dies with the hub's router when the device drops off
+    /// the bus; `releaseFirmwareInstallLock` covers a restart that never
+    /// happened.  `completion` (main thread) gets false when the lock was
+    /// refused and nothing was sent.
+    func enterBootloaderForInstall(completion: @escaping (Bool) -> Void) {
+        let transport = self.transport
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard transport.acquireDeviceLock(reason: "Installing firmware", timeout: DeviceLock.maxTimeout) else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            self.firmwareInstallLock.held = true
+            // The device drops off the bus answering, so there is no reply.
+            _ = transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+            DispatchQueue.main.async { completion(true) }
+        }
+    }
+
+    /// Called when the install ends, however it ends.  Idempotent.
+    func releaseFirmwareInstallLock() {
+        guard firmwareInstallLock.take() else { return }
+        transport.releaseDeviceLock()
     }
 
     // MARK: - Signal Generator
@@ -3545,8 +3600,11 @@ extension DSPViewModel {
     /// true on a valid V16 payload, false otherwise.
     @discardableResult
     func fetchAllParams(markDisconnectedOnFailure: Bool = true) -> Bool {
-        guard let data = transport.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE) else {
-            if markDisconnectedOnFailure {
+        let result = transport.getControlResult(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE)
+        guard case .success(let data) = result else {
+            // LOCKED means another session is mid-flow on a live device, not a
+            // dead link; the notifications from its writes resync us after.
+            if markDisconnectedOnFailure, result != .failure(.locked) {
                 self.transport.markDisconnected()
             }
             return false
@@ -4109,8 +4167,19 @@ extension DSPViewModel {
         }
     }
 
+    /// Save live state to `slot` under the device lock (spec 7.7), so no other
+    /// session's write lands in the snapshot.  PRESET_STATUS_LOCKED when
+    /// another session holds the lock; nothing is sent then.
     @discardableResult
     func savePreset(slot: Int) -> UInt8 {
+        transport.withDeviceLock(reason: "Saving preset", timeout: 5) {
+            savePresetUnlocked(slot: slot)
+        } ?? PRESET_STATUS_LOCKED
+    }
+
+    /// The save itself, for callers that already hold the lock.  Taking it
+    /// again here would release it early, since a release is not counted.
+    private func savePresetUnlocked(slot: Int) -> UInt8 {
         guard let data = transport.getControlRequest(request: REQ_PRESET_SAVE, value: UInt16(slot), index: 2, length: 1) else { return 0xFF }
         let status = data[0]
         if status == PRESET_OK {
@@ -4140,11 +4209,20 @@ extension DSPViewModel {
     /// destination slot getting a name (from setPresetName, which writes
     /// the directory directly) but factory-default parameters when loaded.
     ///
+    /// One lock covers both saves and both waits, so no other session can
+    /// write between the destination and source snapshots.
+    ///
     /// Returns PRESET_OK on success, an error code on failure.
     @discardableResult
     func copyPreset(from sourceSlot: Int, to destinationSlot: Int) -> UInt8 {
+        transport.withDeviceLock(reason: "Copying preset", timeout: 10) {
+            copyPresetUnlocked(from: sourceSlot, to: destinationSlot)
+        } ?? PRESET_STATUS_LOCKED
+    }
+
+    private func copyPresetUnlocked(from sourceSlot: Int, to destinationSlot: Int) -> UInt8 {
         let generation = transport.generation
-        let dstStatus = savePreset(slot: destinationSlot)
+        let dstStatus = savePresetUnlocked(slot: destinationSlot)
         guard dstStatus == PRESET_OK else { return dstStatus }
         guard waitForPresetActivation(slot: destinationSlot) else { return 0xFF }
 
@@ -4152,7 +4230,7 @@ extension DSPViewModel {
         // re-save (which also moves last_active) run against the new device.
         guard transport.generation == generation else { return 0xFF }
 
-        let srcStatus = savePreset(slot: sourceSlot)
+        let srcStatus = savePresetUnlocked(slot: sourceSlot)
         guard srcStatus == PRESET_OK else { return srcStatus }
         _ = waitForPresetActivation(slot: sourceSlot)
 
@@ -4327,10 +4405,20 @@ extension DSPViewModel {
     /// true on success, false if the device disconnected or the transfer failed.
     @discardableResult
     func saveOutputConfig() -> Bool {
-        guard let data = transport.getControlRequest(request: REQ_SAVE_OUTPUT_CONFIG, value: 0, index: 2, length: 1) else {
-            return false
-        }
-        return data.first == 0  // PRESET_OK
+        if case .success = saveOutputConfigResult() { return true }
+        return false
+    }
+
+    /// As `saveOutputConfig`, but tells a held device lock (`.locked`, nothing
+    /// sent) apart from a device that did not acknowledge (`.error`).
+    func saveOutputConfigResult() -> Result<Void, LinkStatus> {
+        transport.withDeviceLock(reason: "Saving output configuration", timeout: 5) {
+            guard let data = transport.getControlRequest(request: REQ_SAVE_OUTPUT_CONFIG, value: 0, index: 2, length: 1),
+                  data.first == 0 else {  // PRESET_OK
+                return .failure(.error)
+            }
+            return .success(())
+        } ?? .failure(.locked)
     }
 
     // MARK: - Channel Names
@@ -4681,10 +4769,9 @@ extension DSPViewModel {
 
     func saveParams() -> UInt8 {
         guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        if let data = transport.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1) {
-            return data[0]
-        }
-        return FLASH_ERR_WRITE
+        return transport.withDeviceLock(reason: "Saving to flash", timeout: 5) {
+            transport.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1)?.first
+        }.flatMap { $0 } ?? FLASH_ERR_WRITE
     }
 
     func loadParams() -> UInt8 {

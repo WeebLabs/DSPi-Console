@@ -6126,11 +6126,14 @@ struct ControlSurfacesSettingsTab: View {
         learnMessage = "Point the remote at the receiver and press the button to learn."
         subMessages[sub] = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            guard vm.csIrLearnArm() else {
+            let armed = vm.csIrLearnArm()
+            guard armed == .armed else {
                 DispatchQueue.main.async {
                     endLearn()
                     learnMessage = nil
-                    subMessages[sub] = ("No IR receiver is active - apply the receiver first.", true)
+                    subMessages[sub] = (armed == .locked
+                        ? "\(DeviceLock.lockedMessage) - try again when it has finished."
+                        : "No IR receiver is active - apply the receiver first.", true)
                 }
                 return
             }
@@ -6180,6 +6183,9 @@ struct ControlSurfacesSettingsTab: View {
         guard learningSub != nil else { return }
         learningSub = nil
         coordinator.endCsOperation()
+        // The device lock taken at arm.  A release never blocks, so it runs
+        // here, before any re-arm; idempotent against the read and cancel.
+        vm.csIrLearnEnd()
     }
 
     // MARK: Shared row helpers (mirror the Control Interfaces page)
@@ -9953,7 +9959,11 @@ struct FileMenuActions {
         PresetDocumentApply.apply(doc, to: vm, options: options,
                                   progress: { progress.update($0) }) { report in
             progress.end()
-            showImportResult(report)
+            if report.lockedOut {
+                showError("The configuration was not applied: \(DeviceLock.lockedMessage).")
+            } else {
+                showImportResult(report)
+            }
         }
     }
 
@@ -10083,12 +10093,15 @@ struct FileMenuActions {
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            let ok = vm.saveOutputConfig()
+            let result = vm.saveOutputConfigResult()
             DispatchQueue.main.async {
-                if ok {
+                switch result {
+                case .success:
                     showSuccess("Output configuration saved. It will be applied on next boot.")
-                } else {
-                    showError("Failed to save output configuration — the device did not acknowledge the request.")
+                case .failure(.locked):
+                    showError("Failed to save output configuration: \(DeviceLock.lockedMessage).")
+                case .failure:
+                    showError("Failed to save output configuration. The device did not acknowledge the request.")
                 }
             }
         }
@@ -10546,7 +10559,7 @@ struct ToolsMenuActions {
             case PRESET_OK:
                 showSuccess("Preset saved successfully")
             default:
-                showError("Failed to save preset (error \(result))")
+                showError("Failed to save preset (\(presetFailureText(result)))")
             }
         }
     }
@@ -10876,7 +10889,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     } else {
                         let alert = NSAlert()
                         alert.messageText = "Save Failed"
-                        alert.informativeText = "Failed to save preset (error \(status)). Quit anyway?"
+                        alert.informativeText = "Failed to save preset (\(presetFailureText(status))). Quit anyway?"
                         alert.alertStyle = .warning
                         alert.addButton(withTitle: "Quit")
                         alert.addButton(withTitle: "Cancel")

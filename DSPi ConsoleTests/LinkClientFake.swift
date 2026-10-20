@@ -71,7 +71,14 @@ final class LinkClientFake: LinkClientProtocol {
         completion(.success(polls.map { LinkPollGrant(slot: $0.slot, hz: $0.hz) }))
     }
     func unsubscribePolls(handle: UInt8, slots: [Int]) {}
+    var lockResult: Result<Void, LinkClientError> = .success(())
+    var lockAcquires: [(handle: UInt8, reason: String?, timeoutMs: Int?)] = []
+    var lockReleases: [UInt8] = []
     func acquireLock(handle: UInt8, reason: String?, timeoutMs: Int?,
-                     completion: @escaping (Result<Void, LinkClientError>) -> Void) { completion(.success(())) }
-    func releaseLock(handle: UInt8) {}
+                     completion: @escaping (Result<Void, LinkClientError>) -> Void) {
+        lockAcquires.append((handle, reason, timeoutMs))
+        let r = lockResult
+        DispatchQueue.main.async { completion(r) }
+    }
+    func releaseLock(handle: UInt8) { lockReleases.append(handle) }
 }

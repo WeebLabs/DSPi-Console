@@ -272,6 +272,9 @@ final class PresetApplyReport {
         skipped.append(reason)
     }
 
+    /// Another DSPi Link session held the device lock, so nothing was sent.
+    var lockedOut = false
+
     var isClean: Bool { missingChannels.isEmpty && skipped.isEmpty }
 }
 
@@ -328,7 +331,26 @@ enum PresetDocumentApply {
         // The device ends up holding the document but nothing is written to
         // flash, so the preset stays marked dirty - which is what the result
         // dialog tells the user.
-        run(steps, index: 0, progress: progress) { completion(report) }
+        //
+        // The whole apply holds the device lock (spec 7.7) so no other session
+        // interleaves its writes with the document's.  Acquiring may wait on
+        // the network, so it happens off the main thread.
+        let transport = vm.transport
+        DispatchQueue.global(qos: .userInitiated).async {
+            let locked = transport.acquireDeviceLock(reason: "Applying configuration",
+                                                     timeout: DeviceLock.maxTimeout)
+            DispatchQueue.main.async {
+                guard locked else {
+                    report.lockedOut = true
+                    completion(report)
+                    return
+                }
+                run(steps, index: 0, progress: progress) {
+                    transport.releaseDeviceLock()
+                    completion(report)
+                }
+            }
+        }
     }
 
     private static func run(_ steps: [Step], index: Int,

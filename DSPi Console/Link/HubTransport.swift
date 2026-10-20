@@ -77,7 +77,9 @@ final class HubTransport: DeviceTransport {
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
         let req = LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
                                  bRequest: request, wValue: value, wIndex: index, payload: data)
-        hub.submit(req, from: localSession.id) { _ in }
+        hub.submit(req, from: localSession.id) { response in
+            if response.status == .locked { DeviceLock.notice.post() }
+        }
     }
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
@@ -97,7 +99,24 @@ final class HubTransport: DeviceTransport {
             sem.signal()
         }
         guard sem.wait(timeout: .now() + syncWaitTimeout) == .success else { return .failure(.timeout) }
-        return box.get() ?? .failure(.timeout)
+        let result = box.get() ?? .failure(.timeout)
+        if case .failure(.locked) = result { DeviceLock.notice.post() }
+        return result
+    }
+
+    // MARK: - Lock
+
+    /// With no device attached there is no router to lock; the flow then
+    /// fails on its own commands as NO_DEVICE, which is the truer message.
+    func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool {
+        guard hub.isDeviceAttached else { return true }
+        let granted = hub.acquireLock(session: localSession.id, timeout: min(timeout, DeviceLock.maxTimeout))
+        if !granted { DeviceLock.notice.post() }
+        return granted
+    }
+
+    func releaseDeviceLock() {
+        hub.releaseLock(session: localSession.id)
     }
 
     /// The completion may land after a timed-out wait has returned; the box

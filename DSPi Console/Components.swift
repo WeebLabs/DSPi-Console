@@ -351,8 +351,10 @@ struct CpuSection: View {
 // the picker to force a USB reconnect.
 struct ConnectionStatusIndicator: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var lockNotice = DeviceLock.notice
     var body: some View {
         HStack(spacing: 6) {
+
             Circle()
                 .fill(vm.isDeviceConnected ? Color.green : Color.red)
                 .frame(width: 6, height: 6)
@@ -398,6 +400,17 @@ struct ConnectionStatusIndicator: View {
                 }
                 .fixedSize()
                 .allowsHitTesting(pickable)
+            }
+
+            // A command or flow refused with LOCKED (spec 7.7) shows here for a
+            // few seconds, rather than through every command's own error path.
+            if let message = lockNotice.message {
+                Label(message, systemImage: "lock.fill")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(message)
             }
         }
     }
