@@ -63,12 +63,15 @@ struct RtaConfig: Equatable {
         return (config, packet[s + 16])
     }
 
-    /// The same tap and transform size, analysing at least every channel in
-    /// `own`.  The device clamps averaging and decay rather than refusing
-    /// them, so those never decide whether a configuration landed.
-    func satisfies(_ own: RtaConfig) -> Bool {
-        tap == own.tap && fftOrder == own.fftOrder
-            && channelMask & own.channelMask == own.channelMask
+    /// The same tap, channels and transform size.  Exact, not a superset: a
+    /// device analysing more channels than asked for rotates through them,
+    /// and the bins then belong to whichever came last.  The device clamps
+    /// averaging and decay rather than refusing them, so those never decide
+    /// whether a configuration landed.  It also drops channel bits beyond
+    /// the tap's count, which is safe only because the selections never
+    /// carry any.
+    func matches(_ own: RtaConfig) -> Bool {
+        tap == own.tap && fftOrder == own.fftOrder && channelMask == own.channelMask
     }
 }
 
@@ -285,10 +288,11 @@ struct RtaRequest: Equatable {
     var tap: UInt8
     /// Bit i = channel i at that tap (input row, or matrix output index).
     var mask: UInt16
-    /// Whether this view also needs the raw bins.  A bin frame belongs to
-    /// whichever channel was transformed last, so a view that wants bins is
-    /// asking for a narrow selection as well.
-    var wantsBins: Bool = false
+    /// Whether this view draws the fine curve from the raw bins when the
+    /// device analyses a single channel.  The engine reads the bins only
+    /// then, whoever chose that channel, since a bin frame belongs to
+    /// whichever channel was transformed last.
+    var drawsBins: Bool = false
 }
 
 /// The bins averaged over time the way the device averages its bands: power,
@@ -456,12 +460,6 @@ final class RtaEngine: ObservableObject {
     // Sharing with other consoles (Documentation/rta_sharing_spec.md §3).
     /// The device configuration someone else pushed, while following it.
     private var following: (config: RtaConfig, origin: LinkSessionID)? = nil
-    /// Channels another console asked for beyond ours, at `sharedTap`.  Our
-    /// pushes at that tap keep them, so taking control does not blank its
-    /// picture.  Learned only from configurations someone else pushed, never
-    /// from our own, so a channel the user unchecks really goes.
-    private var sharedMask: UInt16 = 0
-    private var sharedTap: UInt8 = RTA_TAP_OUTPUT
     /// The configuration our views last asked for, kept while none is
     /// watching, so a display shown again is told apart from a new choice and
     /// events received meanwhile are judged against it.
@@ -626,7 +624,6 @@ final class RtaEngine: ObservableObject {
     /// holds `lock`.
     private func forgetSharingLocked() {
         following = nil
-        sharedMask = 0
         everAgreed = false
         pushOutstanding = false
         eventSeen = false
@@ -646,10 +643,9 @@ final class RtaEngine: ObservableObject {
         // While no view watches, judge it against what we last asked for, so
         // a display shown later follows a change made in the meantime.
         let mine = ownConfigLocked() ?? lastOwn
-        if !own { learnForeignLocked(config, mine: mine) }
         if let mine {
-            if config.satisfies(mine) {
-                // Our echo, or someone else's superset of what we want.
+            if config.matches(mine) {
+                // Our echo, or someone else choosing exactly what we want.
                 following = nil
                 confirmLocked(mine, device: config)
                 clearRejected = true
@@ -658,7 +654,7 @@ final class RtaEngine: ObservableObject {
                 pushOutstanding = false
                 clearRejected = true
             }
-            // An echo of ours that no longer satisfies is an older push,
+            // An echo of ours that no longer matches is an older push,
             // superseded by one still in flight.
         }
         lock.unlock()
@@ -666,13 +662,14 @@ final class RtaEngine: ObservableObject {
         publishSharing()
     }
 
-    /// The configuration this console's own views ask for, before any
-    /// channels kept for another console.  nil while nobody watches or the
-    /// mask is empty.  Caller holds `lock`.
+    /// The configuration this console's own views ask for.  nil while nobody
+    /// watches or the mask is empty.  Caller holds `lock`.
     private func ownConfigLocked() -> RtaConfig? {
         guard let primary = requests.values.max(by: { $0.seq < $1.seq })?.request else { return nil }
         let mask: UInt16
-        if primary.wantsBins {
+        // Every view registers the same selection, so the newest one alone
+        // differs from the union only while a change reaches them one by one.
+        if primary.mask.nonzeroBitCount == 1 {
             mask = primary.mask
         } else {
             mask = requests.values
@@ -684,21 +681,12 @@ final class RtaEngine: ObservableObject {
                          avgMs: pollOptions.avgMs, peakDecayDBs: pollOptions.peakDecayDBs, flags: 0)
     }
 
-    /// Remember the channels someone else's configuration asks for beyond
-    /// ours.  Caller holds `lock`.
-    private func learnForeignLocked(_ config: RtaConfig, mine: RtaConfig?) {
-        sharedTap = config.tap
-        sharedMask = config.channelMask & ~(mine?.tap == config.tap ? mine!.channelMask : 0)
-    }
-
     /// The device holds what we want: adopt its clamped averaging and stop
     /// pushing.  `appliedConfig` keeps the values we asked for, so a clamped
     /// one does not read as a difference and get pushed again on every echo.
     /// Caller holds `lock`.
     private func confirmLocked(_ mine: RtaConfig, device: RtaConfig) {
-        var applied = mine
-        if sharedTap == mine.tap { applied.channelMask |= sharedMask }
-        appliedConfig = applied
+        appliedConfig = mine
         adoptedAvgMs = device.avgMs
         pushAttempts = 0
         everAgreed = true
@@ -813,7 +801,7 @@ final class RtaEngine: ObservableObject {
         // An empty mask is a STALL on the device, and there is nothing to draw
         // either; hold the previous configuration and skip the poll.
         guard let own = ownConfigLocked() else { lock.unlock(); return }
-        let wantsBins = requests.values.contains { $0.request.wantsBins }
+        let drawsBins = requests.values.contains { $0.request.drawsBins }
         var want: RtaConfig
         var needsPush = false
         if let f = following {
@@ -821,7 +809,6 @@ final class RtaEngine: ObservableObject {
             want = f.config
         } else {
             want = own
-            if sharedTap == own.tap { want.channelMask |= sharedMask }
             // Give up after three rejected pushes of the *same* configuration,
             // so firmware that refuses one setting does not turn into a write
             // on every tick - but asking for something different starts the
@@ -847,8 +834,10 @@ final class RtaEngine: ObservableObject {
         let now = Date()
         // Read the bins no faster than the device publishes them, which is a
         // frame time apart: at 1024 points that is 21 ms, at 256 points 5 ms,
-        // and the poll timer is slower than both.
-        let readBins = wantsBins
+        // and the poll timer is slower than both.  Keyed to what the device
+        // analyses, whoever chose it, so a follower draws the same fine curve
+        // as the console it follows.
+        let readBins = drawsBins && want.channelMask.nonzeroBitCount == 1
             && now.timeIntervalSince(lastBinRead) >= max(pollFrameInterval, RTA_MIN_BIN_INTERVAL)
         let readStatus = now.timeIntervalSince(lastStatusRead) >= statusInterval
         // Once the device announces its configurations, reading it back is
@@ -922,8 +911,8 @@ final class RtaEngine: ObservableObject {
             lock.lock()
             // Anything that changed ownership mid-tick outranks this reading.
             if epoch == stateEpoch {
-                if a.satisfies(own) {
-                    // Ours, or a superset someone else pushed.
+                if a.matches(own) {
+                    // Ours, or someone else's identical choice.
                     following = nil
                     confirmLocked(own, device: a)
                     if want.tap == a.tap { want.avgMs = a.avgMs; want.peakDecayDBs = a.peakDecayDBs }
@@ -933,12 +922,11 @@ final class RtaEngine: ObservableObject {
                     let a0 = RtaConfig(tap: a.tap, channelMask: a.channelMask, fftOrder: a.fftOrder)
                     let f0 = RtaConfig(tap: f.config.tap, channelMask: f.config.channelMask,
                                        fftOrder: f.config.fftOrder)
-                    if a0 != f0 { following = (a, 0); learnForeignLocked(a, mine: own) }
+                    if a0 != f0 { following = (a, 0) }
                 } else if everAgreed {
                     // It held ours and now holds something else: another host
                     // changed it, which is not a refusal.
                     following = (a, 0)
-                    learnForeignLocked(a, mine: own)
                     pushOutstanding = false
                     rejected = false
                 } else if pushAttempts >= 3 {

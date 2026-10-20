@@ -71,14 +71,13 @@ struct GraphSpectrumOverlay: View {
         let wantsBins: Bool
     }
 
-    /// What this view registers for: the page's whole selection, with the bins
-    /// only when that selection is a single channel, since the device keeps
-    /// bins for just the channel it transformed last.  Hidden channels do not
-    /// enter into it.
+    /// What this view registers for: the page's whole selection.  It always
+    /// draws the fine curve when the device analyses one channel, which may
+    /// be another console's choice, so the engine decides whether to read
+    /// the bins.  Hidden channels do not enter into it.
     private var request: RtaRequest {
         let selection = vm.rtaSelection
-        return RtaRequest(tap: selection.tap, mask: selection.mask,
-                          wantsBins: selection.channels.count == 1)
+        return RtaRequest(tap: selection.tap, mask: selection.mask, drawsBins: true)
     }
 
     /// The analyser configuration for the page's selection.  The selection is

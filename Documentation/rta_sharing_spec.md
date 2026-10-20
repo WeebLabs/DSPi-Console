@@ -51,7 +51,10 @@ enum RtaOwnership: Equatable {
   `configRejected`. The engine stays `.driving`.
 - **Someone else's configuration.** An `RTA_CONFIG` notification with any
   other origin (including 0) whose tap, mask or FFT order differ from what the
-  engine wants moves it to `.following(origin:)`. Because the hub resolves an
+  engine wants moves it to `.following(origin:)`. The comparison is exact: a
+  configuration with more channels than ours is someone else's choice too,
+  not a success, because the device would rotate through the extra channels
+  and our fine curve would lose its bins half the time. Because the hub resolves an
   origin only for the session that wrote, a remote console sees the real
   session id and a USB-only console sees 0 for a UART or I2C writer.
 - **Readback fallback.** The engine keeps the 500 ms `REQ_RTA_GET_CONFIG`
@@ -69,7 +72,13 @@ While following, the engine's effective configuration is the device's. It
 polls bands for the device's mask (`GET_BANDS_ALL` returns every live channel
 in one read anyway) and publishes the device's tap and channels as the
 `effectiveSelection` the views draw, so the user sees what the analyser is
-actually doing rather than an empty graph. The engine does not push, and it
+actually doing rather than an empty graph. When that configuration is a
+single channel and one of the console's displays draws the fine curve
+(`RtaRequest.drawsBins`, set by the response-graph overlay), the engine reads
+the bins too, so a follower shows exactly the curve the driver shows. The
+bins are read whenever the analysed configuration is one channel, whether
+this console chose it or follows it, and never while the device rotates
+through several. The engine does not push, and it
 does not count the mismatch as a rejection. A further change by someone else
 updates the followed configuration in place.
 
@@ -85,19 +94,18 @@ Any of these pushes the engine's own configuration again and returns it to
 - `setOptions` changes a device-side option (FFT order, averaging, decay);
 - the user presses **Take control** in the graph options popover.
 
-When the device's tap matches the engine's, the pushed mask is the union of
-the engine's channels and the channels another console asked for, so the
-other console keeps its picture. Those extra channels are learned only from
-configurations someone else pushed (a foreign event, or a readback that led
-to following), never from the engine's own readbacks, so a channel the user
-unchecks really goes. They are forgotten on a device switch or disconnect.
-Nothing tells the engine when the other console stops watching, so the extra
-channels stay in the mask until then; the hub-side arbitration in section 7
-is what would remove them. A readback or echo counts as success when the tap
-and order match and the device's mask includes every channel the engine
-asked for, and in that case the engine returns to `.driving` by itself, with
-no user action, since the device holds what it wants. The frames the views
-draw are still only the channels they asked for.
+The engine pushes only its own configuration. There is no merging with the
+channels another console asked for: that console follows ours instead, the
+same way this one followed it. A merged mask would make the device rotate
+through both consoles' channels, and since it keeps bins only for the channel
+it transformed last, both consoles' fine curves would flicker. A readback or
+echo counts as success only when the tap, mask and order match exactly, and
+in that case the engine returns to `.driving` by itself, with no user action,
+since the device holds what it wants.
+
+A host that cannot follow (a UART or I2C client reading the analyser
+directly, not a Link hub, which only relays) loses its channels when a
+console takes control. That is the cost of "the last to choose drives".
 
 `appliedConfig` keeps the values the engine asked for. The device's clamped
 `avgMs` is stored separately for the bin average, so a clamped value is not
@@ -115,7 +123,7 @@ ownership state: the device holds its configuration through STOP and
 auto-off, so a display shown again resumes driving or following without a
 push. An `RTA_CONFIG` event that arrives while nothing watches is judged
 against the remembered configuration, so a change made meanwhile is followed
-when a display returns. On a hub it is
+when a display returns. On a hub the STOP is
 swallowed while another session watches (section 4). Over plain USB with no
 other host it stops the engine at once as before, and if a UART bridge is
 reading, its next read restarts the analyser.
@@ -179,9 +187,10 @@ colours, while still registering the page's own request.
 
 - `RtaSharingTests`: engine state transitions driven through a fake
   transport: own echo confirms; foreign event follows; user change takes
-  control with the union mask; superset readback is success; readback
-  fallback follows only after an earlier agreement; a never-agreeing readback
-  still ends rejected.
+  control with its own mask only; a foreign superset is followed; a
+  follower reads bins only when the followed configuration is one channel;
+  readback fallback follows only after an earlier agreement; a never-agreeing
+  readback still ends rejected.
 - `RtaWireTests`: `RTA_CONFIG` packet decode, `isHostSourced` and
   `attributedOrigin` for event 0x0D.
 - `LinkHubCoreTests` (or a new `LinkRtaArbitrationTests`): STOP forwarded
@@ -191,8 +200,7 @@ colours, while still registering the page's own request.
 
 ## 7. Later
 
-A hub-side `rta.state` event naming the driving session, with union masks
-computed by the hub and band reads moved to poll subscriptions, would add the
-driver's name to the "Following" label and read the device once for N
+A hub-side `rta.state` event naming the driving session, with band reads
+moved to poll subscriptions, would add the driver's name to the "Following" label and read the device once for N
 consoles. It needs a spec change and all three hub implementations, so it is
 deliberately not part of this change.

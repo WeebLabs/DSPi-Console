@@ -28,21 +28,19 @@ private final class RtaFakeTransport: DeviceTransport {
     var config = RtaConfig(tap: RTA_TAP_OUTPUT, channelMask: 0x0001)
     /// False: every SET is refused (STALLed), so the readback never agrees.
     var applies = true
-    /// Channels some other host keeps in the mask whatever we push.
-    var forcedExtra: UInt16 = 0
     /// What the device clamps averaging to.
     var clampAvgMs: UInt16? = nil
 
     private(set) var pushes: [RtaConfig] = []
     private(set) var configReads = 0
     private(set) var bandReads: [(request: UInt8, value: UInt16)] = []
+    private(set) var binReads = 0
 
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
         guard request == REQ_RTA_SET_CONFIG, let c = RtaConfig.fromData(data) else { return }
         pushes.append(c)
         guard applies else { return }
         var applied = c
-        applied.channelMask |= forcedExtra
         if let clamp = clampAvgMs { applied.avgMs = clamp }
         config = applied
     }
@@ -54,6 +52,9 @@ private final class RtaFakeTransport: DeviceTransport {
         case REQ_RTA_GET_CONFIG:
             configReads += 1
             return .success(config.toData())
+        case REQ_RTA_GET_BINS:
+            binReads += 1
+            return .failure(.error)
         case REQ_RTA_GET_BANDS, REQ_RTA_GET_BANDS_ALL:
             bandReads.append((request, value))
             return .failure(.error)
@@ -170,12 +171,15 @@ final class RtaSharingTests: XCTestCase {
         XCTAssertEqual(engine.effectiveSelection?.tap, RTA_TAP_INPUT)
     }
 
-    /// A foreign superset of what we want is not a reason to follow.
-    func testForeignSupersetKeepsDriving() {
+    /// A foreign superset of what we want is someone else's choice like any
+    /// other: followed, not pushed over and not taken as ours.
+    func testForeignSupersetIsFollowed() {
         engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
         tick()
+        fake.config = out(0b11)
         engine.deviceAnnounced(out(0b11), origin: 7)
-        XCTAssertEqual(engine.ownership, .driving)
+        XCTAssertEqual(engine.ownership, .following(origin: 7))
+        XCTAssertEqual(engine.effectiveSelection, RtaChannelSelection(tap: RTA_TAP_OUTPUT, channels: [0, 1]))
         let pushes = fake.pushes.count
         tick(3)
         XCTAssertEqual(fake.pushes.count, pushes)
@@ -183,9 +187,9 @@ final class RtaSharingTests: XCTestCase {
 
     // MARK: Taking control
 
-    /// Choosing channels while following pushes ours with the other
-    /// console's channels kept, because it is at the same tap.
-    func testUserChangeTakesControlWithUnionMask() {
+    /// Choosing channels while following pushes ours alone: the other
+    /// console follows us rather than keeping its channels in the mask.
+    func testUserChangeTakesControlWithOwnMask() {
         let id = engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
         tick()
         fake.config = out(0b100)
@@ -196,19 +200,19 @@ final class RtaSharingTests: XCTestCase {
         XCTAssertEqual(engine.ownership, .driving)
         XCTAssertNil(engine.effectiveSelection)
         tick()
-        XCTAssertEqual(fake.pushes.last?.channelMask, 0b111)
+        XCTAssertEqual(fake.pushes.last?.channelMask, 0b11)
         XCTAssertEqual(engine.ownership, .driving)
     }
 
     /// The Take control button does the same without changing the selection.
-    func testTakeControlButtonPushesUnion() {
+    func testTakeControlButtonPushesOwnMask() {
         engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
         tick()
         fake.config = out(0b100)
         engine.deviceAnnounced(out(0b100), origin: 7)
         engine.takeControl()
         tick()
-        XCTAssertEqual(fake.pushes.last?.channelMask, 0b101)
+        XCTAssertEqual(fake.pushes.last?.channelMask, 0b1)
         XCTAssertEqual(engine.ownership, .driving)
     }
 
@@ -237,7 +241,7 @@ final class RtaSharingTests: XCTestCase {
     /// Showing a second display of the same selection (the bars beside the
     /// graph) is not a choice, so it must not push over the console we follow.
     func testShowingAnotherDisplayDoesNotTakeControl() {
-        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1, wantsBins: true))
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1, drawsBins: true))
         tick()
         fake.config = out(0b100)
         engine.deviceAnnounced(out(0b100), origin: 7)
@@ -340,16 +344,6 @@ final class RtaSharingTests: XCTestCase {
 
     // MARK: Readback (firmware without the event)
 
-    /// A readback holding every channel we asked for and more is success.
-    func testSupersetReadbackIsSuccess() {
-        fake.forcedExtra = 0b100
-        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
-        tick(5)
-        XCTAssertEqual(fake.pushes.count, 1)
-        XCTAssertFalse(engine.configRejected)
-        XCTAssertEqual(engine.ownership, .driving)
-    }
-
     /// A readback that agreed and then changes means another host: follow
     /// with an unknown origin, and stop pushing.
     func testReadbackFollowsAfterEarlierAgreement() {
@@ -396,5 +390,38 @@ final class RtaSharingTests: XCTestCase {
         pump()
         tick(2)
         XCTAssertGreaterThan(fake.configReads, reads)
+    }
+
+    // MARK: Bins
+
+    /// A follower reads the bins when the device analyses one channel, even
+    /// though its own selection has several, so it draws the same fine curve.
+    func testFollowerReadsBinsForSingleChannelConfig() {
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b11, drawsBins: true))
+        tick()
+        XCTAssertEqual(fake.binReads, 0, "a driver analysing two channels reads no bins")
+        fake.config = out(0b100)
+        engine.deviceAnnounced(out(0b100), origin: 7)
+        tick(3)
+        XCTAssertGreaterThan(fake.binReads, 0)
+    }
+
+    /// A follower does not read bins while the device rotates through
+    /// several channels, even though its own selection is one.
+    func testFollowerSkipsBinsForMultichannelConfig() {
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1, drawsBins: true))
+        tick()
+        fake.config = out(0b110)
+        engine.deviceAnnounced(out(0b110), origin: 7)
+        let reads = fake.binReads
+        tick(3)
+        XCTAssertEqual(fake.binReads, reads)
+    }
+
+    /// Bar displays never ask for bins.
+    func testBarsAloneReadNoBins() {
+        engine.subscribe(RtaRequest(tap: RTA_TAP_OUTPUT, mask: 0b1))
+        tick(3)
+        XCTAssertEqual(fake.binReads, 0)
     }
 }
