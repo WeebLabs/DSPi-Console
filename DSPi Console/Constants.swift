@@ -145,6 +145,13 @@ let RTA_CTL_STOP: UInt16      = 0
 let RTA_CTL_START: UInt16     = 1
 let RTA_CTL_RESET_AVG: UInt16 = 2
 
+/// Pushed once per applied REQ_RTA_SET_CONFIG, attributed to the writer, so a
+/// console sharing the analyser learns another took it without reading back.
+/// 17 bytes: v2 header, the applied 12-byte RtaConfig at 4-15, source at 16
+/// (notification_protocol_v2_spec.md §3.9).
+let NOTIFY_EVT_RTA_CONFIG: UInt8 = 0x0D
+let NOTIFY_RTA_CONFIG_SIZE: Int = 17
+
 /// Levels ride the wire as one byte in 0.5 dB steps, with 243 meaning 0 dBFS -
 /// six decibels of headroom above it, because upmix-derived rows and hot EQ can
 /// legitimately exceed full scale.  0 is the floor (-121.5 dBFS or below).  The
@@ -1636,6 +1643,15 @@ let PRESET_ERR_INVALID_SLOT: UInt8      = 0x01
 let PRESET_ERR_SLOT_EMPTY: UInt8        = 0x02  // reserved
 let PRESET_ERR_CRC: UInt8               = 0x03
 let PRESET_ERR_FLASH_WRITE: UInt8       = 0x04
+/// App-side only, never on the wire: another DSPi Link session holds the
+/// device lock, so the save was not sent.
+let PRESET_STATUS_LOCKED: UInt8         = 0xFE
+
+/// Text for a failed preset operation's alert: the lock gets the shared
+/// wording, anything else its status code.
+func presetFailureText(_ status: UInt8) -> String {
+    status == PRESET_STATUS_LOCKED ? DeviceLock.lockedMessage : "error \(status)"
+}
 
 // Flash result codes
 let FLASH_OK: UInt8           = 0

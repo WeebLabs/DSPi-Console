@@ -739,6 +739,33 @@ struct IrCommand: Equatable {
     }
 }
 
+/// Outcome of arming an IR learn.
+enum CsIrLearnArmResult: Equatable {
+    case armed
+    /// The device STALLed: no live IR receiver.
+    case noReceiver
+    /// Another DSPi Link session holds the device lock; nothing was sent.
+    case locked
+}
+
+/// A thread-safe flag that exactly one caller can clear, so racing release
+/// paths release once.
+final class HeldFlag {
+    private var value = false
+    private let lock = NSLock()
+    var held: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
+    /// Clears the flag; true only for the caller that found it set.
+    func take() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let was = value
+        value = false
+        return was
+    }
+}
+
 /// Result of REQ_CS_IR_LEARN, wValue = 2 (8 bytes; spec §3.6.1):
 /// {state, protocol, 0, 0, code_le32}.  `state` is CS_IR_LEARN_STATE_DONE (2)
 /// with protocol/code valid, or _TIMEOUT (3) / _ARMED (1) / _IDLE (0).
@@ -2348,6 +2375,10 @@ class DSPViewModel: ObservableObject {
     var pendingDisplayPages: [Int: CsDisplayPage] = [:]
 
     let transport: any DeviceTransport
+    /// Set while an IR learn holds the device lock (see `csIrLearnArm`).
+    let irLearnLock = HeldFlag()
+    /// Set while a firmware install holds the device lock.
+    let firmwareInstallLock = HeldFlag()
     private var cancellables = Set<AnyCancellable>()
     private var pollTimer: DispatchSourceTimer?
     private let pollQueue = DispatchQueue(label: "com.foxdac.poll", qos: .userInteractive)
@@ -2528,6 +2559,12 @@ class DSPViewModel: ObservableObject {
             self.siggenStatus.signalType = signalType
             self.siggenStatus.activeChannel = channel
             self.pollQueue.async { self.fetchSiggenStatus() }
+        }
+
+        // Analyser configuration announcements: our own echo confirms a push,
+        // anyone else's means another console now drives the analyser.
+        AppState.shared.interruptMonitor.onRtaConfig = { [weak self] config, _, origin in
+            self?.rta.deviceAnnounced(config, origin: origin)
         }
 
         // ADAT stream state pushes (start / stop / rate-policy auto-suspend or
@@ -2973,7 +3010,7 @@ class DSPViewModel: ObservableObject {
                         DispatchQueue.main.async {
                             let alert = NSAlert()
                             alert.messageText = "Save Failed"
-                            alert.informativeText = "Failed to save preset (error \(saveStatus)). Device switch aborted."
+                            alert.informativeText = "Failed to save preset (\(presetFailureText(saveStatus))). Device switch aborted."
                             alert.alertStyle = .warning
                             alert.addButton(withTitle: "OK")
                             alert.runModal()

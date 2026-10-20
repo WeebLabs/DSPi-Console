@@ -230,6 +230,9 @@ final class LinkHub {
         let registered = registry.deviceOnline(device.info)
         let router = CommandRouter(handle: registered.handle, device: device, policy: policy)
         let scheduler = PollScheduler(device: device, policy: policy)
+        router.otherSessionPolls = { [weak scheduler] codes, excluding in
+            scheduler?.sessionsSubscribed(toAnyOf: codes, excluding: excluding) ?? false
+        }
         scheduler.onPoll = { [weak self] session, slot, handle, payload in
             self?.deliverPoll(session: session, slot: slot, handle: handle, payload: payload)
         }

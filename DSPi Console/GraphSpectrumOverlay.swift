@@ -86,7 +86,9 @@ struct GraphSpectrumOverlay: View {
     /// curve is visible.  It is already limited to channels the caps report.
     private var plan: Plan? {
         guard vm.isDeviceReady else { return nil }
-        let selection = vm.rtaSelection
+        // While another console drives, draw what the device is analysing; the
+        // request above stays ours so showing it never takes control.
+        let selection = engine.effectiveSelection ?? vm.rtaSelection
         let channels = selection.channels
             .filter { !hiddenChannels.contains($0) }
             .map { Channel(eq: vm.rtaEqChannel(tap: selection.tap, channel: $0), rta: $0) }

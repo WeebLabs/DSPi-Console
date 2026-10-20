@@ -12,7 +12,7 @@
     {"code": 11, "name": "RTA_GET_BANDS", "dirs": ["get"], "class": "read"},
     {"code": 12, "name": "RTA_GET_BINS", "dirs": ["get"], "class": "read"},
     {"code": 13, "name": "RTA_GET_STATUS", "dirs": ["get"], "class": "read"},
-    {"code": 14, "name": "RTA_CONTROL", "dirs": ["get"], "class": "control", "note": "write-as-read: starts, stops or resets the analyser"},
+    {"code": 14, "name": "RTA_CONTROL", "dirs": ["get"], "class": "control", "note": "write-as-read: starts, stops or resets the analyser; the hub answers a STOP with OK and 01 without forwarding it while another session read bands or bins or sent START within 5000 ms, or holds a 0x0B/0x0C/0x0F poll subscription (spec 7.10)"},
     {"code": 15, "name": "RTA_GET_BANDS_ALL", "dirs": ["get"], "class": "read", "note": "USB-only in firmware: through a bridge hub (UART) the device refuses it and the client receives status 0x02 ERROR, not BLOCKED; poll 0x0B per channel instead"},
     {"code": 16, "name": "SET_SUBHARM", "dirs": ["set"], "class": "control"},
     {"code": 17, "name": "GET_SUBHARM", "dirs": ["get"], "class": "read"},

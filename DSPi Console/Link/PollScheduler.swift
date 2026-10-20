@@ -194,6 +194,15 @@ final class PollScheduler {
         return specs.count
     }
 
+    /// True when a session other than `excluding` holds a live subscription
+    /// for any of the given request codes (the router's RTA STOP rule).
+    func sessionsSubscribed(toAnyOf codes: Set<UInt8>, excluding: LinkSessionID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return specs.values.contains { state in
+            codes.contains(state.spec.req) && state.subs.keys.contains { $0.session != excluding }
+        }
+    }
+
     func grantedHz(session: LinkSessionID, slot: Int) -> Double? {
         lock.lock(); defer { lock.unlock() }
         return grantedLocked(session: session, slot: slot)

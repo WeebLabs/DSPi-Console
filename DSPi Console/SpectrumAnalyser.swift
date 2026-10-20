@@ -52,6 +52,33 @@ struct RtaConfig: Equatable {
             peakDecayDBs: b[8],
             flags: b[9])
     }
+
+    /// The configuration and ParamSource carried by a NOTIFY_EVT_RTA_CONFIG
+    /// packet: header, the 12 applied bytes at 4-15, source at 16.
+    static func fromNotification(_ packet: Data) -> (config: RtaConfig, source: UInt8)? {
+        guard packet.count >= NOTIFY_RTA_CONFIG_SIZE else { return nil }
+        let s = packet.startIndex
+        guard packet[s] == 0x02, packet[s + 1] == NOTIFY_EVT_RTA_CONFIG,
+              let config = fromData(packet[(s + 4)..<(s + 4 + RTA_CONFIG_SIZE)]) else { return nil }
+        return (config, packet[s + 16])
+    }
+
+    /// The same tap and transform size, analysing at least every channel in
+    /// `own`.  The device clamps averaging and decay rather than refusing
+    /// them, so those never decide whether a configuration landed.
+    func satisfies(_ own: RtaConfig) -> Bool {
+        tap == own.tap && fftOrder == own.fftOrder
+            && channelMask & own.channelMask == own.channelMask
+    }
+}
+
+/// Who chose the configuration the device holds.  The last console to push
+/// one drives and every other console follows (spectrum_analyser_spec.md §7).
+enum RtaOwnership: Equatable {
+    /// The device holds what this console asked for.
+    case driving
+    /// Someone else's configuration; origin 0 when the writer is unknown.
+    case following(origin: LinkSessionID)
 }
 
 /// What this device's analyser can do (REQ_RTA_GET_CAPS wValue 0, 16 bytes).
@@ -400,6 +427,11 @@ final class RtaEngine: ObservableObject {
     /// Set when the device has repeatedly refused the configuration we are
     /// asking for.  The views show the reason rather than an empty graph.
     @Published private(set) var configRejected: Bool = false
+    @Published private(set) var ownership: RtaOwnership = .driving
+    /// The device's tap and channels while following, nil while driving.  The
+    /// views draw this instead of their own selection so they show what the
+    /// analyser is doing, but keep registering their own requests.
+    @Published private(set) var effectiveSelection: RtaChannelSelection? = nil
 
     /// The device-side options the app is asking for, mirrored for the UI.
     /// Written only on the main thread; the poll queue reads its own copy from
@@ -420,6 +452,32 @@ final class RtaEngine: ObservableObject {
     /// different resets the give-up counter instead of inheriting it.
     private var lastAttempted: RtaConfig? = nil
     private var pushAttempts = 0
+
+    // Sharing with other consoles (Documentation/rta_sharing_spec.md §3).
+    /// The device configuration someone else pushed, while following it.
+    private var following: (config: RtaConfig, origin: LinkSessionID)? = nil
+    /// Channels another console asked for beyond ours, at `sharedTap`.  Our
+    /// pushes at that tap keep them, so taking control does not blank its
+    /// picture.  Learned only from configurations someone else pushed, never
+    /// from our own, so a channel the user unchecks really goes.
+    private var sharedMask: UInt16 = 0
+    private var sharedTap: UInt8 = RTA_TAP_OUTPUT
+    /// A readback agreed since the last new push.  Only then does a
+    /// disagreeing readback mean another host, rather than a refusal.
+    private var everAgreed = false
+    /// The device's clamped averaging for the confirmed configuration, which
+    /// the bins are averaged with.
+    private var adoptedAvgMs: UInt16? = nil
+    /// A push not yet confirmed by an echo or a readback.
+    private var pushOutstanding = false
+    /// An RTA_CONFIG event arrived on this connection, so the periodic
+    /// GET_CONFIG readback is needed only to confirm a push.
+    private var eventSeen = false
+    /// Bumped by anything that changes ownership, so a readback taken before
+    /// the change is not applied after it.
+    private var stateEpoch: UInt64 = 0
+    /// Readback cadence; tests shorten it.
+    var statusInterval: TimeInterval = RTA_STATUS_INTERVAL
     /// The poll queue's copy of `options`, kept in step by `setOptions`.
     private var pollOptions = RtaOptions()
     /// How long the device takes to publish one frame, as last measured from
@@ -457,7 +515,10 @@ final class RtaEngine: ObservableObject {
         if existing?.request == request { lock.unlock(); return }
         requestSeq += 1
         requests[id] = (requestSeq, request)
+        // A real change of what the user is looking at takes the analyser back.
+        takeControlLocked()
         lock.unlock()
+        publishSharing()
     }
 
     func release(_ id: UUID) {
@@ -468,9 +529,14 @@ final class RtaEngine: ObservableObject {
             appliedConfig = nil
             lastAttempted = nil
             pushAttempts = 0
+            following = nil
+            everAgreed = false
+            pushOutstanding = false
+            stateEpoch += 1
         }
         lock.unlock()
         guard empty else { return }
+        publishSharing()
         // Nobody is watching.  The device would auto-off five seconds from now
         // anyway; stopping it explicitly hands the CPU back at once.
         let transport = self.transport
@@ -508,8 +574,30 @@ final class RtaEngine: ObservableObject {
         appliedConfig = nil
         lastAttempted = nil
         pushAttempts = 0
+        takeControlLocked()
         lock.unlock()
         if configRejected { configRejected = false }
+        publishSharing()
+    }
+
+    /// Push our own configuration again after following someone else's: the
+    /// graph options popover's Take control button.  Main thread only.
+    func takeControl() {
+        lock.lock()
+        takeControlLocked()
+        lock.unlock()
+        publishSharing()
+    }
+
+    /// Stop following and push our own configuration on the next tick.
+    /// Caller holds `lock`.
+    private func takeControlLocked() {
+        stateEpoch += 1
+        guard following != nil else { return }
+        following = nil
+        appliedConfig = nil
+        lastAttempted = nil
+        pushAttempts = 0
     }
 
     /// Re-push the configuration on the next tick without changing it, after a
@@ -519,11 +607,110 @@ final class RtaEngine: ObservableObject {
         appliedConfig = nil
         lastAttempted = nil
         pushAttempts = 0
+        forgetSharingLocked()
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.configRejected else { return }
-            self.configRejected = false
+            guard let self else { return }
+            if self.configRejected { self.configRejected = false }
+            self.publishSharing()
         }
+    }
+
+    /// Everything learned about other consoles on this connection.  Caller
+    /// holds `lock`.
+    private func forgetSharingLocked() {
+        following = nil
+        sharedMask = 0
+        everAgreed = false
+        pushOutstanding = false
+        eventSeen = false
+        stateEpoch += 1
+    }
+
+    // MARK: Sharing
+
+    /// A NOTIFY_EVT_RTA_CONFIG from the device: the configuration it just
+    /// applied and the session the hub attributes the SET to.  Main thread.
+    func deviceAnnounced(_ config: RtaConfig, origin: LinkSessionID) {
+        let own = transport?.isOwnWrite(origin: origin) ?? false
+        var clearRejected = false
+        lock.lock()
+        eventSeen = true
+        stateEpoch += 1
+        let mine = ownConfigLocked()
+        if !own { learnForeignLocked(config, mine: mine) }
+        if let mine {
+            if config.satisfies(mine) {
+                // Our echo, or someone else's superset of what we want.
+                following = nil
+                confirmLocked(mine, device: config)
+                clearRejected = true
+            } else if !own {
+                following = (config, origin)
+                pushOutstanding = false
+                clearRejected = true
+            }
+            // An echo of ours that no longer satisfies is an older push,
+            // superseded by one still in flight.
+        }
+        lock.unlock()
+        if clearRejected, configRejected { configRejected = false }
+        publishSharing()
+    }
+
+    /// The configuration this console's own views ask for, before any
+    /// channels kept for another console.  nil while nobody watches or the
+    /// mask is empty.  Caller holds `lock`.
+    private func ownConfigLocked() -> RtaConfig? {
+        guard let primary = requests.values.max(by: { $0.seq < $1.seq })?.request else { return nil }
+        let mask: UInt16
+        if primary.wantsBins {
+            mask = primary.mask
+        } else {
+            mask = requests.values
+                .filter { $0.request.tap == primary.tap }
+                .reduce(UInt16(0)) { $0 | $1.request.mask }
+        }
+        guard mask != 0 else { return nil }
+        return RtaConfig(tap: primary.tap, channelMask: mask, fftOrder: pollOptions.fftOrder,
+                         avgMs: pollOptions.avgMs, peakDecayDBs: pollOptions.peakDecayDBs, flags: 0)
+    }
+
+    /// Remember the channels someone else's configuration asks for beyond
+    /// ours.  Caller holds `lock`.
+    private func learnForeignLocked(_ config: RtaConfig, mine: RtaConfig?) {
+        sharedTap = config.tap
+        sharedMask = config.channelMask & ~(mine?.tap == config.tap ? mine!.channelMask : 0)
+    }
+
+    /// The device holds what we want: adopt its clamped averaging and stop
+    /// pushing.  `appliedConfig` keeps the values we asked for, so a clamped
+    /// one does not read as a difference and get pushed again on every echo.
+    /// Caller holds `lock`.
+    private func confirmLocked(_ mine: RtaConfig, device: RtaConfig) {
+        var applied = mine
+        if sharedTap == mine.tap { applied.channelMask |= sharedMask }
+        appliedConfig = applied
+        adoptedAvgMs = device.avgMs
+        pushAttempts = 0
+        everAgreed = true
+        pushOutstanding = false
+    }
+
+    /// Publish who drives and what the views should draw.  Main thread only;
+    /// reads the lock state at call time so a late tick cannot publish an
+    /// ownership an event has already replaced.
+    private func publishSharing() {
+        lock.lock()
+        let f = following
+        lock.unlock()
+        let o: RtaOwnership = f.map { .following(origin: $0.origin) } ?? .driving
+        if o != ownership { ownership = o }
+        let sel = f.map { f in
+            RtaChannelSelection(tap: f.config.tap,
+                                channels: (0..<16).filter { f.config.channelMask & (1 << $0) != 0 })
+        }
+        if sel != effectiveSelection { effectiveSelection = sel }
     }
 
     // MARK: Capability probe
@@ -588,11 +775,13 @@ final class RtaEngine: ObservableObject {
         appliedConfig = nil
         lastAttempted = nil
         pushAttempts = 0
+        forgetSharingLocked()
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.supported = false
             self?.replaceSnapshot(RtaSnapshot())
             self?.configRejected = false
+            self?.publishSharing()
         }
     }
 
@@ -613,51 +802,50 @@ final class RtaEngine: ObservableObject {
         guard supported, let transport else { return }
 
         lock.lock()
-        guard !requests.isEmpty else { lock.unlock(); return }
-        let primary = requests.values.max(by: { $0.seq < $1.seq })!.request
-        let mask: UInt16
-        if primary.wantsBins {
-            mask = primary.mask
-        } else {
-            mask = requests.values
-                .filter { $0.request.tap == primary.tap }
-                .reduce(UInt16(0)) { $0 | $1.request.mask }
-        }
-        let wantsBins = requests.values.contains { $0.request.wantsBins }
-        var want = RtaConfig(
-            tap: primary.tap,
-            channelMask: mask,
-            fftOrder: pollOptions.fftOrder,
-            avgMs: pollOptions.avgMs,
-            peakDecayDBs: pollOptions.peakDecayDBs,
-            flags: 0)
         // An empty mask is a STALL on the device, and there is nothing to draw
         // either; hold the previous configuration and skip the poll.
-        guard want.channelMask != 0 else { lock.unlock(); return }
-        // Give up after three rejected pushes of the *same* configuration, so
-        // firmware that refuses one setting does not turn into a write on every
-        // tick - but asking for something different starts the count again,
-        // otherwise a rejected size would silently freeze the channel
-        // selection too.
+        guard let own = ownConfigLocked() else { lock.unlock(); return }
+        let wantsBins = requests.values.contains { $0.request.wantsBins }
+        var want: RtaConfig
         var needsPush = false
-        if appliedConfig != want {
-            if lastAttempted != want {
-                lastAttempted = want
-                pushAttempts = 0
+        if let f = following {
+            // Poll what the device is analysing; never push over it.
+            want = f.config
+        } else {
+            want = own
+            if sharedTap == own.tap { want.channelMask |= sharedMask }
+            // Give up after three rejected pushes of the *same* configuration,
+            // so firmware that refuses one setting does not turn into a write
+            // on every tick - but asking for something different starts the
+            // count again, otherwise a rejected size would silently freeze the
+            // channel selection too.
+            if appliedConfig != want {
+                if lastAttempted != want {
+                    lastAttempted = want
+                    pushAttempts = 0
+                    everAgreed = false
+                }
+                if pushAttempts < 3 {
+                    pushAttempts += 1
+                    appliedConfig = want
+                    adoptedAvgMs = nil
+                    pushOutstanding = true
+                    needsPush = true
+                }
             }
-            if pushAttempts < 3 {
-                pushAttempts += 1
-                appliedConfig = want
-                needsPush = true
-            }
+            if !needsPush, let avg = adoptedAvgMs { want.avgMs = avg }
         }
+        let epoch = stateEpoch
         let now = Date()
         // Read the bins no faster than the device publishes them, which is a
         // frame time apart: at 1024 points that is 21 ms, at 256 points 5 ms,
         // and the poll timer is slower than both.
         let readBins = wantsBins
             && now.timeIntervalSince(lastBinRead) >= max(pollFrameInterval, RTA_MIN_BIN_INTERVAL)
-        let readStatus = now.timeIntervalSince(lastStatusRead) >= RTA_STATUS_INTERVAL
+        let readStatus = now.timeIntervalSince(lastStatusRead) >= statusInterval
+        // Once the device announces its configurations, reading it back is
+        // only needed to tell a refused push from one still being applied.
+        let readConfig = readStatus && (!eventSeen || pushOutstanding)
         if readBins { lastBinRead = now }
         if readStatus { lastStatusRead = now }
         let bandSlots = Int(caps.maxBands)
@@ -705,6 +893,8 @@ final class RtaEngine: ObservableObject {
                                              length: UInt16(RTA_STATUS_SIZE)) {
                 status = RtaStatus.fromData(d)
             }
+        }
+        if readConfig {
             if let d = transport.getControlRequest(request: REQ_RTA_GET_CONFIG, value: 0, index: 2,
                                              length: UInt16(RTA_CONFIG_SIZE)) {
                 applied = RtaConfig.fromData(d)
@@ -721,21 +911,35 @@ final class RtaEngine: ObservableObject {
         // them, so compare only the fields it either takes or STALLs on.
         var rejected: Bool? = nil
         if let a = applied {
-            let agrees = a.tap == want.tap && a.channelMask == want.channelMask
-                && a.fftOrder == want.fftOrder
             lock.lock()
-            if agrees {
-                pushAttempts = 0
-                want.avgMs = a.avgMs
-                want.peakDecayDBs = a.peakDecayDBs
-                appliedConfig = want
-                rejected = false
-            } else if pushAttempts >= 3 {
-                rejected = true
-            } else {
-                // Not applied yet (the device applies a staged config from its
-                // main loop) or genuinely refused; try again next tick.
-                appliedConfig = nil
+            // Anything that changed ownership mid-tick outranks this reading.
+            if epoch == stateEpoch {
+                if a.satisfies(own) {
+                    // Ours, or a superset someone else pushed.
+                    following = nil
+                    confirmLocked(own, device: a)
+                    if want.tap == a.tap { want.avgMs = a.avgMs; want.peakDecayDBs = a.peakDecayDBs }
+                    rejected = false
+                } else if let f = following {
+                    // Firmware without the event: follow further changes in place.
+                    let a0 = RtaConfig(tap: a.tap, channelMask: a.channelMask, fftOrder: a.fftOrder)
+                    let f0 = RtaConfig(tap: f.config.tap, channelMask: f.config.channelMask,
+                                       fftOrder: f.config.fftOrder)
+                    if a0 != f0 { following = (a, 0); learnForeignLocked(a, mine: own) }
+                } else if everAgreed {
+                    // It held ours and now holds something else: another host
+                    // changed it, which is not a refusal.
+                    following = (a, 0)
+                    learnForeignLocked(a, mine: own)
+                    pushOutstanding = false
+                    rejected = false
+                } else if pushAttempts >= 3 {
+                    rejected = true
+                } else {
+                    // Not applied yet (the device applies a staged config from
+                    // its main loop) or genuinely refused; try again next tick.
+                    appliedConfig = nil
+                }
             }
             lock.unlock()
         }
@@ -769,6 +973,7 @@ final class RtaEngine: ObservableObject {
             if let status { s.status = status }
             self.replaceSnapshot(s)
             if let rejected, rejected != self.configRejected { self.configRejected = rejected }
+            self.publishSharing()
         }
     }
 

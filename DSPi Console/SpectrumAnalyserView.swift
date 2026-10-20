@@ -672,6 +672,14 @@ struct RtaChannelSelection: Equatable {
         RtaChannelSelection(tap: tap, channels: channels.filter(live.contains))
     }
 
+    /// What a spectrum display draws: the device's channels while another
+    /// console drives, otherwise the page's own.  Drawing only - each view
+    /// keeps registering `own`, so showing a followed selection never takes
+    /// control.
+    static func drawn(own: RtaChannelSelection, followed: RtaChannelSelection?) -> RtaChannelSelection {
+        followed ?? own
+    }
+
     /// Moving to the other side: the side being left becomes the remembered
     /// one, and the side being entered comes back as it was left, or empty if
     /// it was never used.  Asking for the side already showing changes nothing.
@@ -682,6 +690,14 @@ struct RtaChannelSelection: Equatable {
             ?? RtaChannelSelection(tap: tap, channels: [])
         return (restored, active)
     }
+}
+
+/// One bar cell: the analyser channel, the EQ channel its colour comes from,
+/// and its name.
+struct RtaDrawnChannel: Equatable {
+    let channel: Int
+    let eqChannel: Int
+    let name: String
 }
 
 extension DSPViewModel {
@@ -705,6 +721,16 @@ extension DSPViewModel {
     func rtaChannelName(tap: UInt8, channel: Int) -> String {
         let eqCh = rtaEqChannel(tap: tap, channel: channel)
         return eqCh < channelNames.count ? channelNames[eqCh] : "Ch \(channel + 1)"
+    }
+
+    /// The bar displays' cells for `selection`, named and coloured for its
+    /// own tap, which may be the other side from the page's while following.
+    func rtaDrawnChannels(_ selection: RtaChannelSelection) -> [RtaDrawnChannel] {
+        selection.channels.map {
+            RtaDrawnChannel(channel: $0,
+                            eqChannel: rtaEqChannel(tap: selection.tap, channel: $0),
+                            name: rtaChannelName(tap: selection.tap, channel: $0))
+        }
     }
 
     /// The dashboard's selection, as stored, limited to channels live on this
@@ -845,6 +871,11 @@ private struct GraphOptionsPanel: View {
     private var mainPage: some View {
         VStack(alignment: .leading, spacing: 0) {
             if engine.supported && vm.isDeviceReady {
+                if case .following = engine.ownership {
+                    RtaFollowingRow(engine: engine)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                }
                 channelSection
                     .padding(12)
                 Divider()
@@ -880,12 +911,25 @@ private struct GraphOptionsPanel: View {
     /// Choosing a side is what keeps inputs and outputs apart: only one side's
     /// chips are ever on screen.  Each side keeps its own checked channels.
     private var tapBinding: Binding<UInt8> {
-        Binding(get: { vm.rtaSelection.tap },
-                set: { vm.switchRtaSide(to: $0) })
+        Binding(get: { displayed.tap },
+                set: { tap in userChose { vm.switchRtaSide(to: tap) } })
+    }
+
+    /// The device's channels while another console drives, so the chips show
+    /// what is being analysed; otherwise this page's own selection.
+    private var displayed: RtaChannelSelection {
+        engine.effectiveSelection ?? vm.rtaSelection
+    }
+
+    /// A choice made here takes the analyser back even when it leaves this
+    /// page's own selection as it was.
+    private func userChose(_ change: () -> Void) {
+        change()
+        if case .following = engine.ownership { engine.takeControl() }
     }
 
     private var channelSection: some View {
-        let selection = vm.rtaSelection
+        let selection = displayed
         let channels = vm.rtaChannels(tap: selection.tap)
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -924,7 +968,9 @@ private struct GraphOptionsPanel: View {
                     .foregroundColor(.secondary)
                 Spacer()
                 if !selection.isEmpty {
-                    Button("Clear") { vm.setRtaSelection(RtaChannelSelection(tap: selection.tap, channels: [])) }
+                    Button("Clear") {
+                        userChose { vm.setRtaSelection(RtaChannelSelection(tap: selection.tap, channels: [])) }
+                    }
                         .buttonStyle(.plain)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.accentColor)
@@ -946,7 +992,7 @@ private struct GraphOptionsPanel: View {
         let name = vm.rtaChannelName(tap: tap, channel: ch)
         let shape = RoundedRectangle(cornerRadius: 6)
         return Button {
-            vm.setRtaSelection(vm.rtaSelection.toggling(tap: tap, channel: ch))
+            userChose { vm.setRtaSelection(displayed.toggling(tap: tap, channel: ch)) }
         } label: {
             HStack(spacing: 6) {
                 Circle()
@@ -975,6 +1021,28 @@ private struct GraphOptionsPanel: View {
     private func showBinding(_ view: RtaSpectrumView) -> Binding<Bool> {
         Binding(get: { settings.rtaShows(view, onDashboard: onDashboard) },
                 set: { settings.setRtaShows(view, onDashboard: onDashboard, $0) })
+    }
+}
+
+/// Shown while another console drives the analyser.  The hub does not yet
+/// tell clients other sessions' names, so the label cannot say which one.
+private struct RtaFollowingRow: View {
+    @ObservedObject var engine: RtaEngine
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.2.fill")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .frame(width: 18)
+            Text("Following another console")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button("Take control") { engine.takeControl() }
+                .controlSize(.small)
+        }
     }
 }
 
@@ -1368,8 +1436,11 @@ struct SpectrumBarStrip: View {
     }
 
     var body: some View {
-        let selection = vm.rtaSelection
-        if engine.supported, vm.isDeviceReady, !selection.isEmpty,
+        // The page's own selection decides whether the strip shows and is what
+        // it registers; while following it draws the device's channels.
+        let own = vm.rtaSelection
+        let selection = RtaChannelSelection.drawn(own: own, followed: engine.effectiveSelection)
+        if engine.supported, vm.isDeviceReady, !own.isEmpty,
            settings.rtaShows(.bars, onDashboard: vm.activeEqChannel == nil) {
             let count = selection.channels.count
             let single = count == 1
@@ -1378,11 +1449,12 @@ struct SpectrumBarStrip: View {
             // up across rows whatever the channel names.
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: columns),
                       alignment: .leading, spacing: 8) {
-                ForEach(selection.channels, id: \.self) { ch in
+                ForEach(vm.rtaDrawnChannels(selection), id: \.channel) { cell in
+                    let ch = cell.channel
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
                             Circle().fill(color(selection, ch)).frame(width: 5, height: 5)
-                            Text(vm.rtaChannelName(tap: selection.tap, channel: ch))
+                            Text(cell.name)
                                 .font(.system(size: 9, weight: .semibold))
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
@@ -1452,7 +1524,8 @@ struct SpectrumBarStrip: View {
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.15)) { isHovered = hovering }
             }
-            .rtaWatching(engine, RtaRequest(tap: selection.tap, mask: selection.mask))
+            // Our own request, not the drawn one, so following stays following.
+            .rtaWatching(engine, RtaRequest(tap: own.tap, mask: own.mask))
         }
     }
 
@@ -1606,6 +1679,11 @@ struct SpectrumAnalyserView: View {
         eqCurveColor(eqCh: vm.rtaEqChannel(tap: tap, channel: ch), chOut1: vm.chOut1)
     }
 
+    /// The device's channels while another console drives, else the page's.
+    private var drawnSelection: RtaChannelSelection {
+        RtaChannelSelection.drawn(own: vm.rtaSelection, followed: engine.effectiveSelection)
+    }
+
     private func isHidden(_ tap: UInt8, _ ch: Int) -> Bool {
         hidden.contains(ChannelKey(tap: tap, channel: ch))
     }
@@ -1615,14 +1693,15 @@ struct SpectrumAnalyserView: View {
             if !vm.isDeviceReady || !engine.supported {
                 unavailableNotice
             } else {
-                let selection = vm.rtaSelection
+                let own = vm.rtaSelection
+                let selection = drawnSelection
                 // With nothing shown on the page, the main window is asking the
                 // engine for nothing, so there is no data here to present.
-                let available = pageShowsSpectrum && !selection.isEmpty
+                let available = pageShowsSpectrum && !own.isEmpty
                 header(selection, available: available)
                 Divider()
                 if !available {
-                    hiddenNotice(selection)
+                    hiddenNotice(own)
                 } else {
                     let visible = selection.channels.filter { !isHidden(selection.tap, $0) }
                     Group {
@@ -1631,7 +1710,7 @@ struct SpectrumAnalyserView: View {
                         } else {
                             VStack(spacing: 12) {
                                 if mode != .bars { curves(selection) }
-                                if mode != .curves { bars(selection, visible: visible) }
+                                if mode != .curves { bars(selection, visible: visible, own: own) }
                             }
                         }
                     }
@@ -1648,9 +1727,10 @@ struct SpectrumAnalyserView: View {
         .onChange(of: windowController.isVisible) { _, visible in
             if visible { startFromPage() }
         }
-        // A channel that leaves the page's selection forgets it was hidden,
-        // so it comes back visible if it is selected again.
-        .onChange(of: vm.rtaSelection) { _, selection in
+        // A channel that leaves the drawn selection forgets it was hidden, so
+        // it comes back visible if it is selected again.  Watching the drawn
+        // selection also relayouts when the other console changes channels.
+        .onChange(of: drawnSelection) { _, selection in
             hidden = hidden.filter { $0.tap == selection.tap && selection.channels.contains($0.channel) }
         }
     }
@@ -1748,8 +1828,10 @@ struct SpectrumAnalyserView: View {
     }
 
     /// The strip's bars for the visible channels, in its column layout, grown
-    /// to fill the window.  Registered for the page's whole selection.
-    private func bars(_ selection: RtaChannelSelection, visible: [Int]) -> some View {
+    /// to fill the window.  Registered for the page's whole own selection,
+    /// whatever is drawn, so showing a followed selection never takes control.
+    private func bars(_ selection: RtaChannelSelection, visible: [Int],
+                      own: RtaChannelSelection) -> some View {
         let count = visible.count
         let columns = min(max(count, 1), min(max(settings.rtaBarColumns, 1), 4))
         let rows = stride(from: 0, to: count, by: columns).map {
@@ -1769,7 +1851,7 @@ struct SpectrumAnalyserView: View {
             }
         }
         .frame(maxHeight: .infinity)
-        .rtaWatching(engine, RtaRequest(tap: selection.tap, mask: selection.mask), active: active)
+        .rtaWatching(engine, RtaRequest(tap: own.tap, mask: own.mask), active: active)
     }
 
     private func barCell(tap: UInt8, channel ch: Int) -> some View {
@@ -1887,6 +1969,11 @@ private struct RtaStatusBar: View {
             if engine.configRejected {
                 Label("Device refused this configuration", systemImage: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
+            } else if case .following = engine.ownership {
+                Label("Following another console", systemImage: "person.2.fill")
+                Button("Take control") { engine.takeControl() }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.accentColor)
             } else if let lowest = lowBandHint {
                 Text("shaded bands below \(rtaShortHz(lowest)) Hz need a larger transform size in Settings")
                     .foregroundColor(.orange)

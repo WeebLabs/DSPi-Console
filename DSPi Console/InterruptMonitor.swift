@@ -56,6 +56,8 @@ private func sourceLabel(_ src: UInt8) -> String {
     case 5: return "GPIO"
     case 6: return "INTERNAL"
     case 7: return "UAC1"
+    case 8: return "UART"
+    case 9: return "I2C"
     default: return String(format: "src=0x%02X", src)
     }
 }
@@ -199,6 +201,14 @@ struct InterruptEvent: Identifiable {
             let q8 = UInt16(bytes[6]) | (UInt16(bytes[7]) << 8)
             let pct = String(format: "%.1f", Double(q8) / 256.0)
             return "\(seqStr) v2.CsAux                      slot=\(bytes[4]) state=\(bytes[5]) level=\(pct)% src=\(sourceLabel(bytes[8]))"
+
+        case NOTIFY_EVT_RTA_CONFIG:
+            // 17 bytes: [ver, evt, flags, seq, RtaConfig(12), src].
+            guard let (cfg, source) = RtaConfig.fromNotification(Data(bytes)) else {
+                return "\(seqStr) v2.RtaConfig (short: \(bytes.count) bytes)"
+            }
+            let tap = cfg.tap == RTA_TAP_INPUT ? "in" : "out"
+            return "\(seqStr) v2.RtaConfig                  tap=\(tap) mask=\(String(format: "0x%04X", cfg.channelMask)) points=\(cfg.points) avg=\(cfg.avgMs)ms decay=\(cfg.peakDecayDBs) src=\(sourceLabel(source))"
 
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
@@ -651,6 +661,12 @@ class InterruptMonitor: ObservableObject {
     /// the ParamSource of the dispatch (PARAM_SRC_GPIO for a panel control).
     var onCsAux: ((_ slot: UInt8, _ state: Bool, _ level: UInt16, _ source: UInt8) -> Void)?
 
+    /// Fires on the main thread for every configuration the spectrum analyser
+    /// applies (NOTIFY_EVT_RTA_CONFIG), whoever pushed it.  `origin` is the
+    /// session the transport attributes the SET to, which is how the engine
+    /// tells its own echo from another console taking the analyser.
+    var onRtaConfig: ((_ config: RtaConfig, _ source: UInt8, _ origin: LinkSessionID) -> Void)?
+
     private let transport: any DeviceTransport
     private var subscription: AnyCancellable?
 
@@ -827,6 +843,15 @@ class InterruptMonitor: ObservableObject {
             let source = bytes[8]
             DispatchQueue.main.async {
                 handler(slot, state, level, source)
+            }
+        }
+
+        // Dispatch analyser configuration announcements so a console sharing
+        // the analyser follows another's choice instead of overwriting it.
+        if let handler = onRtaConfig,
+           let (config, source) = RtaConfig.fromNotification(notification.packet) {
+            DispatchQueue.main.async {
+                handler(config, source, origin)
             }
         }
 

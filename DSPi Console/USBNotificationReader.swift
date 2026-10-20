@@ -230,6 +230,7 @@ final class USBNotificationReader {
         switch packet[packet.startIndex + 1] {
         case NOTIFY_EVT_PARAM_CHANGED, NOTIFY_EVT_CS_AUX: sourceOffset = 8
         case NOTIFY_EVT_BULK_INVALIDATED: sourceOffset = 4
+        case NOTIFY_EVT_RTA_CONFIG: sourceOffset = 16
         default: return 0
         }
         guard packet.count > sourceOffset else { return 0 }

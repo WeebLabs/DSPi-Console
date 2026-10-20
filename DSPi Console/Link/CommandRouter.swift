@@ -76,6 +76,21 @@ final class CommandRouter {
     private var isShutDown = false
     private let stateLock = NSLock()
 
+    /// Last time each session read analyser bands or bins or sent RTA START
+    /// (spec 7.10).  STOP is per session: it reaches the device only when no
+    /// other session watched within `rtaWatchWindow`.  Guarded by `stateLock`.
+    private var rtaWatchers: [LinkSessionID: Date] = [:]
+    /// The firmware's own idle timeout, so a swallowed STOP never keeps the
+    /// analyser running longer than an unread one would.
+    static let rtaWatchWindow: TimeInterval = 5.0
+    static let rtaWatchCodes: Set<UInt8> = [REQ_RTA_GET_BANDS, REQ_RTA_GET_BINS, REQ_RTA_GET_BANDS_ALL]
+    /// Whether a session other than the given one holds a poll subscription
+    /// for one of the codes.  Scheduler polls bypass the router, so the hub
+    /// wires this to its PollScheduler.
+    var otherSessionPolls: ((_ codes: Set<UInt8>, _ excluding: LinkSessionID) -> Bool)?
+    /// Injected so tests can age a watcher past the window without sleeping.
+    var now: () -> Date = Date.init
+
     /// How long to wait for the device before giving up.  Bulk gets longer.
     var commandTimeout: TimeInterval = 2.0
     var bulkTimeout: TimeInterval = 5.0
@@ -162,6 +177,14 @@ final class CommandRouter {
                 return completion(self.reject(request, .noDevice))
             }
 
+            // Decided here, in queue order, so a band read queued ahead of a
+            // STOP counts as watching.
+            if self.rtaStopIsSwallowed(request, session: session.id) {
+                return completion(RoutedResult(response: LinkCmdResponse(tag: request.tag, status: .ok,
+                                                                         payload: Data([0x01])),
+                                               attributedTo: 0))
+            }
+
             // Anything that can change device state is a write for attribution,
             // whichever transfer direction carries it (write-as-read included).
             var writerToken: UInt64?
@@ -221,6 +244,30 @@ final class CommandRouter {
         }
     }
 
+    /// Record analyser watching, and answer whether this request is an RTA
+    /// STOP that must not reach the device because another session watches.
+    /// Call on the router queue.
+    private func rtaStopIsSwallowed(_ request: LinkCmdRequest, session: LinkSessionID) -> Bool {
+        let code = request.bRequest
+        let isControl = code == REQ_RTA_CONTROL
+        guard Self.rtaWatchCodes.contains(code) || isControl else { return false }
+        let t = now()
+        if !isControl || request.wValue == RTA_CTL_START {
+            stateLock.lock(); rtaWatchers[session] = t; stateLock.unlock()
+            return false
+        }
+        guard request.wValue == RTA_CTL_STOP else { return false }
+
+        stateLock.lock()
+        rtaWatchers[session] = nil
+        rtaWatchers = rtaWatchers.filter { t.timeIntervalSince($0.value) <= Self.rtaWatchWindow }
+        let othersWatching = !rtaWatchers.isEmpty
+        stateLock.unlock()
+        // Queried outside stateLock: the scheduler holds its own lock across
+        // blocking device reads.
+        return othersWatching || (otherSessionPolls?(Self.rtaWatchCodes, session) ?? false)
+    }
+
     /// Run the blocking device call but do not let it wedge the queue past the
     /// timeout: the device call itself is bounded (USBDevice's control transfer
     /// has its own completion timeout), so this guards the pathological case by
@@ -278,6 +325,8 @@ final class CommandRouter {
         stateLock.lock(); defer { stateLock.unlock() }
         if lockHolder == session { lockHolder = nil; lockDeadline = nil }
         inflight[session] = nil
+        // Stops watching at once; nothing is sent, the firmware idles itself.
+        rtaWatchers[session] = nil
     }
 
     /// Consume the oldest writer that wrote within `window`, for attributing

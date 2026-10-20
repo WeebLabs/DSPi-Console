@@ -38,6 +38,15 @@ enum LinkStatus: UInt8, Error, Equatable {
     case unsupported = 0x86
     case badFrame    = 0x87
 
+    /// Text for a user, for the statuses a user can act on.  LOCKED is the
+    /// one shared wording for "another session holds the device".
+    var userMessage: String? {
+        switch self {
+        case .locked: return DeviceLock.lockedMessage
+        default: return nil
+        }
+    }
+
     /// True for the statuses a caller should simply retry after a short wait.
     var isRetryable: Bool {
         switch self {
@@ -70,12 +79,14 @@ struct LinkNotification {
     /// True when the firmware tags the change as a host or bulk write
     /// (PARAM_SRC_HOST_SET 1, PARAM_SRC_BULK_SET 2), which is the only kind a
     /// hub can attribute to one of its sessions.  Reads the source byte where
-    /// each event puts it: PARAM_CHANGED and CS_AUX at 8, BULK_INVALIDATED at 4.
+    /// each event puts it: PARAM_CHANGED and CS_AUX at 8, BULK_INVALIDATED at
+    /// 4, RTA_CONFIG at 16.
     var isHostSourced: Bool {
         let offset: Int
         switch eventID {
         case 0x02, 0x0C: offset = 8
         case 0x03: offset = 4
+        case NOTIFY_EVT_RTA_CONFIG: offset = 16
         default: return false
         }
         guard packet.count > offset else { return false }
@@ -157,6 +168,41 @@ protocol DeviceTransport: AnyObject {
     /// Subscribe to the device's notification stream.  Delivered on the main
     /// thread.  Drop the cancellable to unsubscribe.
     func addNotificationObserver(_ handler: @escaping (LinkNotification) -> Void) -> AnyCancellable
+
+    /// Take the hub's exclusive device lock (spec 7.7) so other sessions'
+    /// commands answer LOCKED until `releaseDeviceLock`.  Blocking; call off
+    /// the main thread.  False when another session holds it.  The release
+    /// never blocks.
+    func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool
+    func releaseDeviceLock()
+}
+
+/// Shared wording and limits for the device lock.
+enum DeviceLock {
+    static let lockedMessage = "Another console is applying changes"
+    /// Hubs cap a lock at 60 s (spec 7.7).
+    static let maxTimeout: TimeInterval = 60
+
+    /// Most recent LOCKED rejection of an ordinary command, for the status
+    /// row.  Posted by the transports, so no command needs its own error path.
+    static let notice = DeviceLockNotice()
+}
+
+/// Briefly shows that a command was refused because another session holds
+/// the lock.  Clears itself a few seconds after the last refusal.
+final class DeviceLockNotice: ObservableObject {
+    @Published private(set) var message: String?
+    private var clearWork: DispatchWorkItem?
+
+    func post() {
+        DispatchQueue.main.async {
+            self.message = DeviceLock.lockedMessage
+            self.clearWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.message = nil }
+            self.clearWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+        }
+    }
 }
 
 extension DeviceTransport {
@@ -174,5 +220,17 @@ extension DeviceTransport {
             return data
         }
         return nil
+    }
+
+    /// With no hub there is nobody to lock out (USB, test fakes).
+    func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool { true }
+    func releaseDeviceLock() {}
+
+    /// Run `body` holding the device lock, released on every exit.  nil, with
+    /// `body` never run, when another session holds the lock.
+    func withDeviceLock<T>(reason: String, timeout: TimeInterval, _ body: () throws -> T) rethrows -> T? {
+        guard acquireDeviceLock(reason: reason, timeout: timeout) else { return nil }
+        defer { releaseDeviceLock() }
+        return try body()
     }
 }

@@ -85,6 +85,62 @@ final class RtaWireTests: XCTestCase {
         XCTAssertEqual(RtaConfig(fftOrder: 10).points, 1024)
     }
 
+    // MARK: - RTA_CONFIG notification (notification_protocol_v2_spec.md §3.9)
+
+    private func rtaConfigPacket(_ cfg: RtaConfig, source: UInt8, seq: UInt8 = 9) -> Data {
+        var d = Data([0x02, NOTIFY_EVT_RTA_CONFIG, 0x00, seq])
+        d.append(cfg.toData())
+        d.append(source)
+        return d
+    }
+
+    func testRtaConfigNotificationDecode() {
+        XCTAssertEqual(NOTIFY_EVT_RTA_CONFIG, 0x0D)
+        let cfg = RtaConfig(tap: RTA_TAP_INPUT, channelMask: 0x0105, fftOrder: 9,
+                            avgMs: 250, peakDecayDBs: 6, flags: 0)
+        let packet = rtaConfigPacket(cfg, source: PARAM_SRC_UART)
+        XCTAssertEqual(packet.count, NOTIFY_RTA_CONFIG_SIZE)
+        let decoded = RtaConfig.fromNotification(packet)
+        XCTAssertEqual(decoded?.config, cfg)
+        XCTAssertEqual(decoded?.source, PARAM_SRC_UART)
+
+        // A slice not starting at index 0 decodes the same.
+        let sliced = (Data([0xAA]) + packet).dropFirst()
+        XCTAssertEqual(RtaConfig.fromNotification(sliced)?.config, cfg)
+
+        XCTAssertNil(RtaConfig.fromNotification(packet.prefix(16)), "short packet")
+        var other = packet
+        other[1] = 0x0C
+        XCTAssertNil(RtaConfig.fromNotification(other), "another event")
+    }
+
+    /// The source sits at byte 16, so only a HOST_SET or BULK_SET there is
+    /// attributable to a session.
+    func testRtaConfigIsHostSourced() {
+        let cfg = RtaConfig()
+        let host = LinkNotification(packet: rtaConfigPacket(cfg, source: 1), origin: 0, receivedAt: Date())
+        let uart = LinkNotification(packet: rtaConfigPacket(cfg, source: PARAM_SRC_UART), origin: 0,
+                                    receivedAt: Date())
+        XCTAssertTrue(host.isHostSourced)
+        XCTAssertFalse(uart.isHostSourced)
+        // Bytes 4-15 are config, not a source: a config byte that happens to
+        // read 1 at offset 8 must not count.
+        let decayOne = RtaConfig(peakDecayDBs: 1)
+        XCTAssertFalse(LinkNotification(packet: rtaConfigPacket(decayOne, source: PARAM_SRC_I2C), origin: 0,
+                                        receivedAt: Date()).isHostSourced)
+    }
+
+    /// On USB a HOST_SET echo is this console's own write; a UART or I2C
+    /// writer is someone else.
+    func testRtaConfigAttributedOrigin() {
+        let cfg = RtaConfig()
+        XCTAssertEqual(USBNotificationReader.attributedOrigin(rtaConfigPacket(cfg, source: 1), session: 5), 5)
+        XCTAssertEqual(USBNotificationReader.attributedOrigin(rtaConfigPacket(cfg, source: PARAM_SRC_UART),
+                                                              session: 5), 0)
+        XCTAssertEqual(USBNotificationReader.attributedOrigin(rtaConfigPacket(cfg, source: 1).prefix(16),
+                                                              session: 5), 0, "no source byte")
+    }
+
     // MARK: - RtaCaps
 
     private func capsBytes(version: UInt8 = RTA_CFG_VERSION, orderMin: UInt8 = 8, orderMax: UInt8 = 10,
