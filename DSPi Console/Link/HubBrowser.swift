@@ -352,6 +352,7 @@ final class HubBrowser: ObservableObject {
         guard let (host, port) = result else {
             let failures = (resolveFailures[name] ?? 0) + 1
             resolveFailures[name] = failures
+            if let endpoint = endpoints[name] { Self.reconfirm(endpoint) }
             let delay = min(30, resolveRetryBase * pow(2, Double(failures - 1)))
             let work = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
@@ -368,6 +369,37 @@ final class HubBrowser: ObservableObject {
         hub.port = port
         browsed[name] = hub
         publish()
+    }
+
+    /// A hub that lost power or its network sends no Bonjour goodbye, so the
+    /// browse listing stays cached until its TTL runs out (75 minutes for the
+    /// PTR record).  Asking mDNSResponder to reconfirm the record makes it
+    /// re-query the network and drop the record within seconds when nothing
+    /// answers, and the browser then sees an ordinary removal.
+    nonisolated static func reconfirm(_ endpoint: NWEndpoint) {
+        guard case let .service(name, type, domain, interface) = endpoint,
+              let rdata = ptrRecordData(name: name, type: type, domain: domain) else { return }
+        let fullname = "\(type).\(domain.isEmpty ? "local." : domain)"
+        _ = rdata.withUnsafeBytes { raw in
+            DNSServiceReconfirmRecord(0, UInt32(interface?.index ?? 0), fullname,
+                                      UInt16(kDNSServiceType_PTR), UInt16(kDNSServiceClass_IN),
+                                      UInt16(rdata.count), raw.baseAddress)
+        }
+    }
+
+    /// The PTR record's data: the instance's full name in DNS wire form, one
+    /// length-prefixed label per component.  The instance name is a single
+    /// label however many dots it holds, so it needs no escaping.
+    nonisolated static func ptrRecordData(name: String, type: String, domain: String) -> Data? {
+        var labels = [Data(name.utf8)]
+        let tail = (type + "." + (domain.isEmpty ? "local" : domain))
+            .split(separator: ".", omittingEmptySubsequences: true)
+        labels += tail.map { Data($0.utf8) }
+        guard labels.allSatisfy({ (1...63).contains($0.count) }) else { return nil }
+        var data = Data()
+        for label in labels { data.append(UInt8(label.count)); data.append(label) }
+        data.append(0)
+        return data.count <= 255 ? data : nil
     }
 
     /// The default resolver: a TCP connection to the service, read for its
