@@ -24,10 +24,58 @@ final class NetworkTransportTests: XCTestCase {
     func testBindResolvesHandleWhenDevicesArrive() {
         let (t, client, _) = make()
         t.bind(serial: "AAAA")
-        XCTAssertNil(t.selectedDevice)
+        XCTAssertEqual(t.selectedDevice?.serial, "AAAA", "selected from the moment it is chosen")
+        XCTAssertEqual(t.selectedDevice?.hub?.handle, 255, "handle unknown until the list arrives")
         client.setDevices([info("AAAA", handle: 3)])
         XCTAssertEqual(t.selectedDevice?.hub?.handle, 3)
         XCTAssertEqual(t.selectedDevice?.displayName, "Living room via Studio")
+    }
+
+    /// While the hub is unreachable the client's inventory is empty (every
+    /// connect attempt clears it).  The bound device stays selected, under
+    /// the name the hub last gave it, so the picker does not jump to whatever
+    /// device happens to be listed first.
+    func testBoundDeviceStaysSelectedWhileTheInventoryIsEmpty() {
+        let (t, client, _) = make()
+        t.bind(serial: "AAAA")
+        client.setDevices([info("AAAA", handle: 3)])
+        client.setState(.ready)
+        XCTAssertTrue(t.isConnected)
+
+        client.setState(.failed("connection lost"))
+        client.setDevices([])
+        XCTAssertFalse(t.isConnected)
+        XCTAssertEqual(t.selectedDevice?.serial, "AAAA")
+        XCTAssertEqual(t.selectedDevice?.hub?.handle, 255)
+        XCTAssertEqual(t.selectedDevice?.displayName, "Living room via Studio")
+
+        t.bind(serial: "BBBB")
+        XCTAssertEqual(t.selectedDevice?.displayName, "DSPi (BBBB) via Studio", "no name borrowed from the last device")
+    }
+
+    /// The browser reporting the hub at a new address re-dials it there at
+    /// once; the same address during a backoff wait re-dials now; the same
+    /// address on a healthy connection changes nothing.
+    func testHubSeenRedialsOnANewAddressOrDuringBackoff() {
+        let (t, client, _) = make()
+        let a = URL(string: "ws://10.0.0.2:11915/dspi/v1")!
+        let b = URL(string: "ws://10.0.0.7:11915/dspi/v1")!
+        t.connect(to: a)
+        client.setState(.ready)
+        t.hubSeen(at: a)
+        XCTAssertEqual(client.connectCalls.count, 1, "nothing to do on a healthy connection")
+
+        t.hubSeen(at: b)
+        XCTAssertEqual(client.connectCalls.count, 2)
+        XCTAssertEqual(client.connectCalls.last?.0, b)
+        XCTAssertEqual(t.url, b)
+
+        var failed = 0
+        t.onConnectionFailed = { failed += 1 }
+        client.setState(.failed("connection lost"))
+        XCTAssertEqual(failed, 1)
+        t.hubSeen(at: b)
+        XCTAssertEqual(client.connectCalls.count, 3, "the hub is back: no need to wait out the backoff")
     }
 
     func testConnectedRequiresReadyAndOnlineDevice() {

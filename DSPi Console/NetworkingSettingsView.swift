@@ -216,6 +216,9 @@ struct NetworkingSettingsTab: View {
                         .font(.caption).foregroundColor(.secondary)
                 }
             }
+            if let error = client.browseError, client.lookForHubs {
+                Text(error).font(.caption).foregroundColor(.orange)
+            }
             if client.hubs.isEmpty {
                 Text(client.lookForHubs ? "No hubs found yet." : "Not looking.")
                     .font(.caption).foregroundColor(.secondary)

@@ -26,6 +26,8 @@ final class LinkClientCoordinator: ObservableObject {
         }
     }
     @Published private(set) var hubs: [DiscoveredHub] = []
+    /// Why the browser is finding nothing, when the system says.
+    @Published private(set) var browseError: String?
     @Published var manualAddresses: [String] {
         didSet { defaults.set(manualAddresses, forKey: Keys.manual) }
     }
@@ -52,6 +54,14 @@ final class LinkClientCoordinator: ObservableObject {
                 self?.composite.updateHubs(hubs.filter { !$0.isSelf })
             }
             .store(in: &cancellables)
+        browser.$browseError
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in self?.browseError = $0 }
+            .store(in: &cancellables)
+        // A failed connection may mean the hub moved: look its address up again.
+        composite.hubUnreachable = { [weak self] hubID in
+            Task { @MainActor in self?.browser.refreshAddress(ofHub: hubID) }
+        }
 
         for address in manualAddresses { browser.addManual(address) }
         if lookForHubs { browser.start() }

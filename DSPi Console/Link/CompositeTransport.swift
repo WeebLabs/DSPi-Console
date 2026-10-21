@@ -23,6 +23,9 @@ final class CompositeTransport: DeviceTransport {
     /// Asks the user for a hub's pairing code.  nil means pairing cannot be
     /// offered (headless), and connecting to a pin hub without a token fails.
     var pairingPrompt: ((String) -> String?)?
+    /// Called on the main thread with a hub id when its connection fails, so
+    /// the browser can look the hub's address up again.
+    var hubUnreachable: ((String) -> Void)?
 
     private var remotes: [String: NetworkTransport] = [:]      // by hub id
     private var knownHubs: [DiscoveredHub] = []
@@ -97,9 +100,16 @@ final class CompositeTransport: DeviceTransport {
     // MARK: - Hubs
 
     /// The browser's current view of the network; devices listed in a hub's
-    /// TXT record appear in the picker before any connection is made.
+    /// TXT record appear in the picker before any connection is made.  A hub
+    /// we already have a transport for is told its current address, so one
+    /// that came back on a new lease is dialled there; a hub that has gone
+    /// takes its unconnected transport with it.
     func updateHubs(_ hubs: [DiscoveredHub]) {
-        stateLock.lock(); knownHubs = hubs; stateLock.unlock()
+        stateLock.lock(); knownHubs = hubs; let existing = remotes; stateLock.unlock()
+        for hub in hubs {
+            if let remote = existing[hub.id], let url = hub.webSocketURL { remote.hubSeen(at: url) }
+        }
+        pruneRemotes()
         recomputeDevices()
     }
 
@@ -115,11 +125,44 @@ final class CompositeTransport: DeviceTransport {
         let transport = NetworkTransport(client: makeClient(), hubID: hub.id, hubName: hub.name,
                                          tokens: tokens, clientName: clientName)
         transport.pairingPrompt = pairingPrompt
+        let hubID = hub.id
+        transport.onConnectionFailed = { [weak self] in self?.remoteFailed(hubID) }
         stateLock.lock(); remotes[hub.id] = transport; stateLock.unlock()
         remoteDeviceCancellables[hub.id] = transport.availableDevicesPublisher
             .sink { [weak self] _ in self?.recomputeDevices() }
         transport.connect(to: url)
         return transport
+    }
+
+    /// A remote's socket failed.  It reconnects with backoff on its own; here
+    /// the browser is asked whether the hub moved, and a hub that has also
+    /// left the browse list is given up on.
+    private func remoteFailed(_ hubID: String) {
+        hubUnreachable?(hubID)
+        pruneRemotes()
+        recomputeDevices()
+    }
+
+    /// Drop every transport whose hub is no longer listed and whose session is
+    /// down.  A live session outlasts a Bonjour hiccup; a dead one with no hub
+    /// to go back to would otherwise retry forever, and, if it was the active
+    /// transport, hold the view model on a device nothing can reach.  That
+    /// case hands the view model back to the local transport.
+    private func pruneRemotes() {
+        stateLock.lock()
+        let hubIDs = Set(knownHubs.map { $0.id })
+        let gone = remotes.filter { !hubIDs.contains($0.key) && !$0.value.isConnected }
+        for id in gone.keys { remotes[id] = nil }
+        stateLock.unlock()
+        guard !gone.isEmpty else { return }
+        for (id, remote) in gone {
+            remoteDeviceCancellables[id] = nil
+            if remote === active {
+                remoteWasAutoSelected = false
+                attach(to: local)
+            }
+            remote.disconnect()
+        }
     }
 
     // MARK: - Device list
@@ -131,21 +174,33 @@ final class CompositeTransport: DeviceTransport {
         let connected = remotes
         stateLock.unlock()
         var seen = Set(merged.map { $0.serial })
+        func append(_ device: DSPiDevice) {
+            guard !seen.contains(device.serial) else { return }
+            merged.append(device); seen.insert(device.serial)
+        }
+        var listed = Set<String>()
         for hub in hubs {
             if let t = connected[hub.id], !t.availableDevices.isEmpty {
-                for d in t.availableDevices where !seen.contains(d.serial) {
-                    merged.append(d); seen.insert(d.serial)
-                }
+                t.availableDevices.forEach(append)
+                listed.insert(hub.id)
             } else {
                 // Not connected yet: what the TXT record advertises.
-                for serial in hub.serials where !seen.contains(serial) {
-                    merged.append(DSPiDevice(serial: serial, locationID: 0,
-                                             hub: RemoteHubRef(hubID: hub.id, hubName: hub.name, handle: 255),
-                                             remoteName: nil))
-                    seen.insert(serial)
+                for serial in hub.serials {
+                    append(DSPiDevice(serial: serial, locationID: 0,
+                                      hub: RemoteHubRef(hubID: hub.id, hubName: hub.name, handle: 255),
+                                      remoteName: nil))
                 }
             }
         }
+        // A session that is up lists its devices whether or not Bonjour shows
+        // the hub right now; the device being driven must not vanish from the
+        // picker on a missed announcement.
+        for (id, t) in connected.sorted(by: { $0.key < $1.key }) where !listed.contains(id) {
+            t.availableDevices.forEach(append)
+        }
+        // The device the view model is on stays listed while its hub cannot
+        // be reached, so the picker keeps showing what is selected.
+        if active !== local, let selected = active.selectedDevice { append(selected) }
         devicesSubject.send(merged)
         autoSelectRemoteIfIdle(merged, hubs: hubs)
     }
@@ -211,14 +266,22 @@ final class CompositeTransport: DeviceTransport {
             local.selectDevice(device)
             return
         }
-        stateLock.lock(); let hub = knownHubs.first { $0.id == ref.hubID }; stateLock.unlock()
-        guard let hub = hub else {
-            errorSubject.send("Hub \(ref.hubName) is no longer on the network.")
-            return
-        }
-        guard let transport = remoteConnecting(to: hub) else {
-            errorSubject.send("Hub \(ref.hubName) has an address Console cannot connect to (\(hub.displayAddress)).")
-            return
+        // A hub with a transport already (its session may be up while Bonjour
+        // has lost sight of it) is used as is.
+        let transport: NetworkTransport
+        if let existing = remote(for: ref.hubID) {
+            transport = existing
+        } else {
+            stateLock.lock(); let hub = knownHubs.first { $0.id == ref.hubID }; stateLock.unlock()
+            guard let hub = hub else {
+                errorSubject.send("Hub \(ref.hubName) is no longer on the network.")
+                return
+            }
+            guard let connecting = remoteConnecting(to: hub) else {
+                errorSubject.send("Hub \(ref.hubName) has an address Console cannot connect to (\(hub.displayAddress)).")
+                return
+            }
+            transport = connecting
         }
         transport.bind(serial: device.serial)
         if active !== transport { attach(to: transport) }

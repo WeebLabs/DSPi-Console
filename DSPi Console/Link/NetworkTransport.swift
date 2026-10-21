@@ -21,9 +21,13 @@ final class NetworkTransport: DeviceTransport {
     private let tokens: LinkTokenStore
     private let clientName: String
 
-    private var url: URL?
+    /// The address last dialled.  Main thread.
+    private(set) var url: URL?
     private var boundHandle: UInt8?
     private var boundSerial: String?
+    /// The hub's name for the bound device, kept so the placeholder shown
+    /// while the hub is unreachable reads as the same device.
+    private var boundName: String?
     private let notifyFanout = NotificationFanout()
     private var cancellables = Set<AnyCancellable>()
 
@@ -42,6 +46,9 @@ final class NetworkTransport: DeviceTransport {
     private var reconnectAttempt = 0
     private var reconnectWork: DispatchWorkItem?
     private var wantConnection = false
+    /// Called on the main thread when the connection fails, so the owner can
+    /// ask the browser whether the hub has moved.
+    var onConnectionFailed: (() -> Void)?
 
     /// Called on the main thread when the hub needs a PIN.  Returns the PIN
     /// or nil to give up.  The app installs a modal prompt.
@@ -101,25 +108,52 @@ final class NetworkTransport: DeviceTransport {
         if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
     }
 
+    /// The browser saw the hub again.  A new address is dialled at once, and a
+    /// hub that is back while a backoff wait is running is dialled now rather
+    /// than when the wait ends.  Anything else (a TXT change on a healthy
+    /// connection) changes nothing.
+    func hubSeen(at url: URL) {
+        onMain {
+            if self.url != url {
+                self.url = url
+                if self.wantConnection { self.connect(to: url) }
+            } else if self.wantConnection, self.reconnectWork != nil {
+                self.connect(to: url)
+            }
+        }
+    }
+
     /// Bind to one of the hub's devices.  The device list may not have
     /// arrived yet, so bind by serial and resolve the handle when it does.
     /// Selecting a device again after the user cancelled pairing (which gave
     /// the connection up) is how they ask to try again.
     func bind(serial: String) {
+        if serial != boundSerial { boundName = nil }
         boundSerial = serial
         resolveBinding()
         publishConnected()
         if !wantConnection, let url = url { connect(to: url) }
     }
 
+    /// The bound device stays selected while the hub's inventory lacks it
+    /// (the hub unreachable, the session restarting, the device dropped off
+    /// the hub): a handle-255 placeholder keeps the picker on the device the
+    /// user chose instead of falling back to whatever is listed first.
     private func resolveBinding() {
-        guard let serial = boundSerial,
-              let info = client.devices.first(where: { $0.serial == serial }) else {
+        guard let serial = boundSerial else {
             boundHandle = nil
             selectedSubject.send(nil)
             return
         }
+        guard let info = client.devices.first(where: { $0.serial == serial }) else {
+            boundHandle = nil
+            selectedSubject.send(DSPiDevice(serial: serial, locationID: 0,
+                                            hub: RemoteHubRef(hubID: hubID, hubName: hubName, handle: 255),
+                                            remoteName: boundName))
+            return
+        }
         boundHandle = UInt8(truncatingIfNeeded: info.handle)
+        boundName = info.name
         selectedSubject.send(Self.device(from: info, hubID: hubID, hubName: hubName))
     }
 
@@ -139,6 +173,10 @@ final class NetworkTransport: DeviceTransport {
         case .failed(let reason):
             errorSubject.send(reason)
             scheduleReconnect()
+            // The owner reads isConnected to decide what to do about the
+            // failure, so it must already say false.
+            publishConnected()
+            onConnectionFailed?()
         case .disconnected:
             break
         default:
