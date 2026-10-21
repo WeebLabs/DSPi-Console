@@ -85,9 +85,9 @@ struct NetworkingSettingsTab: View {
 
     private var statusLine: String {
         let count = service.sessionCount
-        let clients = count == 0 ? "no clients connected"
+        let clients = count == 0 ? "No clients connected"
                                  : "\(count) client\(count == 1 ? "" : "s") connected"
-        return service.listenAddress.map { "On at \($0), \(clients)" } ?? "On, \(clients)"
+        return service.listenAddress.map { "\($0) · \(clients)" } ?? clients
     }
 
     // MARK: - This hub
@@ -107,7 +107,7 @@ struct NetworkingSettingsTab: View {
                 Text("Anyone on the network").tag(LinkAuthMode.none)
             }
             if service.authMode == .none {
-                Label("Anyone on this network gets full control. Use this only on a network you trust.",
+                Label("Anyone on this network can control your devices. Use only on a network you trust.",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             }
@@ -125,8 +125,11 @@ struct NetworkingSettingsTab: View {
         } header: {
             Text("This Hub")
         } footer: {
-            if service.isRunning {
-                footerText("Turn sharing off to change the port.")
+            VStack(alignment: .leading, spacing: 4) {
+                footerText("Other Consoles see this Mac as a hub with this name. Sharing works on your local network only. To reach it from elsewhere, use a VPN such as Tailscale. Don't forward the port on your router.")
+                if service.isRunning {
+                    footerText("Turn sharing off to change the port.")
+                }
             }
         }
     }
@@ -149,13 +152,20 @@ struct NetworkingSettingsTab: View {
             if service.activePIN == nil {
                 HStack {
                     Spacer()
-                    Button("Pair a New Client…") { service.allowNewClient() }
+                    // A code issued while the server is stopped can never be redeemed.
+                    Button("Pair a New Client") { service.allowNewClient() }
+                        .disabled(!service.isRunning)
                 }
             }
         } header: {
             Text("Paired Clients")
         } footer: {
-            footerText("A role sets what each client can do: Viewer watches, Control adjusts settings, Admin also changes the hub.")
+            VStack(alignment: .leading, spacing: 4) {
+                footerText("Viewer can only watch. Control can adjust devices. Admin can also change these hub settings.")
+                if !service.isRunning {
+                    footerText("Turn sharing on to pair a new client.")
+                }
+            }
         }
     }
 
@@ -168,7 +178,7 @@ struct NetworkingSettingsTab: View {
                 .tracking(8)
                 .textSelection(.enabled)
             if let expiry = service.pairingExpires {
-                Text("Expires \(expiry, style: .relative) from now")
+                Text("Expires in \(expiry, style: .relative)")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Button("Cancel", role: .cancel) { service.cancelPairing() }
@@ -223,13 +233,19 @@ struct NetworkingSettingsTab: View {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange)
             }
-            ForEach(client.hubs) { hub in
+            // This Mac's own hub is left out: the header already shows it is up.
+            let hubs = client.hubs.filter { !$0.isSelf }
+            ForEach(hubs) { hub in
                 hubRow(hub)
             }
-            if client.hubs.isEmpty && client.lookForHubs {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Looking for hubs…").foregroundStyle(.secondary)
+            if hubs.isEmpty {
+                if client.lookForHubs {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for hubs…").foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("No hubs added.").foregroundStyle(.secondary)
                 }
             }
             HStack {
@@ -240,7 +256,7 @@ struct NetworkingSettingsTab: View {
         } header: {
             Text("Other Hubs")
         } footer: {
-            footerText("Devices shared by other Consoles and bridges appear in the device menu, marked with the hub they live on.")
+            footerText("Devices from these hubs appear in the device menu, labelled with their hub.")
         }
     }
 
@@ -253,12 +269,9 @@ struct NetworkingSettingsTab: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(hub.name)
                 // verbatim: a localized Text would print the port as "11,915".
-                Text(verbatim: hub.isSelf
-                     ? "\(hub.displayAddress), this Mac's own hub"
-                     : "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s")")
+                Text(verbatim: "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s")")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            .opacity(hub.isSelf ? 0.6 : 1)
             Spacer()
             hubBadge(hub)
                 .frame(width: 90, alignment: .trailing)
@@ -274,11 +287,10 @@ struct NetworkingSettingsTab: View {
     }
 
     private func hubBadge(_ hub: DiscoveredHub) -> some View {
-        let (text, color): (String, Color) =
-            hub.isSelf ? ("Not used", .secondary)
-            : hub.authMode == "none" ? ("Open", .green)
-            : ("Pairing", .blue)
-        return Text(text)
+        let (text, icon, color): (String, String, Color) =
+            hub.authMode == "none" ? ("Open", "lock.open", .green)
+                                   : ("Private", "lock", .blue)
+        return Label(text, systemImage: icon)
             .font(.caption.weight(.medium))
             .foregroundStyle(color)
             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -325,7 +337,7 @@ struct NetworkingSettingsTab: View {
                 Text("Show in the menu bar")
                 Text("Closing the window keeps Console running in the menu bar.")
             }
-            Toggle("Start hidden in the menu bar",
+            Toggle("Start in the menu bar only",
                    isOn: Binding(get: { menuBar.startMinimised }, set: { menuBar.startMinimised = $0 }))
                 .disabled(!menuBar.showInMenuBar)
             Toggle("Open at login",
@@ -339,8 +351,6 @@ struct NetworkingSettingsTab: View {
                                  set: { service.preventSleepWhileConnected = $0 }))
         } header: {
             Text("Running in the Background")
-        } footer: {
-            footerText("Sharing works only on your local network. To reach your devices away from home, use a VPN such as Tailscale or WireGuard; do not forward the port on your router.")
         }
     }
 
