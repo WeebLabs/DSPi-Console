@@ -80,7 +80,9 @@ final class HubBrowser: ObservableObject {
     private var manual: [DiscoveredHub] = []
     private var browsed: [String: DiscoveredHub] = [:]   // keyed by service name
     private var endpoints: [String: NWEndpoint] = [:]
-    private var resolvers: [String: AnyCancellable] = [:]
+    /// The attempt in flight per service.  The token tells a late result from
+    /// an earlier attempt apart from the current one's.
+    private var resolvers: [String: (token: UUID, attempt: AnyCancellable)] = [:]
     private var resolveRetries: [String: DispatchWorkItem] = [:]
     private var resolveFailures: [String: Int] = [:]
 
@@ -188,7 +190,7 @@ final class HubBrowser: ObservableObject {
         restartWork?.cancel(); restartWork = nil
         browser?.cancel()
         browser = nil
-        resolvers.values.forEach { $0.cancel() }
+        resolvers.values.forEach { $0.attempt.cancel() }
         resolvers.removeAll()
         resolveRetries.values.forEach { $0.cancel() }
         resolveRetries.removeAll()
@@ -313,7 +315,7 @@ final class HubBrowser: ObservableObject {
     private func forget(_ name: String) {
         browsed[name] = nil
         endpoints[name] = nil
-        resolvers[name]?.cancel(); resolvers[name] = nil
+        resolvers[name]?.attempt.cancel(); resolvers[name] = nil
         resolveRetries[name]?.cancel(); resolveRetries[name] = nil
         resolveFailures[name] = nil
     }
@@ -333,12 +335,18 @@ final class HubBrowser: ObservableObject {
     private func resolve(name: String) {
         guard resolvers[name] == nil, let endpoint = endpoints[name] else { return }
         resolveRetries[name]?.cancel(); resolveRetries[name] = nil
-        resolvers[name] = resolver(endpoint) { [weak self] result in
-            Task { @MainActor in self?.resolved(name, result) }
+        let token = UUID()
+        let attempt = resolver(endpoint) { [weak self] result in
+            Task { @MainActor in self?.resolved(name, token: token, result) }
         }
+        resolvers[name] = (token, attempt)
     }
 
-    private func resolved(_ name: String, _ result: (host: String, port: Int)?) {
+    /// A result that hopped to the main actor after its attempt was abandoned
+    /// (the service left and came back, starting a new attempt) is ignored,
+    /// or it would cancel the attempt now in flight.
+    private func resolved(_ name: String, token: UUID, _ result: (host: String, port: Int)?) {
+        guard resolvers[name]?.token == token else { return }
         resolvers[name] = nil
         guard var hub = browsed[name] else { return }
         guard let (host, port) = result else {

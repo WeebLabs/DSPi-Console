@@ -53,29 +53,58 @@ final class NetworkTransportTests: XCTestCase {
         XCTAssertEqual(t.selectedDevice?.displayName, "DSPi (BBBB) via Studio", "no name borrowed from the last device")
     }
 
-    /// The browser reporting the hub at a new address re-dials it there at
-    /// once; the same address during a backoff wait re-dials now; the same
-    /// address on a healthy connection changes nothing.
-    func testHubSeenRedialsOnANewAddressOrDuringBackoff() {
+    /// A session that is up is never dropped for an address change: a
+    /// dual-stack hub resolves to a different family from one probe to the
+    /// next.  The new address is kept and used once the session fails.
+    func testHubSeenKeepsAReadySessionAndRemembersTheNewAddress() {
+        let (t, client, _) = make()
+        let a = URL(string: "ws://10.0.0.2:11915/dspi/v1")!
+        let b = URL(string: "ws://[fe80::1%25en0]:11915/dspi/v1")!
+        t.connect(to: a)
+        client.setState(.ready)
+        t.hubSeen(at: b, reappeared: false)
+        XCTAssertEqual(client.connectCalls.count, 1, "a healthy socket is left alone")
+        XCTAssertEqual(t.url, b)
+
+        client.setState(.failed("connection lost"))
+        let redialled = expectation(description: "reconnect")
+        redialled.assertForOverFulfill = false
+        let probe = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            if client.connectCalls.count >= 2 { redialled.fulfill() }
+        }
+        wait(for: [redialled], timeout: 3)
+        probe.invalidate()
+        XCTAssertEqual(client.connectCalls.last?.0, b, "the reconnect goes to the address last seen")
+    }
+
+    /// With the session down, a new address is dialled at once, and the hub
+    /// coming back during a backoff wait is dialled at once; the same address
+    /// re-listed with no news is not, so browse traffic cannot collapse the
+    /// backoff ladder for a hub that keeps refusing.
+    func testHubSeenDialsADownSessionOnNewsOnly() {
         let (t, client, _) = make()
         let a = URL(string: "ws://10.0.0.2:11915/dspi/v1")!
         let b = URL(string: "ws://10.0.0.7:11915/dspi/v1")!
         t.connect(to: a)
-        client.setState(.ready)
-        t.hubSeen(at: a)
-        XCTAssertEqual(client.connectCalls.count, 1, "nothing to do on a healthy connection")
-
-        t.hubSeen(at: b)
-        XCTAssertEqual(client.connectCalls.count, 2)
-        XCTAssertEqual(client.connectCalls.last?.0, b)
-        XCTAssertEqual(t.url, b)
-
         var failed = 0
         t.onConnectionFailed = { failed += 1 }
         client.setState(.failed("connection lost"))
         XCTAssertEqual(failed, 1)
-        t.hubSeen(at: b)
-        XCTAssertEqual(client.connectCalls.count, 3, "the hub is back: no need to wait out the backoff")
+        XCTAssertTrue(t.isSessionDown)
+
+        t.hubSeen(at: a, reappeared: false)
+        XCTAssertEqual(client.connectCalls.count, 1, "same hub, same address, still listed: wait out the backoff")
+
+        t.hubSeen(at: a, reappeared: true)
+        XCTAssertEqual(client.connectCalls.count, 2, "back after an absence: dial now")
+
+        client.setState(.failed("connection lost"))
+        t.hubSeen(at: b, reappeared: false)
+        XCTAssertEqual(client.connectCalls.count, 3, "a new address: dial now")
+        XCTAssertEqual(client.connectCalls.last?.0, b)
+
+        client.setState(.connecting)
+        XCTAssertFalse(t.isSessionDown, "connecting counts as up")
     }
 
     func testConnectedRequiresReadyAndOnlineDevice() {

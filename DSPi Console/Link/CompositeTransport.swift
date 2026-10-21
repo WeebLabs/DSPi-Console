@@ -105,9 +105,14 @@ final class CompositeTransport: DeviceTransport {
     /// that came back on a new lease is dialled there; a hub that has gone
     /// takes its unconnected transport with it.
     func updateHubs(_ hubs: [DiscoveredHub]) {
-        stateLock.lock(); knownHubs = hubs; let existing = remotes; stateLock.unlock()
+        stateLock.lock()
+        let previous = Set(knownHubs.map { $0.id })
+        knownHubs = hubs
+        let existing = remotes
+        stateLock.unlock()
         for hub in hubs {
-            if let remote = existing[hub.id], let url = hub.webSocketURL { remote.hubSeen(at: url) }
+            guard let remote = existing[hub.id], let url = hub.webSocketURL else { continue }
+            remote.hubSeen(at: url, reappeared: !previous.contains(hub.id))
         }
         pruneRemotes()
         recomputeDevices()
@@ -143,17 +148,41 @@ final class CompositeTransport: DeviceTransport {
         recomputeDevices()
     }
 
-    /// Drop every transport whose hub is no longer listed and whose session is
-    /// down.  A live session outlasts a Bonjour hiccup; a dead one with no hub
-    /// to go back to would otherwise retry forever, and, if it was the active
-    /// transport, hold the view model on a device nothing can reach.  That
-    /// case hands the view model back to the local transport.
+    /// How long a hub must stay off the browse list with its session down
+    /// before its transport is dropped.  Long enough to ride out a missed
+    /// announcement, a partial first result from a rebuilt browser, and the
+    /// first rungs of the reconnect ladder; short enough that a hub that has
+    /// really gone does not hold the view model for long.
+    var pruneGrace: TimeInterval = 10
+    /// When each transport first met the drop condition.  Guarded by
+    /// `stateLock`; an entry clears the moment the condition stops holding.
+    private var pruneSince: [String: Date] = [:]
+    private var pruneCheck: DispatchWorkItem?
+
+    /// Drop every transport whose hub has been off the browse list, with no
+    /// session up, for the grace period.  A session that is connecting,
+    /// authenticating or ready outlasts a Bonjour hiccup; a dead one with no
+    /// hub to go back to would otherwise retry forever, and, if it was the
+    /// active transport, hold the view model on a device nothing can reach.
+    /// That case hands the view model back to the local transport.
     private func pruneRemotes() {
+        let now = Date()
         stateLock.lock()
         let hubIDs = Set(knownHubs.map { $0.id })
-        let gone = remotes.filter { !hubIDs.contains($0.key) && !$0.value.isConnected }
+        var gone: [String: NetworkTransport] = [:]
+        for (id, remote) in remotes {
+            guard !hubIDs.contains(id), remote.isSessionDown else { pruneSince[id] = nil; continue }
+            let since = pruneSince[id] ?? now
+            pruneSince[id] = since
+            if now.timeIntervalSince(since) >= pruneGrace {
+                gone[id] = remote
+                pruneSince[id] = nil
+            }
+        }
         for id in gone.keys { remotes[id] = nil }
+        let waiting = !pruneSince.isEmpty
         stateLock.unlock()
+        if waiting { schedulePruneCheck() }
         guard !gone.isEmpty else { return }
         for (id, remote) in gone {
             remoteDeviceCancellables[id] = nil
@@ -163,6 +192,20 @@ final class CompositeTransport: DeviceTransport {
             }
             remote.disconnect()
         }
+    }
+
+    /// Nothing else is guaranteed to call pruneRemotes once the grace period
+    /// has run out, so a check is booked for then.
+    private func schedulePruneCheck() {
+        guard pruneCheck == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.pruneCheck = nil
+            self.pruneRemotes()
+            self.recomputeDevices()
+        }
+        pruneCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + pruneGrace + 0.05, execute: work)
     }
 
     // MARK: - Device list

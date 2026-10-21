@@ -2980,7 +2980,10 @@ class DSPViewModel: ObservableObject {
     }
 
     func switchToDevice(_ device: DSPiDevice) {
-        guard device != selectedDevice else { return }
+        // Picking the selected device again while it is not connected is a
+        // retry: a remote whose pairing was cancelled reconnects, a local
+        // board is rescanned.
+        guard device != selectedDevice || !isDeviceConnected else { return }
 
         // Pending Settings changes (staged global parameters, unflashed output
         // config) belong to the current device and are discarded on switch -

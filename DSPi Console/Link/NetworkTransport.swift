@@ -108,18 +108,33 @@ final class NetworkTransport: DeviceTransport {
         if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
     }
 
-    /// The browser saw the hub again.  A new address is dialled at once, and a
-    /// hub that is back while a backoff wait is running is dialled now rather
-    /// than when the wait ends.  Anything else (a TXT change on a healthy
-    /// connection) changes nothing.
-    func hubSeen(at url: URL) {
+    /// The browser listed the hub, at `url`; `reappeared` says it was absent
+    /// from the previous list.  A session that is up is left alone whatever
+    /// the address says: a dual-stack hub resolves to a different family from
+    /// one probe to the next, and that is no reason to drop a working socket.
+    /// The new address is kept for the next dial.  A session that is down is
+    /// dialled now on news only: a new address, or the hub back after an
+    /// absence while a backoff wait is pending.  The ladder is not reset, so a
+    /// hub that keeps refusing cannot be hammered by browse traffic.
+    func hubSeen(at url: URL, reappeared: Bool) {
         onMain {
-            if self.url != url {
-                self.url = url
-                if self.wantConnection { self.connect(to: url) }
-            } else if self.wantConnection, self.reconnectWork != nil {
-                self.connect(to: url)
-            }
+            let moved = self.url != url
+            self.url = url
+            guard self.wantConnection, self.client.state != .ready else { return }
+            guard moved || (reappeared && self.reconnectWork != nil) else { return }
+            self.reconnectWork?.cancel()
+            self.reconnectWork = nil
+            self.client.connect(to: url, clientName: self.clientName, token: self.tokens.token(forHub: self.hubID))
+        }
+    }
+
+    /// True when no session exists or the last one failed.  Connecting,
+    /// authenticating and ready sessions are all "up" for the purpose of
+    /// deciding whether the hub is really gone.
+    var isSessionDown: Bool {
+        switch client.state {
+        case .disconnected, .failed: return true
+        default: return false
         }
     }
 

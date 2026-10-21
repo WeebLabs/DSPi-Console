@@ -153,18 +153,45 @@ final class HubBrowserResolveTests: XCTestCase {
     /// start resolves afresh.
     func testRemovedServiceStopsRetryingAndStopForgetsBrowsedHubs() {
         let resolver = FakeResolver()
-        resolver.answers = [nil]
+        resolver.holds = true
         let browser = make(resolver)
-        browser.ingest([(name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))])
-        browser.ingest([])
-        settle(); settle()
+        browser.resolveRetryBase = 0.3     // longer than a settle, shorter than the wait below
+        let entry = (name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))
+        browser.ingest([entry])
+        resolver.settle(nil)
+        settle()                       // the failure lands and books a retry
+        browser.ingest([])             // the service is gone before it fires
+        let past = expectation(description: "past the retry delay")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { past.fulfill() }
+        wait(for: [past], timeout: 1)
         XCTAssertEqual(resolver.attempts, 1, "no retry for a service that is gone")
 
+        resolver.holds = false
         resolver.answers = [("10.0.0.5", 11915)]
-        browser.ingest([(name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))])
+        browser.ingest([entry])
         browser.addManual("10.0.0.9")
         waitUntil { browser.hubs.map { $0.host } == ["10.0.0.5", "10.0.0.9"] }
         browser.stop()
         XCTAssertEqual(browser.hubs.map { $0.host }, ["10.0.0.9"], "manual entries survive a stop")
+    }
+
+    /// An attempt's result can reach the main actor after the service left
+    /// and came back with a new attempt under way.  The late result must not
+    /// cancel that attempt or be taken for its answer.
+    func testALateResultFromAnAbandonedAttemptIsIgnored() {
+        let resolver = FakeResolver()
+        resolver.holds = true
+        let browser = make(resolver)
+        let entry = (name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))
+        browser.ingest([entry])
+        let first = resolver.pending.removeFirst()
+        browser.ingest([])                  // abandons the first attempt
+        browser.ingest([entry])             // starts a second
+        XCTAssertEqual(resolver.attempts, 2)
+        first(("10.0.0.1", 11915))          // the first answers anyway
+        settle()
+        XCTAssertTrue(browser.hubs.isEmpty, "the stale answer is not used")
+        resolver.settle(("10.0.0.5", 11915))
+        waitUntil { browser.hubs.first?.host == "10.0.0.5" }
     }
 }

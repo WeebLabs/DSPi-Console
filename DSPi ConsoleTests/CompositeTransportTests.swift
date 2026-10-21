@@ -210,9 +210,10 @@ final class CompositeTransportTests: XCTestCase {
         XCTAssertEqual(fake.connectCalls.last?.0.host, "10.0.0.7")
     }
 
-    /// A failed connection asks the browser to look the hub up again, and a
-    /// hub the browser then lists again is dialled without waiting out the
-    /// backoff.
+    /// A failed connection asks the browser to look the hub up again.  A hub
+    /// that then drops off the browse list and comes back within the grace
+    /// period keeps its transport and is dialled without waiting out the
+    /// backoff; a hub merely re-listed is not.
     func testFailureAsksForAFreshAddressAndAReappearingHubReconnectsAtOnce() {
         let (local, _, _) = makeLocal()
         let fake = LinkClientFake()
@@ -229,7 +230,13 @@ final class CompositeTransportTests: XCTestCase {
         XCTAssertTrue(composite.isRemoteActive, "the hub is still advertised: keep trying")
 
         composite.updateHubs([studio])
-        XCTAssertEqual(fake.connectCalls.count, 2)
+        XCTAssertEqual(fake.connectCalls.count, 1, "re-listed with no news: the backoff stands")
+
+        composite.updateHubs([])
+        XCTAssertTrue(composite.isRemoteActive, "a short absence is within the grace period")
+        composite.updateHubs([studio])
+        XCTAssertEqual(fake.connectCalls.count, 2, "back: dial now")
+        XCTAssertEqual(fake.disconnectCalls, 0)
     }
 
     /// The hub the view model is on leaves the network (its Console quit, its
@@ -241,6 +248,7 @@ final class CompositeTransportTests: XCTestCase {
         let fake = LinkClientFake()
         let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
                                            clientName: "T") { fake }
+        composite.pruneGrace = 0
         composite.updateHubs([hub("hub-1", serials: ["REMOTE0000REMOTE"])])
         composite.selectDevice(composite.availableDevices.first { $0.isRemote }!)
         XCTAssertTrue(composite.isRemoteActive)
@@ -268,6 +276,7 @@ final class CompositeTransportTests: XCTestCase {
         let fake = LinkClientFake()
         let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
                                            clientName: "T") { fake }
+        composite.pruneGrace = 0
         composite.updateHubs([hub("hub-1", serials: ["REMOTE0000REMOTE"])])
         composite.selectDevice(composite.availableDevices.first { $0.isRemote }!)
         fake.setDevices([LinkDeviceInfo(handle: 4, serial: "REMOTE0000REMOTE", name: "Kitchen", state: .online)])
@@ -277,6 +286,36 @@ final class CompositeTransportTests: XCTestCase {
         XCTAssertTrue(composite.isRemoteActive, "the session is up; Bonjour is not believed over it")
         fake.setState(.failed("connection lost"))
         XCTAssertFalse(composite.isRemoteActive)
+        XCTAssertEqual(fake.disconnectCalls, 1)
+    }
+
+    /// A transport that is connecting or waiting for a PIN is not a dead one:
+    /// a browse update that momentarily omits its hub leaves it alone however
+    /// long the grace period, and once the hub has been gone for the grace
+    /// period a session that is down is dropped by the booked check even if
+    /// nothing else happens.
+    func testPruneSparesSessionsThatAreUpAndDropsDeadOnesAfterTheGrace() {
+        let (local, _, _) = makeLocal()
+        let fake = LinkClientFake()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { fake }
+        composite.pruneGrace = 0.1
+        composite.updateHubs([hub("hub-1", serials: ["REMOTE0000REMOTE"])])
+        composite.selectDevice(composite.availableDevices.first { $0.isRemote }!)
+        fake.setState(.awaitingAuth(needsPairing: true))
+
+        composite.updateHubs([])
+        let later = expectation(description: "past the grace")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { later.fulfill() }
+        wait(for: [later], timeout: 1)
+        composite.updateHubs([])
+        XCTAssertTrue(composite.isRemoteActive, "waiting for a PIN is a session in progress")
+        XCTAssertEqual(fake.disconnectCalls, 0)
+
+        fake.setState(.failed("authentication timed out"))
+        XCTAssertTrue(composite.isRemoteActive, "the grace period starts now")
+        let dropped = expectation(for: NSPredicate { _, _ in !composite.isRemoteActive }, evaluatedWith: nil)
+        wait(for: [dropped], timeout: 2)
         XCTAssertEqual(fake.disconnectCalls, 1)
     }
 

@@ -367,8 +367,11 @@ struct ConnectionStatusIndicator: View {
             } else {
                 // The popup falls back to showing the first device when none is
                 // selected; it must stay clickable then, even as the only one,
-                // or a device shown there can never actually be chosen.
+                // or a device shown there can never actually be chosen.  It
+                // also stays clickable while the shown device is not
+                // connected, since picking it again is how a retry is asked for.
                 let pickable = vm.availableDevices.count > 1
+                    || !vm.isDeviceConnected
                     || !(vm.selectedDevice.map { vm.availableDevices.contains($0) } ?? false)
                 BorderlessPopUpButton(
                     items: vm.availableDevices,

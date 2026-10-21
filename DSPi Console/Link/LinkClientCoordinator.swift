@@ -47,7 +47,10 @@ final class LinkClientCoordinator: ObservableObject {
         self.lookForHubs = defaults.object(forKey: Keys.lookForHubs) as? Bool ?? false
         self.manualAddresses = defaults.stringArray(forKey: Keys.manual) ?? []
 
+        // The browser republishes on every Bonjour event; only a changed list
+        // is worth re-dialling hubs and recomputing the device list for.
         browser.$hubs
+            .removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] hubs in
                 self?.hubs = hubs
