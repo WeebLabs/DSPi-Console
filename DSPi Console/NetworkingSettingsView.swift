@@ -14,23 +14,25 @@ struct NetworkingSettingsTab: View {
     @ObservedObject private var service = AppState.shared.linkService
     @ObservedObject private var menuBar = MenuBarController.shared
     @ObservedObject private var client = AppState.shared.linkClientCoordinator
-    @State private var manualDraft: String = ""
 
     @State private var hubNameDraft: String = ""
     @State private var portDraft: String = ""
+    @State private var manualDraft: String = ""
+    @State private var showingAddHub = false
+
+    /// The sidebar's Networking badge colour, so the header reads as the same page.
+    private static let tint = Color(red: 0.290, green: 0.455, blue: 0.600)
 
     var body: some View {
         Form {
-            sharingSection
-            identitySection
-            authSection
+            headerSection
+            hubSection
             if service.authMode == .pin { clientsSection }
-            gatewaySection
             otherHubsSection
-            infoSection
+            backgroundSection
         }
         .formStyle(.grouped)
-        .onChange(of: service.hubName) { name in hubNameDraft = name }   // a remote rename
+        .onChange(of: service.hubName) { _, name in hubNameDraft = name }   // a remote rename
         .onAppear {
             hubNameDraft = service.hubName
             portDraft = String(service.port)
@@ -38,46 +40,76 @@ struct NetworkingSettingsTab: View {
         }
     }
 
-    // MARK: - Sharing
+    // MARK: - Header
 
-    private var sharingSection: some View {
+    private var headerSection: some View {
         Section {
-            Toggle(isOn: Binding(get: { service.sharingEnabled },
-                                 set: { service.setSharing($0) })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Share devices on this network")
-                    Text("Lets phones, browsers and other Consoles on your local network control the DSPi devices plugged into this Mac.")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-            }
-            if let error = service.lastError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundColor(.orange)
-            }
-            if service.isRunning {
-                LabeledContent("Status") {
-                    HStack(spacing: 6) {
-                        Circle().fill(.green).frame(width: 8, height: 8)
-                        Text(service.listenAddress.map { "Listening on \($0)" } ?? "Listening")
+            HStack(alignment: .center, spacing: 12) {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Self.tint.gradient)
+                    .frame(width: 40, height: 40)
+                    .overlay(
+                        Image(systemName: "network")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Share Devices on This Network")
+                        .font(.headline)
+                    if service.isRunning {
+                        HStack(spacing: 5) {
+                            Circle().fill(.green).frame(width: 7, height: 7)
+                            // verbatim: a localized Text would print the port as "11,915".
+                            Text(verbatim: statusLine)
+                        }
+                        .font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Text("Lets phones, browsers and other Consoles control the DSPi devices plugged into this Mac.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                LabeledContent("Connected clients", value: "\(service.sessionCount)")
+                Spacer(minLength: 12)
+                Toggle("Share devices on this network",
+                       isOn: Binding(get: { service.sharingEnabled }, set: { service.setSharing($0) }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
             }
-        } header: {
-            Text("Sharing")
+            .padding(.vertical, 4)
+            if let error = service.lastError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
+            }
         }
     }
 
-    // MARK: - Identity
+    private var statusLine: String {
+        let count = service.sessionCount
+        let clients = count == 0 ? "no clients connected"
+                                 : "\(count) client\(count == 1 ? "" : "s") connected"
+        return service.listenAddress.map { "On at \($0), \(clients)" } ?? "On, \(clients)"
+    }
 
-    private var identitySection: some View {
-        Section("Hub") {
+    // MARK: - This hub
+
+    private var hubSection: some View {
+        Section {
             LabeledContent("Name") {
                 TextField("Hub name", text: $hubNameDraft)
                     .labelsHidden()
                     .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 220)
+                    .frame(maxWidth: 260)
                     .onSubmit { service.hubName = hubNameDraft.isEmpty ? service.hubName : hubNameDraft }
+            }
+            Picker("Access", selection: Binding(get: { service.authMode },
+                                                set: { service.authMode = $0 })) {
+                Text("Paired clients only").tag(LinkAuthMode.pin)
+                Text("Anyone on the network").tag(LinkAuthMode.none)
+            }
+            if service.authMode == .none {
+                Label("Anyone on this network gets full control. Use this only on a network you trust.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
             }
             LabeledContent("Port") {
                 TextField("Port", text: $portDraft)
@@ -90,178 +122,233 @@ struct NetworkingSettingsTab: View {
                         else { portDraft = String(service.port) }
                     }
             }
+        } header: {
+            Text("This Hub")
+        } footer: {
             if service.isRunning {
-                Text("Stop sharing to change the port.")
-                    .font(.caption2).foregroundColor(.secondary)
+                footerText("Turn sharing off to change the port.")
             }
         }
     }
 
-    // MARK: - Auth
-
-    private var authSection: some View {
-        Section("Security") {
-            Picker("Access", selection: Binding(get: { service.authMode },
-                                                set: { service.authMode = $0 })) {
-                Text("Require pairing").tag(LinkAuthMode.pin)
-                Text("Open (no pairing)").tag(LinkAuthMode.none)
-            }
-            .pickerStyle(.radioGroup)
-            if service.authMode == .none {
-                Label("Anyone on the network gets full control without pairing. Use only on a trusted network.",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundColor(.orange)
-            }
-        }
-    }
-
-    // MARK: - Clients
+    // MARK: - Paired clients
 
     private var clientsSection: some View {
-        Section("Clients") {
+        Section {
             if let pin = service.activePIN {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Pairing code")
-                        .font(.caption).foregroundColor(.secondary)
-                    Text(pin)
-                        .font(.system(.largeTitle, design: .monospaced))
-                        .tracking(6)
-                    if let expiry = service.pairingExpires {
-                        Text("Enter this in the new client. Expires \(expiry, style: .relative) from now.")
-                            .font(.caption2).foregroundColor(.secondary)
-                    }
-                    Button("Cancel", role: .cancel) { service.cancelPairing() }
-                }
-            } else {
-                Button {
-                    service.allowNewClient()
-                } label: {
-                    Label("Allow a new client", systemImage: "plus.circle")
-                }
+                pairingCodeRow(pin)
             }
-
             if service.clients.isEmpty {
                 Text("No paired clients yet.")
-                    .font(.caption).foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             } else {
                 ForEach(service.clients) { client in
                     clientRow(client)
                 }
             }
+            if service.activePIN == nil {
+                HStack {
+                    Spacer()
+                    Button("Pair a New Client…") { service.allowNewClient() }
+                }
+            }
+        } header: {
+            Text("Paired Clients")
+        } footer: {
+            footerText("A role sets what each client can do: Viewer watches, Control adjusts settings, Admin also changes the hub.")
         }
     }
 
+    private func pairingCodeRow(_ pin: String) -> some View {
+        VStack(spacing: 6) {
+            Text("Enter this code on the new client")
+                .font(.callout).foregroundStyle(.secondary)
+            Text(pin)
+                .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                .tracking(8)
+                .textSelection(.enabled)
+            if let expiry = service.pairingExpires {
+                Text("Expires \(expiry, style: .relative) from now")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Button("Cancel", role: .cancel) { service.cancelPairing() }
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+    }
+
     private func clientRow(_ client: PairedClient) -> some View {
-        HStack {
+        HStack(spacing: 10) {
+            Image(systemName: "person.crop.circle.fill")
+                .font(.title2).foregroundStyle(.secondary)
+                .frame(width: 26)
             VStack(alignment: .leading, spacing: 2) {
                 Text(client.name)
-                if let seen = client.lastSeen {
-                    Text("Last seen \(seen, style: .relative) ago")
-                        .font(.caption2).foregroundColor(.secondary)
-                } else {
-                    Text("Never connected")
-                        .font(.caption2).foregroundColor(.secondary)
+                Group {
+                    if let seen = client.lastSeen {
+                        Text("Last seen \(seen, style: .relative) ago")
+                    } else {
+                        Text("Never connected")
+                    }
                 }
+                .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Picker("", selection: Binding(get: { client.role },
-                                          set: { service.setRole(client, $0) })) {
+            Picker("Role", selection: Binding(get: { client.role },
+                                              set: { service.setRole(client, $0) })) {
                 Text("Viewer").tag(LinkRole.viewer)
                 Text("Control").tag(LinkRole.control)
                 Text("Admin").tag(LinkRole.admin)
             }
             .labelsHidden()
-            .frame(width: 110)
+            .frame(width: 100)
             Button(role: .destructive) {
                 service.revoke(client)
             } label: {
-                Image(systemName: "trash")
+                Image(systemName: "minus.circle")
             }
             .buttonStyle(.borderless)
-        }
-    }
-
-    // MARK: - Gateway (menu bar and login)
-
-    private var gatewaySection: some View {
-        Section("Run as a Gateway") {
-            Toggle(isOn: Binding(get: { menuBar.showInMenuBar },
-                                 set: { menuBar.showInMenuBar = $0 })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Show in the menu bar")
-                    Text("Closing the window then hides Console to the menu bar while it keeps sharing. Window > Minimise to Menu Bar does the same.")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-            }
-            Toggle("Start at login", isOn: Binding(get: { menuBar.startsAtLogin },
-                                                   set: { menuBar.setStartsAtLogin($0) }))
-            if let error = menuBar.loginItemError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundColor(.orange)
-            }
-            Toggle("Start hidden in the menu bar", isOn: Binding(get: { menuBar.startMinimised },
-                                                                 set: { menuBar.startMinimised = $0 }))
-                .disabled(!menuBar.showInMenuBar)
+            .help("Remove this client")
         }
     }
 
     // MARK: - Other hubs (client mode)
 
     private var otherHubsSection: some View {
-        Section("Other Hubs") {
-            Toggle(isOn: Binding(get: { client.lookForHubs }, set: { client.lookForHubs = $0 })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Look for DSPi devices shared on this network")
-                    Text("Devices shared by other Consoles and bridges appear in the device menu, marked with the hub they live on.")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-            }
+        Section {
+            Toggle("Find hubs automatically",
+                   isOn: Binding(get: { client.lookForHubs }, set: { client.lookForHubs = $0 }))
             if let error = client.browseError, client.lookForHubs {
-                Text(error).font(.caption).foregroundColor(.orange)
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
             }
-            if client.hubs.isEmpty {
-                Text(client.lookForHubs ? "No hubs found yet." : "Not looking.")
-                    .font(.caption).foregroundColor(.secondary)
-            } else {
-                ForEach(client.hubs) { hub in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(hub.name)
-                            // verbatim: a localized Text would print the port as "11,915".
-                            Text(verbatim: hub.isSelf
-                                 ? "\(hub.displayAddress), this Console's own hub, not used"
-                                 : "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s"), \(hub.authMode == "none" ? "open" : "pairing required")")
-                                .font(.caption2).foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        if hub.isManual {
-                            Button(role: .destructive) { client.removeManual(hub) } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                    }
+            ForEach(client.hubs) { hub in
+                hubRow(hub)
+            }
+            if client.hubs.isEmpty && client.lookForHubs {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Looking for hubs…").foregroundStyle(.secondary)
                 }
             }
             HStack {
-                TextField("Add a hub by address (host or host:port)", text: $manualDraft)
-                    .onSubmit { client.addManual(manualDraft); manualDraft = "" }
-                Button("Add") { client.addManual(manualDraft); manualDraft = "" }
-                    .disabled(manualDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                Spacer()
+                Button("Add by Address…") { showingAddHub = true }
+                    .popover(isPresented: $showingAddHub, arrowEdge: .bottom) { addHubPopover }
             }
+        } header: {
+            Text("Other Hubs")
+        } footer: {
+            footerText("Devices shared by other Consoles and bridges appear in the device menu, marked with the hub they live on.")
         }
     }
 
-    // MARK: - Info
+    private func hubRow(_ hub: DiscoveredHub) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: hub.kind == "bridge" ? "point.3.connected.trianglepath.dotted"
+                            : hub.kind == "console" ? "desktopcomputer" : "network")
+                .font(.title3).foregroundStyle(.secondary)
+                .frame(width: 26)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(hub.name)
+                // verbatim: a localized Text would print the port as "11,915".
+                Text(verbatim: hub.isSelf
+                     ? "\(hub.displayAddress), this Mac's own hub"
+                     : "\(hub.displayAddress), \(hub.deviceCount) device\(hub.deviceCount == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .opacity(hub.isSelf ? 0.6 : 1)
+            Spacer()
+            hubBadge(hub)
+                .frame(width: 90, alignment: .trailing)
+            // The column stays reserved on browsed hubs so the badges line up.
+            Button(role: .destructive) { client.removeManual(hub) } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this hub")
+            .opacity(hub.isManual ? 1 : 0)
+            .disabled(!hub.isManual)
+        }
+    }
 
-    private var infoSection: some View {
+    private func hubBadge(_ hub: DiscoveredHub) -> some View {
+        let (text, color): (String, Color) =
+            hub.isSelf ? ("Not used", .secondary)
+            : hub.authMode == "none" ? ("Open", .green)
+            : ("Pairing", .blue)
+        return Text(text)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(color.opacity(0.15), in: Capsule())
+    }
+
+    private var addHubPopover: some View {
+        let valid = HubBrowser.parseAddress(manualDraft) != nil
+        let add = {
+            guard valid else { return }
+            client.addManual(manualDraft)
+            manualDraft = ""
+            showingAddHub = false
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Add a Hub by Address").font(.headline)
+            TextField("Address", text: $manualDraft, prompt: Text("192.168.1.20 or studio.local"))
+                .textFieldStyle(.roundedBorder)
+                .labelsHidden()
+                .frame(width: 240)
+                .onSubmit(add)
+            Text(verbatim: "Hostname or IP address. Add :port if the hub doesn't use \(LinkDiscovery.defaultPort).")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { manualDraft = ""; showingAddHub = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Add", action: add)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!valid)
+            }
+        }
+        .padding()
+        .frame(width: 272)
+    }
+
+    // MARK: - Running in the background
+
+    private var backgroundSection: some View {
         Section {
-            Text("Sharing works only on your local network. Do not forward this port on your router. To reach your devices away from home, use a VPN such as Tailscale or WireGuard.\n\nKeep this Mac awake and Console running (it can sit in the menu bar) for clients to stay connected.")
-                .font(.caption2).foregroundColor(.secondary)
-            Toggle("Prevent this Mac from sleeping while sharing is on",
+            Toggle(isOn: Binding(get: { menuBar.showInMenuBar },
+                                 set: { menuBar.showInMenuBar = $0 })) {
+                Text("Show in the menu bar")
+                Text("Closing the window keeps Console running in the menu bar.")
+            }
+            Toggle("Start hidden in the menu bar",
+                   isOn: Binding(get: { menuBar.startMinimised }, set: { menuBar.startMinimised = $0 }))
+                .disabled(!menuBar.showInMenuBar)
+            Toggle("Open at login",
+                   isOn: Binding(get: { menuBar.startsAtLogin }, set: { menuBar.setStartsAtLogin($0) }))
+            if let error = menuBar.loginItemError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(.orange)
+            }
+            Toggle("Keep this Mac awake while sharing",
                    isOn: Binding(get: { service.preventSleepWhileConnected },
                                  set: { service.preventSleepWhileConnected = $0 }))
-                .font(.caption)
+        } header: {
+            Text("Running in the Background")
+        } footer: {
+            footerText("Sharing works only on your local network. To reach your devices away from home, use a VPN such as Tailscale or WireGuard; do not forward the port on your router.")
         }
+    }
+
+    private func footerText(_ text: String) -> some View {
+        Text(text)
+            .font(.caption).foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)   // grouped-Form footers otherwise wrap ragged-left
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
