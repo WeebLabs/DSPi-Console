@@ -1067,6 +1067,14 @@ fileprivate func availableCrossoverTypes(vm: DSPViewModel) -> [FilterType] {
 
 struct OutputChannelDetail: View {
     @ObservedObject var vm: DSPViewModel
+    @ObservedObject private var telemetry: DeviceTelemetry
+
+    init(vm: DSPViewModel, outputIndex: Int, availableTypes: [FilterType]) {
+        self.vm = vm
+        self.telemetry = vm.telemetry
+        self.outputIndex = outputIndex
+        self.availableTypes = availableTypes
+    }
     let outputIndex: Int
     let availableTypes: [FilterType]
     @State private var tab: OutputChannelTab = .peq
@@ -1099,7 +1107,7 @@ struct OutputChannelDetail: View {
                     get: { vm.outputMuted[outputIndex] },
                     set: { vm.setOutputMute(output: outputIndex, muted: $0) }
                 ),
-                maxDelay: vm.platformName == "RP2040" ? 42 : 85,
+                maxDelay: vm.maximumDelayMS(output: outputIndex),
                 onGainDrag: { vm.sendOutputGainToDevice(output: outputIndex, db: $0) },
                 onDelayDrag: { vm.sendOutputDelayToDevice(output: outputIndex, ms: $0) }
             )

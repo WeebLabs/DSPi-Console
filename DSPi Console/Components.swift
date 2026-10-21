@@ -770,7 +770,7 @@ struct ChannelSettingsView: View {
     @Binding var gainDB: Float
     @Binding var delayMS: Float
     @Binding var isMuted: Bool
-    var maxDelay: Float = 85
+    let maxDelay: Float
     var onGainDrag: ((Float) -> Void)? = nil
     var onDelayDrag: ((Float) -> Void)? = nil
 
@@ -858,13 +858,19 @@ struct ChannelSettingsView: View {
                     Text("DELAY")
                         .font(.caption).fontWeight(.bold).foregroundColor(.secondary)
                     Spacer()
-                    ValueField(label: "ms", value: localDelay, width: 60) {
-                        localDelay = $0
-                        delayMS = $0
+                    ValueField(label: "ms", value: localDelay, width: 60, scrollStep: 0.01,
+                               minValue: 0, maxDecimals: 2, fixedDecimals: true) {
+                        let val = DelaySettings.roundedMS($0, maximum: maxDelay)
+                        localDelay = val
+                        delayMS = val
                     }
                 }
 
-                Slider(value: $localDelay, in: 0...maxDelay) { editing in
+                // Quantize the binding without native slider tick marks.
+                Slider(value: Binding(
+                    get: { localDelay },
+                    set: { localDelay = DelaySettings.roundedMS($0, maximum: maxDelay) }
+                ), in: 0...max(0.01, maxDelay)) { editing in
                     isDraggingDelay = editing
                     if !editing { delayMS = localDelay }
                 }
@@ -877,6 +883,7 @@ struct ChannelSettingsView: View {
                 .onChange(of: delayMS) { val in if !isDraggingDelay { localDelay = val } }
                 .onRightClick { localDelay = 0; delayMS = 0 }
             }
+            .disabled(maxDelay <= 0)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity)
@@ -2457,6 +2464,7 @@ struct ValueField: View {
     var scrollStep: Float = 0.1
     var minValue: Float? = nil
     var maxDecimals: Int = 1
+    var fixedDecimals: Bool = false
     /// Width of the trailing unit label.  The default suits the one- and
     /// two-character symbols this field was built for (dB, Hz, %, s); a longer
     /// one (min) needs more room or it truncates.
@@ -2477,7 +2485,8 @@ struct ValueField: View {
     @FocusState private var isFocused: Bool
 
     private func format(_ v: Float) -> String {
-        Self.format(v, maxDecimals: maxDecimals, stripTrailingZeros: stripTrailingZeros)
+        if fixedDecimals { return String(format: "%.\(maxDecimals)f", v) }
+        return Self.format(v, maxDecimals: maxDecimals, stripTrailingZeros: stripTrailingZeros)
     }
 
     static func format(_ v: Float, maxDecimals: Int, stripTrailingZeros: Bool) -> String {
