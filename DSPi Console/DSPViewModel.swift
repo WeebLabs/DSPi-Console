@@ -90,6 +90,83 @@ struct DacHwMuteConfig: Equatable {
     }
 }
 
+// MARK: - Output Latency
+//
+// Wire structs for REQ_OUTPUT_LATENCY (0x03), mirroring firmware
+// `OutputLatencyStatus` and `OutputLatencyOptionWire` (config.h).  Packed,
+// little-endian.
+//
+// Status (12 bytes):
+//   0:     requested_id   (stored option)
+//   1:     effective_id   (option in force; a stream-only request on USB differs)
+//   2-3:   effective_us   (ring fill target at the current rate, ceiling applied)
+//   4-5:   target_frames
+//   6-7:   batch_frames   (stream-input batch at the current rate)
+//   8:     pending        (1 until a SET has fully applied)
+//   9:     option_count
+//   10-11: reserved
+struct OutputLatencyStatus: Equatable {
+    var requestedId: UInt8 = 0
+    var effectiveId: UInt8 = 0
+    var effectiveUs: UInt16 = 0
+    var targetFrames: UInt16 = 0
+    var batchFrames: UInt16 = 0
+    var pending: Bool = false
+    var optionCount: UInt8 = 0
+
+    static func fromData(_ data: Data) -> OutputLatencyStatus? {
+        guard data.count >= OUTPUT_LATENCY_STATUS_SIZE else { return nil }
+        let b = data.startIndex
+        func u16(_ o: Int) -> UInt16 { UInt16(data[b + o]) | (UInt16(data[b + o + 1]) << 8) }
+        return OutputLatencyStatus(
+            requestedId:  data[b + 0],
+            effectiveId:  data[b + 1],
+            effectiveUs:  u16(2),
+            targetFrames: u16(4),
+            batchFrames:  u16(6),
+            pending:      data[b + 8] != 0,
+            optionCount:  data[b + 9]
+        )
+    }
+}
+
+// One option table entry (8 bytes):
+//   0:   id
+//   1:   flags         (OUTPUT_LATENCY_FLAG_* | OUTPUT_LATENCY_WIRE_AVAILABLE)
+//   2-3: latency_us    (nominal ring fill target)
+//   4-5: batch_us      (nominal stream-input batch)
+//   6-7: effective_us  (what selecting it gives now, source and rate applied)
+struct OutputLatencyOption: Equatable, Identifiable {
+    var id: UInt8
+    var flags: UInt8
+    var latencyUs: UInt16
+    var batchUs: UInt16
+    var effectiveUs: UInt16
+
+    var streamOnly: Bool { flags & OUTPUT_LATENCY_FLAG_STREAM_ONLY != 0 }
+    /// False when the active source runs this option as a different one.
+    var available: Bool { flags & OUTPUT_LATENCY_WIRE_AVAILABLE != 0 }
+
+    /// Parse a whole table reply; a trailing partial entry is dropped.
+    static func tableFromData(_ data: Data) -> [OutputLatencyOption] {
+        let b = data.startIndex
+        func u16(_ o: Int) -> UInt16 { UInt16(data[b + o]) | (UInt16(data[b + o + 1]) << 8) }
+        return (0..<(data.count / OUTPUT_LATENCY_OPTION_SIZE)).map { i in
+            let o = i * OUTPUT_LATENCY_OPTION_SIZE
+            return OutputLatencyOption(id: data[b + o], flags: data[b + o + 1],
+                                       latencyUs: u16(o + 2), batchUs: u16(o + 4),
+                                       effectiveUs: u16(o + 6))
+        }
+    }
+}
+
+/// "0.67 ms", "4 ms", "3.66 ms": whole milliseconds without decimals.
+func formatLatencyMs(_ us: UInt16) -> String {
+    let ms = Double(us) / 1000
+    if us % 1000 == 0 { return "\(Int(ms)) ms" }
+    return String(format: "%.2f ms", ms)
+}
+
 // MARK: - ADAT Bulk Output Status
 //
 // 8-byte wire-format struct mirroring firmware `AdatStatus`
@@ -1549,6 +1626,15 @@ class DSPViewModel: ObservableObject {
     // to REQ_GET_DAC_HW_MUTE_CONFIG (V10+ wire format).
     @Published var dacHwMuteConfig: DacHwMuteConfig = DacHwMuteConfig()
     @Published var dacHwMuteSupported: Bool = false
+
+    // Output latency - the ring fill target, chosen from the device's own option
+    // table and stored device-globally (not per preset).  Which options run as
+    // themselves depends on the input source and rate, so the table is re-read
+    // whenever those may have moved.  `outputLatencySupported` stays false on
+    // firmware that STALLs REQ_OUTPUT_LATENCY.
+    @Published var outputLatencySupported: Bool = false
+    @Published var outputLatencyStatus: OutputLatencyStatus = OutputLatencyStatus()
+    @Published var outputLatencyOptions: [OutputLatencyOption] = []
 
     // ADAT bulk output — streams all 8 main output channels as one ADAT
     // lightpipe signal on a single GPIO (RP2350 only).  `adatSupported` flips

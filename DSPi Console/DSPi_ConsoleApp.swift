@@ -1058,6 +1058,8 @@ struct GlobalSettingsDraft: Equatable {
     var presetMasterVolumeMode: Int
     var presetOutputConfigMode: Int
     var dacHwMuteConfig: DacHwMuteConfig
+    /// Requested option ID; 0 on firmware without the setting.
+    var outputLatencyId: UInt8
 
     static func from(_ vm: DSPViewModel) -> GlobalSettingsDraft {
         GlobalSettingsDraft(
@@ -1065,7 +1067,8 @@ struct GlobalSettingsDraft: Equatable {
             presetDefaultSlot:      vm.presetDefaultSlot,
             presetMasterVolumeMode: vm.presetMasterVolumeMode,
             presetOutputConfigMode: vm.presetOutputConfigMode,
-            dacHwMuteConfig:        vm.dacHwMuteConfig
+            dacHwMuteConfig:        vm.dacHwMuteConfig,
+            outputLatencyId:        vm.outputLatencySupported ? vm.outputLatencyStatus.requestedId : 0
         )
     }
 }
@@ -1299,6 +1302,9 @@ final class SettingsSaveCoordinator: ObservableObject {
                 }
                 if pending.dacHwMuteConfig != deviceState.dacHwMuteConfig {
                     vm.setDacHwMuteConfig(pending.dacHwMuteConfig)
+                }
+                if pending.outputLatencyId != deviceState.outputLatencyId, pending.outputLatencyId != 0 {
+                    vm.setOutputLatency(pending.outputLatencyId)
                 }
             }
             if doOutput {
@@ -1668,6 +1674,27 @@ struct GlobalSettingsTab: View {
                 }
             }
 
+            // MARK: Output Latency (firmware-gated)
+            if vm.outputLatencySupported && !vm.outputLatencyOptions.isEmpty {
+                Section {
+                    Picker("Target", selection: coordinator.draftBinding(\.outputLatencyId)) {
+                        ForEach(vm.outputLatencyOptions) { option in
+                            Text(latencyOptionLabel(option)).tag(option.id)
+                        }
+                        if !vm.outputLatencyOptions.contains(where: { $0.id == draft.outputLatencyId }) {
+                            Text("-").tag(draft.outputLatencyId)
+                        }
+                    }
+
+                    Text(latencyCaption)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } header: {
+                    Label("Latency", systemImage: "timer")
+                }
+            }
+
             // MARK: Master Volume Persistence
             Section {
                 Picker("Mode", selection: coordinator.draftBinding(\.presetMasterVolumeMode)) {
@@ -1714,12 +1741,15 @@ struct GlobalSettingsTab: View {
         .onAppear {
             coordinator.refreshGlobalDraftIfClean()
             scrollToOutputConfigIfNeeded(proxy)
+            refreshOutputLatency()
         }
         .onChange(of: vm.isDeviceConnected) { connected in
             // On (re)connect, refresh the draft from the device's freshly
             // fetched values - but only when the user hasn't staged edits.
             if connected { coordinator.refreshGlobalDraftIfClean() }
         }
+        // Which latency options run as themselves depends on the input source.
+        .onChange(of: vm.inputSource) { _ in refreshOutputLatency() }
         .onChange(of: navigator.scrollTarget) { _ in
             scrollToOutputConfigIfNeeded(proxy)
         }
@@ -1735,6 +1765,35 @@ struct GlobalSettingsTab: View {
             withAnimation { proxy.scrollTo("outputConfig", anchor: .top) }
             navigator.scrollTarget = nil
         }
+    }
+
+    /// Re-read the latency table off main, then re-seed an unedited draft from it.
+    private func refreshOutputLatency() {
+        guard vm.isDeviceConnected else { return }
+        let vm = self.vm
+        DispatchQueue.global(qos: .userInitiated).async {
+            vm.fetchOutputLatency()
+            DispatchQueue.main.async { SettingsSaveCoordinator.shared.refreshGlobalDraftIfClean() }
+        }
+    }
+
+    private func latencyOptionLabel(_ option: OutputLatencyOption) -> String {
+        let ms = formatLatencyMs(option.latencyUs)
+        if option.id == OUTPUT_LATENCY_DEFAULT_ID { return "\(ms) (default)" }
+        return ms
+    }
+
+    /// Explains the trade-off and, when the rate caps the selected option, what
+    /// it actually runs as (the device reports this per option).  The USB
+    /// fallback for stream-only options is covered by the closing sentence.
+    private var latencyCaption: String {
+        var text = "Lower values reduce the delay from input to output. Higher values may benefit sources exhibiting high jitter in the event of audio stutters."
+        if let option = vm.outputLatencyOptions.first(where: { $0.id == draft.outputLatencyId }),
+           option.available, option.effectiveUs != option.latencyUs {
+            text += " At the current sample rate the output buffer is smaller than this, so it runs as \(formatLatencyMs(option.effectiveUs))."
+        }
+        text += " Values less than 2ms have no effect upon USB Audio."
+        return text
     }
 
     @ViewBuilder

@@ -253,10 +253,14 @@ configuration, and an admin who wants control users kept away from the
 wiring leaves the device in independent mode.
 
 A `bRequest` the firmware accepts in both directions can carry a different
-class per direction. `REQ_LIMITER` (0x81) is the case today. Its `SET`
+class per direction. `REQ_LIMITER` (0x81) is one case. Its `SET`
 changes a limiter setting and is *control*, while its `GET` reads a setting,
 the gain-reduction meter or the limiter status and is *read*, so a viewer
-can poll the meter but cannot change the limiter. Section 9.3 gives the table encoding.
+can poll the meter but cannot change the limiter. `REQ_OUTPUT_LATENCY` (0x03)
+is the other: its `SET` selects the output latency, a device-global flash
+write followed by a muted output restart, and is *config*, while its `GET`
+reads the status or the option table and is *read*. Section 9.3 gives the
+table encoding.
 
 ### 6.4 Transport security
 
@@ -968,6 +972,9 @@ suffix-free for a minor-0 hub (section 7.8).
   `REQ_PRESET_LOAD` (0x91), both still *control*, apply output and interface
   pin configuration when the device is in the "with preset" output-config
   mode (0x98). The policy rows carry matching notes.
+- The policy table gains `REQ_OUTPUT_LATENCY` (0x03), added to the firmware
+  after beta5: *config* to set, *read* to get (section 6.3). Additive under
+  section 10; a hub with an older table treats it as *config* both ways.
 - Section 7.7 lists the DSPi Console flows that take the device lock
   (configuration import, preset save and copy, output configuration and
   flash saves, IR learn, firmware install). Client behaviour only; no

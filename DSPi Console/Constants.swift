@@ -456,6 +456,24 @@ func limiterLinkGroupName(_ group: Int) -> String {
     group == 0 ? "Unlinked" : "Group \(group)"
 }
 
+// Output latency: how full the output rings are kept, picked from
+// a fixed option table the device reports.  OUT sets a 1-byte option ID (an
+// unknown ID is ignored); IN wValue 0 reads the 12-byte status, wValue 1 the
+// table as 8-byte entries.  Stored device-globally, never in a preset.
+// See current_architecture.md "Output Latency".
+let REQ_OUTPUT_LATENCY: UInt8 = 0x03
+let OUTPUT_LATENCY_GET_STATUS: UInt16  = 0
+let OUTPUT_LATENCY_GET_OPTIONS: UInt16 = 1
+let OUTPUT_LATENCY_STATUS_SIZE: Int = 12
+let OUTPUT_LATENCY_OPTION_SIZE: Int = 8
+/// The ID a factory-fresh device runs (4 ms).  IDs are stable; 0 is never valid.
+let OUTPUT_LATENCY_DEFAULT_ID: UInt8 = 5
+/// The option needs a sample-stream input (S/PDIF, I2S, ADAT); on USB it runs
+/// as the lowest standard option instead.
+let OUTPUT_LATENCY_FLAG_STREAM_ONLY: UInt8 = 0x01
+/// Set in a table entry when the option runs as itself on the active source.
+let OUTPUT_LATENCY_WIRE_AVAILABLE: UInt8 = 0x80
+
 // Stereo Upmixer (V25): derives Centre + Left/Right Surround as ordinary matrix
 // source rows (2 = C, 3 = Ls, 4 = Rs) from a plain stereo input.  RP2350 only;
 // on RP2040 the SETs STALL and the GETs return all-zero payloads.  See

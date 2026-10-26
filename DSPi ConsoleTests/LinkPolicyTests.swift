@@ -123,10 +123,10 @@ final class LinkPolicyTests: XCTestCase {
 
     func testUnknownCodeIsConfig() throws {
         let policy = try loadPolicy()
-        // 0x03 is unallocated in config.h and must stay admin-only.
-        XCTAssertNil(policy.entry(for: 0x03))
-        XCTAssertEqual(policy.classify(code: 0x03, direction: .set), .config)
-        XCTAssertEqual(policy.classify(code: 0x03, direction: .get), .config)
+        // 0x00 is unallocated in config.h and must stay admin-only.
+        XCTAssertNil(policy.entry(for: 0x00))
+        XCTAssertEqual(policy.classify(code: 0x00, direction: .set), .config)
+        XCTAssertEqual(policy.classify(code: 0x00, direction: .get), .config)
     }
 
     func testDirectionTheTableDoesNotListIsConfig() throws {
@@ -159,6 +159,16 @@ final class LinkPolicyTests: XCTestCase {
         XCTAssertEqual(policy.classify(code: 0x3F, direction: .get), .read)      // GET_TUBE_PARAM
         XCTAssertEqual(policy.classify(code: 0x82, direction: .get), .read)      // GET_CLOCK_DIAG
         XCTAssertEqual(policy.classify(code: 0x82, direction: .set), .config)
+    }
+
+    /// Selecting a latency option writes flash and restarts the outputs, so it
+    /// is config; reading the status or table is open to viewers.
+    func testOutputLatencyIsClassedPerDirection() throws {
+        let policy = try loadPolicy()
+        XCTAssertEqual(policy.classify(code: 0x03, direction: .set), .config)
+        XCTAssertEqual(policy.classify(code: 0x03, direction: .get), .read)
+        XCTAssertFalse(policy.isAllowed(role: .control, code: 0x03, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .viewer, code: 0x03, direction: .get))
     }
 
     // MARK: - Per-direction classes (spec 9.3, 1.1)

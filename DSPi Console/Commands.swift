@@ -77,6 +77,7 @@ extension DSPViewModel {
         fetchCore1Mode()
         fetchLgSoundSyncEnabled()
         fetchDacHwMuteConfig()
+        fetchOutputLatency()
         fetchControlInterfaces()
         fetchControlSurfaces()
         guard transport.generation == generation else { return }
@@ -718,6 +719,47 @@ extension DSPViewModel {
     private static func clampUserVolume(_ db: Float) -> Float {
         let clamped = max(USER_VOLUME_MIN_DB, min(USER_VOLUME_MAX_DB, db))
         return clamped == -0.0 ? 0.0 : clamped
+    }
+
+    // MARK: - Output Latency
+
+    /// Read the latency status and option table (REQ_OUTPUT_LATENCY wValue 0
+    /// and 1).  A STALL on the status read means the firmware predates the
+    /// setting, which hides the Settings section.
+    func fetchOutputLatency() {
+        guard let d = transport.getControlRequest(request: REQ_OUTPUT_LATENCY, value: OUTPUT_LATENCY_GET_STATUS,
+                                                  index: 2, length: UInt16(OUTPUT_LATENCY_STATUS_SIZE)),
+              let status = OutputLatencyStatus.fromData(d) else {
+            DispatchQueue.main.async { self.outputLatencySupported = false }
+            return
+        }
+        let tableLen = UInt16(Int(status.optionCount) * OUTPUT_LATENCY_OPTION_SIZE)
+        let options = transport.getControlRequest(request: REQ_OUTPUT_LATENCY, value: OUTPUT_LATENCY_GET_OPTIONS,
+                                                  index: 2, length: tableLen)
+            .map(OutputLatencyOption.tableFromData)
+        DispatchQueue.main.async {
+            self.outputLatencyStatus = status
+            if let options { self.outputLatencyOptions = options }
+            self.outputLatencySupported = true
+        }
+    }
+
+    /// Select a latency option.  The firmware stores it and restarts the outputs
+    /// on its main loop inside a flash write, so the status reports `pending`
+    /// until then; poll for that (reads can fail during the flash window) and
+    /// re-read the table, whose effective values follow the new option.  Blocks:
+    /// call off the main thread.
+    func setOutputLatency(_ id: UInt8) {
+        let generation = transport.generation
+        transport.sendControlRequest(request: REQ_OUTPUT_LATENCY, value: 0, index: 2, data: Data([id]))
+        for _ in 0..<40 {
+            Thread.sleep(forTimeInterval: 0.1)
+            guard transport.generation == generation else { return }
+            if let d = transport.getControlRequest(request: REQ_OUTPUT_LATENCY, value: OUTPUT_LATENCY_GET_STATUS,
+                                                   index: 2, length: UInt16(OUTPUT_LATENCY_STATUS_SIZE)),
+               let st = OutputLatencyStatus.fromData(d), !st.pending { break }
+        }
+        fetchOutputLatency()
     }
 
     // MARK: - Master Volume Mode (preset directory flag)

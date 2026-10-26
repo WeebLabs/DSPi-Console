@@ -10,8 +10,8 @@ struct SpdifBufferStats {
     var consumerFillPct: UInt8 = 0
     var consumerMinFillPct: UInt8 = 0
     var consumerMaxFillPct: UInt8 = 0
-    /// Sample-granular fill in 0.01% of the same 768-frame scale; may exceed 100%.
-    /// Zero on firmware that predates it.
+    /// Sample-granular fill in 0.01% of the same scale; may exceed 100% on the
+    /// firmware's scale. Zero on firmware that predates it.
     var fillCentiPct: UInt16 = 0
 
     /// Fill in percent to frame resolution. consumerFillPct moves in 6.25% steps,
@@ -20,7 +20,30 @@ struct SpdifBufferStats {
         if fillCentiPct == 0 && consumerFillPct != 0 { return Double(consumerFillPct) }
         return Double(fillCentiPct) / 100
     }
+
+    /// The firmware reports every percentage against a fixed 768-frame scale
+    /// (16 buckets of 48 frames), kept for wire compatibility. Since the output
+    /// latency setting the rings hold 512 frames, so this re-expresses each
+    /// percentage against the ring itself: 100% is a full ring.
+    func rescaledToRing() -> SpdifBufferStats {
+        let factor = Double(SLOT_FILL_SCALE_FRAMES) / Double(OUTPUT_RING_FRAMES)
+        func pct(_ v: UInt8) -> UInt8 { UInt8(min(100, (Double(v) * factor).rounded())) }
+        var out = self
+        out.consumerFillPct = pct(consumerFillPct)
+        out.consumerMinFillPct = pct(consumerMinFillPct)
+        out.consumerMaxFillPct = pct(consumerMaxFillPct)
+        out.fillCentiPct = UInt16(min(10_000, (Double(fillCentiPct) * factor).rounded()))
+        return out
+    }
 }
+
+/// The scale REQ_GET_BUFFER_STATS percentages are measured against, in frames.
+let SLOT_FILL_SCALE_FRAMES = 768
+/// Output slot ring size on firmware with the output latency setting.
+let OUTPUT_RING_FRAMES = 512
+/// Frames ahead of each reader the firmware keeps stamped with silence; a ring
+/// filled past `OUTPUT_RING_FRAMES - OUTPUT_RING_ERASE_AHEAD` cannot take a write.
+let OUTPUT_RING_ERASE_AHEAD = 64
 
 struct PdmBufferStats {
     var dmaFillPct: UInt8 = 0
@@ -175,6 +198,35 @@ struct LgSoundSyncStatus {
     }
 }
 
+// MARK: - Output Ring Health
+
+/// The output rings' counters and watermarks.  Underrun episodes and refused
+/// blocks are cumulative; the lowest fill and the two gaps are watermarks that
+/// "Reset Watermarks" clears.
+struct RingHealth: Equatable {
+    var targetFrames: UInt16
+    var targetUs: UInt16
+    /// Frames a stream input delivers per call; the fill swings by about this.
+    var batchFrames: UInt16
+    /// One per dry episode while a producer owed audio, not one per recovery.
+    var underrunEpisodes: UInt32
+    /// Blocks refused by ring admission.
+    var refusedBlocks: UInt32
+    /// Lowest fill seen just before a write, in frames; nil before the first write.
+    var lowestPrewriteFill: UInt32?
+    /// Longest wait between input deliveries, which bounds the usable margin.
+    var worstInputGapUs: UInt32
+    /// Longest gap between audio-carrying USB packets; a host stall shows here.
+    var worstUsbPacketGapUs: UInt32
+    /// Background steps that overran their main-loop budget.
+    var overBudgetSteps: UInt32
+}
+
+/// Microseconds below 10 ms, milliseconds above.
+func formatGapUs(_ us: UInt32) -> String {
+    us < 10_000 ? "\(us) µs" : String(format: "%.1f ms", Double(us) / 1000)
+}
+
 // MARK: - Stats View Model
 class StatsViewModel: ObservableObject {
     @Published var pdmRingOverruns: UInt32 = 0
@@ -185,6 +237,12 @@ class StatsViewModel: ObservableObject {
     @Published var spdifUnderruns: UInt32 = 0
     @Published var usbRingOverruns: UInt32 = 0
     @Published var isConnected: Bool = false
+
+    // Output ring health (REQ_GET_STATUS 26 to 31), from the firmware that added
+    // the output latency setting.  Older firmware answers those indices with 0
+    // rather than a STALL, so the latency status read is the feature gate, and
+    // it also supplies the fill target the lowest fill is judged against.
+    @Published var ringHealth: RingHealth? = nil
 
     // System monitoring values
     @Published var systemClockHz: UInt32 = 0
@@ -244,6 +302,9 @@ class StatsViewModel: ObservableObject {
     @Published var i2sClockModeSupported: Bool = false
 
     private var previousStarvationTotal: UInt32? = nil
+    /// Whether buffer fill is shown against the 512-frame ring.  Set with the
+    /// ring health read, the feature gate for that ring size; fetch queue only.
+    private var fillOnRingScale = false
     private var hasConnectedOnce = false
     private var pollTimer: Timer?
     private var bufferPollTimer: Timer?
@@ -406,11 +467,41 @@ class StatsViewModel: ObservableObject {
             DispatchQueue.main.async { self.systemTempCentiC = value }
         }
 
+        fetchRingHealth()
         fetchStarvationStats()
         fetchSpdifRxStatus()
         fetchLgSoundSyncStatus()
         fetchAdatStatus()
         fetchI2SSlaveStatus()
+    }
+
+    private func fetchRingHealth() {
+        guard let transport = transport, isConnected else { return }
+        guard let d = transport.getControlRequest(request: REQ_OUTPUT_LATENCY, value: OUTPUT_LATENCY_GET_STATUS,
+                                                  index: 2, length: UInt16(OUTPUT_LATENCY_STATUS_SIZE)),
+              let latency = OutputLatencyStatus.fromData(d) else {
+            fillOnRingScale = false
+            DispatchQueue.main.async { self.ringHealth = nil }
+            return
+        }
+        fillOnRingScale = true
+        func read(_ index: UInt16) -> UInt32? {
+            guard let data = transport.getControlRequest(request: REQ_GET_STATUS, value: index, index: 0, length: 4),
+                  data.count >= 4 else { return nil }
+            return data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        }
+        let health = RingHealth(
+            targetFrames: latency.targetFrames,
+            targetUs: latency.effectiveUs,
+            batchFrames: latency.batchFrames,
+            underrunEpisodes: read(26) ?? 0,
+            refusedBlocks: read(27) ?? 0,
+            lowestPrewriteFill: read(28).flatMap { $0 == UInt32.max ? nil : $0 },
+            worstInputGapUs: read(29) ?? 0,
+            worstUsbPacketGapUs: read(30) ?? 0,
+            overBudgetSteps: read(31) ?? 0
+        )
+        DispatchQueue.main.async { self.ringHealth = health }
     }
 
     /// Poll REQ_GET_I2S_SLAVE_STATUS (0x8A) for the I2S clock-slave lock
@@ -478,7 +569,7 @@ class StatsViewModel: ObservableObject {
 
         for i in 0..<min(Int(packet.numSpdif), 4) {
             let base = 4 + i * 8
-            packet.spdif[i] = SpdifBufferStats(
+            let stats = SpdifBufferStats(
                 consumerFree: data[base],
                 consumerPrepared: data[base + 1],
                 consumerPlaying: data[base + 2],
@@ -487,6 +578,7 @@ class StatsViewModel: ObservableObject {
                 consumerMaxFillPct: data[base + 5],
                 fillCentiPct: UInt16(data[base + 6]) | (UInt16(data[base + 7]) << 8)
             )
+            packet.spdif[i] = fillOnRingScale ? stats.rescaledToRing() : stats
         }
 
         let pdmBase = 36
@@ -740,6 +832,10 @@ struct StatsView: View {
                         systemSection
                         Divider()
                         audioOutputSection
+                        if let health = vm.ringHealth {
+                            Divider()
+                            ringHealthSection(health)
+                        }
                         Divider()
                         pdmSection
                     }
@@ -981,6 +1077,34 @@ struct StatsView: View {
         }
     }
 
+    private func ringHealthSection(_ health: RingHealth) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionLabel("OUTPUT RING HEALTH")
+
+            VStack(alignment: .leading, spacing: 6) {
+                SystemInfoRow(title: "Fill Target",
+                              value: "\(health.targetFrames) frames (\(formatLatencyMs(health.targetUs)))")
+                    .help("How full the output rings are kept, set by Latency in Settings")
+                SystemInfoRow(title: "Underrun Episodes", value: "\(health.underrunEpisodes)",
+                              valueColor: health.underrunEpisodes > 0 ? .red : .primary)
+                    .help("Times the outputs ran dry while a source owed audio. A host that pauses its stream does not count.")
+                SystemInfoRow(title: "Refused Blocks", value: "\(health.refusedBlocks)",
+                              valueColor: health.refusedBlocks > 0 ? .orange : .primary)
+                    .help("Audio blocks dropped because the rings had no room for them")
+                SystemInfoRow(title: "Lowest Fill",
+                              value: health.lowestPrewriteFill.map { "\($0) frames" } ?? "-")
+                    .help("The emptiest any output ring got just before new audio arrived, since the watermarks were reset. Near zero means the margin is thin.")
+                SystemInfoRow(title: "Worst Input Gap", value: formatGapUs(health.worstInputGapUs))
+                    .help("Longest wait between input deliveries since the watermarks were reset")
+                SystemInfoRow(title: "Worst USB Gap", value: formatGapUs(health.worstUsbPacketGapUs))
+                    .help("Longest gap between USB audio packets since the watermarks were reset. Long gaps are the host pausing its stream.")
+                SystemInfoRow(title: "Over-Budget Steps", value: "\(health.overBudgetSteps)",
+                              valueColor: health.overBudgetSteps > 0 ? .orange : .primary)
+                    .help("Background tasks that ran past their time slice in the device's main loop")
+            }
+        }
+    }
+
     private var pdmSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionLabel("PDM (SUBWOOFER)")
@@ -1095,7 +1219,9 @@ struct StatsView: View {
                             fillPct: vm.bufferStats.spdif[i].preciseFillPct,
                             minPct: vm.bufferStats.spdif[i].consumerMinFillPct,
                             maxPct: vm.bufferStats.spdif[i].consumerMaxFillPct,
-                            thresholds: .spdif,
+                            thresholds: vm.ringHealth.map {
+                                BufferFillThresholds.ringTarget(targetFrames: Int($0.targetFrames), batchFrames: Int($0.batchFrames))
+                            } ?? .spdif,
                             color: ChannelPalette.output(i * 2),
                             history: vm.bufferHistory,
                             series: i,
@@ -1157,13 +1283,25 @@ struct StatsView: View {
 // MARK: - Buffer Fill Thresholds
 
 enum BufferFillThresholds {
+    /// Fixed bands for firmware without the latency setting, whose single fill
+    /// target sat at 50% of the reported scale.
     case spdif
+    /// Bands around the live latency target, on the 512-frame ring scale.  A
+    /// healthy ring swings from about one delivery below the target to one
+    /// above it, so green spans a quarter of the target up to two deliveries
+    /// over; red is an empty ring or one too full to take a write.
+    case ringTarget(targetFrames: Int, batchFrames: Int)
     case pdmDma
     case pdmRing
 
-    func color(for pct: UInt8) -> Color {
-        let v = Int(pct)
+    func color(for pct: Double) -> Color {
+        let v = Int(pct.rounded(.down))
         switch self {
+        case .ringTarget(let target, let batch):
+            let frames = pct / 100 * Double(OUTPUT_RING_FRAMES)
+            if frames < 1 || frames >= Double(OUTPUT_RING_FRAMES - OUTPUT_RING_ERASE_AHEAD) { return .red }
+            if frames < Double(target) / 4 || frames > Double(target + 2 * batch) { return .yellow }
+            return .green
         case .spdif:
             if v == 0 || v == 100 { return .red }
             if v < 25 || v > 75 { return .yellow }
@@ -1235,7 +1373,7 @@ struct BufferFillRow: View {
 
                 Text("\(Int(fillPct.rounded()))%")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(thresholds.color(for: UInt8(min(100, max(0, fillPct.rounded(.down))))))
+                    .foregroundColor(thresholds.color(for: min(100, max(0, fillPct))))
                     .frame(width: 36, alignment: .trailing)
             }
             .padding(.horizontal, 6)
@@ -1251,6 +1389,7 @@ struct BufferFillRow: View {
 struct SystemInfoRow: View {
     let title: String
     let value: String
+    var valueColor: Color = .primary
 
     var body: some View {
         HStack {
@@ -1260,7 +1399,7 @@ struct SystemInfoRow: View {
             Spacer()
             Text(value)
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(.primary)
+                .foregroundColor(valueColor)
         }
         .padding(.vertical, 2)
     }
@@ -1343,7 +1482,7 @@ final class BufferFillHistory {
         let slot = total % Self.capacity
         let spdifCount = min(Int(packet.numSpdif), 4)
         for i in 0..<4 {
-            // The ring can hold more than the 768-frame scale; pin the trace to the graph top.
+            // Older firmware's ring can exceed its 768-frame scale; pin the trace to the graph top.
             rings[i][slot] = i < spdifCount ? Float(min(100, packet.spdif[i].preciseFillPct)) : Self.absent
         }
         rings[Self.pdmDmaSeries][slot] = packet.pdmActive ? Float(packet.pdm.dmaFillPct) : Self.absent
