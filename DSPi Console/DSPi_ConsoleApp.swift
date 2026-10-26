@@ -6430,7 +6430,11 @@ struct ControlSurfacesSettingsTab: View {
     /// (empty categories dropped, unknown nouns collected under "Other").  Each
     /// group keeps its category so the menu can shorten its item labels.
     private func nounGroups(forType type: Int) -> [(cat: NounCategory, nouns: [Int])] {
-        let valid = validNouns(forType: type)
+        nounGroups(of: validNouns(forType: type))
+    }
+
+    /// `valid` bucketed into the categories, as for `nounGroups(forType:)`.
+    private func nounGroups(of valid: [Int]) -> [(cat: NounCategory, nouns: [Int])] {
         let validSet = Set(valid)
         var used = Set<Int>()
         var groups: [(cat: NounCategory, nouns: [Int])] = []
@@ -6925,12 +6929,28 @@ struct ControlSurfacesSettingsTab: View {
         let where_ = page.isGrouped
             ? vm.csGroupName(Int(page.target))
             : targetName(nd, Int(page.target))
+        if nd.hasBand { return "\(where_) \(bandName(Int(page.index))) \(noun)" }
         return "\(where_) \(noun)"
+    }
+
+    /// Column widths for the page table, shared by the header and every row so
+    /// the checkboxes line up under their titles.
+    private static let pageNumberWidth: CGFloat = 18
+    private static let pageOptionWidth: CGFloat = 40
+    private static let pageRemoveWidth: CGFloat = 16
+
+    /// Large text is a graphic-OLED feature; character modules ignore it.
+    private var displayIsGraphic: Bool {
+        vm.csDisplaySlot.map { csDisplayIsGraphic(Int(vm.csBindings[$0].index)) } ?? false
     }
 
     @ViewBuilder
     private func displayPagesSection() -> some View {
         groupHeading("Dashboard Pages")
+
+        if !visibleDisplayPages.isEmpty {
+            displayPageHeader()
+        }
 
         ForEach(visibleDisplayPages, id: \.self) { i in
             displayPageRow(i)
@@ -6959,138 +6979,205 @@ struct ControlSurfacesSettingsTab: View {
         }
     }
 
-    /// One page: what it shows, for which channel or group, and whether the
-    /// value is rendered large.  Applies on change like the config does.
-    @ViewBuilder
+    /// Titles over the option columns, so each row needs only bare checkboxes.
+    private func displayPageHeader() -> some View {
+        HStack(spacing: 8) {
+            Spacer().frame(width: Self.pageNumberWidth)
+            Text("Shows")
+            Spacer()
+            if displayIsGraphic {
+                Text("Large").frame(width: Self.pageOptionWidth)
+            }
+            if vm.csDisplayBarSupported {
+                Text("Bar").frame(width: Self.pageOptionWidth)
+            }
+            Spacer().frame(width: Self.pageRemoveWidth)
+        }
+        .font(.caption)
+        .foregroundColor(.secondary)
+    }
+
+    /// One page on one line: what it shows and for which channel or band, then
+    /// its options in the header's columns.  A row whose pickers are too wide
+    /// for one line moves the channel and band under the parameter instead.
+    /// Applies on change like the config does.
     private func displayPageRow(_ i: Int) -> some View {
         let page = vm.csDisplayPages[i]
-        let nd = nounDesc(Int(page.noun))
         let shown = vm.csDisplayStatus.currentPage == UInt8(i)
-        // Large text is a graphic-OLED feature; character modules ignore it.
-        let isGraphic = vm.csDisplaySlot.map { csDisplayIsGraphic(Int(vm.csBindings[$0].index)) } ?? false
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Text("\(i + 1)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(.secondary)
-                    .frame(width: 16, alignment: .trailing)
-                // The live-page marker holds its place when the panel is showing
-                // some other page, so the pickers beside it stay in a column
-                // instead of shuffling sideways as the panel cycles.
-                Image(systemName: "eye.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(.accentColor)
-                    .opacity(shown ? 1 : 0)
-                    .frame(width: 12)
-                    .help(shown ? "Currently on screen" : "")
-                Picker("", selection: Binding(
-                    get: { Int(vm.csDisplayPages[i].noun) },
-                    set: { newNoun in
+        return HStack(spacing: 8) {
+            // The page on screen now is picked out in the number column rather
+            // than with a marker of its own, so no column sits empty.
+            Text("\(i + 1)")
+                .font(.callout.monospacedDigit().weight(shown ? .bold : .regular))
+                .foregroundColor(shown ? .accentColor : .secondary)
+                .frame(width: Self.pageNumberWidth, alignment: .trailing)
+                .help(shown ? "On the display now" : "")
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    displayPageNounMenu(i)
+                    displayPageTargetPickers(i)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    displayPageNounMenu(i)
+                    HStack(spacing: 8) { displayPageTargetPickers(i) }
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if displayIsGraphic {
+                Toggle("Large value", isOn: Binding(
+                    get: { vm.csDisplayPages[i].isLarge },
+                    set: { on in
                         var p = vm.csDisplayPages[i]
-                        p.noun = UInt8(newNoun)
-                        p.target = 0; p.index = 0
-                        p.flags &= ~CS_DPAGE_GROUP
-                        // A bar needs a range to plot inside; switching to a
-                        // switch or a mode leaves it with none, and the device
-                        // rejects the whole page rather than ignoring the flag.
-                        if !displayPageBarAllowed(newNoun) { p.flags &= ~CS_DPAGE_BAR }
+                        if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
+                        applyDisplayPage(i, p)
+                    }))
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .frame(width: Self.pageOptionWidth)
+                    .help("Draw the value in large text.")
+            }
+            if vm.csDisplayBarSupported {
+                // Greyed rather than hidden on a noun that cannot carry a bar,
+                // so the column stays whole and the tooltip says why.
+                let barAllowed = displayPageBarAllowed(Int(page.noun))
+                Toggle("Level bar", isOn: Binding(
+                    get: { vm.csDisplayPages[i].hasBar },
+                    set: { on in
+                        var p = vm.csDisplayPages[i]
+                        if on { p.flags |= CS_DPAGE_BAR } else { p.flags &= ~CS_DPAGE_BAR }
+                        applyDisplayPage(i, p)
+                    }))
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .disabled(!barAllowed)
+                    .frame(width: Self.pageOptionWidth)
+                    .help(barAllowed ? displayBarHelp(isGraphic: displayIsGraphic)
+                                     : "Only a value with a range can be drawn as a bar.")
+            }
+            Button(role: .destructive) {
+                applyDisplayPage(i, CsDisplayPage())
+            } label: {
+                Image(systemName: "minus.circle").font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(.secondary)
+            .frame(width: Self.pageRemoveWidth)
+            .help("Remove this page")
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// The page's parameter, grouped into the same submenus as the Controls picker.
+    private func displayPageNounMenu(_ i: Int) -> some View {
+        let groups = nounGroups(of: displayPageNouns())
+        let current = Int(vm.csDisplayPages[i].noun)
+        return Menu {
+            if groups.count <= 1 {
+                ForEach(groups.first?.nouns ?? [], id: \.self) { n in
+                    displayPageNounItem(i, n, current: current, in: nil)
+                }
+            } else {
+                ForEach(groups, id: \.cat.name) { group in
+                    Menu(group.cat.name) {
+                        ForEach(group.nouns, id: \.self) { n in
+                            displayPageNounItem(i, n, current: current, in: group.cat)
+                        }
+                    }
+                }
+            }
+        } label: {
+            Text(nounName(current, forType: CS_TYPE_NONE))
+        }
+        .menuStyle(.button)
+        .fixedSize()
+    }
+
+    /// The channel or group, and the band for a filter parameter; nothing for
+    /// a parameter with no target.
+    @ViewBuilder
+    private func displayPageTargetPickers(_ i: Int) -> some View {
+        let page = vm.csDisplayPages[i]
+        if let nd = nounDesc(Int(page.noun)), nd.isTargeted {
+            Picker("", selection: Binding<CsTargetChoice>(
+                get: {
+                    let p = vm.csDisplayPages[i]
+                    return p.isGrouped ? .group(Int(p.target)) : .channel(Int(p.target))
+                },
+                set: { choice in
+                    var p = vm.csDisplayPages[i]
+                    switch choice {
+                    case .channel(let c): p.flags &= ~CS_DPAGE_GROUP; p.target = UInt8(c)
+                    case .group(let g):   p.flags |= CS_DPAGE_GROUP;  p.target = UInt8(g)
+                    }
+                    // The new channel or group may not offer the band.
+                    if nd.hasBand {
+                        let opts = bandOptions(noun: Int(p.noun), target: Int(p.target), grouped: p.isGrouped)
+                        if !opts.contains(Int(p.index)) { p.index = UInt8(opts.first ?? 0) }
+                    }
+                    applyDisplayPage(i, p)
+                })) {
+                Section(targetNounPlural(nd)) {
+                    ForEach(targetChoices(nd, noun: Int(page.noun)), id: \.self) { t in
+                        Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
+                    }
+                }
+                let usable = compatibleGroups(forNoun: Int(page.noun))
+                if !usable.isEmpty {
+                    Section("Groups") {
+                        ForEach(usable, id: \.self) { g in
+                            Text(groupMenuLabel(g)).tag(CsTargetChoice.group(g))
+                        }
+                    }
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+
+            if nd.hasBand {
+                Picker("", selection: Binding(
+                    get: { Int(vm.csDisplayPages[i].index) },
+                    set: { band in
+                        var p = vm.csDisplayPages[i]
+                        p.index = UInt8(band)
                         applyDisplayPage(i, p)
                     })) {
-                    ForEach(displayPageNouns(), id: \.self) { n in
-                        Text(nounName(n, forType: CS_TYPE_NONE)).tag(n)
+                    ForEach(bandOptions(noun: Int(page.noun), target: Int(page.target),
+                                        grouped: page.isGrouped), id: \.self) { band in
+                        Text(bandName(band)).tag(band)
                     }
                 }
                 .labelsHidden()
                 .fixedSize()
-
-                Spacer()
-                // The value options ride in this row rather than one of their
-                // own: on a page with no target they were a whole row holding a
-                // single checkbox.  Fixed widths keep the boxes in a column down
-                // the list however wide the noun beside them reads.
-                if isGraphic {
-                    Toggle(isOn: Binding(
-                        get: { vm.csDisplayPages[i].isLarge },
-                        set: { on in
-                            var p = vm.csDisplayPages[i]
-                            if on { p.flags |= CS_DPAGE_LARGE } else { p.flags &= ~CS_DPAGE_LARGE }
-                            applyDisplayPage(i, p)
-                        })) {
-                        Text("Large value").font(.caption)
-                    }
-                    .toggleStyle(.checkbox)
-                    .frame(width: 92, alignment: .leading)
-                }
-                if vm.csDisplayBarSupported {
-                    // Greyed rather than hidden on a noun that cannot carry a
-                    // bar: the box keeps its column, and the tooltip says why it
-                    // is out rather than leaving a silent gap.
-                    let barAllowed = displayPageBarAllowed(Int(page.noun))
-                    Toggle(isOn: Binding(
-                        get: { vm.csDisplayPages[i].hasBar },
-                        set: { on in
-                            var p = vm.csDisplayPages[i]
-                            if on { p.flags |= CS_DPAGE_BAR } else { p.flags &= ~CS_DPAGE_BAR }
-                            applyDisplayPage(i, p)
-                        })) {
-                        Text("Level bar").font(.caption)
-                    }
-                    .toggleStyle(.checkbox)
-                    .disabled(!barAllowed)
-                    .frame(width: 82, alignment: .leading)
-                    .help(barAllowed ? displayBarHelp(isGraphic: isGraphic)
-                                     : "Only a value with a range can be drawn as a bar.")
-                }
-                Button(role: .destructive) {
-                    applyDisplayPage(i, CsDisplayPage())
-                } label: {
-                    Image(systemName: "minus.circle").font(.system(size: 11))
-                }
-                .buttonStyle(.borderless)
-                .foregroundColor(.secondary)
             }
-
-            if let nd = nd, nd.isTargeted {
-                HStack(spacing: 8) {
-                    // Indents past the number and the marker column so this
-                    // picker sits under the noun picker rather than under the
-                    // eye (16 + 8 spacing + 12).
-                    Spacer().frame(width: 36)
-                    Picker("", selection: Binding<CsTargetChoice>(
-                        get: {
-                            let p = vm.csDisplayPages[i]
-                            return p.isGrouped ? .group(Int(p.target)) : .channel(Int(p.target))
-                        },
-                        set: { choice in
-                            var p = vm.csDisplayPages[i]
-                            switch choice {
-                            case .channel(let c): p.flags &= ~CS_DPAGE_GROUP; p.target = UInt8(c)
-                            case .group(let g):   p.flags |= CS_DPAGE_GROUP;  p.target = UInt8(g)
-                            }
-                            applyDisplayPage(i, p)
-                        })) {
-                        Section(targetNounPlural(nd)) {
-                            ForEach(targetChoices(nd, noun: Int(page.noun)), id: \.self) { t in
-                                Text(targetName(nd, t)).tag(CsTargetChoice.channel(t))
-                            }
-                        }
-                        let usable = compatibleGroups(forNoun: Int(page.noun))
-                        if !usable.isEmpty {
-                            Section("Groups") {
-                                ForEach(usable, id: \.self) { g in
-                                    Text(groupMenuLabel(g)).tag(CsTargetChoice.group(g))
-                                }
-                            }
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    Spacer()
-                }
-            }
-
         }
-        .padding(.vertical, 2)
+    }
+
+    /// One item of a page's noun menu, check-marked when it's the page's noun.
+    private func displayPageNounItem(_ i: Int, _ noun: Int, current: Int, in cat: NounCategory?) -> some View {
+        let label = nounMenuLabel(noun, forType: CS_TYPE_NONE, in: cat)
+        return Button { setDisplayPageNoun(i, noun) } label: {
+            if noun == current {
+                Label(label, systemImage: "checkmark")
+            } else {
+                Text(label)
+            }
+        }
+    }
+
+    private func setDisplayPageNoun(_ i: Int, _ newNoun: Int) {
+        guard newNoun != Int(vm.csDisplayPages[i].noun) else { return }
+        var p = vm.csDisplayPages[i]
+        p.noun = UInt8(newNoun)
+        p.target = 0; p.index = 0
+        p.flags &= ~CS_DPAGE_GROUP
+        // A bar needs a range to plot inside; switching to a switch or a mode
+        // leaves it with none, and the device rejects the whole page rather than
+        // ignoring the flag.
+        if !displayPageBarAllowed(newNoun) { p.flags &= ~CS_DPAGE_BAR }
+        applyDisplayPage(i, p)
     }
 
     /// Whether a page may carry a level bar (caps v13, display spec §5.2).  The
@@ -7308,8 +7395,9 @@ struct ControlSurfacesSettingsTab: View {
         let full = nounName(noun, forType: type)
         guard let cat else { return full }
         if noun == cat.enableNoun {
-            // An indicator shows the state rather than changing it.
-            return isIndicatorType(type) ? "Enabled" : "Enable/Disable"
+            // An indicator or a display page (CS_TYPE_NONE) shows the state
+            // rather than changing it.
+            return isIndicatorType(type) || type == CS_TYPE_NONE ? "Enabled" : "Enable/Disable"
         }
         for p in cat.strip where full.hasPrefix(p + " ") {
             return String(full.dropFirst(p.count + 1))
