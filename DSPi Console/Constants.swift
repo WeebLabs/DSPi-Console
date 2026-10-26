@@ -1034,7 +1034,8 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // synthesizer nouns and widen three of their ranges.  v17 never shipped; v18
 // adds the auxiliary output component types (CS_TYPE_AUX_OUT / _PWM, commands
 // 0x04-0x07, nouns 68-69; see control_surfaces_aux_spec.md) and v19 the tube
-// preamp nouns 70-73.  No caps header
+// preamp nouns 70-73.  v20 adds the output limiter nouns 74-78 and the
+// CS_UNIT_MS_LOG unit, and v21 the PRESET_SAVE trigger noun 79.  No caps header
 // field is added after v9: the type table simply grows.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
@@ -1392,6 +1393,15 @@ let CS_NOUN_TUBE: Int               = 70   // bool: tube modeller enable
 let CS_NOUN_TUBE_DRIVE: Int         = 71   // continuous dB -30..24
 let CS_NOUN_TUBE_TYPE: Int          = 72   // enum 0..16 (0 = Custom)
 let CS_NOUN_TUBE_MIX: Int           = 73   // continuous percent 0..100 (dry/wet)
+// Caps v20 (output limiter spec): every one targets an output channel.
+let CS_NOUN_LIMITER: Int            = 74   // bool: output limiter enable
+let CS_NOUN_LIMITER_THRESHOLD: Int  = 75   // continuous dB -30..0
+let CS_NOUN_LIMITER_RELEASE: Int    = 76   // continuous ms 10..1000 (CS_UNIT_MS_LOG)
+let CS_NOUN_LIMITER_LINK: Int       = 77   // enum 0..4 (0 = unlinked)
+let CS_NOUN_LIMITER_GR: Int         = 78   // continuous dB 0..30, read-only gain reduction
+// Caps v21: saves the live state to the active preset slot, as a host save
+// does.  Trigger only, so a held button cannot repeat flash writes.
+let CS_NOUN_PRESET_SAVE: Int        = 79
 /// `CS_NOUN_MACRO` live value while no macro is running (also
 /// `CsExtStatusPacket.macroRunning` when idle).
 let CS_MACRO_NONE: UInt8            = 0xFF
@@ -1446,13 +1456,14 @@ let CS_UNIT_HZ: UInt8      = 2   // plain integer Hz, logarithmic stepping (step
 let CS_UNIT_Q: UInt8       = 3   // 8.8 Q (0.707 = 181), logarithmic stepping (step = 8.8 octaves)
 let CS_UNIT_PERCENT: UInt8 = 4   // 8.8 percent (1 % = 256), linear stepping
 let CS_UNIT_MS: UInt8      = 5   // 8.8 milliseconds (1 ms = 256), linear stepping; default step 0.1 ms
+let CS_UNIT_MS_LOG: UInt8  = 6   // plain integer ms, logarithmic stepping (step = 8.8 octaves); caps v20
 
 /// The firmware's default step for a unit when `CsBinding.step` is 0 (spec
 /// §2.1): one unit for the linear units, 1/12 octave for the log units, and
 /// 0.1 ms for delay (whole-ms detents are too coarse for alignment).
 func csDefaultStep(_ unit: UInt8) -> Float {
     switch unit {
-    case CS_UNIT_HZ, CS_UNIT_Q: return 1.0 / 12.0
+    case CS_UNIT_HZ, CS_UNIT_Q, CS_UNIT_MS_LOG: return 1.0 / 12.0
     case CS_UNIT_MS:            return 0.1
     default:                    return 1.0
     }
@@ -1460,7 +1471,7 @@ func csDefaultStep(_ unit: UInt8) -> Float {
 
 /// True when a unit steps multiplicatively (its `step` operand is in octaves).
 func csUnitIsLog(_ unit: UInt8) -> Bool {
-    unit == CS_UNIT_HZ || unit == CS_UNIT_Q
+    unit == CS_UNIT_HZ || unit == CS_UNIT_Q || unit == CS_UNIT_MS_LOG
 }
 
 /// Longest indicator delay the uint16 0.1 s field can hold (spec §2.2): 6553.5 s,
@@ -1573,7 +1584,7 @@ func csUnitSymbol(_ unit: UInt8) -> String {
     case CS_UNIT_HZ:      return "Hz"
     case CS_UNIT_Q:       return "Q"
     case CS_UNIT_PERCENT: return "%"
-    case CS_UNIT_MS:      return "ms"
+    case CS_UNIT_MS, CS_UNIT_MS_LOG: return "ms"
     default:              return ""
     }
 }

@@ -477,6 +477,27 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertTrue(csUnitIsLog(CS_UNIT_Q))
     }
 
+    /// Caps v20/v21 noun numbers match control_surfaces.h, and `CS_UNIT_MS_LOG`
+    /// (6) is plain integer ms stepped in octaves, so the limiter release can
+    /// span 10 to 1000 ms, past what 8.8 can hold.
+    func testCapsV20V21NounsAndLogMsUnit() {
+        XCTAssertEqual(CS_NOUN_LIMITER, 74)
+        XCTAssertEqual(CS_NOUN_LIMITER_THRESHOLD, 75)
+        XCTAssertEqual(CS_NOUN_LIMITER_RELEASE, 76)
+        XCTAssertEqual(CS_NOUN_LIMITER_LINK, 77)
+        XCTAssertEqual(CS_NOUN_LIMITER_GR, 78)
+        XCTAssertEqual(CS_NOUN_PRESET_SAVE, 79)
+
+        XCTAssertEqual(CS_UNIT_MS_LOG, 6)
+        XCTAssertFalse(csUnitIsFixedPoint(CS_UNIT_MS_LOG))
+        XCTAssertTrue(csUnitIsLog(CS_UNIT_MS_LOG))
+        XCTAssertEqual(csUnitSymbol(CS_UNIT_MS_LOG), "ms")
+        XCTAssertEqual(csEncodeValue(1000, unit: CS_UNIT_MS_LOG), 1000)
+        XCTAssertEqual(csDecodeValue(10, unit: CS_UNIT_MS_LOG), 10, accuracy: 0.0001)
+        XCTAssertEqual(csEncodeStep(1.0, unit: CS_UNIT_MS_LOG), 256)   // one octave
+        XCTAssertEqual(csDefaultStep(CS_UNIT_MS_LOG), 1.0 / 12.0, accuracy: 0.0001)
+    }
+
     /// A v4 caps header is byte-identical to v3 apart from the version and the
     /// grown noun count, so the v3 parser must read it unchanged (§11.4).
     func testCapsHeaderV4SameLayout() {

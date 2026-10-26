@@ -5360,7 +5360,7 @@ struct ControlSurfacesSettingsTab: View {
     }
 
     /// Unit-aware step field.  dB / percent / ms step linearly in their unit;
-    /// Hz / Q step multiplicatively, so their step is expressed in octaves.
+    /// Hz / Q / log ms step multiplicatively, so their step is expressed in octaves.
     @ViewBuilder
     private func csStepRow(_ slot: Int) -> some View {
         let unit = nounUnit(slot)
@@ -6401,8 +6401,12 @@ struct ControlSurfacesSettingsTab: View {
                      nouns: [CS_NOUN_UPMIX, CS_NOUN_UPMIX_CENTER_MODE, CS_NOUN_UPMIX_SURROUND_MODE,
                              CS_NOUN_UPMIX_STRENGTH, CS_NOUN_UPMIX_WIDTH, CS_NOUN_UPMIX_PRESENCE],
                      strip: ["Upmixer"], enableNoun: CS_NOUN_UPMIX),
+        NounCategory(name: "Output Limiter",
+                     nouns: [CS_NOUN_LIMITER, CS_NOUN_LIMITER_THRESHOLD, CS_NOUN_LIMITER_RELEASE,
+                             CS_NOUN_LIMITER_LINK, CS_NOUN_LIMITER_GR],
+                     strip: ["Limiter"], enableNoun: CS_NOUN_LIMITER),
         NounCategory(name: "Input & Presets",
-                     nouns: [CS_NOUN_PRESET, CS_NOUN_PRESET_RELOAD, CS_NOUN_INPUT_SOURCE,
+                     nouns: [CS_NOUN_PRESET, CS_NOUN_PRESET_RELOAD, CS_NOUN_PRESET_SAVE, CS_NOUN_INPUT_SOURCE,
                              CS_NOUN_LG_SYNC]),
         NounCategory(name: "Channels",
                      nouns: [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE,
@@ -7089,7 +7093,9 @@ struct ControlSurfacesSettingsTab: View {
                 }
             }
         } label: {
-            Text(nounName(current, forType: CS_TYPE_NONE))
+            // Page rows share a line with the channel and band pickers.
+            Text(nounName(current, forType: CS_TYPE_NONE)
+                .replacingOccurrences(of: "Frequency", with: "Freq"))
         }
         .menuStyle(.button)
         .fixedSize()
@@ -7413,6 +7419,8 @@ struct ControlSurfacesSettingsTab: View {
             if noun == CS_NOUN_DAC_MUTE_TEST { return "Test DAC Mute" }
             if noun == CS_NOUN_PRESET_RELOAD { return "Reload Preset" }
         }
+        // Trigger only, so it never shows as an indicator.
+        if noun == CS_NOUN_PRESET_SAVE { return "Save Preset" }
         switch noun {
         case CS_NOUN_USER_VOLUME:        return "Volume"
         case CS_NOUN_MASTER_VOLUME:      return "Master Volume"
@@ -7476,6 +7484,11 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_TUBE_DRIVE:         return "Tube Drive"
         case CS_NOUN_TUBE_TYPE:          return "Tube Type"
         case CS_NOUN_TUBE_MIX:           return "Tube Mix"
+        case CS_NOUN_LIMITER:            return "Output Limiter"
+        case CS_NOUN_LIMITER_THRESHOLD:  return "Limiter Threshold"
+        case CS_NOUN_LIMITER_RELEASE:    return "Limiter Release"
+        case CS_NOUN_LIMITER_LINK:       return "Limiter Link Group"
+        case CS_NOUN_LIMITER_GR:         return "Limiter Gain Reduction"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
@@ -7733,6 +7746,8 @@ struct ControlSurfacesSettingsTab: View {
             return (value >= 0 && value < names.count) ? names[value] : "Mode \(value)"
         case CS_NOUN_TUBE_TYPE:
             return tubeTypeName(value)
+        case CS_NOUN_LIMITER_LINK:
+            return limiterLinkGroupName(value)
         case CS_NOUN_FILTER_TYPE:
             let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "High Cut",
                          "Low Cut", "Notch", "All Pass", "All Pass (1st)",
@@ -7833,6 +7848,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_UNIT_PERCENT: return String(format: "%.0f %%", v)
         case CS_UNIT_DB:      return String(format: "%.1f dB", v)
         case CS_UNIT_MS:      return String(format: "%.2f ms", v)
+        case CS_UNIT_MS_LOG:  return String(format: "%.0f ms", v)
         default:              return String(format: "%.0f", v)
         }
     }
@@ -7840,7 +7856,7 @@ struct ControlSurfacesSettingsTab: View {
     /// Scroll-wheel / field increment appropriate to a unit.
     private func unitScrollStep(_ unit: UInt8) -> Float {
         switch unit {
-        case CS_UNIT_HZ:      return 10
+        case CS_UNIT_HZ, CS_UNIT_MS_LOG: return 10
         case CS_UNIT_Q:       return 0.1
         case CS_UNIT_PERCENT: return 1
         case CS_UNIT_MS:      return 0.1
@@ -7851,7 +7867,7 @@ struct ControlSurfacesSettingsTab: View {
     /// Field decimal places appropriate to a unit (Hz/percent whole, Q/ms fine).
     private func unitDecimals(_ unit: UInt8) -> Int {
         switch unit {
-        case CS_UNIT_HZ, CS_UNIT_PERCENT: return 0
+        case CS_UNIT_HZ, CS_UNIT_PERCENT, CS_UNIT_MS_LOG: return 0
         case CS_UNIT_Q, CS_UNIT_MS:       return 2
         default:                          return 1   // dB
         }
