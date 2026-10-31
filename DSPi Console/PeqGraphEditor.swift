@@ -1376,7 +1376,7 @@ final class PeqGraphEditorView: NSView {
     // MARK: - Menus
 
     private func item(_ title: String, checked: Bool = false, enabled: Bool = true, _ action: @escaping () -> Void) -> NSMenuItem {
-        let item = PeqMenuItem(title: title, handler: action)
+        let item = ClosureMenuItem(title: title, handler: action)
         item.state = checked ? .on : .off
         item.isEnabled = enabled
         return item
@@ -1746,14 +1746,3 @@ private extension PeqNodeRole {
     }
 }
 
-/// A menu item that runs a closure.
-final class PeqMenuItem: NSMenuItem {
-    private let handler: () -> Void
-    init(title: String, handler: @escaping () -> Void) {
-        self.handler = handler
-        super.init(title: title, action: #selector(run), keyEquivalent: "")
-        target = self
-    }
-    required init(coder: NSCoder) { fatalError() }
-    @objc private func run() { handler() }
-}

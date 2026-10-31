@@ -2543,6 +2543,44 @@ extension DSPViewModel {
             fetchSpdifInputConfig()
             fetchI2SInputConfig()
         }
+        // Unconditional, so a device switch never keeps the last device's names.
+        fetchInputSourceNames()
+    }
+
+    /// Read every source name.  Older firmware answers source 0 with its 4-byte
+    /// legacy gain, so only that probe decides support; a later failed read
+    /// just leaves that source on its built-in label.
+    func fetchInputSourceNames() {
+        var names = Array(repeating: "", count: INPUT_SOURCE_NAME_SLOTS)
+        var supported = false
+        for source in 0...INPUT_SOURCE_MAX {
+            let d = transport.getControlRequest(request: REQ_GET_INPUT_SOURCE_NAME, value: UInt16(source),
+                                                index: 2, length: UInt16(INPUT_SOURCE_NAME_LEN))
+            let ok = d?.count == INPUT_SOURCE_NAME_LEN
+            if source == 0 {
+                guard ok else { break }
+                supported = true
+            }
+            if ok, let d { names[source] = DSPViewModel.decodeInputSourceName(d) }
+        }
+        DispatchQueue.main.async {
+            self.inputSourceNamesSupported = supported
+            self.inputSourceNames = supported ? names : Array(repeating: "", count: INPUT_SOURCE_NAME_SLOTS)
+        }
+    }
+
+    /// Store a source name; an empty name restores the built-in label.  The
+    /// device writes flash on its main loop and echoes the stored name back as
+    /// NOTIFY_EVT_INPUT_SOURCE_NAME.
+    func setInputSourceName(source: Int, name: String) {
+        guard inputSourceNamesSupported, (0...INPUT_SOURCE_MAX).contains(source) else { return }
+        let ascii = DSPViewModel.sanitizeInputSourceName(name)
+        var payload = Data(count: INPUT_SOURCE_NAME_LEN)
+        payload.replaceSubrange(0..<ascii.utf8.count, with: Data(ascii.utf8))
+        transport.sendControlRequest(request: REQ_SET_INPUT_SOURCE_NAME, value: UInt16(source), index: 2, data: payload)
+        DispatchQueue.main.async {
+            self.inputSourceNames[source] = ascii
+        }
     }
 
     /// Reads the whole S/PDIF input inventory in one transfer (REQ_GET_SPDIF_INPUT_CONFIG,

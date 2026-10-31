@@ -171,7 +171,23 @@ struct PresetDiff {
 }
 
 extension PresetSnapshot {
-    static func diff(from old: PresetSnapshot, to new: PresetSnapshot, channelNames: [String]) -> PresetDiff {
+    /// Source labels for callers without a view model (tests); the app passes
+    /// DSPViewModel.inputSourceTitle so user names show up.
+    static func builtInSourceTitle(_ s: Int) -> String {
+        switch s {
+        case 0: return "USB"
+        case 1: return "S/PDIF 1"
+        case 2: return "I2S"
+        case 3: return "ADAT"
+        case 4: return "S/PDIF 2"
+        case 5: return "S/PDIF 3"
+        case 6: return "S/PDIF 4"
+        default: return "\(s)"
+        }
+    }
+
+    static func diff(from old: PresetSnapshot, to new: PresetSnapshot, channelNames: [String],
+                     sourceTitle: (Int) -> String = PresetSnapshot.builtInSourceTitle) -> PresetDiff {
         var changes = [PresetDiff.Change]()
 
         // Global — per-channel preamp (inputs 0/1 are USB L/R; 2-7 are the 7.1
@@ -635,18 +651,7 @@ extension PresetSnapshot {
 
         // Input source
         if let oldSrc = old.inputSource, let newSrc = new.inputSource, oldSrc != newSrc {
-            func sourceName(_ s: Int) -> String {
-                switch s {
-                case 0: return "USB"
-                case 1: return "S/PDIF 1"
-                case 2: return "I2S"
-                case 3: return "ADAT"
-                case 4: return "S/PDIF 2"
-                case 5: return "S/PDIF 3"
-                default: return "\(s)"
-                }
-            }
-            changes.append(.init(category: "Input", description: "Input source: \(sourceName(oldSrc)) → \(sourceName(newSrc))"))
+            changes.append(.init(category: "Input", description: "Input source: \(sourceTitle(oldSrc)) → \(sourceTitle(newSrc))"))
         }
 
         // LG Sound Sync — per-preset enable (only when firmware supports it)

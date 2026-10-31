@@ -210,6 +210,14 @@ struct InterruptEvent: Identifiable {
             let tap = cfg.tap == RTA_TAP_INPUT ? "in" : "out"
             return "\(seqStr) v2.RtaConfig                  tap=\(tap) mask=\(String(format: "0x%04X", cfg.channelMask)) points=\(cfg.points) avg=\(cfg.avgMs)ms decay=\(cfg.peakDecayDBs) src=\(sourceLabel(source))"
 
+        case NOTIFY_EVT_INPUT_SOURCE_NAME:
+            // 40 bytes: [ver, evt, flags, seq, source, src, 0, 0, name(32)].
+            guard bytes.count >= NOTIFY_INPUT_SOURCE_NAME_SIZE else {
+                return "\(seqStr) v2.InputSourceName (short: \(bytes.count) bytes)"
+            }
+            let name = DSPViewModel.decodeInputSourceName(Data(bytes[8..<NOTIFY_INPUT_SOURCE_NAME_SIZE]))
+            return "\(seqStr) v2.InputSourceName            source=\(bytes[4]) name=\"\(name)\" src=\(sourceLabel(bytes[5]))"
+
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
             return "\(seqStr) v2?evt=\(String(format: "0x%02X", eventID))  \(hex)"
@@ -667,6 +675,11 @@ class InterruptMonitor: ObservableObject {
     /// tells its own echo from another console taking the analyser.
     var onRtaConfig: ((_ config: RtaConfig, _ source: UInt8, _ origin: LinkSessionID) -> Void)?
 
+    /// Fires on the main thread for every stored input source name
+    /// (NOTIFY_EVT_INPUT_SOURCE_NAME), whoever set it.  `name` is empty when
+    /// the source was cleared back to its built-in label.
+    var onInputSourceName: ((_ source: Int, _ name: String) -> Void)?
+
     private let transport: any DeviceTransport
     private var subscription: AnyCancellable?
 
@@ -852,6 +865,17 @@ class InterruptMonitor: ObservableObject {
            let (config, source) = RtaConfig.fromNotification(notification.packet) {
             DispatchQueue.main.async {
                 handler(config, source, origin)
+            }
+        }
+
+        if let handler = onInputSourceName,
+           bytes.count >= NOTIFY_INPUT_SOURCE_NAME_SIZE,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_INPUT_SOURCE_NAME {
+            let source = Int(bytes[4])
+            let name = DSPViewModel.decodeInputSourceName(Data(bytes[8..<NOTIFY_INPUT_SOURCE_NAME_SIZE]))
+            DispatchQueue.main.async {
+                handler(source, name)
             }
         }
 

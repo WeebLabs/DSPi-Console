@@ -17,10 +17,13 @@ let REQ_SAVE_PARAMS: UInt8  = 0x51
 // device-global output-config save (see REQ_SAVE_OUTPUT_CONFIG below).
 let REQ_SAVE_OUTPUT_CONFIG: UInt8 = 0x52
 let REQ_FACTORY_RESET: UInt8 = 0x53
-let REQ_SET_CHANNEL_GAIN: UInt8 = 0x54
-let REQ_GET_CHANNEL_GAIN: UInt8 = 0x55
-let REQ_SET_CHANNEL_MUTE: UInt8 = 0x56
-let REQ_GET_CHANNEL_MUTE: UInt8 = 0x57
+// Device-global input source names (wValue = source ID, 32-byte name).
+// Firmware before them answers the GET with the 4-byte legacy gain, which is
+// how support is detected; never SET on such firmware.
+let REQ_SET_INPUT_SOURCE_NAME: UInt8 = 0x54
+let REQ_GET_INPUT_SOURCE_NAME: UInt8 = 0x55
+let INPUT_SOURCE_NAME_LEN: Int = 32
+let INPUT_SOURCE_NAME_SLOTS: Int = 8
 let REQ_SET_LOUDNESS: UInt8           = 0x58
 let REQ_GET_LOUDNESS: UInt8           = 0x59
 let REQ_SET_LOUDNESS_REF: UInt8       = 0x5A
@@ -151,6 +154,11 @@ let RTA_CTL_RESET_AVG: UInt16 = 2
 /// (notification_protocol_v2_spec.md §3.9).
 let NOTIFY_EVT_RTA_CONFIG: UInt8 = 0x0D
 let NOTIFY_RTA_CONFIG_SIZE: Int = 17
+
+/// Pushed once per stored source name.  40 bytes: v2 header, source ID at 4,
+/// ParamSource at 5, the 32-byte stored name at 8 (all zeros when cleared).
+let NOTIFY_EVT_INPUT_SOURCE_NAME: UInt8 = 0x0F
+let NOTIFY_INPUT_SOURCE_NAME_SIZE: Int = 40
 
 /// Levels ride the wire as one byte in 0.5 dB steps, with 243 meaning 0 dBFS -
 /// six decibels of headroom above it, because upmix-derived rows and hot EQ can
@@ -876,6 +884,7 @@ let INPUT_SOURCE_ADAT: Int   = 3
 let INPUT_SOURCE_SPDIF2: Int = 4
 let INPUT_SOURCE_SPDIF3: Int = 5
 let INPUT_SOURCE_SPDIF4: Int = 6
+let INPUT_SOURCE_MAX: Int    = INPUT_SOURCE_SPDIF4
 
 // S/PDIF input inventory: input 1 is always present; inputs 2/3/4 are optional
 // and disabled by default.  Default RX GPIOs are 5 / 20 / 21 / 22.  This is the

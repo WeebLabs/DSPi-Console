@@ -82,6 +82,9 @@ struct ContentView: View {
     @State private var showPresetRename = false
     @State private var presetRenameSlot = 0
     @State private var presetRenameText = ""
+    @State private var showSourceRename = false
+    @State private var sourceRenameTarget = 0
+    @State private var sourceRenameText = ""
     @State private var presetSwitchInFlight = false
     @State private var settingsWindowOpen = false
 
@@ -129,6 +132,34 @@ struct ContentView: View {
                 tourOpenedMatrixMixer = false
                 matrixMixerController.hide()
             }
+        }
+    }
+
+    /// Right-click menu for the sidebar source picker; nil on firmware without
+    /// source names, which leaves the picker's default right-click alone.
+    private func sourceContextMenu() -> NSMenu? {
+        let source = vm.inputSource
+        guard vm.inputSourceNamesSupported, vm.inputSourceNames.indices.contains(source) else { return nil }
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "Rename \u{201C}\(vm.inputSourceTitle(source))\u{201D}\u{2026}") {
+            sourceRenameTarget = source
+            sourceRenameText = vm.inputSourceNames[source]
+            showSourceRename = true
+        })
+        if !vm.inputSourceNames[source].isEmpty {
+            menu.addItem(ClosureMenuItem(title: "Use Built-in Name") { commitSourceRename(source, "") })
+        }
+        return menu
+    }
+
+    private func commitSourceRename(_ source: Int, _ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard trimmed != vm.inputSourceNames[source] else { return }
+        // Bound to the device the menu was opened on, like channel renames.
+        let generation = vm.transport.generation
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard vm.transport.generation == generation else { return }
+            vm.setInputSourceName(source: source, name: trimmed)
         }
     }
 
@@ -724,7 +755,8 @@ struct ContentView: View {
                                             guard source != vm.inputSource else { return }
                                             vm.setInputSource(source)
                                         }
-                                    )
+                                    ),
+                                    contextMenu: { sourceContextMenu() }
                                 )
                                 .frame(minWidth: 80)
                                 .overlay(alignment: .trailing) {
@@ -970,6 +1002,32 @@ struct ContentView: View {
                     vm.updateSelection(to: nil)
                 }
             }
+        }
+        .sheet(isPresented: $showSourceRename) {
+            VStack(spacing: 16) {
+                Text("Rename Source").font(.headline)
+                TextField(vm.builtInInputSourceTitle(sourceRenameTarget), text: $sourceRenameText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 200)
+                    .onChange(of: sourceRenameText) { _, new in
+                        let clean = DSPViewModel.sanitizeInputSourceName(new)
+                        if clean != new { sourceRenameText = clean }
+                    }
+                Text("Leave empty to use \u{201C}\(vm.builtInInputSourceTitle(sourceRenameTarget))\u{201D}.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                HStack {
+                    Button("Cancel") { showSourceRename = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Rename") {
+                        commitSourceRename(sourceRenameTarget, sourceRenameText)
+                        showSourceRename = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding()
+            .frame(width: 280)
         }
         .sheet(isPresented: $showPresetRename) {
             VStack(spacing: 16) {

@@ -1705,9 +1705,23 @@ private class PaddedPopUpButtonCell: NSPopUpButtonCell {
     }
 }
 
+/// A menu item that runs a closure.
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError() }
+    @objc private func run() { handler() }
+}
+
 private class PaddedPopUpButton: NSPopUpButton {
     var trailingPadding: CGFloat = 14
     var onRightClick: (() -> Void)?
+    // Without it a right-click falls through to NSView and pops the item list.
+    var contextMenu: (() -> NSMenu?)?
     override class var cellClass: AnyClass? {
         get { PaddedPopUpButtonCell.self }
         set {}
@@ -1718,7 +1732,9 @@ private class PaddedPopUpButton: NSPopUpButton {
         return size
     }
     override func rightMouseDown(with event: NSEvent) {
-        if let onRightClick = onRightClick {
+        if let menu = contextMenu?() {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        } else if let onRightClick = onRightClick {
             onRightClick()
         } else {
             super.rightMouseDown(with: event)
@@ -1735,12 +1751,14 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
     var enabled: Bool = true
     var showsHoverBorder: Bool = true
     var onRightClick: (() -> Void)? = nil
+    var contextMenu: (() -> NSMenu?)? = nil
 
     func makeNSView(context: Context) -> NSPopUpButton {
         let button = PaddedPopUpButton(frame: .zero, pullsDown: false)
         button.isBordered = showsHoverBorder
         button.showsBorderOnlyWhileMouseInside = showsHoverBorder
         button.onRightClick = onRightClick
+        button.contextMenu = contextMenu
         (button.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
         if let font = font { button.font = font }
         button.target = context.coordinator
@@ -1756,6 +1774,7 @@ struct BorderlessPopUpButton<T: Hashable>: NSViewRepresentable {
         button.isBordered = showsHoverBorder && enabled
         button.showsBorderOnlyWhileMouseInside = showsHoverBorder && enabled
         (button as? PaddedPopUpButton)?.onRightClick = onRightClick
+        (button as? PaddedPopUpButton)?.contextMenu = contextMenu
 
         // Only rebuild menu if items changed (avoids swallowing clicks during polling updates)
         let currentTitles = (0..<(button.menu?.numberOfItems ?? 0)).map { button.menu?.item(at: $0)?.title ?? "" }

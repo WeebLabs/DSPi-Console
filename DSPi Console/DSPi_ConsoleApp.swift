@@ -7922,6 +7922,54 @@ struct ControlSurfacesSettingsTab: View {
 
 // MARK: - Hardware Settings Tab
 
+/// One editable source name.  Commits on Return, focus loss or the page
+/// closing, and only when the text changed: every commit is a device flash write.
+private struct InputSourceNameRow: View {
+    let source: Int
+    @ObservedObject private var vm = AppState.shared.viewModel
+    @State private var text = ""
+    // Set synchronously, so focus loss and disappear firing together send once.
+    @State private var lastSent: String?
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack {
+            Image(systemName: "arrow.down.to.line")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            Text(vm.builtInInputSourceTitle(source))
+                .font(.body)
+            Spacer()
+            TextField(vm.builtInInputSourceTitle(source), text: $text)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 180)
+                .focused($focused)
+                .onSubmit(commit)
+                .onChange(of: text) { _, new in
+                    let clean = DSPViewModel.sanitizeInputSourceName(new)
+                    if clean != new { text = clean }
+                }
+        }
+        .onAppear { text = vm.inputSourceNames[source] }
+        .onDisappear(perform: commit)
+        .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
+        .onChange(of: vm.inputSourceNames[source]) { _, stored in
+            lastSent = nil
+            if !focused { text = stored }
+        }
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed != (lastSent ?? vm.inputSourceNames[source]) else { return }
+        lastSent = trimmed
+        DispatchQueue.global(qos: .userInitiated).async {
+            vm.setInputSourceName(source: source, name: trimmed)
+        }
+    }
+}
+
 struct HardwareSettingsTab: View {
     /// Which hardware section this instance renders, so each can live on its
     /// own sidebar page while sharing this struct's helpers and pin-conflict
@@ -8745,6 +8793,21 @@ struct HardwareSettingsTab: View {
 
                 statusRow
             }
+            }
+
+            // MARK: Source Names
+            if section == .spdif && vm.inputSourceNamesSupported {
+                Section {
+                    ForEach(vm.inputSourceOptions, id: \.self) { source in
+                        InputSourceNameRow(source: source)
+                    }
+                } header: {
+                    Label("Source Names", systemImage: "character.cursor.ibeam")
+                } footer: {
+                    Text("Stored on the device and shown on every host and the front panel. Leave a name empty to use the built-in label.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
 
             // MARK: Inputs

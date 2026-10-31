@@ -1598,8 +1598,37 @@ class DSPViewModel: ObservableObject {
         return opts
     }
 
-    /// User-facing title for an input-source value.
+    /// User names per input source ID, device-global (not per preset).  Empty
+    /// means unnamed.  `inputSourceNamesSupported` stays false on firmware
+    /// that predates the names (see fetchInputSourceNames()).
+    @Published var inputSourceNames: [String] = Array(repeating: "", count: INPUT_SOURCE_NAME_SLOTS)
+    @Published var inputSourceNamesSupported: Bool = false
+
+    /// What the device can store and the front panel can draw: printable
+    /// ASCII, at most 31 characters.
+    static func sanitizeInputSourceName(_ name: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        scalars.append(contentsOf: name.unicodeScalars.lazy.filter { $0.value >= 32 && $0.value < 127 }
+                                       .prefix(INPUT_SOURCE_NAME_LEN - 1))
+        return String(scalars)
+    }
+
+    /// A stored 32-byte name as shown to the user: up to the first NUL, ASCII.
+    static func decodeInputSourceName(_ data: Data) -> String {
+        let end = data.firstIndex(of: 0) ?? data.endIndex
+        return String(data: data[data.startIndex..<end], encoding: .ascii) ?? ""
+    }
+
+    /// User-facing title for an input-source value: the user's name when one is
+    /// set, otherwise the built-in label.
     func inputSourceTitle(_ source: Int) -> String {
+        if inputSourceNames.indices.contains(source), !inputSourceNames[source].isEmpty {
+            return inputSourceNames[source]
+        }
+        return builtInInputSourceTitle(source)
+    }
+
+    func builtInInputSourceTitle(_ source: Int) -> String {
         switch source {
         case INPUT_SOURCE_USB:    return "USB"
         case INPUT_SOURCE_SPDIF:  return anyOptionalSpdifEnabled ? "S/PDIF 1" : "S/PDIF"
@@ -2698,6 +2727,11 @@ class DSPViewModel: ObservableObject {
         // announced, whoever made it, and the 9-byte event carries both values,
         // so this needs no read-back at all - which matters because a panel
         // button switching a relay must show up here without polling.
+        AppState.shared.interruptMonitor.onInputSourceName = { [weak self] source, name in
+            guard let self = self, self.inputSourceNames.indices.contains(source) else { return }
+            if self.inputSourceNames[source] != name { self.inputSourceNames[source] = name }
+        }
+
         AppState.shared.interruptMonitor.onCsAux = { [weak self] slot, state, level, _ in
             guard let self = self, slot < UInt8(CS_MAX_BINDINGS) else { return }
             let i = Int(slot)
@@ -3062,7 +3096,8 @@ class DSPViewModel: ObservableObject {
 
     func computeDiff() -> PresetDiff {
         guard let saved = savedSnapshot else { return PresetDiff(changes: []) }
-        return PresetSnapshot.diff(from: saved, to: captureSnapshot(), channelNames: channelNames)
+        return PresetSnapshot.diff(from: saved, to: captureSnapshot(), channelNames: channelNames,
+                                   sourceTitle: inputSourceTitle)
     }
 
     func switchToDevice(_ device: DSPiDevice) {
