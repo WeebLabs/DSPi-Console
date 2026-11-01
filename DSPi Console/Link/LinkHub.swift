@@ -328,17 +328,17 @@ final class LinkHub {
 
     /// `device.rename`: on name-capable firmware write the board (the notify
     /// then updates the registry); otherwise keep the hub-stored name as before.
-    /// A name-capable board that is not attached answers NO_DEVICE, since a
-    /// stored name would be overridden by the board's own on its return.
+    /// An unknown handle, or a name-capable board that is not attached, answers
+    /// NO_DEVICE: the board's own name would override a stored one on return.
     func renameDevice(handle: UInt8, to name: String, from sessionID: LinkSessionID,
                       completion: @escaping (LinkStatus) -> Void) {
+        guard let known = registry.device(handle: handle) else { return completion(.noDevice) }
         deviceLock.lock()
         let attached = device != nil && attachedHandle == handle
         deviceLock.unlock()
-        let capable = registry.device(handle: handle)?.info.boardName != nil
-        if capable {
+        if known.info.boardName != nil {
             guard attached else { return completion(.noDevice) }
-            return writeBoardName(DSPViewModel.sanitizeInputSourceName(name), from: sessionID,
+            return writeBoardName(DeviceRegistry.boardName(from: name), from: sessionID,
                                   completion: completion)
         }
         registry.rename(handle: handle, to: name)

@@ -126,4 +126,37 @@ final class LinkHubDeviceNameTests: XCTestCase {
         wait(for: [done], timeout: 2)
         XCTAssertNil(store.name(forSerial: serial))
     }
+
+    func testRenameOfUnknownHandleAnswersNoDevice() {
+        let (hub, store) = makeHub()
+        let session = hub.openSession(role: .control)
+        let done = expectation(description: "refused")
+        hub.renameDevice(handle: 5, to: "Nobody", from: session.id) { status in
+            XCTAssertEqual(status, .noDevice)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 2)
+        XCTAssertNil(store.name(forSerial: serial))
+    }
+
+    func testRenameDropsUnsupportedCharactersAndClosesTheGaps() {
+        let (hub, _) = makeHub()
+        let device = makeDevice(boardName: "")
+        hub.attachDevice(device)
+        let session = hub.openSession(role: .control)
+        let done = expectation(description: "renamed")
+        hub.renameDevice(handle: hub.currentHandle, to: "Caf\u{e9} \u{2013} Rack \u{1F50A}",
+                         from: session.id) { _ in done.fulfill() }
+        wait(for: [done], timeout: 2)
+        let payload = nameSets(device).first?.payload ?? Data()
+        XCTAssertEqual(payload.prefix(while: { $0 != 0 }), Data("Caf Rack".utf8))
+    }
+
+    func testBoardNameCleanup() {
+        XCTAssertEqual(DeviceRegistry.boardName(from: "  Living   Room  "), "Living Room")
+        XCTAssertEqual(DeviceRegistry.boardName(from: "\u{1F50A}\u{1F50A}"), "")
+        XCTAssertEqual(DeviceRegistry.boardName(from: String(repeating: "A", count: 40)).count, 31)
+        XCTAssertEqual(DeviceRegistry.boardName(from: String(repeating: "A", count: 30) + " B"),
+                       String(repeating: "A", count: 30), "a cut that ends on a space is trimmed")
+    }
 }

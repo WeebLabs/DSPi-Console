@@ -158,8 +158,18 @@ final class DeviceRegistry {
     /// once (spec section 5); nil when there is nothing to adopt.
     func adoptionName(for info: HubDeviceInfo) -> String? {
         guard info.boardName == "", let stored = names.name(forSerial: info.serial) else { return nil }
-        let ascii = DSPViewModel.sanitizeInputSourceName(stored)
+        let ascii = Self.boardName(from: stored)
         return ascii.isEmpty ? nil : ascii
+    }
+
+    /// A name a network client sent, as the board can store it: printable
+    /// ASCII with the gaps left by dropped characters closed, at most 31.
+    static func boardName(from name: String) -> String {
+        let ascii = String(String.UnicodeScalarView(
+            name.unicodeScalars.filter { $0.value >= 32 && $0.value < 127 }))
+        let words = ascii.split(separator: " ", omittingEmptySubsequences: true)
+        let joined = words.joined(separator: " ")
+        return String(joined.prefix(DEVICE_NAME_LEN - 1)).trimmingCharacters(in: .whitespaces)
     }
 
     var devices: [RegisteredDevice] {

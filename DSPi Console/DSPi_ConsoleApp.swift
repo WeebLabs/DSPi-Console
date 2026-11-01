@@ -8038,6 +8038,9 @@ private struct DraftNameField: View {
     let edited: Bool
     let clearHelp: String
     @FocusState private var focused: Bool
+    /// The field's own text.  A focused NSTextField ignores a binding that
+    /// rewrites what was typed, so the filtering has to write back here.
+    @State private var text = ""
 
     var body: some View {
         HStack(spacing: 10) {
@@ -8047,20 +8050,20 @@ private struct DraftNameField: View {
                 .opacity(edited ? 1 : 0)
                 .help("Not saved yet")
             HStack(spacing: 4) {
-                TextField("Name", text: name, prompt: Text("Add a name"))
+                TextField("Name", text: $text, prompt: Text("Add a name"))
                     .textFieldStyle(.plain)
                     .labelsHidden()
                     .focused($focused)
                     .onSubmit { focused = false }
-                Button { name.wrappedValue = "" } label: {
+                Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.tertiary)
                 .help(clearHelp)
-                .opacity(name.wrappedValue.isEmpty ? 0 : 1)
-                .disabled(name.wrappedValue.isEmpty)
+                .opacity(text.isEmpty ? 0 : 1)
+                .disabled(text.isEmpty)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -8074,6 +8077,16 @@ private struct DraftNameField: View {
                     .strokeBorder(Color.accentColor.opacity(focused ? 0.7 : 0), lineWidth: 1)
             )
             .animation(.easeOut(duration: 0.12), value: focused)
+        }
+        .onAppear { text = name.wrappedValue }
+        .onChange(of: text) { _, typed in
+            let clean = DSPViewModel.sanitizeInputSourceName(typed)
+            if clean != typed { text = clean; return }
+            if clean != name.wrappedValue { name.wrappedValue = clean }
+        }
+        // A rename from elsewhere, a revert or a device switch.
+        .onChange(of: name.wrappedValue) { _, stored in
+            if stored != text { text = stored }
         }
     }
 }

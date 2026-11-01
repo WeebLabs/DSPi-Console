@@ -399,8 +399,10 @@ reply), the hub writes `REQ_SET_DEVICE_NAME` (0x56) as the requesting
 session, replies `ok` once the write is accepted, and emits `device.changed`
 when the board's `NOTIFY_EVT_DEVICE_NAME` (0x10) arrives. That notification
 is the only thing that sets the name of such a board, so a rename from any
-source is seen, including a raw 0x56 through `cmd`. A name-capable board
-that is not attached answers `no_device`. Otherwise (older firmware) the hub
+source is seen, including a raw 0x56 through `cmd`. The hub reduces the
+name to what the board can store: printable ASCII, gaps left by dropped
+characters closed, ends trimmed, at most 31 characters. A name-capable board
+that is not attached, or an unknown handle, answers `no_device`. Otherwise (older firmware) the hub
 changes its stored name and emits `device.changed` itself. Names travel
 with the board, so the board keeps its name on any hub or computer. A board
 rename restarts the board's outputs briefly.
