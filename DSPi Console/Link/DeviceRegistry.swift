@@ -3,10 +3,11 @@
 //  DSPi Console
 //
 //  Maps a device's stable serial to the small integer handle binary frames
-//  use, holds the hub-stored friendly name (keyed by serial so it follows the
-//  board between hubs and links), tracks online/offline/updating state with a
-//  grace period, and emits device.added / removed / changed events.  Pure
-//  logic; the hub feeds it connection changes.  See spec 7.4.
+//  use, resolves each device's friendly name (the board's own name where the
+//  firmware stores one, else the hub-stored name), tracks online/offline/
+//  updating state with a grace period, and emits device.added / removed /
+//  changed events.  Pure logic; the hub feeds it.  See spec 7.4 and
+//  device_name_spec.md section 5.
 //
 
 import Foundation
@@ -54,8 +55,10 @@ final class DeviceRegistry {
         lock.lock()
         offlineSince[info.serial] = nil
         if var existing = bySerial[info.serial] {
-            let wasChanged = existing.info != info || existing.state != .online
+            let name = resolveName(info)
+            let wasChanged = existing.info != info || existing.state != .online || existing.name != name
             existing.info = info
+            existing.name = name
             existing.state = .online
             bySerial[info.serial] = existing
             lock.unlock()
@@ -63,8 +66,7 @@ final class DeviceRegistry {
             return existing
         }
         let handle = allocateHandle()
-        let device = RegisteredDevice(handle: handle, info: info,
-                                      name: names.name(forSerial: info.serial) ?? Self.defaultName(info),
+        let device = RegisteredDevice(handle: handle, info: info, name: resolveName(info),
                                       state: .online, lockedBy: nil)
         bySerial[info.serial] = device
         lock.unlock()
@@ -131,6 +133,35 @@ final class DeviceRegistry {
         emit(.changed(d))
     }
 
+    /// The board stored a name (NOTIFY_EVT_DEVICE_NAME).  On name-capable
+    /// firmware this is the only writer of the registry name, and it retires
+    /// the hub-stored entry so a later clear is never undone by adoption.
+    func boardNameStored(serial: String, name: String) {
+        lock.lock()
+        guard var d = bySerial[serial] else { lock.unlock(); return }
+        names.removeName(forSerial: serial)
+        d.info.boardName = name
+        let resolved = name.isEmpty ? Self.defaultName(d.info) : name
+        let changed = d.name != resolved
+        d.name = resolved
+        bySerial[serial] = d
+        lock.unlock()
+        if changed { emit(.changed(d)) }
+    }
+
+    /// The board accepted the adoption write, so the stored entry is done with.
+    func adoptionAccepted(serial: String) {
+        names.removeName(forSerial: serial)
+    }
+
+    /// The hub-stored name to write to a name-capable board that reports none,
+    /// once (spec section 5); nil when there is nothing to adopt.
+    func adoptionName(for info: HubDeviceInfo) -> String? {
+        guard info.boardName == "", let stored = names.name(forSerial: info.serial) else { return nil }
+        let ascii = DSPViewModel.sanitizeInputSourceName(stored)
+        return ascii.isEmpty ? nil : ascii
+    }
+
     var devices: [RegisteredDevice] {
         lock.lock(); defer { lock.unlock() }
         return bySerial.values.sorted { $0.handle < $1.handle }
@@ -158,13 +189,24 @@ final class DeviceRegistry {
 
     private func emit(_ event: DeviceRegistryEvent) { onEvent?(event) }
 
+    /// Board name when set, else the hub-stored name, else the default.  A
+    /// non-empty board name retires the stored entry.  Called under `lock`.
+    private func resolveName(_ info: HubDeviceInfo) -> String {
+        if let board = info.boardName, !board.isEmpty {
+            names.removeName(forSerial: info.serial)
+            return board
+        }
+        return names.name(forSerial: info.serial) ?? Self.defaultName(info)
+    }
+
     private static func defaultName(_ info: HubDeviceInfo) -> String {
         "DSPi " + String(info.serial.suffix(6))
     }
 }
 
-/// Persists friendly names by serial in UserDefaults, so a device keeps its
-/// name across restarts and between the hosts that share it.
+/// Persists hub-side friendly names by serial in UserDefaults.  Only boards
+/// whose firmware cannot store a name rely on it; for the rest an entry is
+/// held just until it has been adopted onto the board.
 final class DeviceNameStore {
     private let defaults: UserDefaults
     private let key = "LinkDeviceNames"
@@ -178,6 +220,12 @@ final class DeviceNameStore {
     func setName(_ name: String, forSerial serial: String) {
         var map = (defaults.dictionary(forKey: key) as? [String: String]) ?? [:]
         map[serial] = name
+        defaults.set(map, forKey: key)
+    }
+
+    func removeName(forSerial serial: String) {
+        guard var map = defaults.dictionary(forKey: key) as? [String: String],
+              map.removeValue(forKey: serial) != nil else { return }
         defaults.set(map, forKey: key)
     }
 }

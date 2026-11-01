@@ -82,6 +82,8 @@
     {"code": 83, "name": "FACTORY_RESET", "dirs": ["get"], "class": "config", "note": "factory reset; erases all stored configuration"},
     {"code": 84, "name": "SET_INPUT_SOURCE_NAME", "dirs": ["set"], "class": "control", "note": "a label like device.rename, so control despite being a device-global flash write and a brief output restart"},
     {"code": 85, "name": "GET_INPUT_SOURCE_NAME", "dirs": ["get"], "class": "read", "note": "32-byte reply; firmware before 2026-10-31 answers 4 bytes (the retired channel gain)"},
+    {"code": 86, "name": "SET_DEVICE_NAME", "dirs": ["set"], "class": "control", "note": "a label like device.rename, so control despite being a device-global flash write and a brief output restart; the hub learns the result from NOTIFY_EVT_DEVICE_NAME"},
+    {"code": 87, "name": "GET_DEVICE_NAME", "dirs": ["get"], "class": "read", "note": "32-byte reply; a STALL or a shorter reply means the firmware has no board name"},
     {"code": 88, "name": "SET_LOUDNESS", "dirs": ["set"], "class": "control"},
     {"code": 89, "name": "GET_LOUDNESS", "dirs": ["get"], "class": "read"},
     {"code": 90, "name": "SET_LOUDNESS_REF", "dirs": ["set"], "class": "control"},

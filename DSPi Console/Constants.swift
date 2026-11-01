@@ -24,6 +24,12 @@ let REQ_SET_INPUT_SOURCE_NAME: UInt8 = 0x54
 let REQ_GET_INPUT_SOURCE_NAME: UInt8 = 0x55
 let INPUT_SOURCE_NAME_LEN: Int = 32
 let INPUT_SOURCE_NAME_SLOTS: Int = 8
+// Device-global board name (wValue 0, 32-byte name).  Probe the GET on its own:
+// older firmware STALLs it or answers with the 1-byte legacy mute, and must
+// never receive the SET.
+let REQ_SET_DEVICE_NAME: UInt8 = 0x56
+let REQ_GET_DEVICE_NAME: UInt8 = 0x57
+let DEVICE_NAME_LEN: Int = 32
 let REQ_SET_LOUDNESS: UInt8           = 0x58
 let REQ_GET_LOUDNESS: UInt8           = 0x59
 let REQ_SET_LOUDNESS_REF: UInt8       = 0x5A
@@ -159,6 +165,8 @@ let NOTIFY_RTA_CONFIG_SIZE: Int = 17
 /// ParamSource at 5, the 32-byte stored name at 8 (all zeros when cleared).
 let NOTIFY_EVT_INPUT_SOURCE_NAME: UInt8 = 0x0F
 let NOTIFY_INPUT_SOURCE_NAME_SIZE: Int = 40
+// Board name stored; same 40-byte layout as NOTIFY_EVT_INPUT_SOURCE_NAME.
+let NOTIFY_EVT_DEVICE_NAME: UInt8 = 0x10
 
 /// Levels ride the wire as one byte in 0.5 dB steps, with 243 meaning 0 dBFS -
 /// six decibels of headroom above it, because upmix-derived rows and hot EQ can

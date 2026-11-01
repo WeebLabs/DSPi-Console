@@ -218,6 +218,13 @@ struct InterruptEvent: Identifiable {
             let name = DSPViewModel.decodeInputSourceName(Data(bytes[8..<NOTIFY_INPUT_SOURCE_NAME_SIZE]))
             return "\(seqStr) v2.InputSourceName            source=\(bytes[4]) name=\"\(name)\" src=\(sourceLabel(bytes[5]))"
 
+        case NOTIFY_EVT_DEVICE_NAME:
+            guard bytes.count >= NOTIFY_INPUT_SOURCE_NAME_SIZE else {
+                return "\(seqStr) v2.DeviceName (short: \(bytes.count) bytes)"
+            }
+            let name = DSPViewModel.decodeInputSourceName(Data(bytes[8..<NOTIFY_INPUT_SOURCE_NAME_SIZE]))
+            return "\(seqStr) v2.DeviceName                 name=\"\(name)\" src=\(sourceLabel(bytes[5]))"
+
         default:
             let hex = bytes.dropFirst(4).map { String(format: "%02X", $0) }.joined(separator: " ")
             return "\(seqStr) v2?evt=\(String(format: "0x%02X", eventID))  \(hex)"
@@ -680,6 +687,10 @@ class InterruptMonitor: ObservableObject {
     /// the source was cleared back to its built-in label.
     var onInputSourceName: ((_ source: Int, _ name: String) -> Void)?
 
+    /// Fires on the main thread for every stored board name
+    /// (NOTIFY_EVT_DEVICE_NAME); empty when cleared.
+    var onDeviceName: ((_ name: String) -> Void)?
+
     private let transport: any DeviceTransport
     private var subscription: AnyCancellable?
 
@@ -876,6 +887,16 @@ class InterruptMonitor: ObservableObject {
             let name = DSPViewModel.decodeInputSourceName(Data(bytes[8..<NOTIFY_INPUT_SOURCE_NAME_SIZE]))
             DispatchQueue.main.async {
                 handler(source, name)
+            }
+        }
+
+        if let handler = onDeviceName,
+           bytes.count >= NOTIFY_INPUT_SOURCE_NAME_SIZE,
+           bytes[0] == NOTIFY_V2_VERSION,
+           bytes[1] == NOTIFY_EVT_DEVICE_NAME {
+            let name = DSPViewModel.decodeInputSourceName(Data(bytes[8..<NOTIFY_INPUT_SOURCE_NAME_SIZE]))
+            DispatchQueue.main.async {
+                handler(name)
             }
         }
 

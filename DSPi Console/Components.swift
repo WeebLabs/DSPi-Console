@@ -375,7 +375,7 @@ struct ConnectionStatusIndicator: View {
                     || !(vm.selectedDevice.map { vm.availableDevices.contains($0) } ?? false)
                 BorderlessPopUpButton(
                     items: vm.availableDevices,
-                    titleForItem: { $0.displayName },
+                    titleForItem: { vm.deviceTitle($0) },
                     selection: Binding(
                         get: {
                             if let selected = vm.selectedDevice,

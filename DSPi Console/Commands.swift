@@ -2545,6 +2545,7 @@ extension DSPViewModel {
         }
         // Unconditional, so a device switch never keeps the last device's names.
         fetchInputSourceNames()
+        fetchDeviceName()
     }
 
     /// Read every source name.  Older firmware answers source 0 with its 4-byte
@@ -2580,6 +2581,35 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_INPUT_SOURCE_NAME, value: UInt16(source), index: 2, data: payload)
         DispatchQueue.main.async {
             self.inputSourceNames[source] = ascii
+        }
+    }
+
+    /// Read the board name.  The probe is this GET alone: a STALL or a reply
+    /// shorter than 32 bytes means the firmware has no board name.
+    func fetchDeviceName() {
+        // A late reply from the previous device must not land on the new one.
+        let generation = transport.generation
+        let d = transport.getControlRequest(request: REQ_GET_DEVICE_NAME, value: 0,
+                                            index: 2, length: UInt16(DEVICE_NAME_LEN))
+        let supported = d?.count == DEVICE_NAME_LEN
+        let name = supported ? DSPViewModel.decodeInputSourceName(d!) : ""
+        DispatchQueue.main.async {
+            guard self.transport.generation == generation else { return }
+            self.deviceNameSupported = supported
+            self.deviceName = name
+        }
+    }
+
+    /// Store the board name; empty clears it.  The device writes flash on its
+    /// main loop and echoes the stored name as NOTIFY_EVT_DEVICE_NAME.
+    func setDeviceName(_ name: String) {
+        guard deviceNameSupported else { return }
+        let ascii = DSPViewModel.sanitizeInputSourceName(name)
+        var payload = Data(count: DEVICE_NAME_LEN)
+        payload.replaceSubrange(0..<ascii.utf8.count, with: Data(ascii.utf8))
+        transport.sendControlRequest(request: REQ_SET_DEVICE_NAME, value: 0, index: 2, data: payload)
+        DispatchQueue.main.async {
+            self.deviceName = ascii
         }
     }
 

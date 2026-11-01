@@ -80,13 +80,14 @@ struct LinkNotification {
     /// (PARAM_SRC_HOST_SET 1, PARAM_SRC_BULK_SET 2), which is the only kind a
     /// hub can attribute to one of its sessions.  Reads the source byte where
     /// each event puts it: PARAM_CHANGED and CS_AUX at 8, BULK_INVALIDATED at
-    /// 4, RTA_CONFIG at 16.
+    /// 4, RTA_CONFIG at 16, the two name events at 5.
     var isHostSourced: Bool {
         let offset: Int
         switch eventID {
         case 0x02, 0x0C: offset = 8
         case 0x03: offset = 4
         case NOTIFY_EVT_RTA_CONFIG: offset = 16
+        case NOTIFY_EVT_INPUT_SOURCE_NAME, NOTIFY_EVT_DEVICE_NAME: offset = 5
         default: return false
         }
         guard packet.count > offset else { return false }

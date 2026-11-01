@@ -1107,7 +1107,8 @@ struct OutputConfigSnapshot: Equatable {
 ///    limiter edits apply LIVE to RAM as they're made; "dirty" means they
 ///    haven't been flashed yet.
 ///    Save calls `saveOutputConfig()`; Revert re-applies the captured baseline.
-///  - Input source names: typed into `sourceNameEdits`, written on Save.
+///  - Input source and board names: typed into `sourceNameEdits` and
+///    `deviceNameEdit`, written on Save.
 ///
 /// One Save / one Revert acts on whatever is pending. Dirtiness is gated on
 /// actual user edits, so fresh device data (on connect) never looks unsaved.
@@ -1138,10 +1139,13 @@ final class SettingsSaveCoordinator: ObservableObject {
     /// drafts from the restored config.
     @Published private(set) var csReloadToken = 0
 
-    // Category D - Input source names: typed edits stay here until Save, which
-    // writes each changed name (one device flash write per name).
+    // Category D - Input source and board names: typed edits stay here until
+    // Save, which sends every changed name back to back so the device can
+    // usually write them in one flash pass.
     /// Edited text by source ID. A source with no entry shows its stored name.
     @Published var sourceNameEdits: [Int: String] = [:]
+    /// Edited board name; nil shows the stored one.
+    @Published var deviceNameEdit: String?
 
     /// Serial of the device the pending state belongs to. When the selection
     /// moves to a *different* device, pending edits are discarded - the draft
@@ -1192,6 +1196,7 @@ final class SettingsSaveCoordinator: ObservableObject {
         globalUserEdited = false
         outputConfigDirty = false
         sourceNameEdits = [:]
+        deviceNameEdit = nil
         globalDraft = GlobalSettingsDraft.from(vm)
         outputBaseline = SettingsSaveCoordinator.snapshot(vm)
     }
@@ -1238,7 +1243,16 @@ final class SettingsSaveCoordinator: ObservableObject {
         return out
     }
     var sourceNamesDirty: Bool { vm.inputSourceNamesSupported && !pendingSourceNames.isEmpty }
-    var hasPendingChanges: Bool { globalDirty || outputDirty || csDirty || sourceNamesDirty }
+    /// The edited board name when it differs from the stored one, trimmed as saved.
+    var pendingDeviceName: String? {
+        guard let text = deviceNameEdit else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return trimmed == vm.deviceName ? nil : trimmed
+    }
+    var deviceNameDirty: Bool { vm.deviceNameSupported && pendingDeviceName != nil }
+    var hasPendingChanges: Bool {
+        globalDirty || outputDirty || csDirty || sourceNamesDirty || deviceNameDirty
+    }
 
     // MARK: Control Surfaces operation gate
 
@@ -1291,6 +1305,17 @@ final class SettingsSaveCoordinator: ObservableObject {
         vm.inputSourceNames.indices.contains(source) ? vm.inputSourceNames[source] : ""
     }
 
+    /// Binding for the board name field, with the same draft rules.
+    var deviceNameBinding: Binding<String> {
+        Binding(
+            get: { self.deviceNameEdit ?? self.vm.deviceName },
+            set: { new in
+                let clean = DSPViewModel.sanitizeInputSourceName(new)
+                self.deviceNameEdit = clean == self.vm.deviceName ? nil : clean
+            }
+        )
+    }
+
     // MARK: Output-config editing
 
     /// Call at the start of any output-config edit. On the first edit since the
@@ -1312,7 +1337,9 @@ final class SettingsSaveCoordinator: ObservableObject {
         let doCs = csDirty
         let names = sourceNamesDirty ? pendingSourceNames : [:]
         let sentEdits = sourceNameEdits
-        guard doGlobal || doOutput || doCs || !names.isEmpty else { return }
+        let boardName = deviceNameDirty ? pendingDeviceName : nil
+        let sentBoardEdit = deviceNameEdit
+        guard doGlobal || doOutput || doCs || !names.isEmpty || boardName != nil else { return }
         if doCs { beginCsOperation() }
         let pending = globalDraft
         let deviceState = GlobalSettingsDraft.from(vm)
@@ -1358,11 +1385,17 @@ final class SettingsSaveCoordinator: ObservableObject {
                 guard vm.transport.generation == generation else { return }
                 vm.setInputSourceName(source: src, name: name)
             }
+            if let boardName, vm.transport.generation == generation {
+                vm.setDeviceName(boardName)
+            }
             DispatchQueue.main.async {
                 guard vm.transport.generation == generation else { return }
                 // Keep any field edited again while the save was in flight.
                 for (src, text) in sentEdits where self.sourceNameEdits[src] == text {
                     self.sourceNameEdits[src] = nil
+                }
+                if boardName != nil, self.deviceNameEdit == sentBoardEdit {
+                    self.deviceNameEdit = nil
                 }
                 self.globalUserEdited = false
                 self.outputConfigDirty = false
@@ -1373,6 +1406,7 @@ final class SettingsSaveCoordinator: ObservableObject {
 
     func revert() {
         sourceNameEdits = [:]
+        deviceNameEdit = nil
         if globalDirty {
             globalUserEdited = false
             globalDraft = GlobalSettingsDraft.from(vm)
@@ -1501,7 +1535,7 @@ private struct SettingsSaveBar: View {
     /// True when the only pending change is the Control Surfaces live preview.
     private var csOnly: Bool {
         coordinator.csDirty && !coordinator.globalDirty && !coordinator.outputDirty
-            && !coordinator.sourceNamesDirty
+            && !coordinator.sourceNamesDirty && !coordinator.deviceNameDirty
     }
 
     /// Control Surfaces changes are already live, so say so when that is all
@@ -1571,6 +1605,34 @@ struct GlobalSettingsTab: View {
     var body: some View {
         ScrollViewReader { proxy in
         Form {
+            // MARK: Device Name
+            if vm.deviceNameSupported {
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "tag")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 16)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Name")
+                            Text(vm.selectedDevice.map { "Serial \($0.serial)" } ?? "")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        DraftNameField(name: coordinator.deviceNameBinding,
+                                       edited: coordinator.pendingDeviceName != nil,
+                                       clearHelp: "Remove the name")
+                    }
+                    .padding(.vertical, 2)
+                } header: {
+                    Label("Device Name", systemImage: "cpu")
+                } footer: {
+                    Text("Stored on the device, so it keeps this name on any computer or DSPi Link hub. Shown in the device picker and on the front panel.")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+            }
+
             // MARK: Startup Preset
             Section {
                 Picker("Mode", selection: coordinator.draftBinding(\.presetStartupMode)) {
@@ -7969,29 +8031,16 @@ struct ControlSurfacesSettingsTab: View {
 
 // MARK: - Hardware Settings Tab
 
-/// One source-name row: the source's identity on the left, its editable name
-/// on the right. Typing only edits the Settings draft; the shared bar saves it.
-private struct InputSourceNameRow: View {
-    let source: Int
-    @ObservedObject private var vm = AppState.shared.viewModel
-    @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
+/// The filled name field shared by the source-name and board-name rows, with
+/// the orange not-saved dot to its left and a clear button inside.
+private struct DraftNameField: View {
+    let name: Binding<String>
+    let edited: Bool
+    let clearHelp: String
     @FocusState private var focused: Bool
 
     var body: some View {
-        let name = coordinator.sourceNameBinding(source)
-        let edited = coordinator.pendingSourceNames[source] != nil
         HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(vm.builtInInputSourceTitle(source))
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            Spacer(minLength: 12)
             Circle()
                 .fill(Color.orange)
                 .frame(width: 6, height: 6)
@@ -8009,7 +8058,7 @@ private struct InputSourceNameRow: View {
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.tertiary)
-                .help("Use the built-in name")
+                .help(clearHelp)
                 .opacity(name.wrappedValue.isEmpty ? 0 : 1)
                 .disabled(name.wrappedValue.isEmpty)
             }
@@ -8025,6 +8074,33 @@ private struct InputSourceNameRow: View {
                     .strokeBorder(Color.accentColor.opacity(focused ? 0.7 : 0), lineWidth: 1)
             )
             .animation(.easeOut(duration: 0.12), value: focused)
+        }
+    }
+}
+
+/// One source-name row: the source's identity on the left, its editable name
+/// on the right. Typing only edits the Settings draft; the shared bar saves it.
+private struct InputSourceNameRow: View {
+    let source: Int
+    @ObservedObject private var vm = AppState.shared.viewModel
+    @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
+
+    var body: some View {
+        let name = coordinator.sourceNameBinding(source)
+        let edited = coordinator.pendingSourceNames[source] != nil
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(vm.builtInInputSourceTitle(source))
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 12)
+            DraftNameField(name: name, edited: edited, clearHelp: "Use the built-in name")
         }
         .padding(.vertical, 2)
     }

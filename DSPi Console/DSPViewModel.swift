@@ -1604,6 +1604,29 @@ class DSPViewModel: ObservableObject {
     @Published var inputSourceNames: [String] = Array(repeating: "", count: INPUT_SOURCE_NAME_SLOTS)
     @Published var inputSourceNamesSupported: Bool = false
 
+    /// The board's own name, device-global; empty means unnamed.
+    /// `deviceNameSupported` stays false on firmware without REQ_GET_DEVICE_NAME.
+    @Published var deviceName: String = "" {
+        didSet {
+            if let d = selectedDevice, !d.isRemote, knownDeviceNames[d.serial] != deviceName {
+                knownDeviceNames[d.serial] = deviceName
+            }
+        }
+    }
+    @Published var deviceNameSupported: Bool = false
+    /// Last name read from each local board this session, so the picker can
+    /// show names for boards that are not the connected one.
+    @Published private(set) var knownDeviceNames: [String: String] = [:]
+
+    /// Picker title: a local board's own name once known.  Boards reached through
+    /// a hub already carry the hub's inventory name.
+    func deviceTitle(_ device: DSPiDevice) -> String {
+        if !device.isRemote, let name = knownDeviceNames[device.serial], !name.isEmpty {
+            return name
+        }
+        return device.displayName
+    }
+
     /// What the device can store and the front panel can draw: printable
     /// ASCII, at most 31 characters.
     static func sanitizeInputSourceName(_ name: String) -> String {
@@ -2723,15 +2746,20 @@ class DSPViewModel: ObservableObject {
             self.pollQueue.async { self.fetchAdatInputStatus() }
         }
 
-        // Auxiliary-output pushes (caps v18).  Every state or level change is
-        // announced, whoever made it, and the 9-byte event carries both values,
-        // so this needs no read-back at all - which matters because a panel
-        // button switching a relay must show up here without polling.
         AppState.shared.interruptMonitor.onInputSourceName = { [weak self] source, name in
             guard let self = self, self.inputSourceNames.indices.contains(source) else { return }
             if self.inputSourceNames[source] != name { self.inputSourceNames[source] = name }
         }
 
+        AppState.shared.interruptMonitor.onDeviceName = { [weak self] name in
+            guard let self = self, self.deviceNameSupported else { return }
+            if self.deviceName != name { self.deviceName = name }
+        }
+
+        // Auxiliary-output pushes (caps v18).  Every state or level change is
+        // announced, whoever made it, and the 9-byte event carries both values,
+        // so this needs no read-back at all - which matters because a panel
+        // button switching a relay must show up here without polling.
         AppState.shared.interruptMonitor.onCsAux = { [weak self] slot, state, level, _ in
             guard let self = self, slot < UInt8(CS_MAX_BINDINGS) else { return }
             let i = Int(slot)

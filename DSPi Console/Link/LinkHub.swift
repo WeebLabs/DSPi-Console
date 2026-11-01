@@ -116,11 +116,12 @@ final class LinkHub {
         return sessions.count
     }
 
-    init(usb: USBDevice, policy: LinkPolicy, auth: LinkAuthStore) {
+    init(usb: USBDevice, policy: LinkPolicy, auth: LinkAuthStore,
+         registry: DeviceRegistry = DeviceRegistry()) {
         self.usb = usb
         self.policy = policy
         self.auth = auth
-        self.registry = DeviceRegistry()
+        self.registry = registry
 
         registry.onEvent = { [weak self] event in self?.broadcastDeviceEvent(event) }
 
@@ -245,6 +246,14 @@ final class LinkHub {
 
         attachedSubject.send(true)
         warmSnapshot()
+        // An accepted write retires the stored entry at once, so adoption runs
+        // at most once even if the confirming notify is lost.
+        if let name = registry.adoptionName(for: device.info) {
+            let serial = device.info.serial
+            writeBoardName(name, from: nil) { [weak self] status in
+                if status == .ok { self?.registry.adoptionAccepted(serial: serial) }
+            }
+        }
     }
 
     /// Detach the current device.  A no-op when nothing is attached, so a
@@ -297,10 +306,62 @@ final class LinkHub {
         if note.eventID == 0x03 {
             snapshot.invalidate()
             refreshSnapshotSoon()
+        } else if note.eventID == NOTIFY_EVT_DEVICE_NAME {
+            noteBoardName(note.packet)
         } else {
             snapshot.applyParamChange(packet: note.packet)
         }
         relay.publish(handle: currentHandle, notification: attributed)
+    }
+
+    private func noteBoardName(_ packet: Data) {
+        guard packet.count >= NOTIFY_INPUT_SOURCE_NAME_SIZE else { return }
+        let start = packet.startIndex
+        let name = DSPViewModel.decodeInputSourceName(packet[(start + 8)..<(start + NOTIFY_INPUT_SOURCE_NAME_SIZE)])
+        deviceLock.lock()
+        let serial = device?.info.serial
+        deviceLock.unlock()
+        if let serial { registry.boardNameStored(serial: serial, name: name) }
+    }
+
+    // MARK: - Device names
+
+    /// `device.rename`: on name-capable firmware write the board (the notify
+    /// then updates the registry); otherwise keep the hub-stored name as before.
+    /// A name-capable board that is not attached answers NO_DEVICE, since a
+    /// stored name would be overridden by the board's own on its return.
+    func renameDevice(handle: UInt8, to name: String, from sessionID: LinkSessionID,
+                      completion: @escaping (LinkStatus) -> Void) {
+        deviceLock.lock()
+        let attached = device != nil && attachedHandle == handle
+        deviceLock.unlock()
+        let capable = registry.device(handle: handle)?.info.boardName != nil
+        if capable {
+            guard attached else { return completion(.noDevice) }
+            return writeBoardName(DSPViewModel.sanitizeInputSourceName(name), from: sessionID,
+                                  completion: completion)
+        }
+        registry.rename(handle: handle, to: name)
+        completion(.ok)
+    }
+
+    /// Send REQ_SET_DEVICE_NAME through the router, as the given session or as
+    /// the hub itself (nil) for adoption.
+    private func writeBoardName(_ ascii: String, from sessionID: LinkSessionID?,
+                                completion: @escaping (LinkStatus) -> Void) {
+        var payload = Data(count: DEVICE_NAME_LEN)
+        payload.replaceSubrange(0..<ascii.utf8.count, with: Data(ascii.utf8))
+        let req = LinkCmdRequest(tag: 0, handle: currentHandle, direction: .set,
+                                 bRequest: REQ_SET_DEVICE_NAME, wValue: 0, wIndex: 2,
+                                 wLength: UInt16(payload.count), payload: payload)
+        if let sessionID {
+            submit(req, from: sessionID) { completion($0.status) }
+            return
+        }
+        guard let router = currentRouter else { return completion(.noDevice) }
+        let internalSession = RouterSession(id: Self.internalSessionID, role: .admin,
+                                            exemptFromInflightCap: true)
+        router.submit(req, session: internalSession) { completion($0.response.status) }
     }
 
     // MARK: - Snapshot

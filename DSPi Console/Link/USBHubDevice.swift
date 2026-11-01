@@ -69,11 +69,22 @@ final class USBHubDevice: HubDevice {
         guard let p = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
               let reply = FirmwareVersion.fromPlatformReply([UInt8](p)) else { return nil }
         let v = reply.version
+        // A STALL or a short reply (older firmware) means no board name.  One
+        // retry, so a transient miss does not treat a capable board as old.
+        var boardName: String?
+        for _ in 0..<2 where boardName == nil {
+            if let n = usb.getControlRequest(request: REQ_GET_DEVICE_NAME, value: 0, index: 2,
+                                             length: UInt16(DEVICE_NAME_LEN)),
+               n.count == DEVICE_NAME_LEN {
+                boardName = DSPViewModel.decodeInputSourceName(n)
+            }
+        }
         // fw_beta reports only what byte 6 says; a short reply leaves it unknown
         // even where FirmwareVersion can infer more (spec 7.4).
         return HubDeviceInfo(serial: serial, platform: reply.platform,
                              firmware: "\(v.major).\(v.minor).\(v.patch)",
                              firmwareBeta: p.count >= 7 ? Int(p[p.startIndex + 6]) : nil,
-                             outputs: Int(p[p.startIndex + 3]), inputs: nil, wireVersion: nil, link: .usb)
+                             outputs: Int(p[p.startIndex + 3]), inputs: nil, wireVersion: nil, link: .usb,
+                             boardName: boardName)
     }
 }

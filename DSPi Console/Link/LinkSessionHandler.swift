@@ -255,9 +255,19 @@ final class LinkSessionHandler {
     }
 
     private func handleRename(_ m: LinkDeviceRename) {
-        guard role != .viewer else { return emit(err(m.id, LinkErrorCode.denied)) }
-        hub.registry.rename(handle: UInt8(truncatingIfNeeded: m.handle), to: m.name)
-        sendOk(id: m.id, body: [String: JSONValue]())
+        guard role != .viewer, let session else { return emit(err(m.id, LinkErrorCode.denied)) }
+        hub.renameDevice(handle: UInt8(truncatingIfNeeded: m.handle), to: m.name,
+                         from: session.id) { [weak self] status in
+            guard let self else { return }
+            switch status {
+            case .ok:       self.sendOk(id: m.id, body: [String: JSONValue]())
+            case .locked:   self.emit(self.err(m.id, LinkErrorCode.locked))
+            case .noDevice: self.emit(self.err(m.id, LinkErrorCode.noDevice))
+            case .denied:   self.emit(self.err(m.id, LinkErrorCode.denied))
+            case .busy, .rateLimited: self.emit(self.err(m.id, LinkErrorCode.busy))
+            default:        self.emit(self.err(m.id, LinkErrorCode.internalError))
+            }
+        }
     }
 
     private func handleDeviceEvent(_ event: DeviceRegistryEvent) {

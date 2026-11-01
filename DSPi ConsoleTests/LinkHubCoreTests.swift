@@ -388,6 +388,55 @@ final class LinkHubCoreTests: XCTestCase {
         XCTAssertEqual(reg2.deviceOnline(info).name, "Living room")
     }
 
+    // MARK: Board names (device_name_spec.md section 5)
+
+    private func boardInfo(_ boardName: String?) -> HubDeviceInfo {
+        HubDeviceInfo(serial: "AAAA", platform: 1, firmware: "1.1.7", outputs: 9, inputs: 8,
+                      wireVersion: 30, link: .usb, boardName: boardName)
+    }
+
+    func testBoardNameWinsAndRetiresStoredName() {
+        let store = DeviceNameStore(defaults: ephemeralDefaults())
+        store.setName("Hub name", forSerial: "AAAA")
+        let reg = DeviceRegistry(nameStore: store)
+        XCTAssertEqual(reg.deviceOnline(boardInfo("Rack left")).name, "Rack left")
+        XCTAssertNil(store.name(forSerial: "AAAA"), "a named board retires the hub's entry")
+        XCTAssertNil(reg.adoptionName(for: boardInfo("Rack left")))
+    }
+
+    func testUnnamedCapableBoardShowsAndAdoptsStoredName() {
+        let store = DeviceNameStore(defaults: ephemeralDefaults())
+        store.setName("Hub name", forSerial: "AAAA")
+        let reg = DeviceRegistry(nameStore: store)
+        XCTAssertEqual(reg.deviceOnline(boardInfo("")).name, "Hub name")
+        XCTAssertEqual(reg.adoptionName(for: boardInfo("")), "Hub name")
+        XCTAssertEqual(store.name(forSerial: "AAAA"), "Hub name", "kept until the board confirms")
+    }
+
+    func testOldFirmwareNeverAdopts() {
+        let store = DeviceNameStore(defaults: ephemeralDefaults())
+        store.setName("Hub name", forSerial: "AAAA")
+        let reg = DeviceRegistry(nameStore: store)
+        XCTAssertEqual(reg.deviceOnline(boardInfo(nil)).name, "Hub name")
+        XCTAssertNil(reg.adoptionName(for: boardInfo(nil)))
+    }
+
+    func testBoardNameNotifyUpdatesNameAndRetiresStore() {
+        let store = DeviceNameStore(defaults: ephemeralDefaults())
+        store.setName("Hub name", forSerial: "AAAA")
+        let reg = DeviceRegistry(nameStore: store)
+        _ = reg.deviceOnline(boardInfo(""))
+        var changed: RegisteredDevice?
+        reg.onEvent = { if case .changed(let d) = $0 { changed = d } }
+        reg.boardNameStored(serial: "AAAA", name: "Hub name")
+        XCTAssertNil(store.name(forSerial: "AAAA"))
+        XCTAssertNil(changed, "the adopted name was already shown, so nothing changed")
+        reg.boardNameStored(serial: "AAAA", name: "")
+        XCTAssertEqual(changed?.name, "DSPi " + String("AAAA".suffix(6)), "a clear falls back to the default")
+        XCTAssertEqual(reg.device(serial: "AAAA")?.info.boardName, "")
+        XCTAssertNil(reg.adoptionName(for: reg.device(serial: "AAAA")!.info), "a clear is never undone")
+    }
+
     func testTwoDevicesGetDistinctHandles() {
         let reg = DeviceRegistry(nameStore: DeviceNameStore(defaults: ephemeralDefaults()))
         let a = reg.deviceOnline(HubDeviceInfo(serial: "AAAA", platform: 1, firmware: "1.1.7", outputs: 9, inputs: 8, wireVersion: 30, link: .usb)).handle
