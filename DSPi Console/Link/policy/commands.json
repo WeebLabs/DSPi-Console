@@ -1,6 +1,6 @@
 {
   "spec_version": "1.1",
-  "generated": "2026-10-17",
+  "generated": "2026-11-01",
   "commands": [
     {"code": 3, "name": "OUTPUT_LATENCY", "dirs": ["set", "get"], "class": "config", "classes": {"set": "config", "get": "read"}, "note": "one opcode both ways: OUT selects the output latency option, a device-global flash write and a muted output restart; IN reads the status or the option table"},
     {"code": 4, "name": "SET_CS_AUX_STATE", "dirs": ["set"], "class": "control"},
@@ -80,10 +80,8 @@
     {"code": 81, "name": "SAVE_PARAMS", "dirs": ["get"], "class": "config", "note": "device-global flash write of all live parameters"},
     {"code": 82, "name": "SAVE_OUTPUT_CONFIG", "dirs": ["get"], "class": "config", "note": "device-global flash write of the output configuration and output limiter settings"},
     {"code": 83, "name": "FACTORY_RESET", "dirs": ["get"], "class": "config", "note": "factory reset; erases all stored configuration"},
-    {"code": 84, "name": "SET_CHANNEL_GAIN", "dirs": ["set"], "class": "control"},
-    {"code": 85, "name": "GET_CHANNEL_GAIN", "dirs": ["get"], "class": "read"},
-    {"code": 86, "name": "SET_CHANNEL_MUTE", "dirs": ["set"], "class": "control"},
-    {"code": 87, "name": "GET_CHANNEL_MUTE", "dirs": ["get"], "class": "read"},
+    {"code": 84, "name": "SET_INPUT_SOURCE_NAME", "dirs": ["set"], "class": "control", "note": "a label like device.rename, so control despite being a device-global flash write and a brief output restart"},
+    {"code": 85, "name": "GET_INPUT_SOURCE_NAME", "dirs": ["get"], "class": "read", "note": "32-byte reply; firmware before 2026-10-31 answers 4 bytes (the retired channel gain)"},
     {"code": 88, "name": "SET_LOUDNESS", "dirs": ["set"], "class": "control"},
     {"code": 89, "name": "GET_LOUDNESS", "dirs": ["get"], "class": "read"},
     {"code": 90, "name": "SET_LOUDNESS_REF", "dirs": ["set"], "class": "control"},

@@ -1099,7 +1099,7 @@ struct OutputConfigSnapshot: Equatable {
 
 /// App-lifetime owner of pending (unsaved) Settings changes, so the save bar
 /// survives navigation between pages and the Settings window being closed and
-/// reopened. Two independent categories of pending change:
+/// reopened. Independent categories of pending change:
 ///
 ///  - Global parameters: staged in `globalDraft` and not applied until saved
 ///    (the firmware setters apply + persist on Save).
@@ -1107,6 +1107,7 @@ struct OutputConfigSnapshot: Equatable {
 ///    limiter edits apply LIVE to RAM as they're made; "dirty" means they
 ///    haven't been flashed yet.
 ///    Save calls `saveOutputConfig()`; Revert re-applies the captured baseline.
+///  - Input source names: typed into `sourceNameEdits`, written on Save.
 ///
 /// One Save / one Revert acts on whatever is pending. Dirtiness is gated on
 /// actual user edits, so fresh device data (on connect) never looks unsaved.
@@ -1136,6 +1137,11 @@ final class SettingsSaveCoordinator: ObservableObject {
     /// Bumped after a Control Surfaces revert lands, so the page can re-seed its
     /// drafts from the restored config.
     @Published private(set) var csReloadToken = 0
+
+    // Category D - Input source names: typed edits stay here until Save, which
+    // writes each changed name (one device flash write per name).
+    /// Edited text by source ID. A source with no entry shows its stored name.
+    @Published var sourceNameEdits: [Int: String] = [:]
 
     /// Serial of the device the pending state belongs to. When the selection
     /// moves to a *different* device, pending edits are discarded - the draft
@@ -1185,6 +1191,7 @@ final class SettingsSaveCoordinator: ObservableObject {
     private func resetForNewDevice() {
         globalUserEdited = false
         outputConfigDirty = false
+        sourceNameEdits = [:]
         globalDraft = GlobalSettingsDraft.from(vm)
         outputBaseline = SettingsSaveCoordinator.snapshot(vm)
     }
@@ -1221,7 +1228,17 @@ final class SettingsSaveCoordinator: ObservableObject {
     /// Control Surfaces applies are live-only previews until REQ_CS_SAVE; the
     /// device reports the unsaved state, so this is just a passthrough.
     var csDirty: Bool { vm.controlSurfacesSupported && vm.csDirty }
-    var hasPendingChanges: Bool { globalDirty || outputDirty || csDirty }
+    /// Edited source names that differ from the stored ones, trimmed as saved.
+    var pendingSourceNames: [Int: String] {
+        var out: [Int: String] = [:]
+        for (src, text) in sourceNameEdits where vm.inputSourceNames.indices.contains(src) {
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            if trimmed != vm.inputSourceNames[src] { out[src] = trimmed }
+        }
+        return out
+    }
+    var sourceNamesDirty: Bool { vm.inputSourceNamesSupported && !pendingSourceNames.isEmpty }
+    var hasPendingChanges: Bool { globalDirty || outputDirty || csDirty || sourceNamesDirty }
 
     // MARK: Control Surfaces operation gate
 
@@ -1256,6 +1273,24 @@ final class SettingsSaveCoordinator: ObservableObject {
         if !globalUserEdited { globalDraft = GlobalSettingsDraft.from(vm) }
     }
 
+    // MARK: Source-name editing
+
+    /// Binding for one source's name field. Typing only edits the draft; an
+    /// entry that matches the stored name again is dropped.
+    func sourceNameBinding(_ source: Int) -> Binding<String> {
+        Binding(
+            get: { self.sourceNameEdits[source] ?? self.storedSourceName(source) },
+            set: { new in
+                let clean = DSPViewModel.sanitizeInputSourceName(new)
+                self.sourceNameEdits[source] = clean == self.storedSourceName(source) ? nil : clean
+            }
+        )
+    }
+
+    private func storedSourceName(_ source: Int) -> String {
+        vm.inputSourceNames.indices.contains(source) ? vm.inputSourceNames[source] : ""
+    }
+
     // MARK: Output-config editing
 
     /// Call at the start of any output-config edit. On the first edit since the
@@ -1275,7 +1310,9 @@ final class SettingsSaveCoordinator: ObservableObject {
         let doGlobal = globalDirty
         let doOutput = outputDirty
         let doCs = csDirty
-        guard doGlobal || doOutput || doCs else { return }
+        let names = sourceNamesDirty ? pendingSourceNames : [:]
+        let sentEdits = sourceNameEdits
+        guard doGlobal || doOutput || doCs || !names.isEmpty else { return }
         if doCs { beginCsOperation() }
         let pending = globalDraft
         let deviceState = GlobalSettingsDraft.from(vm)
@@ -1317,8 +1354,16 @@ final class SettingsSaveCoordinator: ObservableObject {
             if doCs, vm.transport.generation == generation {
                 _ = vm.csSave()
             }
+            for (src, name) in names.sorted(by: { $0.key < $1.key }) {
+                guard vm.transport.generation == generation else { return }
+                vm.setInputSourceName(source: src, name: name)
+            }
             DispatchQueue.main.async {
                 guard vm.transport.generation == generation else { return }
+                // Keep any field edited again while the save was in flight.
+                for (src, text) in sentEdits where self.sourceNameEdits[src] == text {
+                    self.sourceNameEdits[src] = nil
+                }
                 self.globalUserEdited = false
                 self.outputConfigDirty = false
                 self.globalDraft = GlobalSettingsDraft.from(vm)
@@ -1327,6 +1372,7 @@ final class SettingsSaveCoordinator: ObservableObject {
     }
 
     func revert() {
+        sourceNameEdits = [:]
         if globalDirty {
             globalUserEdited = false
             globalDraft = GlobalSettingsDraft.from(vm)
@@ -1455,6 +1501,7 @@ private struct SettingsSaveBar: View {
     /// True when the only pending change is the Control Surfaces live preview.
     private var csOnly: Bool {
         coordinator.csDirty && !coordinator.globalDirty && !coordinator.outputDirty
+            && !coordinator.sourceNamesDirty
     }
 
     /// Control Surfaces changes are already live, so say so when that is all
@@ -7922,50 +7969,86 @@ struct ControlSurfacesSettingsTab: View {
 
 // MARK: - Hardware Settings Tab
 
-/// One editable source name.  Commits on Return, focus loss or the page
-/// closing, and only when the text changed: every commit is a device flash write.
+/// One source-name row: the source's identity on the left, its editable name
+/// on the right. Typing only edits the Settings draft; the shared bar saves it.
 private struct InputSourceNameRow: View {
     let source: Int
     @ObservedObject private var vm = AppState.shared.viewModel
-    @State private var text = ""
-    // Set synchronously, so focus loss and disappear firing together send once.
-    @State private var lastSent: String?
+    @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack {
-            Image(systemName: "arrow.down.to.line")
+        let name = coordinator.sourceNameBinding(source)
+        let edited = coordinator.pendingSourceNames[source] != nil
+        HStack(spacing: 10) {
+            Image(systemName: icon)
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .frame(width: 16)
-            Text(vm.builtInInputSourceTitle(source))
-                .font(.body)
-            Spacer()
-            TextField(vm.builtInInputSourceTitle(source), text: $text)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
-                .focused($focused)
-                .onSubmit(commit)
-                .onChange(of: text) { _, new in
-                    let clean = DSPViewModel.sanitizeInputSourceName(new)
-                    if clean != new { text = clean }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(vm.builtInInputSourceTitle(source))
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 12)
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 6, height: 6)
+                .opacity(edited ? 1 : 0)
+                .help("Not saved yet")
+            HStack(spacing: 4) {
+                TextField("Name", text: name, prompt: Text("Add a name"))
+                    .textFieldStyle(.plain)
+                    .labelsHidden()
+                    .focused($focused)
+                    .onSubmit { focused = false }
+                Button { name.wrappedValue = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
                 }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tertiary)
+                .help("Use the built-in name")
+                .opacity(name.wrappedValue.isEmpty ? 0 : 1)
+                .disabled(name.wrappedValue.isEmpty)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(width: 190)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(focused ? 0.09 : 0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.accentColor.opacity(focused ? 0.7 : 0), lineWidth: 1)
+            )
+            .animation(.easeOut(duration: 0.12), value: focused)
         }
-        .onAppear { text = vm.inputSourceNames[source] }
-        .onDisappear(perform: commit)
-        .onChange(of: focused) { _, isFocused in if !isFocused { commit() } }
-        .onChange(of: vm.inputSourceNames[source]) { _, stored in
-            lastSent = nil
-            if !focused { text = stored }
+        .padding(.vertical, 2)
+    }
+
+    private var icon: String {
+        switch source {
+        case INPUT_SOURCE_USB:  return "laptopcomputer"
+        case INPUT_SOURCE_I2S:  return "waveform.path"
+        case INPUT_SOURCE_ADAT: return "fibrechannel"
+        default:                return "arrow.down.to.line"
         }
     }
 
-    private func commit() {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard trimmed != (lastSent ?? vm.inputSourceNames[source]) else { return }
-        lastSent = trimmed
-        DispatchQueue.global(qos: .userInitiated).async {
-            vm.setInputSourceName(source: source, name: trimmed)
+    /// Where the source physically comes in, so similar sources can be told apart.
+    private var detail: String {
+        switch source {
+        case INPUT_SOURCE_USB:  return "Audio from the computer"
+        case INPUT_SOURCE_I2S:  return "External I2S device"
+        case INPUT_SOURCE_ADAT: return "Lightpipe on GPIO \(vm.adatInputPin)"
+        default:
+            guard let idx = vm.spdifIndex(forSource: source) else { return "" }
+            let pin: UInt8? = idx == 0 ? vm.spdifRxPin
+                : (vm.spdifRxPinsExt.indices.contains(idx - 1) ? vm.spdifRxPinsExt[idx - 1] : nil)
+            return pin.map { "Receiver on GPIO \($0)" } ?? "S/PDIF receiver"
         }
     }
 }
@@ -8795,21 +8878,6 @@ struct HardwareSettingsTab: View {
             }
             }
 
-            // MARK: Source Names
-            if section == .spdif && vm.inputSourceNamesSupported {
-                Section {
-                    ForEach(vm.inputSourceOptions, id: \.self) { source in
-                        InputSourceNameRow(source: source)
-                    }
-                } header: {
-                    Label("Source Names", systemImage: "character.cursor.ibeam")
-                } footer: {
-                    Text("Stored on the device and shown on every host and the front panel. Leave a name empty to use the built-in label.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-
             // MARK: Inputs
             if section == .spdif && vm.inputSourceSupported {
                 Section {
@@ -9264,6 +9332,21 @@ struct HardwareSettingsTab: View {
                     Label("ADAT Input", systemImage: "fibrechannel")
                 } footer: {
                     Text("Pairs with an outboard ADC (for example a Behringer ADA8200) to turn DSPi into an analog-in processor. In master mode, wire DSPi's ADAT output to the box's ADAT input and the box's ADAT output back to the data pin here. The 8 channels arrive as input channels 1-8 with full per-input EQ and metering. Save a preset to keep this wiring.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // MARK: Source Names
+            if section == .spdif && vm.inputSourceNamesSupported {
+                Section {
+                    ForEach(vm.inputSourceOptions, id: \.self) { source in
+                        InputSourceNameRow(source: source)
+                    }
+                } header: {
+                    Label("Source Names", systemImage: "tag")
+                } footer: {
+                    Text("Shown in the sidebar, on the front panel and on every connected computer. An empty name uses the built-in one.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }

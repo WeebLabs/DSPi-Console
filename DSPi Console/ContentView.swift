@@ -154,6 +154,8 @@ struct ContentView: View {
 
     private func commitSourceRename(_ source: Int, _ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
+        // An explicit rename supersedes any unsaved edit in Settings.
+        SettingsSaveCoordinator.shared.sourceNameEdits[source] = nil
         guard trimmed != vm.inputSourceNames[source] else { return }
         // Bound to the device the menu was opened on, like channel renames.
         let generation = vm.transport.generation
