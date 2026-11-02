@@ -19,6 +19,9 @@ struct NetworkingSettingsTab: View {
     @State private var portDraft: String = ""
     @State private var manualDraft: String = ""
     @State private var showingAddHub = false
+    @FocusState private var focus: Field?
+
+    private enum Field { case hubName, port }
 
     /// The sidebar's Networking badge colour, so the header reads as the same page.
     private static let tint = Color(red: 0.290, green: 0.455, blue: 0.600)
@@ -32,7 +35,13 @@ struct NetworkingSettingsTab: View {
             backgroundSection
         }
         .formStyle(.grouped)
+        .endsEditingOnClickOutside()
         .onChange(of: service.hubName) { _, name in hubNameDraft = name }   // a remote rename
+        // Commit whenever a field loses focus, whether by Enter or a click elsewhere.
+        .onChange(of: focus) { old, _ in
+            if old == .hubName { commitHubName() }
+            if old == .port { commitPort() }
+        }
         .onAppear {
             hubNameDraft = service.hubName
             portDraft = String(service.port)
@@ -99,17 +108,13 @@ struct NetworkingSettingsTab: View {
                     .labelsHidden()
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 260)
-                    .onSubmit { service.hubName = hubNameDraft.isEmpty ? service.hubName : hubNameDraft }
+                    .focused($focus, equals: .hubName)
+                    .onSubmit { focus = nil }
             }
             Picker("Access", selection: Binding(get: { service.authMode },
                                                 set: { service.authMode = $0 })) {
-                Text("Paired clients only").tag(LinkAuthMode.pin)
-                Text("Anyone on the network").tag(LinkAuthMode.none)
-            }
-            if service.authMode == .none {
-                Label("Anyone on this network can control your devices. Use only on a network you trust.",
-                      systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout).foregroundStyle(.orange)
+                Text("Open").tag(LinkAuthMode.none)
+                Text("Require Pairing").tag(LinkAuthMode.pin)
             }
             LabeledContent("Port") {
                 TextField("Port", text: $portDraft)
@@ -117,10 +122,8 @@ struct NetworkingSettingsTab: View {
                     .multilineTextAlignment(.trailing)
                     .frame(width: 80)
                     .disabled(service.isRunning)
-                    .onSubmit {
-                        if let p = Int(portDraft), (1024...65535).contains(p) { service.port = p }
-                        else { portDraft = String(service.port) }
-                    }
+                    .focused($focus, equals: .port)
+                    .onSubmit { focus = nil }
             }
         } header: {
             Text("This Hub")
@@ -132,6 +135,16 @@ struct NetworkingSettingsTab: View {
                 }
             }
         }
+    }
+
+    private func commitHubName() {
+        if hubNameDraft.isEmpty { hubNameDraft = service.hubName }
+        else { service.hubName = hubNameDraft }
+    }
+
+    private func commitPort() {
+        if let p = Int(portDraft), (1024...65535).contains(p) { service.port = p }
+        else { portDraft = String(service.port) }
     }
 
     // MARK: - Paired clients
@@ -361,4 +374,47 @@ struct NetworkingSettingsTab: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
     }
+}
+
+// A grouped Form keeps a text field focused when the user clicks a label, the
+// background or another control, so the edit never ends.  While the view is on
+// screen, a click in its window outside the field being edited resigns focus.
+private struct EndsEditingOnClickOutside: ViewModifier {
+    @State private var monitor: Any?
+    @State private var anchor = NSView()   // finds this view's window, so other windows are left alone
+
+    func body(content: Content) -> some View {
+        content
+            .background(ViewAnchor(view: anchor))
+            .onAppear {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [anchor] event in
+                    guard let window = event.window, window === anchor.window,
+                          let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+                          let field = editor.delegate as? NSTextField,
+                          let hit = window.contentView?.superview?.hitTest(event.locationInWindow),
+                          !hit.isDescendant(of: field) else { return event }
+                    // Deferred so the click still lands.  A click into another
+                    // field has already moved focus there, so leave that alone.
+                    DispatchQueue.main.async {
+                        if field.currentEditor() != nil { window.makeFirstResponder(nil) }
+                    }
+                    return event
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
+    }
+}
+
+private struct ViewAnchor: NSViewRepresentable {
+    let view: NSView
+    func makeNSView(context: Context) -> NSView { view }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private extension View {
+    func endsEditingOnClickOutside() -> some View { modifier(EndsEditingOnClickOutside()) }
 }
