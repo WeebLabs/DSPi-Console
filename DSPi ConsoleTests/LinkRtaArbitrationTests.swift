@@ -2,7 +2,7 @@
 //  LinkRtaArbitrationTests.swift
 //  DSPi ConsoleTests
 //
-//  The hub's analyser STOP rule (dspi_link_protocol_spec.md section 7.10): a
+//  The hub's analyser STOP rule (dspi_link_protocol_spec.md section 7.15): a
 //  session's RTA STOP reaches the device only when no other session is
 //  watching, by recent band/bin reads, START, or a band/bin poll subscription.
 //

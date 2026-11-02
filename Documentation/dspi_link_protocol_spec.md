@@ -2,7 +2,7 @@
 
 *Version: 1.1 (draft)*
 *Status: draft; dspi-link-js and the DSPi Console `feature/dspi-link` branch implement 1.1*
-*Last updated: 2026-11-01 (changes from 1.0 are listed in section 13)*
+*Last updated: 2026-11-02 (changes from 1.0 are listed in section 13)*
 *Canonical home: `WeebLabs/DSPi-Link` `spec/`; this copy is kept in step with it.*
 
 DSPi Link is the local-network protocol through which a **hub** (DSPi Console
@@ -538,7 +538,9 @@ suffix, so a client sends a minor-0 hub `major.minor.patch` without one.
 
 ---
 
-### 7.10 Analyser sharing
+### 7.15 Analyser sharing
+
+Sections 7.10 to 7.14 (hub administration) are in 1.2 and not in this copy.
 
 The spectrum analyser (`REQ_RTA_*`, 0x08 to 0x0F) is one engine with one
 configuration shared by every session, and the firmware cannot tell sessions
@@ -810,7 +812,7 @@ none of which are visible to clients:
 - Obeys the one-request-in-flight rule on the UART: the Link router
   serialises per device anyway, so this costs nothing.
 - Forwards the UART `status` byte verbatim; wraps UART timeouts as `TIMEOUT`.
-- Follows the analyser rules in section 7.10: tracks which sessions are
+- Follows the analyser rules in section 7.15: tracks which sessions are
   watching and swallows `RTA_CTL_STOP` while another session is.
 - Cannot serve `REQ_RTA_GET_BANDS_ALL` (0x0F): it is USB-only in firmware,
   the device refuses it on the UART and the client receives status `0x02
@@ -945,7 +947,7 @@ A hub is conformant when it:
 - [ ] enforces `pin` auth by default, rate-limits failures, stores token hashes only;
 - [ ] implements CMD with per-device ordering, `max_inflight`, and the status table;
 - [ ] relays notifications verbatim with `origin` attribution and sends RESYNC on drop;
-- [ ] tracks analyser watchers per session and swallows `RTA_CTL_STOP` while another session is watching (section 7.10);
+- [ ] tracks analyser watchers per session and swallows `RTA_CTL_STOP` while another session is watching (section 7.15);
 - [ ] implements poll subscriptions with fan-out and stops polling when unsubscribed;
 - [ ] classifies every command it forwards and fails safe on unknown ones;
 - [ ] keeps handles stable, emits `device.added/removed/changed`;
@@ -987,7 +989,7 @@ suffix-free for a minor-0 hub (section 7.8).
   bridge hub returns `0x02 ERROR` for it, and clients poll 0x0B per channel
   (section 9.2). Section 9.2 also records the bridge's 132-byte `GET`
   response and 64-byte `SET` payload caps.
-- Section 7.10 adds analyser sharing: a hub tracks which sessions are
+- Section 7.15 adds analyser sharing: a hub tracks which sessions are
   watching the analyser, swallows `RTA_CTL_STOP` while another session is,
   and attributes `NOTIFY_EVT_RTA_CONFIG` (0x0D, source byte at offset 16)
   like `PARAM_CHANGED`. Hub behaviour only; no message changes.

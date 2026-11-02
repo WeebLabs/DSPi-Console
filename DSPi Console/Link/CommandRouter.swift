@@ -77,7 +77,7 @@ final class CommandRouter {
     private let stateLock = NSLock()
 
     /// Last time each session read analyser bands or bins or sent RTA START
-    /// (spec 7.10).  STOP is per session: it reaches the device only when no
+    /// (spec 7.15).  STOP is per session: it reaches the device only when no
     /// other session watched within `rtaWatchWindow`.  Guarded by `stateLock`.
     private var rtaWatchers: [LinkSessionID: Date] = [:]
     /// The firmware's own idle timeout, so a swallowed STOP never keeps the
