@@ -1,5 +1,22 @@
 [
   {
+    "version": "1.1.6",
+    "headline": "Choose your latency, and name your board and its inputs",
+    "items": [
+      "Settings > Global Parameters has a Latency section. Pick a target from 0.67 ms to 8 ms; the default is 4 ms. The 0.67 and 1 ms options suit S/PDIF, I2S and ADAT inputs, and run as 2 ms on USB.",
+      "Stats has an Output Ring Health section showing the fill target, underruns, the lowest fill and the worst input gaps, so you can tell whether a latency setting holds up.",
+      "Give the board its own name under Settings > Global Parameters > Device Name. The device menu and DSPi Link hubs show it.",
+      "Rename input sources under Settings > Inputs > Source Names, or right-click the source picker in the sidebar. The names appear wherever Console names a source.",
+      "Control Surfaces can drive the output limiter, save the active preset, and set the target latency. The Input & Presets family is now called Device.",
+      "Display pages for filter parameters can choose which band they show, and the page table fits each page on one line.",
+      "The Networking settings page is reorganised around sharing and other hubs. Hubs that change address are followed without a restart, and a hub that loses power drops off the list within seconds.",
+      "The spectrum analyser keeps drawing while windows open, and the Hardware settings page no longer stalls the app while it loads.",
+      "On the RP2040, level meters and clip indicators no longer read 6 dB hot, so full-volume USB playback stops showing false clipping, and the signal generator plays at the level you set.",
+      "A bypassed EQ band no longer stays bypassed after a factory reset, a preset delete or loading an empty slot.",
+      "Outputs on a mixed S/PDIF and I2S layout no longer fall silent after the computer pauses playback."
+    ]
+  },
+  {
     "version": "1.1.6-beta5",
     "headline": "Share your DSPi on the network, and Console now updates itself",
     "items": [
