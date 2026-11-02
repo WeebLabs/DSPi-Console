@@ -6519,7 +6519,7 @@ struct ControlSurfacesSettingsTab: View {
                              CS_NOUN_LG_SYNC]),
         NounCategory(name: "Channels",
                      nouns: [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE,
-                             CS_NOUN_OUTPUT_ENABLE, CS_NOUN_OUTPUT_DELAY]),
+                             CS_NOUN_OUTPUT_ENABLE, CS_NOUN_OUTPUT_DELAY, CS_NOUN_OUTPUT_LATENCY]),
         NounCategory(name: "Filters",
                      nouns: [CS_NOUN_EQ_BYPASS, CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN,
                              CS_NOUN_FILTER_Q, CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS],
@@ -7599,6 +7599,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_LIMITER_LINK:       return "Limiter Link Group"
         case CS_NOUN_LIMITER_GR:         return "Limiter Gain Reduction"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
+        case CS_NOUN_OUTPUT_LATENCY:     return "Output Latency"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
         case CS_NOUN_LOUDNESS_INTENSITY: return "Loudness Intensity"
@@ -7857,6 +7858,14 @@ struct ControlSurfacesSettingsTab: View {
             return tubeTypeName(value)
         case CS_NOUN_LIMITER_LINK:
             return limiterLinkGroupName(value)
+        case CS_NOUN_OUTPUT_LATENCY:
+            // Nominal target, not the effective one: the noun steps the
+            // requested option whatever the source makes of it.
+            if let option = vm.outputLatencyOptions.first(where: { Int($0.id) == value + 1 }) {
+                return formatLatencyMs(option.latencyUs)
+            }
+            let names = ["0.67 ms", "1 ms", "2 ms", "3 ms", "4 ms", "6 ms", "8 ms"]
+            return (value >= 0 && value < names.count) ? names[value] : "Option \(value + 1)"
         case CS_NOUN_FILTER_TYPE:
             let names = ["Flat", "Peaking", "Low Shelf", "High Shelf", "High Cut",
                          "Low Cut", "Notch", "All Pass", "All Pass (1st)",

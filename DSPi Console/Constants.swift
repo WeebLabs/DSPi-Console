@@ -1052,7 +1052,8 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // adds the auxiliary output component types (CS_TYPE_AUX_OUT / _PWM, commands
 // 0x04-0x07, nouns 68-69; see control_surfaces_aux_spec.md) and v19 the tube
 // preamp nouns 70-73.  v20 adds the output limiter nouns 74-78 and the
-// CS_UNIT_MS_LOG unit, and v21 the PRESET_SAVE trigger noun 79.  No caps header
+// CS_UNIT_MS_LOG unit, v21 the PRESET_SAVE trigger noun 79, and v22 the
+// OUTPUT_LATENCY enum noun 80.  No caps header
 // field is added after v9: the type table simply grows.
 let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
 let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
@@ -1419,6 +1420,10 @@ let CS_NOUN_LIMITER_GR: Int         = 78   // continuous dB 0..30, read-only gai
 // Caps v21: saves the live state to the active preset slot, as a host save
 // does.  Trigger only, so a held button cannot repeat flash writes.
 let CS_NOUN_PRESET_SAVE: Int        = 79
+// Caps v22: requests an output latency option (value = option ID - 1, 0.67 to
+// 8 ms).  Deferred like a host SET, so all outputs restart together.  Reads the
+// requested option, not the one in force on the current source.
+let CS_NOUN_OUTPUT_LATENCY: Int     = 80
 /// `CS_NOUN_MACRO` live value while no macro is running (also
 /// `CsExtStatusPacket.macroRunning` when idle).
 let CS_MACRO_NONE: UInt8            = 0xFF

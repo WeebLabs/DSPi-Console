@@ -477,7 +477,7 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertTrue(csUnitIsLog(CS_UNIT_Q))
     }
 
-    /// Caps v20/v21 noun numbers match control_surfaces.h, and `CS_UNIT_MS_LOG`
+    /// Caps v20-v22 noun numbers match control_surfaces.h, and `CS_UNIT_MS_LOG`
     /// (6) is plain integer ms stepped in octaves, so the limiter release can
     /// span 10 to 1000 ms, past what 8.8 can hold.
     func testCapsV20V21NounsAndLogMsUnit() {
@@ -487,6 +487,7 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CS_NOUN_LIMITER_LINK, 77)
         XCTAssertEqual(CS_NOUN_LIMITER_GR, 78)
         XCTAssertEqual(CS_NOUN_PRESET_SAVE, 79)
+        XCTAssertEqual(CS_NOUN_OUTPUT_LATENCY, 80)
 
         XCTAssertEqual(CS_UNIT_MS_LOG, 6)
         XCTAssertFalse(csUnitIsFixedPoint(CS_UNIT_MS_LOG))
