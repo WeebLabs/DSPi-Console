@@ -376,7 +376,7 @@ advertises a small one.
 |-------|--------|
 | `handle` | Hub-assigned, section 2. Stable until `device.removed`. |
 | `serial` | `REQ_GET_SERIAL` (0x7E). |
-| `name` | The board's own name (`REQ_GET_DEVICE_NAME` 0x57) when its firmware stores one and it is set; else the hub-stored name; else a default derived from the serial. The hub applies this order each time the device comes online. |
+| `name` | The board's own name (`REQ_GET_DEVICE_NAME` 0x57) when its firmware stores one and it is set. Otherwise the hub-stored name, and failing that a default derived from the serial. The hub applies this order each time the device comes online. |
 | `platform`, `fw`, `outputs` | `REQ_GET_PLATFORM` (0x7F), 7-byte read. `fw` is `major.minor.patch` from bytes 1, 4 and 5, or from the byte 2 nibbles on firmware that returns only 4 bytes. |
 | `fw_beta` | Byte 6 of the same read: the beta number, 0 for a final release. Betas of one patch share its `fw` string, so this is the only field that tells them apart. A hub omits it when the device returns fewer than 7 bytes, and a client treats a missing field as unknown, not as 0. Added in 1.1. |
 | `inputs` | Compile-time input count if the hub knows it; else omitted. |
@@ -396,16 +396,19 @@ Events, sent to every session:
 `device.rename {handle, name}` (control or admin) renames the device. When
 the attached board's firmware stores names (a 32-byte `REQ_GET_DEVICE_NAME`
 reply), the hub writes `REQ_SET_DEVICE_NAME` (0x56) as the requesting
-session, replies `ok` once the write is accepted, and emits `device.changed`
-when the board's `NOTIFY_EVT_DEVICE_NAME` (0x10) arrives. That notification
-is the only thing that sets the name of such a board, so a rename from any
-source is seen, including a raw 0x56 through `cmd`. The hub reduces the
-name to what the board can store: printable ASCII, gaps left by dropped
-characters closed, ends trimmed, at most 31 characters. A name-capable board
-that is not attached, or an unknown handle, answers `no_device`. Otherwise (older firmware) the hub
-changes its stored name and emits `device.changed` itself. Names travel
-with the board, so the board keeps its name on any hub or computer. A board
-rename restarts the board's outputs briefly.
+session, replies `ok` once the board accepts the write, and emits
+`device.changed` when the board's `NOTIFY_EVT_DEVICE_NAME` (0x10) arrives.
+That notification is the only thing that sets the name of such a board, so a
+rename from any source is seen, including a raw 0x56 through `cmd`. The hub
+reduces the name to what the board can store: printable ASCII, gaps left by
+dropped characters closed, ends trimmed, at most 31 characters. An empty
+name clears it. Like a `cmd`, the write honours locks and the session's
+in-flight limit: while another session holds the device's lock (section 7.7)
+the rename answers `locked`, and past the limit it answers `busy`. A name-capable board that is not attached, or an
+unknown handle, answers `no_device`. On older firmware the hub changes its
+stored name and emits `device.changed` itself. Names stored on the board
+travel with it, so it keeps its name on any hub or computer. A board rename
+restarts the board's outputs briefly.
 
 A hub that holds a stored name for a name-capable board reporting an empty
 name writes the stored name to the board once at attach. It deletes its
