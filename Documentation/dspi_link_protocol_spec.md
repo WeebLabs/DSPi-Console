@@ -564,12 +564,12 @@ forwarded. A hub must never forward a STOP on a session's behalf when that
 session closes: the firmware stops itself 5 s after the last read.
 
 **The configuration event is attributed.** `NOTIFY_EVT_RTA_CONFIG` (0x0D,
-notification spec §3.9) is a host-sourced event when its source byte, at
-offset 16, is `HOST_SET` or `BULK_SET`, and the hub attributes it to the
-session whose `REQ_RTA_SET_CONFIG` it answers, exactly as it attributes
-`PARAM_CHANGED`. That attribution is how a client tells its own echo from
-another session's change. A hub relays the packet verbatim like every other
-notification.
+notification spec section 3.9) is a host-sourced event when its source byte,
+at offset 16, is `HOST_SET`, `BULK_SET` or (over a bridge) `UART`, and the hub
+attributes it to the session whose `REQ_RTA_SET_CONFIG` it answers, exactly as
+it attributes `PARAM_CHANGED` (section 8.3). That attribution is how a client
+tells its own echo from another session's change. A hub relays the packet
+verbatim like every other notification.
 
 **Viewers.** `REQ_RTA_SET_CONFIG` and `REQ_RTA_CONTROL` remain classed
 *control*, so a viewer can watch whatever configuration the device holds (band

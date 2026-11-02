@@ -1,6 +1,6 @@
 {
   "spec_version": "1.1",
-  "generated": "2026-11-01",
+  "generated": "2026-11-02",
   "commands": [
     {"code": 3, "name": "OUTPUT_LATENCY", "dirs": ["set", "get"], "class": "config", "classes": {"set": "config", "get": "read"}, "note": "one opcode both ways: OUT selects the output latency option, a device-global flash write and a muted output restart; IN reads the status or the option table"},
     {"code": 4, "name": "SET_CS_AUX_STATE", "dirs": ["set"], "class": "control"},
