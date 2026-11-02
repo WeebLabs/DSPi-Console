@@ -8103,6 +8103,12 @@ private struct DraftNameField: View {
 /// One source-name row: the source's identity on the left, its editable name
 /// on the right. Typing only edits the Settings draft; the shared bar saves it.
 private struct InputSourceNameRow: View {
+    /// Row identity of its own type, so it never equals another row's Int id.
+    struct ID: Hashable, Identifiable {
+        let source: Int
+        var id: Self { self }
+    }
+
     let source: Int
     @ObservedObject private var vm = AppState.shared.viewModel
     @ObservedObject private var coordinator = SettingsSaveCoordinator.shared
@@ -9444,8 +9450,11 @@ struct HardwareSettingsTab: View {
             // MARK: Source Names
             if section == .spdif && vm.inputSourceNamesSupported {
                 Section {
-                    ForEach(vm.inputSourceOptions, id: \.self) { source in
-                        InputSourceNameRow(source: source)
+                    // Not `id: \.self`: a bare source number collides with the
+                    // S/PDIF and I2S pin rows' 0-based ids in this Form, and
+                    // focusing USB's field (source 0) scrolled to "S/PDIF 1".
+                    ForEach(vm.inputSourceOptions.map(InputSourceNameRow.ID.init)) { row in
+                        InputSourceNameRow(source: row.source)
                     }
                 } header: {
                     Label("Source Names", systemImage: "tag")
