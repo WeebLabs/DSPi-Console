@@ -1599,7 +1599,7 @@ The functions available on current firmware are:
 | **Subharmonic Synth** | On/off, band levels (24-36, 36-56, 56-80 Hz), LF Boost, Selectivity (All material, Percussive or Sustained; a list showing 0, 1 and 2 means them in that order), Selectivity Depth, Selectivity Hold, Sub Ceiling, Pair Link, Solo |
 | **Tube Modeller** | On/off, Type, Drive, Mix |
 | **Upmixer** (RP2350) | On/off, Centre Mode, Surround Mode, Strength, Width, Presence |
-| **Input & Presets** | Preset, Reload Preset, Input Source, LG Sound Sync |
+| **Device** | Preset, Reload Preset, Save Preset, Input Source, LG Sound Sync, Target Latency |
 | **Channels** | Input Preamp, Output Gain, Output Mute, Output Enable, Output Delay |
 | **Filters** | EQ Bypass, Frequency, Gain, Q, Type, Bypass (per band) |
 | **Tools** | Macro, Signal Generator, Test DAC Mute, Clear Clipping |

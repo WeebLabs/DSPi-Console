@@ -6514,12 +6514,12 @@ struct ControlSurfacesSettingsTab: View {
                      nouns: [CS_NOUN_LIMITER, CS_NOUN_LIMITER_THRESHOLD, CS_NOUN_LIMITER_RELEASE,
                              CS_NOUN_LIMITER_LINK, CS_NOUN_LIMITER_GR],
                      strip: ["Limiter"], enableNoun: CS_NOUN_LIMITER),
-        NounCategory(name: "Input & Presets",
+        NounCategory(name: "Device",
                      nouns: [CS_NOUN_PRESET, CS_NOUN_PRESET_RELOAD, CS_NOUN_PRESET_SAVE, CS_NOUN_INPUT_SOURCE,
-                             CS_NOUN_LG_SYNC]),
+                             CS_NOUN_LG_SYNC, CS_NOUN_OUTPUT_LATENCY]),
         NounCategory(name: "Channels",
                      nouns: [CS_NOUN_PREAMP, CS_NOUN_OUTPUT_GAIN, CS_NOUN_OUTPUT_MUTE,
-                             CS_NOUN_OUTPUT_ENABLE, CS_NOUN_OUTPUT_DELAY, CS_NOUN_OUTPUT_LATENCY]),
+                             CS_NOUN_OUTPUT_ENABLE, CS_NOUN_OUTPUT_DELAY]),
         NounCategory(name: "Filters",
                      nouns: [CS_NOUN_EQ_BYPASS, CS_NOUN_FILTER_FREQ, CS_NOUN_FILTER_GAIN,
                              CS_NOUN_FILTER_Q, CS_NOUN_FILTER_TYPE, CS_NOUN_FILTER_BYPASS],
@@ -7599,7 +7599,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_NOUN_LIMITER_LINK:       return "Limiter Link Group"
         case CS_NOUN_LIMITER_GR:         return "Limiter Gain Reduction"
         case CS_NOUN_OUTPUT_DELAY:       return "Output Delay"
-        case CS_NOUN_OUTPUT_LATENCY:     return "Output Latency"
+        case CS_NOUN_OUTPUT_LATENCY:     return "Target Latency"
         case CS_NOUN_PRESET_RELOAD:      return "Preset Reload"
         case CS_NOUN_LOUDNESS_SPL:       return "Loudness Reference SPL"
         case CS_NOUN_LOUDNESS_INTENSITY: return "Loudness Intensity"
