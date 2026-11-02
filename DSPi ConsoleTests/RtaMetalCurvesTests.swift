@@ -35,14 +35,18 @@ final class RtaMetalCurvesTests: XCTestCase {
         XCTAssertNotNil(RtaMetalCurveResources.shared, "Curve shaders must compile and link")
     }
 
-    private final class CountingDelegate: NSObject, MTKViewDelegate {
-        let forward: MTKViewDelegate?
-        var draws = 0
-        init(_ forward: MTKViewDelegate?) { self.forward = forward }
-        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            forward?.mtkView(view, drawableSizeWillChange: size)
+    /// Frames arrive on the render thread, so the count is locked.
+    private final class CountingDelegate: NSObject, RtaMetalSurfaceDelegate {
+        let forward: RtaMetalSurfaceDelegate?
+        private let lock = NSLock()
+        private var count = 0
+        var draws: Int { lock.lock(); defer { lock.unlock() }; return count }
+        init(_ forward: RtaMetalSurfaceDelegate?) { self.forward = forward }
+        func surfaceHasChanges(_ surface: RtaMetalSurface) -> Bool { forward?.surfaceHasChanges(surface) ?? false }
+        func draw(in surface: RtaMetalSurface, drawable: CAMetalDrawable, size: CGSize, scale: CGFloat) {
+            lock.lock(); count += 1; lock.unlock()
+            forward?.draw(in: surface, drawable: drawable, size: size, scale: scale)
         }
-        func draw(in view: MTKView) { draws += 1; forward?.draw(in: view) }
     }
 
     @MainActor
@@ -77,12 +81,32 @@ final class RtaMetalCurvesTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         spin(0.3)
         XCTAssertGreaterThan(counter.draws, hidden)
+        // The link keeps ticking while visible so data that arrives during a
+        // main-thread stall still draws, but with nothing new it draws nothing.
         view.update(panel: panel(), active: true)
         spin(0.2)
         let stationary = counter.draws
         spin(0.2)
-        XCTAssertTrue(view.isPaused)
         XCTAssertEqual(counter.draws, stationary, "Smoothing off should redraw only on changes")
+    }
+
+    @MainActor
+    func testCurvesKeepDrawingWhileTheMainThreadIsBlocked() throws {
+        guard RtaMetalCurveResources.shared != nil else { throw XCTSkip("No Metal device") }
+        let view = RtaMetalCurveView()
+        let counter = CountingDelegate(view.delegate)
+        view.delegate = counter
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 300, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { view.stop(); window.orderOut(nil) }
+        view.update(panel: panel(fallTau: 0.1), active: true)
+        window.makeKeyAndOrderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let before = counter.draws
+        XCTAssertGreaterThan(before, 0)
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertGreaterThan(counter.draws - before, 5, "curves stopped while main was blocked")
     }
 
     func testFlatteningKeepsFFTPointsAndClampsBandCurve() {

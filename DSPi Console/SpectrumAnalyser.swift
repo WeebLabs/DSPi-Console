@@ -375,6 +375,27 @@ final class RtaFrameFeed: ObservableObject {
     func advance() { version &+= 1 }
 }
 
+/// What the Metal surfaces draw from.  The poll queue writes it as each tick
+/// lands and the main thread when the configuration changes; the render thread
+/// reads it.  None of that waits on the main thread, so a window being built
+/// there does not freeze the spectrum.
+struct RtaRenderState {
+    /// Advances whenever the picture changes, like `RtaFrameFeed.version`.
+    var version: UInt64 = 0
+    var snapshot = RtaSnapshot()
+    var configuration = RtaDisplayConfiguration(
+        tap: RTA_TAP_OUTPUT, centres: [], sampleRateHz: 0, fftOrder: 10, bassBands: 0,
+        firstResolvedBand: 0, levelZero: Double(RTA_LEVEL_ZERO_DBFS))
+    /// `RtaEngine.channelRefreshInterval` for this snapshot.
+    var refreshInterval: TimeInterval = 1024.0 / 48000.0
+
+    /// `RtaEngine.frame(channel:tap:)` against this snapshot.
+    func frame(channel: Int, tap: UInt8) -> RtaBandFrame? {
+        guard snapshot.tap == tap else { return nil }
+        return snapshot.frames[UInt8(clamping: channel)]
+    }
+}
+
 /// The analyser window's status line, published on its own so its changes
 /// twice a second redraw the status bar and nothing else.
 final class RtaTelemetry: ObservableObject {
@@ -488,8 +509,23 @@ final class RtaEngine: ObservableObject {
     private var pollFrameInterval: TimeInterval = 1024.0 / 48000.0
     private var lastBinRead: Date = .distantPast
     private var lastStatusRead: Date = .distantPast
-    /// Time average of the bin frames.  Main thread only.
+    /// Guards `render` and `binAverage`.  Never taken while holding `lock`.
+    private let renderLock = NSLock()
+    private var render = RtaRenderState()
+    /// Time average of the bin frames, advanced on the poll queue.
     private var binAverage = RtaBinAverage()
+
+    /// The render thread's copy of the picture.  Any thread.
+    var renderState: RtaRenderState {
+        renderLock.lock(); defer { renderLock.unlock() }
+        return render
+    }
+
+    /// `renderState.version` without copying the snapshot.  Any thread.
+    var renderVersion: UInt64 {
+        renderLock.lock(); defer { renderLock.unlock() }
+        return render.version
+    }
 
     init(transport: any DeviceTransport) {
         self.transport = transport
@@ -551,8 +587,7 @@ final class RtaEngine: ObservableObject {
                 // A hidden window can be shown again before STOP completes.
                 // Never clear data belonging to that new subscription.
                 guard let self, !self.isWatching else { return }
-                self.replaceSnapshot(RtaSnapshot())
-                self.binAverage.reset()
+                self.clearSnapshot()
             }
         }
     }
@@ -560,7 +595,9 @@ final class RtaEngine: ObservableObject {
     /// Clear the running averages (the device's bands and the bins here) and the
     /// peak hold without disturbing the frame in flight.  Main thread only.
     func resetAveraging() {
+        renderLock.lock()
         binAverage.reset()
+        renderLock.unlock()
         let transport = self.transport
         DispatchQueue.global(qos: .utility).async {
             _ = transport?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_RESET_AVG, index: 2, length: 1)
@@ -573,6 +610,7 @@ final class RtaEngine: ObservableObject {
         guard new != options else { return }
         options = new
         frameFeed.advance()
+        publishRenderConfiguration()
         lock.lock()
         pollOptions = new
         appliedConfig = nil
@@ -752,6 +790,7 @@ final class RtaEngine: ObservableObject {
             self.caps = caps
             self.bandCentresHz = Array(centres.prefix(Int(caps.maxBands)))
             self.frameFeed.advance()
+            self.publishRenderConfiguration()
             self.supported = complete
             // Fold this device's limits into the options: a size outside the
             // range this device reports would be STALLed on every push.
@@ -775,7 +814,7 @@ final class RtaEngine: ObservableObject {
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.supported = false
-            self?.replaceSnapshot(RtaSnapshot())
+            self?.clearSnapshot()
             self?.configRejected = false
             self?.publishSharing()
         }
@@ -943,30 +982,37 @@ final class RtaEngine: ObservableObject {
         let tap = want.tap
         // What the device reports it applied, when this tick read it back.
         let avgMs = want.avgMs
+        // Merged here rather than on main so the render thread has the frame
+        // now; main only mirrors the result for SwiftUI.
+        renderLock.lock()
+        var s = render.snapshot
+        // A tap change invalidates every frame we were holding: the frames
+        // are indexed by channel, and channel 0 means a different thing on
+        // the other side of the matrix.
+        if s.tap != tap { s.frames = [:]; s.bins = nil }
+        s.tap = tap
+        let fresh = Self.silencingStale(frames, staleAfterMs: Self.staleAfterMs(render.refreshInterval))
+        for (ch, f) in fresh.frames { s.frames[ch] = f }
+        if var bins {
+            let zero = render.configuration.levelZero
+            bins.levelsDB = binAverage.add(bins, tap: tap, at: binsReadAt, avgMs: avgMs,
+                                           levelDB: { (Double($0) - zero) * RTA_LEVEL_STEP_DB })
+            bins.smoothedLevelsDB = binAverage.smoothedLevels
+            s.bins = bins
+        }
+        // Bins carry no age of their own, and the device keeps the last
+        // transform's bins just as it keeps the bands, so they go with
+        // their channel's frame.
+        if let held = s.bins, fresh.stale.contains(held.channel) {
+            s.bins = nil
+            binAverage.reset()
+        }
+        if let status { s.status = status }
+        adoptRenderSnapshotLocked(s)
+        renderLock.unlock()
+
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            var s = self.snapshot
-            // A tap change invalidates every frame we were holding: the frames
-            // are indexed by channel, and channel 0 means a different thing on
-            // the other side of the matrix.
-            if s.tap != tap { s.frames = [:]; s.bins = nil }
-            s.tap = tap
-            let fresh = Self.silencingStale(frames, staleAfterMs: self.staleAfterMs)
-            for (ch, f) in fresh.frames { s.frames[ch] = f }
-            if var bins {
-                bins.levelsDB = self.binAverage.add(bins, tap: tap, at: binsReadAt,
-                                                    avgMs: avgMs, levelDB: self.levelDB)
-                bins.smoothedLevelsDB = self.binAverage.smoothedLevels
-                s.bins = bins
-            }
-            // Bins carry no age of their own, and the device keeps the last
-            // transform's bins just as it keeps the bands, so they go with
-            // their channel's frame.
-            if let held = s.bins, fresh.stale.contains(held.channel) {
-                s.bins = nil
-                self.binAverage.reset()
-            }
-            if let status { s.status = status }
             self.replaceSnapshot(s)
             if let rejected, rejected != self.configRejected { self.configRejected = rejected }
             self.publishSharing()
@@ -984,13 +1030,58 @@ final class RtaEngine: ObservableObject {
         let old = snapshot
         guard s != old else { return }
         snapshot = s
-        if s.tap != old.tap || s.status != old.status
-            || s.bins?.displayFrame != old.bins?.displayFrame || !Self.drawsSame(s.frames, old.frames) {
-            frameFeed.advance()
-        }
+        if Self.drawsDifferently(s, old) { frameFeed.advance() }
         if telemetry.status != s.status { telemetry.status = s.status }
         let d = RtaDisplayState(s)
         if d != display { display = d }
+    }
+
+    /// Empty the snapshot and the bin average on both sides.  Main thread only.
+    private func clearSnapshot() {
+        renderLock.lock()
+        binAverage.reset()
+        adoptRenderSnapshotLocked(RtaSnapshot())
+        renderLock.unlock()
+        replaceSnapshot(RtaSnapshot())
+    }
+
+    /// The render-side half of `replaceSnapshot`.  Caller holds `renderLock`.
+    private func adoptRenderSnapshotLocked(_ s: RtaSnapshot) {
+        let old = render.snapshot
+        guard s != old else { return }
+        render.snapshot = s
+        let d = RtaDisplayState(s)
+        render.configuration.tap = d.tap
+        render.configuration.sampleRateHz = d.sampleRateHz
+        render.configuration.firstResolvedBand = d.firstResolvedBand
+        render.configuration.bandCount = d.bandCount
+        render.refreshInterval = Self.channelRefreshInterval(
+            status: s.status, fftOrder: UInt8(clamping: render.configuration.fftOrder))
+        if Self.drawsDifferently(s, old) { render.version &+= 1 }
+    }
+
+    /// Hand the render thread the parts of `RtaDisplayConfiguration` that come
+    /// from the caps and the options rather than the frames.  Main thread only.
+    private func publishRenderConfiguration() {
+        let centres = bandCentresHz
+        let fftOrder = options.fftOrder
+        let bassBands = Int(caps.bassBands)
+        let levelZero = caps.levelZero == 0 ? Double(RTA_LEVEL_ZERO_DBFS) : Double(caps.levelZero)
+        renderLock.lock()
+        render.configuration.centres = centres
+        render.configuration.fftOrder = Int(fftOrder)
+        render.configuration.bassBands = bassBands
+        render.configuration.levelZero = levelZero
+        render.refreshInterval = Self.channelRefreshInterval(status: render.snapshot.status, fftOrder: fftOrder)
+        render.version &+= 1
+        renderLock.unlock()
+    }
+
+    /// Whether two snapshots draw different pictures.  Sequence numbers and
+    /// ages alone do not count.
+    static func drawsDifferently(_ a: RtaSnapshot, _ b: RtaSnapshot) -> Bool {
+        a.tap != b.tap || a.status != b.status
+            || a.bins?.displayFrame != b.bins?.displayFrame || !drawsSame(a.frames, b.frames)
     }
 
     /// Whether two sets of band frames draw the same picture.
@@ -1003,9 +1094,9 @@ final class RtaEngine: ObservableObject {
 
     /// How old a channel's frame may get before it is shown as silence: a few
     /// refresh intervals, so a slow rotation through many channels is not
-    /// mistaken for a stopped stream.  Main thread only.
-    private var staleAfterMs: Double {
-        max(500, channelRefreshInterval * 4000)
+    /// mistaken for a stopped stream.
+    private static func staleAfterMs(_ refreshInterval: TimeInterval) -> Double {
+        max(500, refreshInterval * 4000)
     }
 
     /// Frames with any that have stopped updating replaced by silence.

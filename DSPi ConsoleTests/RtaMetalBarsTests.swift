@@ -14,6 +14,43 @@ final class RtaMetalBarsTests: XCTestCase {
         XCTAssertNil(view.delegate)
     }
 
+    private final class CountingDelegate: NSObject, RtaMetalSurfaceDelegate {
+        let forward: RtaMetalSurfaceDelegate?
+        private let lock = NSLock()
+        private var count = 0
+        var draws: Int { lock.lock(); defer { lock.unlock() }; return count }
+        init(_ forward: RtaMetalSurfaceDelegate?) { self.forward = forward }
+        func surfaceHasChanges(_ surface: RtaMetalSurface) -> Bool { forward?.surfaceHasChanges(surface) ?? false }
+        func draw(in surface: RtaMetalSurface, drawable: CAMetalDrawable, size: CGSize, scale: CGFloat) {
+            lock.lock(); count += 1; lock.unlock()
+            forward?.draw(in: surface, drawable: drawable, size: size, scale: scale)
+        }
+    }
+
+    /// The point of the render thread: a main thread busy building a window
+    /// must not stop the bars.
+    @MainActor
+    func testBarsKeepDrawingWhileTheMainThreadIsBlocked() throws {
+        guard RtaMetalBarResources.shared != nil else { throw XCTSkip("No Metal device") }
+        let view = RtaMetalBarView()
+        let counter = CountingDelegate(view.delegate)
+        view.delegate = counter
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 300, height: 120),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { view.stop(); window.orderOut(nil) }
+        let panel = RtaMetalBarPanel(identity: 0, rect: CGRect(x: 0, y: 0, width: 300, height: 120),
+            levels: [-30, -20, -10], peaks: [], visible: [0, 1, 2], color: SIMD4(1, 0, 0, 1),
+            floorDB: -90, ceilingDB: 0, fallTau: 0.1, showPeakHold: false)
+        view.update(panels: [panel], active: true)
+        window.makeKeyAndOrderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let before = counter.draws
+        XCTAssertGreaterThan(before, 0)
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertGreaterThan(counter.draws - before, 5, "bars stopped while main was blocked")
+    }
+
     func testOlderTimestampCannotAdvanceTheNextFrameTwice() {
         let start = Date(timeIntervalSince1970: 0)
         let actual = RtaBarSmoother(), reference = RtaBarSmoother()

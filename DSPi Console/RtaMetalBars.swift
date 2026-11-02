@@ -17,36 +17,56 @@ struct RtaMetalBarSource: Equatable {
     let rect: CGRect
 }
 
-/// Resolves sources into panels against the engine's latest snapshot, and only
-/// when the engine reports the picture changed.  Main thread only.
+/// Resolves sources into panels against the engine's render state, and only
+/// when the engine reports the picture changed.  Sources arrive from SwiftUI on
+/// main; panels are resolved on the render thread.
 final class RtaMetalBarFeed {
     private weak var engine: RtaEngine?
+    private let lock = NSLock()
     private var sources: [RtaMetalBarSource] = []
+    private var sourcesChanged = true
+    // Render thread only.
     private var resolvedVersion: UInt64?
     private let cache = RtaRenderCache()
 
     init(engine: RtaEngine) { self.engine = engine }
 
-    var animating: Bool { sources.contains { $0.smoothing > 0 } }
+    var animating: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return sources.contains { $0.smoothing > 0 }
+    }
 
     func setSources(_ new: [RtaMetalBarSource]) {
+        lock.lock(); defer { lock.unlock() }
         guard new != sources else { return }
         sources = new
-        resolvedVersion = nil
+        sourcesChanged = true
+    }
+
+    /// Whether `panelsIfChanged` would return panels.  Render thread.
+    func hasChanges() -> Bool {
+        guard let engine else { return false }
+        lock.lock(); let changed = sourcesChanged; lock.unlock()
+        return changed || engine.renderVersion != resolvedVersion
     }
 
     /// New panels, or nil when nothing has changed since the last call.
+    /// Render thread.
     func panelsIfChanged() -> [RtaMetalBarPanel]? {
         guard let engine else { return nil }
-        let version = engine.frameFeed.version
-        guard version != resolvedVersion else { return nil }
-        resolvedVersion = version
-        let configuration = RtaDisplayConfiguration(engine: engine)
+        lock.lock()
+        let sources = self.sources
+        let changed = sourcesChanged
+        sourcesChanged = false
+        lock.unlock()
+        let state = engine.renderState
+        guard changed || state.version != resolvedVersion else { return nil }
+        resolvedVersion = state.version
         return sources.map { source in
-            RtaMetalBarPanel(configuration: configuration, tap: source.tap, channel: source.channel,
-                             frame: engine.frame(channel: source.channel, tap: source.tap),
+            RtaMetalBarPanel(configuration: state.configuration, tap: source.tap, channel: source.channel,
+                             frame: state.frame(channel: source.channel, tap: source.tap),
                              color: source.color, scale: source.scale,
-                             fallTau: rtaFallTau(engine, source.smoothing),
+                             fallTau: rtaFallTau(refreshInterval: state.refreshInterval, amount: source.smoothing),
                              showPeakHold: source.showPeakHold, rect: source.rect, cache: cache)
         }
     }
@@ -133,113 +153,49 @@ struct RtaMetalBars: NSViewRepresentable {
     }
 }
 
-/// A single surface for an entire strip. Stop drawing when detached, hidden,
-/// occluded or minimised; with interpolation off, draw only on data/size changes.
-final class RtaMetalBarView: MTKView {
+/// A single surface for an entire strip, drawn off the main thread; see
+/// `RtaMetalSurface`.  With interpolation off it draws only on data/size changes.
+final class RtaMetalBarView: RtaMetalSurface {
     private var renderer: RtaMetalBarRenderer?
-    private var requestedActive = true
-    private var animating = false
-    private var observers: [NSObjectProtocol] = []
     private var feed: RtaMetalBarFeed?
-    private var feedChanges: AnyCancellable?
 
     init() {
         let resources = RtaMetalBarResources.shared
-        super.init(frame: .zero, device: resources?.device)
-        colorPixelFormat = .bgra8Unorm
-        clearColor = MTLClearColorMake(0, 0, 0, 0)
-        framebufferOnly = true
-        preferredFramesPerSecond = 60
-        isPaused = true
-        enableSetNeedsDisplay = true
-        wantsLayer = true
-        layer?.isOpaque = false
-        if let metalLayer = layer as? CAMetalLayer {
-            metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
-        }
+        super.init(device: resources?.device)
         if let resources { renderer = RtaMetalBarRenderer(resources: resources) }
         delegate = renderer
     }
 
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var isOpaque: Bool { false }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Fixed panels, for tests and benchmarks.
     func update(panels: [RtaMetalBarPanel], active: Bool) {
         renderer?.update(panels)
-        requestedActive = active
         animating = panels.contains { $0.fallTau > 0 }
-        updateVisibility()
-        needsDisplay = true
+        setActive(active)
+        requestRedraw()
     }
 
-    /// Live bars: the draw loop resolves `sources` against the engine's frames.
+    /// Live bars: the render thread resolves `sources` against the engine.
     func update(sources: [RtaMetalBarSource], engine: RtaEngine, active: Bool) {
         if feed == nil {
             let feed = RtaMetalBarFeed(engine: engine)
             self.feed = feed
             renderer?.feed = feed
-            // Smoothing keeps the loop running; without it nothing draws until
-            // asked, so ask whenever the picture changes.
-            feedChanges = engine.frameFeed.$version.sink { [weak self] _ in
-                guard let self, !self.animating else { return }
-                self.needsDisplay = true
-            }
         }
         feed?.setSources(sources)
-        requestedActive = active
         animating = feed?.animating ?? false
-        updateVisibility()
-        needsDisplay = true
+        setActive(active)
     }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        removeObservers()
-        if let window {
-            for name in [NSWindow.didChangeOcclusionStateNotification,
-                         NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification] {
-                observers.append(NotificationCenter.default.addObserver(
-                    forName: name, object: window, queue: .main) { [weak self] _ in self?.updateVisibility() })
-            }
-        }
-        updateVisibility()
-    }
-
-    override func viewDidHide() { super.viewDidHide(); updateVisibility() }
-    override func viewDidUnhide() { super.viewDidUnhide(); updateVisibility() }
-
-    private func updateVisibility() {
-        let visible = requestedActive && window?.occlusionState.contains(.visible) == true
-            && window?.isMiniaturized == false && !isHiddenOrHasHiddenAncestor
-        renderer?.active = visible
-        if enableSetNeedsDisplay != !animating { enableSetNeedsDisplay = !animating }
-        let paused = !visible || !animating
-        if isPaused != paused { isPaused = paused }
-        if visible { needsDisplay = true }
-    }
-
-    private func removeObservers() {
-        observers.forEach(NotificationCenter.default.removeObserver)
-        observers.removeAll()
-    }
-
-    func stop() {
-        requestedActive = false
-        isPaused = true
-        renderer?.active = false
-        removeObservers()
-        feedChanges = nil
-        delegate = nil
-    }
-
-    deinit { removeObservers() }
 }
 
-final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
+final class RtaMetalBarRenderer: NSObject, RtaMetalSurfaceDelegate {
     private let resources: RtaMetalBarResources
+    // Render thread only, apart from tests driving it directly.
     private var panels: [RtaMetalBarPanel] = []
+    /// Fixed panels handed over from main, adopted at the next frame.
+    private let pendingLock = NSLock()
+    private var pending: [RtaMetalBarPanel]?
     private struct Filters {
         let bars = RtaBarSmoother()
         let caps = RtaBarSmoother()
@@ -251,7 +207,6 @@ final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
     private let slotLock = NSLock()
     private var busy = [false, false, false]
     private static let capacity = 16 * 37 * 2
-    var active = true
 
     init?(resources: RtaMetalBarResources) {
         let slots = (0..<3).compactMap { _ in resources.device.makeBuffer(
@@ -262,8 +217,12 @@ final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
         super.init()
     }
 
+    /// Fixed panels, for tests and benchmarks.  Any thread.
     func update(_ panels: [RtaMetalBarPanel]) {
-        precondition(Thread.isMainThread)
+        pendingLock.lock(); pending = panels; pendingLock.unlock()
+    }
+
+    private func adopt(_ panels: [RtaMetalBarPanel]) {
         self.panels = panels
         let identities = Set(panels.map(\.identity))
         filters = filters.filter { identities.contains($0.key) }
@@ -282,19 +241,26 @@ final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
         busy[slot] = false
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-
-    /// Set for live bars; nil when panels are supplied directly.
+    /// Set for live bars; nil when panels are supplied directly.  Set once on
+    /// main before the surface first draws.
     var feed: RtaMetalBarFeed?
 
-    func draw(in view: MTKView) {
-        precondition(Thread.isMainThread)
-        guard active, view.bounds.width > 0, view.bounds.height > 0 else { return }
-        if let fresh = feed?.panelsIfChanged() { update(fresh) }
-        guard let slot = acquireSlot() else { return }
-        guard let descriptor = view.currentRenderPassDescriptor,
-              let drawable = view.currentDrawable,
-              let command = resources.queue.makeCommandBuffer(),
+    func surfaceHasChanges(_ surface: RtaMetalSurface) -> Bool {
+        pendingLock.lock(); let fixed = pending != nil; pendingLock.unlock()
+        return fixed || feed?.hasChanges() == true
+    }
+
+    func draw(in surface: RtaMetalSurface, drawable: CAMetalDrawable, size: CGSize, scale: CGFloat) {
+        pendingLock.lock(); let fixed = pending; pending = nil; pendingLock.unlock()
+        if let fixed { adopt(fixed) }
+        if let fresh = feed?.panelsIfChanged() { adopt(fresh) }
+        guard let slot = acquireSlot() else { surface.requestRedraw(); return }
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = drawable.texture
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard let command = resources.queue.makeCommandBuffer(),
               let encoder = command.makeRenderCommandEncoder(descriptor: descriptor) else {
             releaseSlot(slot)
             return
@@ -325,7 +291,7 @@ final class RtaMetalBarRenderer: NSObject, MTKViewDelegate {
             Self.writeInstances(panel: panel, levels: avg, peaks: peaks,
                                 into: instances, count: &count, capacity: Self.capacity)
         }
-        var viewport = SIMD2<Float>(Float(view.bounds.width), Float(view.bounds.height))
+        var viewport = SIMD2<Float>(Float(size.width), Float(size.height))
         encoder.setRenderPipelineState(resources.pipeline)
         encoder.setVertexBuffer(buffer, offset: 0, index: 0)
         encoder.setFragmentBuffer(buffer, offset: 0, index: 0)

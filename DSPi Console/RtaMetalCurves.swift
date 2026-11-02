@@ -22,40 +22,61 @@ struct RtaMetalCurveSource: Equatable {
     let opacity: Double
 }
 
-/// Resolves a source into a panel against the engine's latest snapshot, and
-/// only when the engine reports the picture changed.  Main thread only.
+/// Resolves a source into a panel against the engine's render state, and only
+/// when the engine reports the picture changed.  The source arrives from
+/// SwiftUI on main; panels are resolved on the render thread.
 final class RtaMetalCurveFeed {
     private weak var engine: RtaEngine?
+    private let lock = NSLock()
     private var source: RtaMetalCurveSource?
+    private var sourceChanged = true
+    // Render thread only.
     private var resolvedVersion: UInt64?
 
     init(engine: RtaEngine) { self.engine = engine }
 
-    var animating: Bool { (source?.smoothing ?? 0) > 0 }
+    var animating: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (source?.smoothing ?? 0) > 0
+    }
 
     func setSource(_ new: RtaMetalCurveSource) {
+        lock.lock(); defer { lock.unlock() }
         guard new != source else { return }
         source = new
-        resolvedVersion = nil
+        sourceChanged = true
+    }
+
+    /// Whether `panelIfChanged` would return a panel.  Render thread.
+    func hasChanges() -> Bool {
+        guard let engine else { return false }
+        lock.lock(); let changed = sourceChanged && source != nil; lock.unlock()
+        return changed || engine.renderVersion != resolvedVersion
     }
 
     /// A new panel, or nil when nothing has changed since the last call.
+    /// Render thread.
     func panelIfChanged() -> RtaMetalCurvePanel? {
-        guard let engine, let source else { return nil }
-        let version = engine.frameFeed.version
-        guard version != resolvedVersion else { return nil }
-        resolvedVersion = version
-        let snapshot = engine.snapshot
-        let bins = source.wantsBins && snapshot.tap == source.tap ? snapshot.bins : nil
+        guard let engine else { return nil }
+        lock.lock()
+        let source = self.source
+        let changed = sourceChanged
+        sourceChanged = false
+        lock.unlock()
+        guard let source else { return nil }
+        let state = engine.renderState
+        guard changed || state.version != resolvedVersion else { return nil }
+        resolvedVersion = state.version
+        let bins = source.wantsBins && state.snapshot.tap == source.tap ? state.snapshot.bins : nil
         return RtaMetalCurvePanel(
-            tap: source.tap, configuration: RtaDisplayConfiguration(engine: engine),
+            tap: source.tap, configuration: state.configuration,
             channels: source.channels.map {
                 RtaMetalCurveChannel(channel: $0.channel, color: $0.color,
-                                     bands: engine.frame(channel: $0.channel, tap: source.tap), bins: bins)
+                                     bands: state.frame(channel: $0.channel, tap: source.tap), bins: bins)
             },
             minFreq: source.minFreq, maxFreq: source.maxFreq, scale: source.scale,
-            fallTau: rtaFallTau(engine, source.smoothing), showPeak: source.showPeak,
-            glow: source.glow, opacity: source.opacity)
+            fallTau: rtaFallTau(refreshInterval: state.refreshInterval, amount: source.smoothing),
+            showPeak: source.showPeak, glow: source.glow, opacity: source.opacity)
     }
 }
 
@@ -66,8 +87,8 @@ struct RtaMetalCurveChannel {
     let bins: RtaBinFrame?
 }
 
-/// Immutable measurement inputs arrive at USB cadence. MetalKit owns the draw
-/// loop; interpolation no longer causes a SwiftUI update or builds a Path.
+/// Immutable measurement inputs arrive at USB cadence. The render thread owns
+/// the draw loop; interpolation never causes a SwiftUI update or builds a Path.
 struct RtaMetalCurvePanel {
     let tap: UInt8
     let configuration: RtaDisplayConfiguration
@@ -143,96 +164,37 @@ struct RtaMetalCurves: NSViewRepresentable {
 
 /// Same lifecycle as the bar surface, including on-demand redraw with smoothing
 /// off and stopping immediately when detached, hidden, minimised or occluded.
-final class RtaMetalCurveView: MTKView {
+final class RtaMetalCurveView: RtaMetalSurface {
     private var renderer: RtaMetalCurveRenderer?
-    private var requestedActive = true
-    private var animating = false
-    private var observers: [NSObjectProtocol] = []
     private var feed: RtaMetalCurveFeed?
-    private var feedChanges: AnyCancellable?
 
     init() {
         let resources = RtaMetalCurveResources.shared
-        super.init(frame: .zero, device: resources?.device)
-        colorPixelFormat = .bgra8Unorm
-        clearColor = MTLClearColorMake(0, 0, 0, 0)
-        framebufferOnly = true
-        preferredFramesPerSecond = 60
-        isPaused = true
-        enableSetNeedsDisplay = true
-        wantsLayer = true
-        layer?.isOpaque = false
-        (layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        super.init(device: resources?.device)
         if let resources { renderer = RtaMetalCurveRenderer(resources: resources) }
         delegate = renderer
     }
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override var isOpaque: Bool { false }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// A fixed panel, for tests and benchmarks.
     func update(panel: RtaMetalCurvePanel, active: Bool) {
         renderer?.update(panel)
-        requestedActive = active
         animating = panel.fallTau > 0
-        updateVisibility()
-        needsDisplay = true
+        setActive(active)
+        requestRedraw()
     }
 
-    /// Live curves: the draw loop resolves `source` against the engine's frames.
+    /// Live curves: the render thread resolves `source` against the engine.
     func update(source: RtaMetalCurveSource, engine: RtaEngine, active: Bool) {
         if feed == nil {
             let feed = RtaMetalCurveFeed(engine: engine)
             self.feed = feed
             renderer?.feed = feed
-            // Smoothing keeps the loop running; without it nothing draws until
-            // asked, so ask whenever the picture changes.
-            feedChanges = engine.frameFeed.$version.sink { [weak self] _ in
-                guard let self, !self.animating else { return }
-                self.needsDisplay = true
-            }
         }
         feed?.setSource(source)
-        requestedActive = active
         animating = feed?.animating ?? false
-        updateVisibility()
-        needsDisplay = true
+        setActive(active)
     }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        removeObservers()
-        if let window {
-            for name in [NSWindow.didChangeOcclusionStateNotification,
-                         NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification] {
-                observers.append(NotificationCenter.default.addObserver(
-                    forName: name, object: window, queue: .main) { [weak self] _ in self?.updateVisibility() })
-            }
-        }
-        updateVisibility()
-    }
-    override func viewDidHide() { super.viewDidHide(); updateVisibility() }
-    override func viewDidUnhide() { super.viewDidUnhide(); updateVisibility() }
-    private func updateVisibility() {
-        let visible = requestedActive && window?.occlusionState.contains(.visible) == true
-            && window?.isMiniaturized == false && !isHiddenOrHasHiddenAncestor
-        renderer?.active = visible
-        if enableSetNeedsDisplay != !animating { enableSetNeedsDisplay = !animating }
-        if isPaused != (!visible || !animating) { isPaused = !visible || !animating }
-        if visible { needsDisplay = true }
-    }
-    private func removeObservers() {
-        observers.forEach(NotificationCenter.default.removeObserver)
-        observers.removeAll()
-    }
-    func stop() {
-        requestedActive = false
-        isPaused = true
-        renderer?.active = false
-        removeObservers()
-        feedChanges = nil
-        delegate = nil
-    }
-    deinit { removeObservers() }
 }
 
 /// Flatten exactly the same clamped cubic Beziers as smoothPath, within a
@@ -328,9 +290,13 @@ enum RtaCurveGeometry {
     }
 }
 
-final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
+final class RtaMetalCurveRenderer: NSObject, RtaMetalSurfaceDelegate {
     private let resources: RtaMetalCurveResources
+    // Render thread only, apart from tests and benchmarks driving `encode`.
     private var panel: RtaMetalCurvePanel?
+    /// A fixed panel handed over from main, adopted at the next encode.
+    private let pendingLock = NSLock()
+    private var pending: RtaMetalCurvePanel?
     private var filters: [Int: RtaCurveSmoothing] = [:]
     private var lastWidth: CGFloat = 0
     private var slots: [MTLBuffer?] = [nil, nil, nil]
@@ -340,12 +306,15 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
     private var glowResult: MTLTexture?
     private var blur: MPSImageGaussianBlur?
     private var blurScale: CGFloat = 0
-    var active = true
 
     init(resources: RtaMetalCurveResources) { self.resources = resources; super.init() }
 
+    /// A fixed panel, for tests and benchmarks.  Any thread.
     func update(_ panel: RtaMetalCurvePanel) {
-        precondition(Thread.isMainThread)
+        pendingLock.lock(); pending = panel; pendingLock.unlock()
+    }
+
+    private func adopt(_ panel: RtaMetalCurvePanel) {
         if self.panel?.configuration != panel.configuration || self.panel?.minFreq != panel.minFreq
             || self.panel?.maxFreq != panel.maxFreq { filters.removeAll() }
         let channels = Set(panel.channels.map(\.channel))
@@ -362,19 +331,25 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
         slotLock.lock(); defer { slotLock.unlock() }
         busy[i] = false
     }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-    /// Set for live curves; nil when a panel is supplied directly.
+    /// Set for live curves; nil when a panel is supplied directly.  Set once
+    /// on main before the surface first draws.
     var feed: RtaMetalCurveFeed?
 
-    func draw(in view: MTKView) {
-        precondition(Thread.isMainThread)
-        guard active, view.bounds.width > 4, view.bounds.height > 4 else { return }
-        if let fresh = feed?.panelIfChanged() { update(fresh) }
-        guard let drawable = view.currentDrawable,
-              let command = resources.queue.makeCommandBuffer() else { return }
-        let scale = CGFloat(drawable.texture.width) / view.bounds.width
-        guard encode(command: command, target: drawable.texture, size: view.bounds.size, backingScale: scale,
-                     now: Date(timeIntervalSinceReferenceDate: CACurrentMediaTime())) else { return }
+    func surfaceHasChanges(_ surface: RtaMetalSurface) -> Bool {
+        pendingLock.lock(); let fixed = pending != nil; pendingLock.unlock()
+        return fixed || feed?.hasChanges() == true
+    }
+
+    func draw(in surface: RtaMetalSurface, drawable: CAMetalDrawable, size: CGSize, scale: CGFloat) {
+        guard size.width > 4, size.height > 4 else { return }
+        if let fresh = feed?.panelIfChanged() { pendingLock.lock(); pending = fresh; pendingLock.unlock() }
+        guard let command = resources.queue.makeCommandBuffer() else { return }
+        let scale = CGFloat(drawable.texture.width) / size.width
+        guard encode(command: command, target: drawable.texture, size: size, backingScale: scale,
+                     now: Date(timeIntervalSinceReferenceDate: CACurrentMediaTime())) else {
+            surface.requestRedraw()
+            return
+        }
         #if RTA_CURVE_BENCHMARK
         RtaCurveBenchmarkMetrics.frame()
         command.addCompletedHandler { RtaCurveBenchmarkMetrics.gpu($0.gpuEndTime - $0.gpuStartTime) }
@@ -395,7 +370,8 @@ final class RtaMetalCurveRenderer: NSObject, MTKViewDelegate {
     /// command after a successful encode. In-flight CPU buffers are never reused.
     func encode(command: MTLCommandBuffer, target: MTLTexture, size: CGSize,
                 backingScale: CGFloat, now: Date) -> Bool {
-        precondition(Thread.isMainThread)
+        pendingLock.lock(); let fixed = pending; pending = nil; pendingLock.unlock()
+        if let fixed { adopt(fixed) }
         guard size.width > 4, size.height > 4, let panel, let slot = acquireSlot() else { return false }
         var submitted = false
         defer { if !submitted { releaseSlot(slot) } }

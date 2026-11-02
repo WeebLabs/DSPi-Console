@@ -593,12 +593,15 @@ extension RtaEngine {
     /// is the interval the displays interpolate across, so their smoothing
     /// tracks the size and the selection rather than being a fixed guess.
     var channelRefreshInterval: TimeInterval {
-        let s = snapshot.status
+        Self.channelRefreshInterval(status: snapshot.status, fftOrder: options.fftOrder)
+    }
+
+    static func channelRefreshInterval(status s: RtaStatus, fftOrder: UInt8) -> TimeInterval {
         if s.framesPerSecond > 0 {
             return Double(max(Int(s.liveCount), 1)) / Double(s.framesPerSecond)
         }
         let rate = s.sampleRateHz > 0 ? Double(s.sampleRateHz) : 48000
-        let points = Double(1 << Int(options.fftOrder))
+        let points = Double(1 << Int(fftOrder))
         return points / rate * Double(max(Int(s.liveCount), 1))
     }
 }
