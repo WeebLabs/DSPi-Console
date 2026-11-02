@@ -8639,23 +8639,29 @@ struct HardwareSettingsTab: View {
         }
         .onAppear {
             if vm.isDeviceConnected {
-                for output in visiblePinOutputs {
-                    vm.fetchOutputPin(output: output.id)
-                }
-                for slot in 0..<vm.numOutputSlots {
-                    vm.fetchOutputSlotType(slot: slot)
-                }
-                vm.fetchI2SBckPin()
-                vm.fetchI2SClockPinMode()
-                vm.fetchMckEnable()
-                vm.fetchMckPin()
-                vm.fetchMckMultiplier()
-                vm.fetchSampleRate()
-                if vm.inputSourceSupported {
-                    vm.fetchSpdifInputConfig()
-                    vm.fetchI2SInputConfig()
-                }
+                // Each read blocks until its transfer completes (up to a second
+                // over Link), so keep them off main or the window - and every
+                // MTKView sharing the main thread - stalls while the page opens.
+                let pinOutputs = visiblePinOutputs.map(\.id)
+                let slotCount = vm.numOutputSlots
+                let inputSourceSupported = vm.inputSourceSupported
                 DispatchQueue.global(qos: .userInitiated).async {
+                    for output in pinOutputs {
+                        vm.fetchOutputPin(output: output)
+                    }
+                    for slot in 0..<slotCount {
+                        vm.fetchOutputSlotType(slot: slot)
+                    }
+                    vm.fetchI2SBckPin()
+                    vm.fetchI2SClockPinMode()
+                    vm.fetchMckEnable()
+                    vm.fetchMckPin()
+                    vm.fetchMckMultiplier()
+                    vm.fetchSampleRate()
+                    if inputSourceSupported {
+                        vm.fetchSpdifInputConfig()
+                        vm.fetchI2SInputConfig()
+                    }
                     vm.fetchAdatConfig()
                     vm.fetchAdatInputConfig()
                 }
