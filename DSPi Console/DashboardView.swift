@@ -111,7 +111,7 @@ struct StereoDashboardCard: View {
                     Text(vm.channelNames[left.rawValue]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     if showDelay {
-                        Text("Delay: \(vm.channelDelays[left.rawValue] ?? 0.0, specifier: "%.0f")ms")
+                        Text("Delay: \(vm.channelDelays[left.rawValue] ?? 0.0, specifier: "%.2f")ms")
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
@@ -128,7 +128,7 @@ struct StereoDashboardCard: View {
                     Text(vm.channelNames[right.rawValue]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
                     if showDelay {
-                        Text("Delay: \(vm.channelDelays[right.rawValue] ?? 0.0, specifier: "%.0f")ms")
+                        Text("Delay: \(vm.channelDelays[right.rawValue] ?? 0.0, specifier: "%.2f")ms")
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
@@ -197,7 +197,7 @@ struct MonoDashboardCard: View {
                 Circle().fill(channel.color).frame(width: 6, height: 6)
                 Text(vm.channelNames[channel.rawValue]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
-                Text("Delay: \(vm.channelDelays[channel.rawValue] ?? 0.0, specifier: "%.0f")ms")
+                Text("Delay: \(vm.channelDelays[channel.rawValue] ?? 0.0, specifier: "%.2f")ms")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(.secondary)
             }
@@ -244,7 +244,7 @@ struct StereoOutputDashboardCard: View {
                     Circle().fill(left.color).frame(width: 6, height: 6)
                     Text(vm.channelNames[leftEqCh]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
-                    Text("Delay: \(vm.outputDelayMS[leftIndex], specifier: "%.0f")ms")
+                    Text("Delay: \(vm.outputDelayMS[leftIndex], specifier: "%.2f")ms")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
@@ -258,7 +258,7 @@ struct StereoOutputDashboardCard: View {
                     Circle().fill(right.color).frame(width: 6, height: 6)
                     Text(vm.channelNames[rightEqCh]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                     Spacer()
-                    Text("Delay: \(vm.outputDelayMS[rightIndex], specifier: "%.0f")ms")
+                    Text("Delay: \(vm.outputDelayMS[rightIndex], specifier: "%.2f")ms")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
@@ -332,7 +332,7 @@ struct OutputDashboardCard: View {
                 Circle().fill(output.color).frame(width: 6, height: 6)
                 Text(vm.channelNames[eqChannel]).font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
                 Spacer()
-                Text("Delay: \(vm.outputDelayMS[outputIndex], specifier: "%.0f")ms")
+                Text("Delay: \(vm.outputDelayMS[outputIndex], specifier: "%.2f")ms")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(.secondary)
             }
