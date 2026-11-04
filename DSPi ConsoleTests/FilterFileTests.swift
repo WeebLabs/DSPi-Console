@@ -168,6 +168,33 @@ final class FilterFileTests: XCTestCase {
         XCTAssertEqual(parsed?.params.q ?? 0, 4.0, accuracy: 0.01)
     }
 
+    func testParsesUnnumberedMSOFilters() throws {
+        let cases: [(String, FilterType, Float, Float, Float)] = [
+            ("ON PK Fc 26.07 Hz Gain -5.92 dB Q 10.0000", .peaking, 26.07, -5.92, 10),
+            ("ON LPQ Fc 120.00 Hz Q 0.7071", .lowPass, 120, 0, 0.7071),
+            ("ON AP Fc 181.27 Hz Q 0.5632", .allPass, 181.27, 0, 0.5632),
+        ]
+        for (payload, type, freq, gain, q) in cases {
+            for prefix in ["Filter: ", "Filter 1: ", "  filter\t:\t", "Filter:"] {
+                let parsed = try XCTUnwrap(FilterFile.parse(line: prefix + payload))
+                XCTAssertEqual(parsed.bank, .peq)
+                XCTAssertTrue(parsed.enabled)
+                XCTAssertEqual(parsed.params.type, type)
+                XCTAssertEqual(parsed.params.freq, freq, accuracy: 0.001)
+                XCTAssertEqual(parsed.params.gain, gain, accuracy: 0.001)
+                XCTAssertEqual(parsed.params.q, q, accuracy: 0.00001)
+            }
+        }
+        XCTAssertEqual(FilterFile.parse(line: "Filter: OFF")?.enabled, false)
+    }
+
+    func testUnnumberedSupportStillRejectsInvalidHeaders() {
+        for header in ["Filters:", "Filter Settings:", "Filter abc:", "Filter 1x:",
+                       "Xover:", "Crossover:"] {
+            XCTAssertNil(FilterFile.parse(line: header + " ON PK Fc 100 Hz Gain -3 dB Q 1"))
+        }
+    }
+
     func testParsesTypeAliases() {
         XCTAssertEqual(FilterType(fileCode: "PEQ"), .peaking)
         XCTAssertEqual(FilterType(fileCode: "lpq"), .lowPass)
@@ -194,7 +221,7 @@ final class FilterFileTests: XCTestCase {
         XCTAssertNil(FilterFile.parse(line: "# DSPi Console Filter Settings"))
         XCTAssertNil(FilterFile.parse(line: "[Output 0: SPDIF 1 L (Enabled)]"))
         XCTAssertNil(FilterFile.parse(line: "Filter Settings file"))
-        // "Filter…:" prose without a band index is not a filter entry.
+        // A plural keyword is not a filter entry.
         XCTAssertNil(FilterFile.parse(line: "Filters: 5"))
     }
 
