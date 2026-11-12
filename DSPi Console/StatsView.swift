@@ -253,6 +253,9 @@ class StatsViewModel: ObservableObject {
     // Device identification (fetched once on connect)
     @Published var serialNumber: String = "-"
     @Published var platformName: String = "-"
+    /// Board name when the firmware reports one (REQ_GET_PLATFORM byte 7); shown instead of the
+    /// chip name in Device Information. platformName still drives feature gating.
+    @Published var boardName: String = ""
     @Published var firmwareVersion: String = "-"
     @Published var outputCount: Int = 0
 
@@ -697,9 +700,11 @@ class StatsViewModel: ObservableObject {
 
         // REQ_GET_PLATFORM (0x7F): decoded, short replies included, by
         // FirmwareVersion.fromPlatformReply, the same as fetchPlatform().
-        if let data = transport.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+        // 8 bytes, for the optional board byte; firmware without it answers short, which is fine.
+        if let data = transport.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 8),
            let reply = FirmwareVersion.fromPlatformReply([UInt8](data)) {
             let outputs = Int(data[data.startIndex + 3])
+            let board = FirmwareVersion.boardName(fromPlatformReply: [UInt8](data)) ?? ""
 
             let platformStr: String
             switch reply.platform {
@@ -711,6 +716,7 @@ class StatsViewModel: ObservableObject {
 
             DispatchQueue.main.async {
                 self.platformName = platformStr
+                self.boardName = board
                 self.firmwareVersion = versionStr
                 self.outputCount = outputs
             }
@@ -920,7 +926,7 @@ struct StatsView: View {
             sectionLabel("DEVICE INFORMATION")
 
             VStack(alignment: .leading, spacing: 6) {
-                SystemInfoRow(title: "Platform", value: vm.platformName)
+                SystemInfoRow(title: "Platform", value: vm.boardName.isEmpty ? vm.platformName : vm.boardName)
                 SystemInfoRow(title: "Firmware", value: vm.firmwareVersion)
                 SystemInfoRow(title: "Serial", value: vm.serialNumber)
                 SystemInfoRow(title: "Reconnects", value: "\(vm.reconnectCount)")

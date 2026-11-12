@@ -566,6 +566,9 @@ let REQ_GET_OUTPUT_PIN: UInt8      = 0x7D
 // Device identification request codes
 let REQ_GET_SERIAL: UInt8          = 0x7E
 let REQ_GET_PLATFORM: UInt8        = 0x7F
+/// Optional eighth byte of the REQ_GET_PLATFORM reply: the board, for display only. Byte 0 stays the
+/// code base the firmware was built from (a Pi Zero 2 W runs the RP2350 build), and features gate on that.
+let BOARD_ID_PI_ZERO_2W: UInt8      = 1
 
 // I2S output configuration request codes
 let REQ_SET_OUTPUT_TYPE: UInt8     = 0xC0

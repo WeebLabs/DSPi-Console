@@ -111,6 +111,16 @@ extension FirmwareVersion {
         return (bytes[0], FirmwareVersion(major, minor, patch, beta))
     }
 
+    /// The board named by the optional eighth byte of a REQ_GET_PLATFORM reply, for display only.
+    /// nil when the firmware does not send it (every RP2040 and RP2350 build) or the ID is unknown.
+    static func boardName(fromPlatformReply bytes: [UInt8]) -> String? {
+        guard bytes.count >= 8 else { return nil }
+        switch bytes[7] {
+        case BOARD_ID_PI_ZERO_2W: return "Raspberry Pi Zero 2 W"
+        default:                  return nil
+        }
+    }
+
     /// The firmware version this Console build expects a device to be running,
     /// read from `CFBundleShortVersionString` (driven by `MARKETING_VERSION`).
     ///
