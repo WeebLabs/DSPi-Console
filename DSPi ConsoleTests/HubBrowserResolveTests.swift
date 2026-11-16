@@ -203,6 +203,7 @@ final class HubBrowserResolveTests: XCTestCase {
         let browser = make(resolver)
         browser.usesSystemBrowser = false
         browser.refreshInterval = 1000      // tests restart on demand
+        browser.earlyRefreshDelays = []
         browser.refreshGap = 0.02
         browser.refreshSettle = 0.3
         return browser
@@ -219,6 +220,22 @@ final class HubBrowserResolveTests: XCTestCase {
         let starts = browser.browserStarts
         settle(); settle(); settle()
         XCTAssertEqual(browser.browserStarts, starts, "no restarts after stop")
+    }
+
+    /// Soon after starting, the search restarts on the early schedule, then
+    /// settles to the steady interval.  A later start runs the early ones again.
+    func testEarlyRestartsRunOnceThenTheSteadyIntervalTakesOver() {
+        let browser = makeSearching(FakeResolver())
+        browser.earlyRefreshDelays = [0.05, 0.05]
+        browser.start()
+        waitUntil { browser.browserStarts == 3 }     // the start plus two early restarts
+        settle(); settle(); settle()
+        XCTAssertEqual(browser.browserStarts, 3, "the steady interval (1000 s) is next")
+
+        browser.stop()
+        browser.start()
+        waitUntil { browser.browserStarts == 6 }
+        browser.stop()
     }
 
     /// A hub the old browser never reported is listed as soon as the restarted

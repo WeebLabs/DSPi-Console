@@ -105,6 +105,12 @@ final class HubBrowser: ObservableObject {
     /// unlisted for hours until the user turned the search off and on.  A
     /// restart is what that toggle did: a new browse queries at once.
     var refreshInterval: TimeInterval = 30
+    /// Extra restarts soon after the search starts, each delay counted from
+    /// the previous restart: at 5, 10 and 20 s, then every `refreshInterval`.
+    /// A hub that missed the first burst of queries (a bridge still booting,
+    /// an ESP32 dropping multicast) then appears within seconds of launch.
+    var earlyRefreshDelays: [TimeInterval] = [5, 5, 10]
+    private var pendingEarlyDelays: [TimeInterval] = []
     /// Gap between cancelling the old browser and starting the new one.  A
     /// browse started while the old one is still registered joins it as a
     /// duplicate and inherits its backed-off schedule instead of querying.
@@ -151,6 +157,7 @@ final class HubBrowser: ObservableObject {
 
     func start() {
         wantBrowsing = true
+        pendingEarlyDelays = earlyRefreshDelays
         startBrowser()
         scheduleRefresh()
     }
@@ -238,7 +245,8 @@ final class HubBrowser: ObservableObject {
             self.refresh()
         }
         refreshWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + refreshInterval, execute: work)
+        let delay = pendingEarlyDelays.isEmpty ? refreshInterval : pendingEarlyDelays.removeFirst()
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Restart the search without forgetting what it has found: cancel the
