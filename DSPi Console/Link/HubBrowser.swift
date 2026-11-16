@@ -11,6 +11,7 @@ import Foundation
 import Network
 import Combine
 import dnssd
+import os
 
 /// A hub as discovered or entered, before connecting to it.
 struct DiscoveredHub: Identifiable, Equatable {
@@ -97,6 +98,43 @@ final class HubBrowser: ObservableObject {
     /// How long a dead browser waits before it is rebuilt.
     var browserRestartDelay: TimeInterval = 1
 
+    /// How often a running search is restarted.  A long-lived Bonjour browse
+    /// re-queries ever more rarely (mDNSResponder backs off to once an hour),
+    /// so a hub whose announcement was lost, or that was dropped after a
+    /// missed query (an ESP32 on Wi-Fi misses multicast often), stayed
+    /// unlisted for hours until the user turned the search off and on.  A
+    /// restart is what that toggle did: a new browse queries at once.
+    var refreshInterval: TimeInterval = 30
+    /// Gap between cancelling the old browser and starting the new one.  A
+    /// browse started while the old one is still registered joins it as a
+    /// duplicate and inherits its backed-off schedule instead of querying.
+    var refreshGap: TimeInterval = 1
+    /// How long after a restart the new browser's results only add hubs.  Its
+    /// first snapshot can be partial; absence counts only once it settles.
+    var refreshSettle: TimeInterval = 5
+    private var refreshWork: DispatchWorkItem?
+    /// Bumped by every restart and by stop(), so a restart's delayed steps
+    /// know whether they are still the current one.
+    private var refreshGeneration = 0
+    /// Names the restarted browser has reported, while its settle window is
+    /// open; nil outside the window.
+    private var seenSinceRefresh: Set<String>?
+    private var resultsSinceRefresh = false
+    private var browserReady = false
+    /// Browsers started so far; lets a test see the restarts.
+    private(set) var browserStarts = 0
+
+    /// Resolve failures in a row before mDNSResponder is asked to reconfirm
+    /// the hub's record.  One missed query is no evidence the hub is gone,
+    /// and a reconfirm that also goes unanswered removes it from the browse.
+    nonisolated static let reconfirmAfterFailures = 3
+
+    /// False in tests: start and restart only count, and results are fed by
+    /// hand through `ingest`, so no real hub on the test machine's network
+    /// leaks in.
+    var usesSystemBrowser = true
+    private static let log = Logger(subsystem: "WeebLabs.DSPi-Console", category: "link")
+
     init(ownHubID: String? = nil,
          fetchInfo: @escaping (URL, @escaping (Data?) -> Void) -> Void = HubBrowser.fetchOverHTTP,
          resolver: @escaping Resolver = HubBrowser.resolveOverTCP) {
@@ -114,10 +152,14 @@ final class HubBrowser: ObservableObject {
     func start() {
         wantBrowsing = true
         startBrowser()
+        scheduleRefresh()
     }
 
     private func startBrowser() {
         guard browser == nil else { return }
+        browserReady = false
+        browserStarts += 1
+        guard usesSystemBrowser else { return }
         let params = NWParameters()
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: LinkDiscovery.serviceType, domain: nil),
@@ -147,12 +189,17 @@ final class HubBrowser: ObservableObject {
     private func browserStateChanged(_ state: NWBrowser.State) {
         switch state {
         case .ready:
+            browserReady = true
             isBrowsing = true
             browseError = nil
         case .waiting(let error):
+            Self.log.notice("hub browser waiting: \(error.localizedDescription, privacy: .public)")
+            browserReady = false
             isBrowsing = false
             browseError = Self.describe(error)
         case .failed(let error):
+            Self.log.notice("hub browser failed, rebuilding: \(error.localizedDescription, privacy: .public)")
+            browserReady = false
             isBrowsing = false
             browseError = Self.describe(error)
             browser?.cancel()
@@ -183,11 +230,61 @@ final class HubBrowser: ObservableObject {
         return "Could not look for hubs: \(error.localizedDescription)"
     }
 
+    private func scheduleRefresh() {
+        refreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.wantBrowsing else { return }
+            self.refreshWork = nil
+            self.refresh()
+        }
+        refreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + refreshInterval, execute: work)
+    }
+
+    /// Restart the search without forgetting what it has found: cancel the
+    /// browser, start a new one after `refreshGap`, and let the new one's
+    /// results only add hubs until `refreshSettle` has passed.  Internal so a
+    /// test can run one on demand.
+    func refresh() {
+        guard wantBrowsing else { return }
+        Self.log.debug("hub browser: restarting the search")
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        restartWork?.cancel(); restartWork = nil
+        browser?.cancel()
+        browser = nil
+        seenSinceRefresh = []
+        resultsSinceRefresh = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + refreshGap) { [weak self] in
+            guard let self = self, self.wantBrowsing, self.refreshGeneration == generation else { return }
+            self.startBrowser()
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.refreshSettle) { [weak self] in
+                guard let self = self, self.refreshGeneration == generation else { return }
+                self.endRefreshWindow()
+            }
+        }
+        scheduleRefresh()
+    }
+
+    /// The restarted browser has had its chance to report: drop what it did
+    /// not.  A browser that neither reported nor became ready (still waiting,
+    /// or failed and rebuilding) is no evidence, so nothing is dropped then.
+    private func endRefreshWindow() {
+        guard let seen = seenSinceRefresh else { return }
+        seenSinceRefresh = nil
+        guard resultsSinceRefresh || browserReady else { return }
+        for name in browsed.keys where !seen.contains(name) { forget(name) }
+        publish()
+    }
+
     /// Stop browsing and forget every browsed hub, so the next start resolves
     /// each one afresh.  Manual entries stay.
     func stop() {
         wantBrowsing = false
         restartWork?.cancel(); restartWork = nil
+        refreshWork?.cancel(); refreshWork = nil
+        refreshGeneration += 1
+        seenSinceRefresh = nil
         browser?.cancel()
         browser = nil
         resolvers.values.forEach { $0.attempt.cancel() }
@@ -288,15 +385,26 @@ final class HubBrowser: ObservableObject {
     /// an address is already known, since a hub that moved to a new lease
     /// re-announces the same name: the old address stays listed until the
     /// new one arrives.
+    ///
+    /// While a restart's settle window is open, absence removes nothing and a
+    /// hub already resolved is not dialled again: the new browser reports
+    /// every cached service as added, which says nothing about its address.
     func ingest(_ services: [(name: String, txt: NWTXTRecord?, endpoint: NWEndpoint)],
                 changed: Set<String>? = nil) {
+        let settling = seenSinceRefresh != nil
         var seen = Set<String>()
         for (name, txt, endpoint) in services {
             seen.insert(name)
-            guard let txt = txt else { continue }
+            guard let txt = txt else {
+                if browsed[name] == nil { Self.log.notice("hub \(name, privacy: .public) seen without its TXT record yet") }
+                continue
+            }
             var hub = Self.hub(fromTXT: txt, serviceName: name)
             // Left out of `seen`, so the sweep below drops it if it was listed.
             if let own = ownHubID, hub.id.lowercased() == own { seen.remove(name); continue }
+            if browsed[name] == nil {
+                Self.log.notice("hub \(name, privacy: .public) found (kind \(hub.kind, privacy: .public))")
+            }
             // Keep an already resolved host/port; resolve the rest.
             if let known = browsed[name] { hub.host = known.host; hub.port = known.port }
             if hub.host.isEmpty, case let .hostPort(host, port) = endpoint {
@@ -306,13 +414,20 @@ final class HubBrowser: ObservableObject {
             endpoints[name] = endpoint
             // An endpoint that already carries an address has nothing to resolve.
             if case .hostPort = endpoint { continue }
-            if hub.host.isEmpty || changed?.contains(name) ?? true { resolve(name: name) }
+            let announced = changed?.contains(name) ?? true
+            if hub.host.isEmpty || (announced && !settling) { resolve(name: name) }
         }
-        for name in browsed.keys where !seen.contains(name) { forget(name) }
+        if settling {
+            seenSinceRefresh?.formUnion(seen)
+            resultsSinceRefresh = true
+        } else {
+            for name in browsed.keys where !seen.contains(name) { forget(name) }
+        }
         publish()
     }
 
     private func forget(_ name: String) {
+        if browsed[name] != nil { Self.log.notice("hub \(name, privacy: .public) gone from the browse") }
         browsed[name] = nil
         endpoints[name] = nil
         resolvers[name]?.attempt.cancel(); resolvers[name] = nil
@@ -352,7 +467,10 @@ final class HubBrowser: ObservableObject {
         guard let (host, port) = result else {
             let failures = (resolveFailures[name] ?? 0) + 1
             resolveFailures[name] = failures
-            if let endpoint = endpoints[name] { Self.reconfirm(endpoint) }
+            if failures == 1 { Self.log.notice("hub \(name, privacy: .public) did not resolve; retrying") }
+            if failures >= Self.reconfirmAfterFailures, let endpoint = endpoints[name] {
+                Self.reconfirm(endpoint)
+            }
             let delay = min(30, resolveRetryBase * pow(2, Double(failures - 1)))
             let work = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
@@ -365,6 +483,7 @@ final class HubBrowser: ObservableObject {
         }
         resolveFailures[name] = nil
         guard hub.host != host || hub.port != port else { return }
+        Self.log.notice("hub \(name, privacy: .public) at \(host, privacy: .public):\(port)")
         hub.host = host
         hub.port = port
         browsed[name] = hub

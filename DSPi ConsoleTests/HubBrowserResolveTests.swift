@@ -194,4 +194,88 @@ final class HubBrowserResolveTests: XCTestCase {
         resolver.settle(("10.0.0.5", 11915))
         waitUntil { browser.hubs.first?.host == "10.0.0.5" }
     }
+
+    // MARK: - Restarting a running search
+
+    /// A searching browser with no system browse behind it: restarts are
+    /// counted and results are fed by hand.
+    private func makeSearching(_ resolver: FakeResolver) -> HubBrowser {
+        let browser = make(resolver)
+        browser.usesSystemBrowser = false
+        browser.refreshInterval = 1000      // tests restart on demand
+        browser.refreshGap = 0.02
+        browser.refreshSettle = 0.3
+        return browser
+    }
+
+    /// A long-running search left a hub unlisted for hours until the user
+    /// turned it off and on.  It now restarts itself, and stops when told to.
+    func testRunningSearchRestartsItselfUntilStopped() {
+        let browser = makeSearching(FakeResolver())
+        browser.refreshInterval = 0.1
+        browser.start()
+        waitUntil { browser.browserStarts >= 3 }
+        browser.stop()
+        let starts = browser.browserStarts
+        settle(); settle(); settle()
+        XCTAssertEqual(browser.browserStarts, starts, "no restarts after stop")
+    }
+
+    /// A hub the old browser never reported is listed as soon as the restarted
+    /// one sees it, while a listed hub missing from the restarted browser's
+    /// first (possibly partial) snapshot stays until the window settles.
+    func testRestartListsNewHubsAndDropsMissingOnesOnlyOnceSettled() {
+        let resolver = FakeResolver()
+        resolver.answers = [("10.0.0.5", 11915), ("10.0.0.6", 11915)]
+        let browser = makeSearching(resolver)
+        browser.start()
+        browser.ingest([(name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))])
+        waitUntil { browser.hubs.count == 1 }
+
+        // The window opens with refresh() itself.  waitUntil polls about once
+        // a second, longer than the window, so only fixed short waits here.
+        browser.refresh()
+        browser.ingest([(name: "Bridge", txt: txt("hub-2"), endpoint: service("Bridge"))])
+        settle()
+        XCTAssertEqual(browser.hubs.map(\.name), ["Bridge", "Studio"], "Studio kept while the window is open")
+
+        waitUntil { browser.hubs.map(\.name) == ["Bridge"] }
+        XCTAssertEqual(browser.browserStarts, 2)
+        browser.stop()
+    }
+
+    /// The restarted browser reports every cached service as new.  That is no
+    /// reason to dial hubs whose address is known, nor to drop any of them.
+    func testRestartDoesNotResolveKnownHubsAgain() {
+        let resolver = FakeResolver()
+        resolver.answers = [("10.0.0.5", 11915)]
+        let browser = makeSearching(resolver)
+        browser.start()
+        let entry = (name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))
+        browser.ingest([entry])
+        waitUntil { browser.hubs.first?.host == "10.0.0.5" }
+
+        browser.refresh()
+        browser.ingest([entry])                     // changed: nil means "all new"
+        settle(); settle(); settle(); settle()      // past the settle window
+        XCTAssertEqual(resolver.attempts, 1)
+        XCTAssertEqual(browser.hubs.first?.host, "10.0.0.5")
+        browser.stop()
+    }
+
+    /// A restarted browser that reports nothing and never becomes ready (still
+    /// waiting, say) is no evidence that the listed hubs left.
+    func testSilentRestartedBrowserDropsNothing() {
+        let resolver = FakeResolver()
+        resolver.answers = [("10.0.0.5", 11915)]
+        let browser = makeSearching(resolver)
+        browser.start()
+        browser.ingest([(name: "Studio", txt: txt("hub-1"), endpoint: service("Studio"))])
+        waitUntil { browser.hubs.count == 1 }
+
+        browser.refresh()
+        settle(); settle(); settle(); settle()
+        XCTAssertEqual(browser.hubs.map(\.name), ["Studio"])
+        browser.stop()
+    }
 }
