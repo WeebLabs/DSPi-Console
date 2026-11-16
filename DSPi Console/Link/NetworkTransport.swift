@@ -49,6 +49,10 @@ final class NetworkTransport: DeviceTransport {
     /// Called on the main thread when the connection fails, so the owner can
     /// ask the browser whether the hub has moved.
     var onConnectionFailed: (() -> Void)?
+    /// Called on the main thread when the user cancels the pairing prompt,
+    /// after the connection has been dropped, so the owner can put the view
+    /// model back where it was.
+    var onPairingCancelled: (() -> Void)?
 
     /// Called on the main thread with the hub's name when it needs a PIN.
     /// The prompt calls back once, on the main thread, with the PIN or nil to
@@ -221,6 +225,11 @@ final class NetworkTransport: DeviceTransport {
             reconnectWork?.cancel()
             reconnectWork = nil
             client.disconnect()
+            // A hub that asks to pair has refused any token we hold (revoked,
+            // or the hub was reset).  Keeping it would let the composite
+            // auto-select this hub again at once and ask for the PIN again.
+            tokens.removeToken(forHub: hubID)
+            onPairingCancelled?()
             return
         }
         // The hub gives a client 30 s to authenticate; a slower answer finds

@@ -394,6 +394,84 @@ final class CompositeTransportTests: XCTestCase {
         token.cancel()
     }
 
+    // MARK: - Cancelled pairing
+
+    private func pinHub(_ id: String, name: String, serials: [String]) -> DiscoveredHub {
+        DiscoveredHub(id: id, name: name, kind: "console", authMode: "pin",
+                      deviceCount: serials.count, serials: serials, path: "/dspi/v1",
+                      tls: false, host: "10.0.0.2", port: 11915, isManual: false)
+    }
+
+    /// Picking a private device and cancelling its PIN used to leave the
+    /// window on a device nothing could reach.  It goes back to local.
+    func testCancellingPairingReturnsToTheLocalDevice() {
+        let (local, _, _) = makeLocal()
+        let fake = LinkClientFake()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { fake }
+        composite.pairingPrompt = { _, reply in reply(nil) }
+        composite.updateHubs([pinHub("p", name: "Private", serials: ["REMOTE0000REMOTE"])])
+        XCTAssertTrue(composite.isConnected, "on the local board")
+
+        composite.selectDevice(composite.availableDevices.first { $0.isRemote }!)
+        XCTAssertTrue(composite.isRemoteActive)
+        XCTAssertFalse(composite.isConnected)
+
+        fake.setState(.awaitingAuth(needsPairing: true))     // prompts; the user cancels
+        XCTAssertFalse(composite.isRemoteActive, "back on the local transport")
+        XCTAssertTrue(composite.isConnected, "and its board is live again")
+    }
+
+    /// Coming from a device on another hub, a cancel goes back to that one.
+    func testCancellingPairingReturnsToThePreviousRemoteDevice() {
+        let (local, _, _) = makeLocal()
+        let open = LinkClientFake(), locked = LinkClientFake()
+        var clients = [open, locked]
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { clients.removeFirst() }
+        composite.pairingPrompt = { _, reply in reply(nil) }
+        composite.updateHubs([pinHub("a", name: "Kitchen", serials: ["AAAA0000AAAA0000"]),
+                              pinHub("b", name: "Private", serials: ["BBBB0000BBBB0000"])])
+
+        composite.selectDevice(composite.availableDevices.first { $0.serial == "AAAA0000AAAA0000" }!)
+        open.setDevices([LinkDeviceInfo(handle: 1, serial: "AAAA0000AAAA0000", name: "Kitchen DSPi", state: .online)])
+        open.setState(.ready)
+        XCTAssertTrue(composite.isConnected)
+
+        composite.selectDevice(composite.availableDevices.first { $0.serial == "BBBB0000BBBB0000" }!)
+        locked.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(composite.selectedDevice?.serial, "AAAA0000AAAA0000")
+        XCTAssertEqual(composite.selectedDevice?.hub?.hubID, "a")
+        XCTAssertTrue(composite.isConnected)
+    }
+
+    /// A hub that asks again long after it connected (its token revoked) has
+    /// no earlier device to return to; a cancel then drops to local.
+    func testCancellingARepairOfAConnectedHubDropsToLocal() {
+        let (local, _, _) = makeLocal()
+        let fake = LinkClientFake()
+        let tokens = LinkTokenStore(service: "t-\(UUID())")
+        let composite = CompositeTransport(local: local, tokens: tokens, clientName: "T") { fake }
+        var answers: [String?] = ["123456", nil]
+        var prompts = 0
+        composite.pairingPrompt = { _, reply in prompts += 1; reply(answers.removeFirst()) }
+        composite.updateHubs([pinHub("p", name: "Private", serials: ["REMOTE0000REMOTE"])])
+
+        composite.selectDevice(composite.availableDevices.first { $0.isRemote }!)
+        fake.setDevices([LinkDeviceInfo(handle: 2, serial: "REMOTE0000REMOTE", name: nil, state: .online)])
+        fake.setState(.awaitingAuth(needsPairing: true))     // pairs; the fake goes ready
+        XCTAssertTrue(composite.isConnected)
+        XCTAssertTrue(composite.isRemoteActive)
+
+        fake.setState(.awaitingAuth(needsPairing: true))     // asks again later; cancelled
+        XCTAssertEqual(prompts, 2)
+        XCTAssertFalse(composite.isRemoteActive)
+        XCTAssertNil(tokens.token(forHub: "p"), "the refused token is dropped")
+        composite.updateHubs([pinHub("p", name: "Private", serials: ["REMOTE0000REMOTE"])])
+        XCTAssertEqual(prompts, 2, "not auto-selected and asked again")
+        XCTAssertFalse(composite.isRemoteActive)
+    }
+
     // MARK: - Routes
 
     private func routeHub(_ id: String, name: String, kind: String, serials: [String]) -> DiscoveredHub {

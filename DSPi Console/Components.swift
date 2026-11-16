@@ -440,14 +440,30 @@ struct DevicePickerButton: NSViewRepresentable {
         if let font = font { button.font = font }
         (button as? PaddedPopUpButton)?.onRightClick = onRightClick
 
+        // With nothing selected and no local board (only remote devices, none
+        // connected, say after a cancelled pairing), the face says so rather
+        // than showing a device that is not in use.  With a local board,
+        // USBDevice is about to select it, so it is shown as before.
+        let selectedIndex = selected.flatMap { devices.firstIndex(of: $0) }
+        let placeholder = selectedIndex == nil && devices.first?.isRemote == true
+
         // Rebuild only when the menu's shape changes, so the 60 ms polling
         // re-renders do not tear down a menu the user has open.
         let shape = devices.map { d in
             ([titleForDevice(d)] + d.routes.map { $0.routeID + "|" + $0.routeLabel }).joined(separator: "\n")
-        }
+        } + (placeholder ? [Self.placeholderTitle] : [])
         if shape != context.coordinator.shape {
             context.coordinator.shape = shape
             button.menu?.removeAllItems()
+            if placeholder {
+                // No action, so the menu greys it out; it only titles the button.
+                let item = NSMenuItem(title: Self.placeholderTitle, action: nil, keyEquivalent: "")
+                item.tag = Self.placeholderTag
+                button.menu?.addItem(item)
+                let separator = NSMenuItem.separator()
+                separator.tag = Self.separatorTag
+                button.menu?.addItem(separator)
+            }
             for (index, device) in devices.enumerated() {
                 let item = context.coordinator.item(titleForDevice(device), picking: device)
                 item.tag = index
@@ -465,14 +481,15 @@ struct DevicePickerButton: NSViewRepresentable {
             }
         }
 
+        // Items are found by tag, since the placeholder shifts the indices.
         // Checkmarks are set by hand: AppKit's own selection bookkeeping
-        // knows nothing about submenu items.  With nothing selected the first
-        // device is shown, as before.
-        let selectedIndex = selected.flatMap { devices.firstIndex(of: $0) } ?? 0
-        if button.indexOfSelectedItem != selectedIndex, selectedIndex < button.numberOfItems {
-            button.selectItem(at: selectedIndex)
+        // knows nothing about submenu items.  With nothing selected and a
+        // local board present, the first device is shown, as before.
+        let shownTag = placeholder ? Self.placeholderTag : (selectedIndex ?? 0)
+        if button.selectedTag() != shownTag {
+            button.selectItem(withTag: shownTag)
         }
-        for item in button.itemArray {
+        for item in button.itemArray where item.tag >= 0 {
             let isSelected = item.tag == selectedIndex
             item.state = isSelected ? .on : .off
             for routeItem in item.submenu?.items ?? [] {
@@ -482,11 +499,15 @@ struct DevicePickerButton: NSViewRepresentable {
         }
 
         // The face shows the board's name only; say which route is in use.
-        let current = devices.indices.contains(selectedIndex) ? devices[selectedIndex] : nil
+        let current = selectedIndex.map { devices[$0] }
         button.toolTip = current?.hasMultipleRoutes == true
             ? "Reached \(selected?.routeLabel ?? current!.routeLabel)"
             : nil
     }
+
+    static let placeholderTitle = "Select Device"
+    private static let placeholderTag = -1
+    private static let separatorTag = -2
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 

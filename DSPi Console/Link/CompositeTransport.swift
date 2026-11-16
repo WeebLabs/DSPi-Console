@@ -60,6 +60,17 @@ final class CompositeTransport: DeviceTransport {
     /// USBDevice opens, as it would have with no hub on the network.
     private var remoteWasAutoSelected = false
 
+    /// A switch to a remote that has not connected yet, and where it came
+    /// from.  The view model is attached to the remote at once, so cancelling
+    /// its pairing prompt would otherwise leave it on a device nothing can
+    /// reach.  Cleared once the remote connects or anything else is selected.
+    private struct PendingSwitch {
+        let to: NetworkTransport
+        let previous: any DeviceTransport
+        let previousAutoSelected: Bool
+    }
+    private var pendingSwitch: PendingSwitch?
+
     init(local: HubTransport, tokens: LinkTokenStore, clientName: String,
          makeClient: @escaping () -> LinkClientProtocol) {
         self.local = local
@@ -132,11 +143,39 @@ final class CompositeTransport: DeviceTransport {
         transport.pairingPrompt = pairingPrompt
         let hubID = hub.id
         transport.onConnectionFailed = { [weak self] in self?.remoteFailed(hubID) }
+        transport.onPairingCancelled = { [weak self, weak transport] in
+            guard let self = self, let transport = transport else { return }
+            self.pairingCancelled(on: transport)
+        }
         stateLock.lock(); remotes[hub.id] = transport; stateLock.unlock()
         remoteDeviceCancellables[hub.id] = transport.availableDevicesPublisher
             .sink { [weak self] _ in self?.recomputeDevices() }
         transport.connect(to: url)
         return transport
+    }
+
+    /// The user cancelled pairing with the hub the view model is on.  Go back
+    /// to the device it was on before, when that is still reachable;
+    /// otherwise to the local transport, which may have no device: then
+    /// nothing is selected, as before the remote was picked.
+    private func pairingCancelled(on transport: NetworkTransport) {
+        guard active === transport else { return }
+        let pending = pendingSwitch
+        pendingSwitch = nil
+        var back: any DeviceTransport = local
+        var backWasAutoSelected = false
+        if let pending = pending, pending.to === transport {
+            stateLock.lock()
+            let alive = pending.previous === local || remotes.values.contains { $0 === pending.previous }
+            stateLock.unlock()
+            if alive {
+                back = pending.previous
+                backWasAutoSelected = pending.previousAutoSelected
+            }
+        }
+        attach(to: back)
+        remoteWasAutoSelected = back !== local && backWasAutoSelected
+        recomputeDevices()
     }
 
     /// A remote's socket failed.  It reconnects with backoff on its own; here
@@ -299,11 +338,20 @@ final class CompositeTransport: DeviceTransport {
     // MARK: - Switching
 
     private func attach(to transport: any DeviceTransport) {
+        if let pending = pendingSwitch, pending.to !== transport { pendingSwitch = nil }
         activeCancellables.removeAll()
         activeNotifyToken = nil
         active = transport
-        transport.isConnectedPublisher.sink { [weak self] in self?.connectedSubject.send($0) }
-            .store(in: &activeCancellables)
+        let attached = ObjectIdentifier(transport)
+        transport.isConnectedPublisher.sink { [weak self] connected in
+            guard let self = self else { return }
+            // Connected: there is no pairing left to cancel.
+            if connected, let pending = self.pendingSwitch, ObjectIdentifier(pending.to) == attached {
+                self.pendingSwitch = nil
+            }
+            self.connectedSubject.send(connected)
+        }
+        .store(in: &activeCancellables)
         transport.selectedDevicePublisher.sink { [weak self] in self?.selectedSubject.send($0) }
             .store(in: &activeCancellables)
         transport.errorMessagePublisher.sink { [weak self] in self?.errorSubject.send($0) }
@@ -327,12 +375,14 @@ final class CompositeTransport: DeviceTransport {
     /// The user's choice: a remote picked here stays put when a local board
     /// appears.
     func selectDevice(_ device: DSPiDevice) {
+        let wasAutoSelected = remoteWasAutoSelected
         remoteWasAutoSelected = false
-        select(device)
+        select(device, previousAutoSelected: wasAutoSelected)
     }
 
-    private func select(_ device: DSPiDevice) {
+    private func select(_ device: DSPiDevice, previousAutoSelected: Bool = false) {
         guard let ref = device.hub else {
+            pendingSwitch = nil
             if active !== local { attach(to: local) }
             local.selectDevice(device)
             return
@@ -353,6 +403,10 @@ final class CompositeTransport: DeviceTransport {
                 return
             }
             transport = connecting
+        }
+        if active !== transport, !transport.isConnected {
+            pendingSwitch = PendingSwitch(to: transport, previous: active,
+                                          previousAutoSelected: previousAutoSelected)
         }
         transport.bind(serial: device.serial)
         if active !== transport { attach(to: transport) }
