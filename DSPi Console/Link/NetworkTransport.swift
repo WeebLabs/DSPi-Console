@@ -50,11 +50,12 @@ final class NetworkTransport: DeviceTransport {
     /// ask the browser whether the hub has moved.
     var onConnectionFailed: (() -> Void)?
 
-    /// Called on the main thread when the hub needs a PIN.  Returns the PIN
-    /// or nil to give up.  The app installs a modal prompt.
-    var pairingPrompt: ((String) -> String?)?
-    /// True while the prompt is up.  The modal spins the run loop, so a
-    /// reconnect can ask for a PIN again underneath it; that ask waits.
+    /// Called on the main thread with the hub's name when it needs a PIN.
+    /// The prompt calls back once, on the main thread, with the PIN or nil to
+    /// give up.  The app installs a sheet on the main window.
+    var pairingPrompt: ((String, @escaping (String?) -> Void) -> Void)?
+    /// True while the prompt is up.  The connection keeps living underneath
+    /// it, so a reconnect can ask for a PIN again meanwhile; that ask waits.
     private var pairingPromptShowing = false
     /// A PIN typed after the hub's auth deadline closed the socket: sent on
     /// the next connection that asks, instead of prompting again.
@@ -207,8 +208,14 @@ final class NetworkTransport: DeviceTransport {
         }
         guard !pairingPromptShowing else { return }
         pairingPromptShowing = true
-        let pin = prompt(hubName)
-        pairingPromptShowing = false
+        prompt(hubName) { [weak self] pin in
+            guard let self = self else { return }
+            self.pairingPromptShowing = false
+            self.pairingAnswered(pin)
+        }
+    }
+
+    private func pairingAnswered(_ pin: String?) {
         guard let pin = pin else {
             wantConnection = false
             reconnectWork?.cancel()

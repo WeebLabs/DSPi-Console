@@ -50,7 +50,9 @@ class AppState: ObservableObject {
             tokens: LinkTokenStore(),
             clientName: Host.current().localizedName ?? "DSPi Console",
             makeClient: { LinkClient() })
-        composite.pairingPrompt = { hubName in PairingPrompt.ask(hubName: hubName) }
+        composite.pairingPrompt = { hubName, reply in
+            MainActor.assumeIsolated { PairingPrompt.ask(hubName: hubName, reply: reply) }
+        }
         return composite
     }()
 

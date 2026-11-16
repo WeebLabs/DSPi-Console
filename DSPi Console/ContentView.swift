@@ -54,6 +54,7 @@ func availableFilterTypes(vm: DSPViewModel, includeLinkwitz: Bool = true) -> [Fi
 struct ContentView: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var pairing = PairingPromptCenter.shared
     @EnvironmentObject var matrixMixerController: MatrixMixerWindowController
     @EnvironmentObject var loudnessController: LoudnessWindowController
     @EnvironmentObject var crossfeedController: CrossfeedWindowController
@@ -1030,6 +1031,14 @@ struct ContentView: View {
             }
             .padding()
             .frame(width: 280)
+        }
+        // A hub asking for its pairing code.  Dismissing the sheet any other
+        // way than its buttons counts as Cancel, so the hub is always answered.
+        .sheet(item: Binding(get: { pairing.current },
+                             set: { if $0 == nil { pairing.answer(nil) } })) { request in
+            PairingSheet(hubName: request.hubName) { pin in
+                pairing.answer(pin.flatMap { $0.isEmpty ? nil : $0 })
+            }
         }
         .sheet(isPresented: $showPresetRename) {
             VStack(spacing: 16) {

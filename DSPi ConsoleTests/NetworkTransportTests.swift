@@ -181,7 +181,7 @@ final class NetworkTransportTests: XCTestCase {
     func testPairingPromptRunsAndStoresToken() {
         let (t, client, tokens) = make()
         var prompted: String?
-        t.pairingPrompt = { name in prompted = name; return "123456" }
+        t.pairingPrompt = { name, reply in prompted = name; reply("123456") }
         t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
         XCTAssertNil(client.connectCalls.first?.1, "no token yet")
         client.setState(.awaitingAuth(needsPairing: true))
@@ -290,15 +290,15 @@ final class NetworkTransportTests: XCTestCase {
     func testAuthDeadlineDuringThePromptDoesNotOpenASecondPrompt() {
         let (t, client, _) = make()
         var prompts = 0
-        t.pairingPrompt = { _ in
+        t.pairingPrompt = { _, reply in
             prompts += 1
-            // While the user reads the alert the hub's 30 s auth deadline
+            // While the user reads the prompt the hub's 30 s auth deadline
             // closes the socket (4001) and the reconnect asks for a PIN again.
             if prompts == 1 {
                 client.setState(.failed("authentication timed out"))
                 client.setState(.awaitingAuth(needsPairing: true))
             }
-            return "123456"
+            reply("123456")
         }
         t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
         client.setState(.awaitingAuth(needsPairing: true))
@@ -309,10 +309,10 @@ final class NetworkTransportTests: XCTestCase {
     func testPINTypedAfterTheSocketClosedIsSentOnTheNextConnection() {
         let (t, client, _) = make()
         var prompts = 0
-        t.pairingPrompt = { _ in
+        t.pairingPrompt = { _, reply in
             prompts += 1
             client.setState(.failed("authentication timed out"))
-            return "123456"
+            reply("123456")
         }
         t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
         client.setState(.awaitingAuth(needsPairing: true))
@@ -324,9 +324,57 @@ final class NetworkTransportTests: XCTestCase {
         XCTAssertEqual(client.pairCalls, ["123456"])
     }
 
+    /// The prompt is a window sheet now: it answers later, after the run loop
+    /// has moved on.  A reconnect while it is up asks nothing new, and the
+    /// late answer goes to whichever connection is waiting for it.
+    func testALateAnswerFromTheSheetReachesTheWaitingConnection() {
+        let (t, client, _) = make()
+        var prompts = 0
+        var answer: ((String?) -> Void)?
+        t.pairingPrompt = { _, reply in prompts += 1; answer = reply }
+        t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
+        client.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(client.pairCalls, [], "nothing sent while the sheet is up")
+
+        client.setState(.failed("authentication timed out"))
+        client.setState(.awaitingAuth(needsPairing: true))
+        XCTAssertEqual(prompts, 1, "one sheet, not one per reconnect")
+
+        answer?("123456")
+        XCTAssertEqual(client.pairCalls, ["123456"])
+    }
+
+    @MainActor
+    func testPairingRequestsQueueAndEachIsAnsweredOnce() {
+        let center = PairingPromptCenter()
+        var answers: [String: [String?]] = [:]
+        center.present(hubName: "Kitchen") { answers["Kitchen", default: []].append($0) }
+        center.present(hubName: "Bridge") { answers["Bridge", default: []].append($0) }
+        XCTAssertEqual(center.current?.hubName, "Kitchen", "the first request is shown")
+
+        center.answer("123456")
+        center.answer(nil)                  // the sheet's own dismissal afterwards
+        XCTAssertEqual(answers["Kitchen"], ["123456"], "answered once")
+        XCTAssertNil(answers["Bridge"])
+
+        let next = expectation(description: "next request shown")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next.fulfill() }
+        wait(for: [next], timeout: 2)
+        XCTAssertEqual(center.current?.hubName, "Bridge")
+        center.answer(nil)
+        XCTAssertEqual(answers["Bridge"], [nil])
+        XCTAssertNil(center.current)
+    }
+
+    func testOnlyDigitsAreKeptInThePIN() {
+        XCTAssertEqual(PairingPrompt.sanitize(" 48-29 13x9"), "482913")
+        XCTAssertEqual(PairingPrompt.sanitize("١٢٣"), "", "non-ASCII digits are not the hub's")
+    }
+
     func testCancellingPairingThenSelectingTheDeviceAgainReconnects() {
         let (t, client, _) = make()
-        t.pairingPrompt = { _ in nil }
+        t.pairingPrompt = { _, reply in reply(nil) }
         t.connect(to: URL(string: "ws://10.0.0.2:11915/dspi/v1")!)
         t.bind(serial: "AAAA")
         client.setState(.awaitingAuth(needsPairing: true))

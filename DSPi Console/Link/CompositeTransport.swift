@@ -22,7 +22,7 @@ final class CompositeTransport: DeviceTransport {
     private let makeClient: () -> LinkClientProtocol
     /// Asks the user for a hub's pairing code.  nil means pairing cannot be
     /// offered (headless), and connecting to a pin hub without a token fails.
-    var pairingPrompt: ((String) -> String?)?
+    var pairingPrompt: ((String, @escaping (String?) -> Void) -> Void)?
     /// Called on the main thread with a hub id when its connection fails, so
     /// the browser can look the hub's address up again.
     var hubUnreachable: ((String) -> Void)?
