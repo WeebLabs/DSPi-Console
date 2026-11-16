@@ -370,25 +370,18 @@ struct ConnectionStatusIndicator: View {
                 // or a device shown there can never actually be chosen.  It
                 // also stays clickable while the shown device is not
                 // connected, since picking it again is how a retry is asked for.
+                // A single board with a second route (plugged in here and
+                // behind a bridge) has a choice to offer too.
                 let pickable = vm.availableDevices.count > 1
                     || !vm.isDeviceConnected
                     || !(vm.selectedDevice.map { vm.availableDevices.contains($0) } ?? false)
-                BorderlessPopUpButton(
-                    items: vm.availableDevices,
-                    titleForItem: { vm.deviceTitle($0) },
-                    selection: Binding(
-                        get: {
-                            if let selected = vm.selectedDevice,
-                               vm.availableDevices.contains(selected) {
-                                return selected
-                            }
-                            return vm.availableDevices.first ?? DSPiDevice(serial: "", locationID: 0)
-                        },
-                        set: { vm.switchToDevice($0) }
-                    ),
+                    || vm.availableDevices.contains { $0.hasMultipleRoutes }
+                DevicePickerButton(
+                    devices: vm.availableDevices,
+                    selected: vm.selectedDevice,
+                    titleForDevice: { vm.deviceTitle($0) },
                     font: .systemFont(ofSize: NSFont.smallSystemFontSize),
-                    enabled: pickable,
-                    showsHoverBorder: false,
+                    onSelect: { vm.switchToDevice($0) },
                     onRightClick: { vm.transport.reconnect() }
                 )
                 .overlay(alignment: .trailing) {
@@ -415,6 +408,104 @@ struct ConnectionStatusIndicator: View {
                     .truncationMode(.tail)
                     .help(message)
             }
+        }
+    }
+}
+
+/// The device picker.  A board reachable over more than one route gets a
+/// submenu of them ("via USB (Direct)", "via MyESP32 (Bridge)"), so a working
+/// bridge is visible even while the board is also plugged in here.
+/// NSPopUpButton reports no selection for a pick inside a submenu, so every
+/// item carries its own target/action rather than using the button's.
+/// Every pick reaches `onSelect`, including the item already shown: picking
+/// it again is how a retry is asked for.
+struct DevicePickerButton: NSViewRepresentable {
+    let devices: [DSPiDevice]
+    let selected: DSPiDevice?
+    let titleForDevice: (DSPiDevice) -> String
+    var font: NSFont?
+    let onSelect: (DSPiDevice) -> Void
+    var onRightClick: (() -> Void)? = nil
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = PaddedPopUpButton(frame: .zero, pullsDown: false)
+        button.isBordered = false
+        button.showsBorderOnlyWhileMouseInside = false
+        (button.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.parent = self
+        if let font = font { button.font = font }
+        (button as? PaddedPopUpButton)?.onRightClick = onRightClick
+
+        // Rebuild only when the menu's shape changes, so the 60 ms polling
+        // re-renders do not tear down a menu the user has open.
+        let shape = devices.map { d in
+            ([titleForDevice(d)] + d.routes.map { $0.routeID + "|" + $0.routeLabel }).joined(separator: "\n")
+        }
+        if shape != context.coordinator.shape {
+            context.coordinator.shape = shape
+            button.menu?.removeAllItems()
+            for (index, device) in devices.enumerated() {
+                let item = context.coordinator.item(titleForDevice(device), picking: device)
+                item.tag = index
+                if device.hasMultipleRoutes {
+                    // A row with a submenu only opens it.
+                    item.action = nil
+                    item.target = nil
+                    let submenu = NSMenu()
+                    for route in device.routes {
+                        submenu.addItem(context.coordinator.item(route.routeLabel, picking: route))
+                    }
+                    item.submenu = submenu
+                }
+                button.menu?.addItem(item)
+            }
+        }
+
+        // Checkmarks are set by hand: AppKit's own selection bookkeeping
+        // knows nothing about submenu items.  With nothing selected the first
+        // device is shown, as before.
+        let selectedIndex = selected.flatMap { devices.firstIndex(of: $0) } ?? 0
+        if button.indexOfSelectedItem != selectedIndex, selectedIndex < button.numberOfItems {
+            button.selectItem(at: selectedIndex)
+        }
+        for item in button.itemArray {
+            let isSelected = item.tag == selectedIndex
+            item.state = isSelected ? .on : .off
+            for routeItem in item.submenu?.items ?? [] {
+                let route = routeItem.representedObject as? DSPiDevice
+                routeItem.state = isSelected && route?.routeID == selected?.routeID ? .on : .off
+            }
+        }
+
+        // The face shows the board's name only; say which route is in use.
+        let current = devices.indices.contains(selectedIndex) ? devices[selectedIndex] : nil
+        button.toolTip = current?.hasMultipleRoutes == true
+            ? "Reached \(selected?.routeLabel ?? current!.routeLabel)"
+            : nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject {
+        var parent: DevicePickerButton
+        var shape: [String] = []
+
+        init(_ parent: DevicePickerButton) { self.parent = parent }
+
+        func item(_ title: String, picking device: DSPiDevice) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: #selector(pick(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device
+            return item
+        }
+
+        @objc func pick(_ sender: NSMenuItem) {
+            guard let device = sender.representedObject as? DSPiDevice else { return }
+            parent.onSelect(device)
         }
     }
 }

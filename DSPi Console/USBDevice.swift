@@ -14,6 +14,12 @@ struct RemoteHubRef: Hashable {
     let hubID: String
     let hubName: String
     var handle: UInt8
+    /// From the hub's TXT `kind` key (spec 3.1); nil when unknown, as for a
+    /// hub whose session is up while Bonjour has lost sight of it.
+    var kind: LinkHubKind? = nil
+
+    /// The word shown in a route label: "via Kitchen (Hub)".
+    var routeWord: String { kind == .bridge ? "Bridge" : "Hub" }
 }
 
 struct DSPiDevice: Identifiable {
@@ -23,12 +29,25 @@ struct DSPiDevice: Identifiable {
     var hub: RemoteHubRef? = nil
     /// The hub-stored friendly name, when reached through a hub.
     var remoteName: String? = nil
+    /// Every way to reach this board, default first, when there is more than
+    /// one (plugged in here and also behind a bridge, say).  Empty for a
+    /// device with a single route.  Only CompositeTransport fills it.
+    var routes: [DSPiDevice] = []
     var id: String { serial }
     var displayName: String {
-        let short = String(serial.suffix(8))
-        guard let hub = hub else { return "DSPi (\(short))" }
-        return "\(remoteName ?? "DSPi (\(short))") via \(hub.hubName)"
+        guard let hub = hub else { return baseName }
+        return "\(baseName) via \(hub.hubName)"
     }
+    /// The board's name without any route.
+    var baseName: String { remoteName ?? "DSPi (\(serial.suffix(8)))" }
+    /// How this entry reaches the board, as listed in the picker's submenu.
+    var routeLabel: String {
+        guard let hub = hub else { return "via USB (Direct)" }
+        return "via \(hub.hubName) (\(hub.routeWord))"
+    }
+    /// Identifies the route, not the board: "local" or the hub id.
+    var routeID: String { hub?.hubID ?? "local" }
+    var hasMultipleRoutes: Bool { routes.count > 1 }
     var isRemote: Bool { hub != nil }
 }
 

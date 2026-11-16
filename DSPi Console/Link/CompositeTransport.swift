@@ -212,40 +212,66 @@ final class CompositeTransport: DeviceTransport {
 
     private func recomputeDevices() {
         stateLock.lock()
-        var merged = localDevices
+        let localList = localDevices
         let hubs = knownHubs
-        let connected = remotes
+        let connected = remotes.mapValues { $0.availableDevices }
         stateLock.unlock()
-        var seen = Set(merged.map { $0.serial })
-        func append(_ device: DSPiDevice) {
-            guard !seen.contains(device.serial) else { return }
-            merged.append(device); seen.insert(device.serial)
+        let pinned = active !== local ? active.selectedDevice : nil
+        let merged = Self.mergeRoutes(local: localList, hubs: hubs, connected: connected, pinned: pinned)
+        devicesSubject.send(merged)
+        autoSelectRemoteIfIdle(merged, hubs: hubs)
+    }
+
+    /// One entry per board, carrying every route to it in `routes` when there
+    /// is more than one.  The entry itself is the default route: local USB,
+    /// then a hub with a session up, then one known only from its TXT record
+    /// (its handle is not known yet, and it may be stale).  Within a rank,
+    /// hub order wins (Bonjour hubs by name, then manual ones).
+    /// `pinned` is the remote the view model is on: it stays listed while its
+    /// hub cannot be reached, so the picker keeps showing what is selected.
+    static func mergeRoutes(local: [DSPiDevice], hubs: [DiscoveredHub],
+                            connected: [String: [DSPiDevice]], pinned: DSPiDevice?) -> [DSPiDevice] {
+        var order: [String] = []
+        var routes: [String: [(rank: Int, device: DSPiDevice)]] = [:]
+        func add(_ device: DSPiDevice, rank: Int) {
+            if routes[device.serial] == nil { order.append(device.serial); routes[device.serial] = [] }
+            guard !routes[device.serial]!.contains(where: { $0.device.routeID == device.routeID }) else { return }
+            routes[device.serial]!.append((rank, device))
         }
+
+        for d in local { add(d, rank: 0) }
         var listed = Set<String>()
         for hub in hubs {
-            if let t = connected[hub.id], !t.availableDevices.isEmpty {
-                t.availableDevices.forEach(append)
+            let kind = LinkHubKind(rawValue: hub.kind)
+            if let devices = connected[hub.id], !devices.isEmpty {
+                for var d in devices { d.hub?.kind = kind; add(d, rank: 1) }
                 listed.insert(hub.id)
             } else {
                 // Not connected yet: what the TXT record advertises.
                 for serial in hub.serials {
-                    append(DSPiDevice(serial: serial, locationID: 0,
-                                      hub: RemoteHubRef(hubID: hub.id, hubName: hub.name, handle: 255),
-                                      remoteName: nil))
+                    add(DSPiDevice(serial: serial, locationID: 0,
+                                   hub: RemoteHubRef(hubID: hub.id, hubName: hub.name, handle: 255, kind: kind),
+                                   remoteName: nil), rank: 2)
                 }
             }
         }
         // A session that is up lists its devices whether or not Bonjour shows
         // the hub right now; the device being driven must not vanish from the
         // picker on a missed announcement.
-        for (id, t) in connected.sorted(by: { $0.key < $1.key }) where !listed.contains(id) {
-            t.availableDevices.forEach(append)
+        for (id, devices) in connected.sorted(by: { $0.key < $1.key }) where !listed.contains(id) {
+            for d in devices { add(d, rank: 1) }
         }
-        // The device the view model is on stays listed while its hub cannot
-        // be reached, so the picker keeps showing what is selected.
-        if active !== local, let selected = active.selectedDevice { append(selected) }
-        devicesSubject.send(merged)
-        autoSelectRemoteIfIdle(merged, hubs: hubs)
+        if let pinned = pinned { add(pinned, rank: 3) }
+
+        return order.map { serial in
+            // Stable sort: hub order survives within a rank.
+            let all = routes[serial]!.enumerated()
+                .sorted { ($0.element.rank, $0.offset) < ($1.element.rank, $1.offset) }
+                .map { $0.element.device }
+            var entry = all[0]
+            entry.routes = all.count > 1 ? all : []
+            return entry
+        }
     }
 
     /// USBDevice selects the first local board on its own; nothing did the
@@ -257,7 +283,9 @@ final class CompositeTransport: DeviceTransport {
         guard !autoSelecting, active === local else { return }
         stateLock.lock(); let noLocal = localDevices.isEmpty && localSelected == nil; stateLock.unlock()
         guard noLocal else { return }
-        let candidate = merged.first { device in
+        // Any route will do: a board's default may be a PIN hub while a
+        // second route to it is open.
+        let candidate = merged.flatMap { $0.routes.isEmpty ? [$0] : $0.routes }.first { device in
             guard let ref = device.hub, let hub = hubs.first(where: { $0.id == ref.hubID }) else { return false }
             return hub.authMode == "none" || tokens.token(forHub: hub.id) != nil
         }

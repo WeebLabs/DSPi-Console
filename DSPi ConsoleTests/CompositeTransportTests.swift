@@ -393,4 +393,92 @@ final class CompositeTransportTests: XCTestCase {
         XCTAssertEqual(seen.last, 42)
         token.cancel()
     }
+
+    // MARK: - Routes
+
+    private func routeHub(_ id: String, name: String, kind: String, serials: [String]) -> DiscoveredHub {
+        DiscoveredHub(id: id, name: name, kind: kind, authMode: "pin",
+                      deviceCount: serials.count, serials: serials, path: "/dspi/v1",
+                      tls: false, host: "10.0.0.2", port: 11915, isManual: false)
+    }
+
+    private func routeRemote(_ serial: String, hubID: String, hubName: String, handle: UInt8) -> DSPiDevice {
+        DSPiDevice(serial: serial, locationID: 0,
+                   hub: RemoteHubRef(hubID: hubID, hubName: hubName, handle: handle), remoteName: nil)
+    }
+
+    func testBoardPluggedInHereAndBehindABridgeListsBothRoutes() {
+        let serial = "LOCAL0000LOCAL00"
+        let merged = CompositeTransport.mergeRoutes(
+            local: [DSPiDevice(serial: serial, locationID: 1)],
+            hubs: [routeHub("esp", name: "MyESP32", kind: "bridge", serials: [serial])],
+            connected: [:], pinned: nil)
+        XCTAssertEqual(merged.count, 1, "still one board")
+        XCTAssertNil(merged[0].hub, "local USB is the default route")
+        XCTAssertEqual(merged[0].routes.map(\.routeLabel), ["via USB (Direct)", "via MyESP32 (Bridge)"])
+    }
+
+    func testCompositePublishesRoutesFromItsHubs() {
+        // The test USBDevice does not monitor, so the routes here are two hubs.
+        let (local, _, _) = makeLocal()
+        let composite = CompositeTransport(local: local, tokens: LinkTokenStore(service: "t-\(UUID())"),
+                                           clientName: "T") { LinkClientFake() }
+        let serial = "REMOTE0000REMOTE"
+        composite.updateHubs([routeHub("k", name: "Kitchen", kind: "console", serials: [serial]),
+                              routeHub("esp", name: "MyESP32", kind: "bridge", serials: [serial])])
+        XCTAssertEqual(composite.availableDevices.count, 1)
+        XCTAssertEqual(composite.availableDevices[0].routes.map(\.routeLabel),
+                       ["via Kitchen (Hub)", "via MyESP32 (Bridge)"])
+    }
+
+    func testSingleRouteDevicesCarryNoRoutes() {
+        let merged = CompositeTransport.mergeRoutes(
+            local: [DSPiDevice(serial: "LOCAL0000LOCAL00", locationID: 1)],
+            hubs: [routeHub("h1", name: "Kitchen", kind: "console", serials: ["REMOTE0000REMOTE"])],
+            connected: [:], pinned: nil)
+        XCTAssertEqual(merged.map(\.serial), ["LOCAL0000LOCAL00", "REMOTE0000REMOTE"])
+        XCTAssertTrue(merged.allSatisfy { $0.routes.isEmpty })
+        XCTAssertEqual(merged[1].displayName, "DSPi (00REMOTE) via Kitchen", "single-route label unchanged")
+    }
+
+    func testConnectedHubIsPreferredOverAnAdvertisedOne() {
+        // "Attic" sorts first but is only known from TXT; "Kitchen" is connected.
+        let serial = "REMOTE0000REMOTE"
+        let merged = CompositeTransport.mergeRoutes(
+            local: [],
+            hubs: [routeHub("a", name: "Attic", kind: "console", serials: [serial]),
+                   routeHub("k", name: "Kitchen", kind: "console", serials: [serial])],
+            connected: ["k": [routeRemote(serial, hubID: "k", hubName: "Kitchen", handle: 3)]],
+            pinned: nil)
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].hub?.hubID, "k")
+        XCTAssertEqual(merged[0].hub?.handle, 3)
+        XCTAssertEqual(merged[0].routes.map(\.routeLabel), ["via Kitchen (Hub)", "via Attic (Hub)"])
+    }
+
+    func testConnectedRouteTakesItsKindFromTheHub() {
+        let serial = "REMOTE0000REMOTE"
+        let merged = CompositeTransport.mergeRoutes(
+            local: [DSPiDevice(serial: serial, locationID: 1)],
+            hubs: [routeHub("esp", name: "MyESP32", kind: "bridge", serials: [serial]),
+                   routeHub("odd", name: "Typed", kind: "unknown", serials: [serial])],
+            connected: ["esp": [routeRemote(serial, hubID: "esp", hubName: "MyESP32", handle: 0)]],
+            pinned: nil)
+        XCTAssertEqual(merged[0].routes.map(\.routeLabel),
+                       ["via USB (Direct)", "via MyESP32 (Bridge)", "via Typed (Hub)"])
+    }
+
+    func testSessionOffTheBrowseListAndPinnedRouteStayListed() {
+        // "gone" has a session up but Bonjour lost it; "lost" is the route in
+        // use with no session at all.  Both stay as routes, after the board's
+        // local USB route.
+        let serial = "LOCAL0000LOCAL00"
+        let merged = CompositeTransport.mergeRoutes(
+            local: [DSPiDevice(serial: serial, locationID: 1)],
+            hubs: [],
+            connected: ["gone": [routeRemote(serial, hubID: "gone", hubName: "Gone", handle: 1)]],
+            pinned: routeRemote(serial, hubID: "lost", hubName: "Lost", handle: 2))
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].routes.map(\.routeID), ["local", "gone", "lost"])
+    }
 }

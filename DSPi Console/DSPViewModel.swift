@@ -1620,11 +1620,13 @@ class DSPViewModel: ObservableObject {
 
     /// Picker title: a local board's own name once known.  Boards reached through
     /// a hub already carry the hub's inventory name.
+    /// A board with several routes is named without one; its submenu says how.
     func deviceTitle(_ device: DSPiDevice) -> String {
-        if !device.isRemote, let name = knownDeviceNames[device.serial], !name.isEmpty {
+        if !device.isRemote || device.hasMultipleRoutes,
+           let name = knownDeviceNames[device.serial], !name.isEmpty {
             return name
         }
-        return device.displayName
+        return device.hasMultipleRoutes ? device.baseName : device.displayName
     }
 
     /// What the device can store and the front panel can draw: printable
@@ -3132,6 +3134,14 @@ class DSPViewModel: ObservableObject {
         // Picking the selected device again while it is not connected is a
         // retry: a remote whose pairing was cancelled reconnects, a local
         // board is rescanned.
+        //
+        // DSPiDevice compares by serial, so the same board over another route
+        // (USB, a hub, a bridge) needs its own test.  Its state lives on the
+        // board, so switching route loses nothing and skips the prompts below.
+        if device == selectedDevice, device.routeID != selectedDevice?.routeID {
+            transport.selectDevice(device)
+            return
+        }
         guard device != selectedDevice || !isDeviceConnected else { return }
 
         // Pending Settings changes (staged global parameters, unflashed output
