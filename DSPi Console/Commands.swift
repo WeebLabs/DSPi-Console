@@ -2493,7 +2493,11 @@ extension DSPViewModel {
     @discardableResult
     func setUartCtrlConfig(_ config: UartCtrlConfig) -> UInt8 {
         let generation = transport.generation
-        transport.send(VC.XPORT.UART_CONFIG, data: config.toData())
+        // 1.1.7 refuses a bad baud or pin at once and leaves XPORT.STATUS
+        // alone, so the status read below would report the previous apply.
+        if let refused = Self.ctrlIfaceRefusal(transport.setAndWait(VC.XPORT.UART_CONFIG, data: config.toData())) {
+            return refused
+        }
         // Deferred apply + ~45 ms flash blackout on the device; wait before reading.
         Thread.sleep(forTimeInterval: 0.25)
         // A device switch during the wait means the SET was dropped (or went
@@ -2514,7 +2518,9 @@ extension DSPViewModel {
     @discardableResult
     func setI2cCtrlConfig(_ config: I2cCtrlConfig) -> UInt8 {
         let generation = transport.generation
-        transport.send(VC.XPORT.I2C_CONFIG, data: config.toData())
+        if let refused = Self.ctrlIfaceRefusal(transport.setAndWait(VC.XPORT.I2C_CONFIG, data: config.toData())) {
+            return refused
+        }
         Thread.sleep(forTimeInterval: 0.25)
         // Same device-scoping as setUartCtrlConfig.
         guard transport.generation == generation else { return 0xFF }
@@ -2525,6 +2531,14 @@ extension DSPViewModel {
             return status.i2cLastStatus
         }
         return 0xFF
+    }
+
+    /// The PIN_CONFIG_* byte the Settings page shows for a refused control-
+    /// interface SET (VC_ERR_VALUE becomes INVALID_PARAM, the pin errors their
+    /// pin codes), 0xFF for no verdict, or nil when the device accepted it.
+    static func ctrlIfaceRefusal(_ status: LinkStatus) -> UInt8? {
+        guard status != .ok else { return nil }
+        return LegacyStatusFamily.pin.byte(for: status) ?? 0xFF
     }
 
     // MARK: - Control Surfaces

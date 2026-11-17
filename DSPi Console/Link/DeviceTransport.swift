@@ -209,6 +209,68 @@ protocol DeviceTransport: AnyObject {
     func releaseDeviceLock()
 }
 
+/// A write the device turned down.
+struct VendorRefusal: Equatable {
+    let command: VendorCommand
+    let value: UInt16
+    let status: LinkStatus
+
+    /// Worth telling the user: the device itself said no.  Not a lost link, a
+    /// lock (which has its own notice), the phase-3 refusal of paged requests
+    /// to remote hubs, or VC_ERR_BUSY, which is a retry matter.
+    var isReportable: Bool { status == .error || (status.isVendorResult && status != .vcBusy) }
+
+    /// Plain words for the reason.
+    var reason: String {
+        switch status {
+        case .vcValue: return "value out of range"
+        case .vcState: return "not allowed in the current state"
+        case .vcUnsupported: return "not supported on this board"
+        case .vcAddress: return "no such channel, output or slot"
+        case .vcUnknown: return "not supported by this firmware"
+        case .vcLength, .vcDirection: return "malformed request"
+        case .vcBlocked: return "not allowed over this connection"
+        case .vcPinInvalid: return "that pin cannot be used for this"
+        case .vcPinInUse: return "that pin is already in use"
+        case .vcBusy: return "the device was busy"
+        default: return "reason unknown"
+        }
+    }
+}
+
+/// Shows the latest refused write for a few seconds, next to the lock notice,
+/// and publishes each one so the view model can re-read the device.
+final class DeviceRefusalNotice: ObservableObject {
+    @Published private(set) var message: String?
+    @Published private(set) var detail: String?
+    let refusals = PassthroughSubject<VendorRefusal, Never>()
+    private var clearWork: DispatchWorkItem?
+
+    func post(_ refusal: VendorRefusal) {
+        guard refusal.status != .ok else { return }
+        guard refusal.isReportable else {
+            if refusal.status == .vcBusy {
+                print("[VENDOR] \(refusal.command) wValue \(refusal.value) dropped: device busy")
+            }
+            return
+        }
+        print("[VENDOR] \(refusal.command) wValue \(refusal.value) refused: \(refusal.reason)")
+        DispatchQueue.main.async {
+            self.message = "Device refused a change: \(refusal.reason)"
+            self.detail = "\(refusal.command) (wValue \(refusal.value)): \(refusal.reason)"
+            self.refusals.send(refusal)
+            self.clearWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.message = nil; self?.detail = nil }
+            self.clearWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+        }
+    }
+}
+
+enum DeviceRefusal {
+    static let notice = DeviceRefusalNotice()
+}
+
 /// Carries a status from a completion that may land after a timed-out wait.
 final class StatusBox {
     private var value: LinkStatus?
@@ -276,11 +338,20 @@ extension DeviceTransport {
         return nil
     }
 
-    /// Fire-and-forget SET of a paged command, for live drags that must not
-    /// wait.  Use `set` wherever a refusal matters.
+    /// SET of a paged command that does not wait for the device, for live
+    /// drags and for writes the UI has already shown.  1.1.6 accepted most bad
+    /// writes silently; 1.1.7 refuses them, so a refusal is still reported, to
+    /// `DeviceRefusal.notice`, which tells the user and lets the view model
+    /// re-read what the device really holds.  Use `set` to handle it yourself.
     func send(_ command: VendorCommand, value: UInt16 = 0, data: Data = Data()) {
-        guard Self.localRefusal(command, isGet: false, payload: data) == nil else { return }
-        sendControlRequest(request: command.number, value: value, index: command.usbIndex, data: data)
+        if let refusal = Self.localRefusal(command, isGet: false, payload: data) {
+            DeviceRefusal.notice.post(VendorRefusal(command: command, value: value, status: refusal))
+            return
+        }
+        sendControlResult(request: command.number, value: value, index: command.usbIndex,
+                          data: data) { status in
+            DeviceRefusal.notice.post(VendorRefusal(command: command, value: value, status: status))
+        }
     }
 
     /// SET of a paged command that reports the outcome.  `completion` runs on

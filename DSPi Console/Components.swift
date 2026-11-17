@@ -352,6 +352,7 @@ struct CpuSection: View {
 struct ConnectionStatusIndicator: View {
     @ObservedObject var vm: DSPViewModel
     @ObservedObject private var lockNotice = DeviceLock.notice
+    @ObservedObject private var refusalNotice = DeviceRefusal.notice
     var body: some View {
         HStack(spacing: 6) {
 
@@ -407,6 +408,15 @@ struct ConnectionStatusIndicator: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(message)
+            } else if let message = refusalNotice.message {
+                // A write the device turned down; the view model re-reads the
+                // device, so the control springs back to what it really holds.
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(refusalNotice.detail ?? message)
             }
         }
     }

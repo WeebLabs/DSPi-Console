@@ -2804,6 +2804,13 @@ class DSPViewModel: ObservableObject {
             self?.scheduleDeviceResync()
         }
 
+        // A refused write leaves the optimistic UI state wrong; re-read the
+        // device so every control shows what it really holds.
+        DeviceRefusal.notice.refusals
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.scheduleDeviceResync() }
+            .store(in: &cancellables)
+
         // A legacy board publishes only its protocol state, never "connected".
         transport.deviceProtocolPublisher
             .receive(on: RunLoop.main)

@@ -166,6 +166,16 @@ The BOOTSEL path also still works.
 
 **Done when** a rejected pin assignment on hardware shows the same message as in 1.1.6.
 
+**Result (committed 2026-11-17).** Phase 3 had already ported the pin family, the actions and the ADAT pin. This phase added the following:
+
+- **Refusal reporting.** `send` (fire-and-forget) now gets the device's verdict too. A refusal goes to `DeviceRefusal.notice`, which logs it, shows it for 5 seconds in the status row next to the lock notice (the tooltip names the command), and makes the view model resync from the device. Local registry refusals are reported the same way.
+  - Not reported: `VC_ERR_BUSY` (logged only, because phase 6's band writer deals with it), lost links, locks, and phase 3's refusal of remote paged requests.
+- **UART and I2C apply.** They check the SET's own result first and map it to `PIN_CONFIG_*`. They read `XPORT.STATUS` only after the device accepts the config.
+- **Hardware check.** Run on the 1.1.7 bench board:
+  - **Pin in use.** Assigning another output's pin is refused as `PIN_CONFIG_PIN_IN_USE`, the 1.1.6 message, and nothing changes.
+  - **Out-of-range baud.** A baud rate of 1 is refused as `PIN_CONFIG_INVALID_PARAM` at once, with the config unchanged.
+  - **Real reasons.** In the full suite, the deliberate empty-mask RTA test showed `VC_ERR_VALUE` arriving through `SYS.LAST_RESULT`.
+
 ## Phase 6: Reshaped commands, the band writer, statistics and feature gates
 
 - **`FILTER.BAND`.** One 16-byte encoder replaces `eqParamPacket` and `setCrossoverBand`, with the address in `wValue` and Qp always sent.
