@@ -592,18 +592,6 @@ final class RtaEngine: ObservableObject {
         }
     }
 
-    /// Clear the running averages (the device's bands and the bins here) and the
-    /// peak hold without disturbing the frame in flight.  Main thread only.
-    func resetAveraging() {
-        renderLock.lock()
-        binAverage.reset()
-        renderLock.unlock()
-        let transport = self.transport
-        DispatchQueue.global(qos: .utility).async {
-            _ = transport?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_RESET_AVG, index: 2, length: 1)
-        }
-    }
-
     /// Adopt new device-side options and re-push them on the next tick.  Main
     /// thread only; the poll queue picks up its copy from under the lock.
     func setOptions(_ new: RtaOptions) {

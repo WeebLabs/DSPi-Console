@@ -245,19 +245,6 @@ final class LinkLockUsageTests: XCTestCase {
         XCTAssertEqual(executed(rig, REQ_SAVE_OUTPUT_CONFIG), 0)
     }
 
-    func testSaveParamsHoldsTheLockAndRefusesWhenLocked() {
-        let rig = makeRig()
-        XCTAssertTrue(rig.vm.isDeviceConnected)
-        let rec = instrument(rig, code: REQ_SAVE_PARAMS) { self.ok($0, Data([FLASH_OK])) }
-        XCTAssertEqual(offMain { rig.vm.saveParams() }, FLASH_OK)
-        XCTAssertEqual(rec.seenHolders, [LinkHub.localSessionID])
-        XCTAssertNil(holder(rig))
-
-        XCTAssertTrue(rig.hub.acquireLock(session: rig.remote.id, timeout: 5))
-        XCTAssertEqual(offMain { rig.vm.saveParams() }, FLASH_ERR_WRITE)
-        XCTAssertEqual(executed(rig, REQ_SAVE_PARAMS), 1, "the refused save never reached the device")
-    }
-
     // MARK: IR learn
 
     private func learnAnswer(state: UInt8) -> (LinkCmdRequest) -> LinkCmdResponse {

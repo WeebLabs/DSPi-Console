@@ -254,13 +254,6 @@ extension DSPViewModel {
 
     // MARK: - USB-only sends (no @Published update, for slider drag)
 
-    func sendPreampToDevice(_ db: Float) {
-        var val = (db * 10).rounded() / 10
-        if val == -0.0 { val = 0.0 }
-        let data = Data(bytes: &val, count: 4)
-        transport.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
-    }
-
     func sendPreampChannelToDevice(channel: Int, db: Float) {
         var val = (db * 10).rounded() / 10
         if val == -0.0 { val = 0.0 }
@@ -360,55 +353,6 @@ extension DSPViewModel {
         return data as Data
     }
     
-    func fetchFilter(ch: Int, band: Int) {
-        // REQ_GET_EQ_PARAM wValue: bits[15:8]=channel, bits[7:3]=band (5 bits,
-        // 0..31), bits[2:0]=param (0=type, 1=freq, 2=Q, 3=gain, 4=bypass,
-        // 5=qp).  The band field is 5 bits (not the original 4) so crossover
-        // bands at 20..23 stay addressable after the reserved PEQ gap widened
-        // to 10..19.
-        func getVal<T>(_ param: Int, defaultVal: T) -> T {
-            let wVal = UInt16((ch << 8) | (band << 3) | param)
-            if let d = transport.getControlRequest(request: REQ_GET_EQ_PARAM, value: wVal, index: 0, length: 4) {
-                return d.withUnsafeBytes { $0.load(as: T.self) }
-            }
-            return defaultVal
-        }
-        
-        let typeRaw: UInt32 = getVal(0, defaultVal: 0)
-        let freq: Float = getVal(1, defaultVal: 1000.0)
-        let q: Float = getVal(2, defaultVal: 0.707)
-        let gain: Float = getVal(3, defaultVal: 0.0)
-        // param=4 returns bypass (firmware 1.1.4+); pre-1.1.4 STALLs and we
-        // fall back to 0/active.  Spec §5: only the low byte is meaningful.
-        let bypassRaw: UInt32 = getVal(4, defaultVal: 0)
-        let bypass = (bypassRaw & 0xFF) == 1
-
-        let type = FilterType(rawValue: Int(typeRaw)) ?? .flat
-        // param=5 returns qp_x512 in the low 16 bits (0 for non-LT bands and on
-        // firmware that predates it, decoding to the 0.707 default).  Only read
-        // it for LT bands to avoid an extra transfer on every other type.
-        var qp = FilterParams.defaultQp
-        if type == .linkwitzTransform {
-            let qpRaw: UInt32 = getVal(5, defaultVal: 0)
-            qp = FilterParams.decodeQp(UInt16(qpRaw & 0xFFFF))
-        }
-
-        var newParams = FilterParams(
-            type: type,
-            freq: freq,
-            q: q,
-            gain: gain,
-            bypass: bypass
-        )
-        newParams.qp = qp
-
-        DispatchQueue.main.async {
-            if self.channelData[ch]?[band] != newParams {
-                self.channelData[ch]?[band] = newParams
-            }
-        }
-    }
-
     /// Toggle a single band's bypass flag without touching freq/Q/gain.
     /// Cheaper than REQ_SET_EQ_PARAM when the user just clicks the bypass
     /// checkbox, and avoids racing with an in-flight parameter edit.
@@ -424,17 +368,6 @@ extension DSPViewModel {
         let wValue = UInt16((ch << 8) | band)
         let payload = Data([bypass ? 1 : 0])
         transport.sendControlRequest(request: REQ_SET_BAND_BYPASS, value: wValue, index: 0, data: payload)
-    }
-
-    /// Returns the current bypass state for a single band, or nil if the
-    /// firmware STALLs (pre-1.1.4).  Always normalized to true/false.
-    func fetchBandBypass(ch: Int, band: Int) -> Bool? {
-        let wValue = UInt16((ch << 8) | band)
-        guard let data = transport.getControlRequest(request: REQ_GET_BAND_BYPASS, value: wValue, index: 0, length: 1),
-              data.count >= 1 else {
-            return nil
-        }
-        return data[0] == 1
     }
 
     // MARK: - Crossover Bands
@@ -524,45 +457,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_DELAY, value: UInt16(ch), index: 0, data: data)
     }
 
-    func fetchDelay(ch: Int) {
-        if let d = transport.getControlRequest(request: REQ_GET_DELAY, value: UInt16(ch), index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs((self.channelDelays[ch] ?? 0) - val) > 0.01 {
-                    self.channelDelays[ch] = val
-                }
-            }
-        }
-    }
-
-    /// Legacy global preamp SET — sets both channels to the same value via 0x44.
-    func setPreamp(_ db: Float) {
-        var val = (db * 10).rounded() / 10
-        if val == -0.0 { val = 0.0 }
-        // The device sets every input, so every entry follows.  Replacing the
-        // array with two entries would leave inputs 2+ out of range.
-        self.preampDB = Array(repeating: val, count: preampDB.count)
-        let data = Data(bytes: &val, count: 4)
-        transport.sendControlRequest(request: REQ_SET_PREAMP, value: 0, index: 0, data: data)
-    }
-
-    /// Legacy global preamp GET — returns channel 0 only.
-    @discardableResult
-    func fetchPreamp() -> Bool {
-        if let d = transport.getControlRequest(request: REQ_GET_PREAMP, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.preampDB[0] - val) > 0.1 {
-                    self.preampDB[0] = val
-                }
-            }
-            return true
-        } else {
-            self.transport.markDisconnected()
-            return false
-        }
-    }
-
     // MARK: - Per-Channel Preamp
 
     func setPreampChannel(channel: Int, db: Float) {
@@ -580,17 +474,6 @@ extension DSPViewModel {
         }
     }
 
-    func fetchPreampChannel(channel: Int) {
-        if let d = transport.getControlRequest(request: REQ_GET_PREAMP_CH, value: UInt16(channel), index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.preampDB[channel] - val) > 0.1 {
-                    self.preampDB[channel] = val
-                }
-            }
-        }
-    }
-
     // MARK: - Master Volume
 
     func setMasterVolume(_ db: Float) {
@@ -598,17 +481,6 @@ extension DSPViewModel {
         self.masterVolumeDB = val
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_MASTER_VOLUME, value: 0, index: 0, data: data)
-    }
-
-    func fetchMasterVolume() {
-        if let d = transport.getControlRequest(request: REQ_GET_MASTER_VOLUME, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.masterVolumeDB - val) > 0.01 {
-                    self.masterVolumeDB = val
-                }
-            }
-        }
     }
 
     // MARK: - User Volume (vendor channel for audio_state.volume)
@@ -776,15 +648,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_MASTER_VOLUME_MODE, value: 0, index: 2, data: Data([clamped]))
     }
 
-    func fetchMasterVolumeMode() {
-        guard let data = transport.getControlRequest(request: REQ_GET_MASTER_VOLUME_MODE, value: 0, index: 2, length: 1) else { return }
-        let val = Int(data[0])
-        DispatchQueue.main.async {
-            self.presetMasterVolumeMode = (val == MASTER_VOLUME_MODE_WITH_PRESET) ? MASTER_VOLUME_MODE_WITH_PRESET
-                                                                                  : MASTER_VOLUME_MODE_INDEPENDENT
-        }
-    }
-
     /// Persist the current live master volume into the directory's independent
     /// storage. Accepted in any mode (dormant in MASTER_VOLUME_MODE_WITH_PRESET).
     /// IN-shaped action command: device responds with a 1-byte status (0 = OK).
@@ -798,15 +661,6 @@ extension DSPViewModel {
         return data.first == 0  // PRESET_OK
     }
 
-    /// Read the directory's independent master-volume value (the dB applied at
-    /// boot in MASTER_VOLUME_MODE_INDEPENDENT). Independent of the current
-    /// live value and the current mode. Returns nil if the transfer failed.
-    func fetchSavedMasterVolume() -> Float? {
-        guard let data = transport.getControlRequest(request: REQ_GET_SAVED_MASTER_VOLUME, value: 0, index: 2, length: 4),
-              data.count >= 4 else { return nil }
-        return data.withUnsafeBytes { $0.load(as: Float.self) }
-    }
-
     func setBypass(_ enabled: Bool) {
         self.bypass = enabled
         var val: UInt8 = enabled ? 1 : 0
@@ -814,22 +668,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_BYPASS, value: 0, index: 0, data: data)
         recomputeMagnitudes(for: 0)
         recomputeMagnitudes(for: 1)
-    }
-    
-    @discardableResult
-    func fetchBypass() -> Bool {
-        if let d = transport.getControlRequest(request: REQ_GET_BYPASS, value: 0, index: 0, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async {
-                self.bypass = val
-                self.recomputeMagnitudes(for: 0)
-                self.recomputeMagnitudes(for: 1)
-            }
-            return true
-        } else {
-            self.transport.markDisconnected()
-            return false
-        }
     }
     
     /// Copy every PEQ band and the input trim from one input onto the other.
@@ -862,13 +700,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_LOUDNESS, value: 0, index: 0, data: data)
     }
 
-    func fetchLoudness() {
-        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS, value: 0, index: 0, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.loudnessEnabled = val }
-        }
-    }
-
     func setLoudnessRef(_ spl: Float) {
         self.loudness.refSPL = spl
         var val = spl
@@ -876,33 +707,11 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_LOUDNESS_REF, value: 0, index: 0, data: data)
     }
 
-    func fetchLoudnessRef() {
-        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_REF, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.loudness.refSPL - val) > 0.01 {
-                    self.loudness.refSPL = val
-                }
-            }
-        }
-    }
-
     func setLoudnessIntensity(_ pct: Float) {
         self.loudness.intensity = pct
         var val = pct
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_LOUDNESS_INTENSITY, value: 0, index: 0, data: data)
-    }
-
-    func fetchLoudnessIntensity() {
-        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_INTENSITY, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.loudness.intensity - val) > 0.01 {
-                    self.loudness.intensity = val
-                }
-            }
-        }
     }
 
     /// Sets the per-output loudness mask (V19+).  Bit k enables compensation on
@@ -922,13 +731,6 @@ extension DSPViewModel {
         setLoudnessMask(mask)
     }
 
-    func fetchLoudnessMask() {
-        if let d = transport.getControlRequest(request: REQ_GET_LOUDNESS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
-            let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
-            DispatchQueue.main.async { self.loudness.outputMask = val }
-        }
-    }
-
     // MARK: - Headphone Crossfeed
 
     func setCrossfeed(_ enabled: Bool) {
@@ -936,13 +738,6 @@ extension DSPViewModel {
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED, value: 0, index: 0, data: data)
-    }
-
-    func fetchCrossfeed() {
-        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED, value: 0, index: 0, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.crossfeedEnabled = val }
-        }
     }
 
     private static let presetValues: [(freq: Float, feed: Float)] = [
@@ -963,29 +758,11 @@ extension DSPViewModel {
         }
     }
 
-    func fetchCrossfeedPreset() {
-        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_PRESET, value: 0, index: 0, length: 1) {
-            let val = Int(d[0])
-            DispatchQueue.main.async { self.crossfeed.preset = val }
-        }
-    }
-
     func setCrossfeedFreq(_ freq: Float) {
         self.crossfeed.freq = freq
         var val = freq
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_FREQ, value: 0, index: 0, data: data)
-    }
-
-    func fetchCrossfeedFreq() {
-        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_FREQ, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.crossfeed.freq - val) > 0.01 {
-                    self.crossfeed.freq = val
-                }
-            }
-        }
     }
 
     func setCrossfeedFeed(_ feed: Float) {
@@ -995,29 +772,11 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_FEED, value: 0, index: 0, data: data)
     }
 
-    func fetchCrossfeedFeed() {
-        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_FEED, value: 0, index: 0, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.crossfeed.feed - val) > 0.01 {
-                    self.crossfeed.feed = val
-                }
-            }
-        }
-    }
-
     func setCrossfeedITD(_ enabled: Bool) {
         self.crossfeed.itd = enabled
         var val: UInt8 = enabled ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_CROSSFEED_ITD, value: 0, index: 0, data: data)
-    }
-
-    func fetchCrossfeedITD() {
-        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_ITD, value: 0, index: 0, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.crossfeed.itd = val }
-        }
     }
 
     /// Sets the crossfeed output-pair mask (V20+).  Bit p runs crossfeed on output
@@ -1036,13 +795,6 @@ extension DSPViewModel {
         var mask = crossfeed.outputMask
         if enabled { mask |= (UInt8(1) << pair) } else { mask &= ~(UInt8(1) << pair) }
         setCrossfeedMask(mask)
-    }
-
-    func fetchCrossfeedMask() {
-        if let d = transport.getControlRequest(request: REQ_GET_CROSSFEED_OUTPUTS, value: 0, index: 0, length: 1), !d.isEmpty {
-            let val = d[0]
-            DispatchQueue.main.async { self.crossfeed.outputMask = val }
-        }
     }
 
     // MARK: - Psychoacoustic Bass
@@ -1066,27 +818,11 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_PSYBASS, value: 0, index: 0, data: data)
     }
 
-    func fetchPsybass() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS, value: 0, index: 0, length: 1), !d.isEmpty {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.psybassEnabled = val }
-        }
-    }
-
     func setPsybassCutoff(_ hz: Float) {
         self.psybass.cutoffHz = hz
         var val = hz
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: data)
-    }
-
-    func fetchPsybassCutoff() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.psybass.cutoffHz - val) > 0.01 { self.psybass.cutoffHz = val }
-            }
-        }
     }
 
     func setPsybassHarmonics(_ db: Float) {
@@ -1096,29 +832,11 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_PSYBASS_HARMONICS, value: 0, index: 0, data: data)
     }
 
-    func fetchPsybassHarmonics() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_HARMONICS, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.psybass.harmonicsDB - val) > 0.01 { self.psybass.harmonicsDB = val }
-            }
-        }
-    }
-
     func setPsybassDrive(_ db: Float) {
         self.psybass.driveDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_DRIVE, value: 0, index: 0, data: data)
-    }
-
-    func fetchPsybassDrive() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_DRIVE, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.psybass.driveDB - val) > 0.01 { self.psybass.driveDB = val }
-            }
-        }
     }
 
     func setPsybassCharacter(_ pct: Float) {
@@ -1128,29 +846,11 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_PSYBASS_CHARACTER, value: 0, index: 0, data: data)
     }
 
-    func fetchPsybassCharacter() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_CHARACTER, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.psybass.characterPct - val) > 0.01 { self.psybass.characterPct = val }
-            }
-        }
-    }
-
     func setPsybassOriginal(_ db: Float) {
         self.psybass.originalDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_PSYBASS_ORIGINAL, value: 0, index: 0, data: data)
-    }
-
-    func fetchPsybassOriginal() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_ORIGINAL, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.psybass.originalDB - val) > 0.01 { self.psybass.originalDB = val }
-            }
-        }
     }
 
     /// Sets the per-output psybass mask.  Bit k processes output channel k; sent
@@ -1170,13 +870,6 @@ extension DSPViewModel {
         setPsybassMask(mask)
     }
 
-    func fetchPsybassMask() {
-        if let d = transport.getControlRequest(request: REQ_GET_PSYBASS_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
-            let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
-            DispatchQueue.main.async { self.psybass.outputMask = val }
-        }
-    }
-
     // MARK: - Subharmonic Synthesizer
 
     // Every SET is fire-and-forget and updates app state first, exactly like
@@ -1192,28 +885,12 @@ extension DSPViewModel {
         fetchSubharmHeadroomAsync()
     }
 
-    func fetchSubharm() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1), !d.isEmpty {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.subharmEnabled = val }
-        }
-    }
-
     func setSubharmLow(_ db: Float) {
         self.subharm.lowDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
-    }
-
-    func fetchSubharmLow() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.lowDB - val) > 0.01 { self.subharm.lowDB = val }
-            }
-        }
     }
 
     func setSubharmHigh(_ db: Float) {
@@ -1224,15 +901,6 @@ extension DSPViewModel {
         fetchSubharmHeadroomAsync()
     }
 
-    func fetchSubharmHigh() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HIGH, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.highDB - val) > 0.01 { self.subharm.highDB = val }
-            }
-        }
-    }
-
     func setSubharmTop(_ db: Float) {
         self.subharm.topDB = db
         var val = db
@@ -1241,30 +909,12 @@ extension DSPViewModel {
         fetchSubharmHeadroomAsync()
     }
 
-    func fetchSubharmTop() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_TOP, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.topDB - val) > 0.01 { self.subharm.topDB = val }
-            }
-        }
-    }
-
     func setSubharmBoost(_ db: Float) {
         self.subharm.boostDB = db
         var val = db
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
-    }
-
-    func fetchSubharmBoost() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.boostDB - val) > 0.01 { self.subharm.boostDB = val }
-            }
-        }
     }
 
     /// Sets the per-output subharm mask.  Bit k processes output channel k, sent
@@ -1284,13 +934,6 @@ extension DSPViewModel {
         var mask = subharm.outputMask
         if enabled { mask |= (UInt16(1) << output) } else { mask &= ~(UInt16(1) << output) }
         setSubharmMask(mask)
-    }
-
-    func fetchSubharmMask() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_MASK, value: 0, index: 0, length: 2), d.count >= 2 {
-            let val = UInt16(d[0]) | (UInt16(d[1]) << 8)
-            DispatchQueue.main.async { self.subharm.outputMask = val }
-        }
     }
 
     /// Reads the worst-case gain of the live configuration (0 dB while disabled).
@@ -1329,13 +972,6 @@ extension DSPViewModel {
         fetchSubharmHeadroomAsync()
     }
 
-    func fetchSubharmSelectMode() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1), !d.isEmpty {
-            let val = min(Int(d[0]), SUBHARM_SELECT_SUSTAINED)
-            DispatchQueue.main.async { self.subharm.selectMode = val }
-        }
-    }
-
     func setSubharmSelectDepth(_ pct: Float) {
         self.subharm.selectDepthPct = pct
         var val = pct
@@ -1344,30 +980,12 @@ extension DSPViewModel {
         fetchSubharmHeadroomAsync()
     }
 
-    func fetchSubharmSelectDepth() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_DEPTH, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.selectDepthPct - val) > 0.01 { self.subharm.selectDepthPct = val }
-            }
-        }
-    }
-
     func setSubharmSelectHold(_ ms: Float) {
         self.subharm.selectHoldMs = ms
         var val = ms
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_HOLD, value: 0, index: 0, data: data)
         fetchSubharmHeadroomAsync()
-    }
-
-    func fetchSubharmSelectHold() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_HOLD, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.selectHoldMs - val) > 0.01 { self.subharm.selectHoldMs = val }
-            }
-        }
     }
 
     /// Sub ceiling in dBFS; 0 turns the limiter off.  It bounds the sub before it
@@ -1381,15 +999,6 @@ extension DSPViewModel {
         fetchSubharmHeadroomAsync()
     }
 
-    func fetchSubharmCeiling() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4), d.count >= 4 {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.subharm.ceilingDB - val) > 0.01 { self.subharm.ceilingDB = val }
-            }
-        }
-    }
-
     /// Link each output pair to its mono sum.  Read live each packet by the
     /// firmware, so there is no recompute and the headroom cannot change: a
     /// mono sum is never larger than the louder of the two channels.
@@ -1398,13 +1007,6 @@ extension DSPViewModel {
         var val: UInt8 = linked ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_SUBHARM_LINK, value: 0, index: 0, data: data)
-    }
-
-    func fetchSubharmLinkPairs() {
-        if let d = transport.getControlRequest(request: REQ_GET_SUBHARM_LINK, value: 0, index: 0, length: 1), !d.isEmpty {
-            let val = d[0] != 0
-            DispatchQueue.main.async { self.subharm.linkPairs = val }
-        }
     }
 
     /// Solo the synthesized sub on the masked outputs.  Runtime only: it is not
@@ -1468,14 +1070,6 @@ extension DSPViewModel {
         var val = value
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_SET_TUBE_PARAM, value: index, index: 0, data: data)
-    }
-
-    /// Reads one parameter; nil when the GET STALLs (index out of range, or
-    /// firmware older than V31).
-    func fetchTubeParam(_ index: UInt16) -> Float? {
-        guard let d = transport.getControlRequest(request: REQ_GET_TUBE_PARAM, value: index, index: 0, length: 4),
-              d.count >= 4 else { return nil }
-        return d.withUnsafeBytes { $0.load(as: Float.self) }
     }
 
     private static func clampTube(_ v: Float, _ lo: Float, _ hi: Float) -> Float {
@@ -1613,17 +1207,6 @@ extension DSPViewModel {
         let data = Data(bytes: &val, count: 4)
         transport.sendControlRequest(request: REQ_LIMITER, value: (UInt16(output) << 8) | UInt16(index),
                                      index: 0, data: data)
-    }
-
-    /// Reads one parameter; nil when the GET STALLs (bad output or index, or
-    /// firmware older than V32).
-    func fetchLimiterParam(output: Int, _ index: UInt8) -> Float? {
-        guard output >= 0, output < 0xFF,
-              let d = transport.getControlRequest(request: REQ_LIMITER,
-                                                  value: (UInt16(output) << 8) | UInt16(index),
-                                                  index: 0, length: 4),
-              d.count >= 4 else { return nil }
-        return d.withUnsafeBytes { $0.load(as: Float.self) }
     }
 
     static func clampLimiterThreshold(_ db: Float) -> Float {
@@ -2017,21 +1600,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_MATRIX_ROUTE, value: 0, index: 2, data: packet)
     }
 
-    func fetchMatrixRoute(input: Int, output: Int) {
-        let wValue = UInt16((input << 8) | output)
-        guard let data = transport.getControlRequest(request: REQ_GET_MATRIX_ROUTE, value: wValue, index: 2, length: 9) else { return }
-
-        let enabled = data[2] != 0
-        let invert = data[3] != 0
-        let gain = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
-
-        DispatchQueue.main.async {
-            self.matrixRouting[input][output] = enabled
-            self.matrixGain[input][output] = gain
-            self.matrixInvert[input][output] = invert
-        }
-    }
-
     /// Apply a direct 1:1 routing (recipe 11.1 of the 8-channel-usb-input spec):
     /// input i → output i at 0 dB for i in 0..<numMatrixInputs, enabling those
     /// outputs and disabling the PDM sub.  All other crosspoints are cleared so
@@ -2103,17 +1671,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_OUTPUT_GAIN, value: UInt16(output), index: 2, data: data)
     }
 
-    func fetchOutputGainDB(output: Int) {
-        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_GAIN, value: UInt16(output), index: 2, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.outputGainDB[output] - val) > 0.01 {
-                    self.outputGainDB[output] = val
-                }
-            }
-        }
-    }
-
     // MARK: - Per-Output Mute
 
     func setOutputMute(output: Int, muted: Bool) {
@@ -2121,15 +1678,6 @@ extension DSPViewModel {
         var val: UInt8 = muted ? 1 : 0
         let data = Data(bytes: &val, count: 1)
         transport.sendControlRequest(request: REQ_SET_OUTPUT_MUTE, value: UInt16(output), index: 2, data: data)
-    }
-
-    func fetchOutputMute(output: Int) {
-        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_MUTE, value: UInt16(output), index: 2, length: 1) {
-            let val = d[0] != 0
-            DispatchQueue.main.async {
-                self.outputMuted[output] = val
-            }
-        }
     }
 
     // MARK: - Per-Output Delay
@@ -2142,17 +1690,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_SET_OUTPUT_DELAY, value: UInt16(output), index: 2, data: data)
     }
 
-    func fetchOutputDelay(output: Int) {
-        if let d = transport.getControlRequest(request: REQ_GET_OUTPUT_DELAY, value: UInt16(output), index: 2, length: 4) {
-            let val = d.withUnsafeBytes { $0.load(as: Float.self) }
-            DispatchQueue.main.async {
-                if abs(self.outputDelayMS[output] - val) > 0.01 {
-                    self.outputDelayMS[output] = val
-                }
-            }
-        }
-    }
-
     // MARK: - Core 1 Mode
 
     func fetchCore1Mode() {
@@ -2160,13 +1697,6 @@ extension DSPViewModel {
             let val = Int(d[0])
             DispatchQueue.main.async { self.core1Mode = val }
         }
-    }
-
-    func checkCore1Conflict(output: Int) -> Bool {
-        if let d = transport.getControlRequest(request: REQ_GET_CORE1_CONFLICT, value: UInt16(output), index: 0, length: 1) {
-            return d[0] != 0
-        }
-        return false
     }
 
     /// Disable all EQ worker outputs, then enable PDM, confirm via read-back.
@@ -4472,16 +4002,6 @@ extension DSPViewModel {
         transport.sendControlRequest(request: REQ_PRESET_SET_STARTUP, value: 0, index: 2, data: data)
     }
 
-    func fetchPresetStartup() {
-        guard let data = transport.getControlRequest(request: REQ_PRESET_GET_STARTUP, value: 0, index: 2, length: 3),
-              data.count >= 3 else { return }
-        DispatchQueue.main.async {
-            self.presetStartupMode = Int(data[0])
-            self.presetDefaultSlot = Int(data[1])
-            self.activePresetSlot = Int(data[2])
-        }
-    }
-
     // MARK: - Output Config Mode (preset directory flag)
 
     /// Set output-config persistence mode (the repurposed include-pins flag).
@@ -4495,15 +4015,6 @@ extension DSPViewModel {
                                                                           : OUTPUT_CONFIG_MODE_INDEPENDENT
         DispatchQueue.main.async { self.presetOutputConfigMode = normalized }
         transport.sendControlRequest(request: REQ_SET_OUTPUT_CONFIG_MODE, value: 0, index: 2, data: Data([clamped]))
-    }
-
-    func fetchOutputConfigMode() {
-        guard let data = transport.getControlRequest(request: REQ_GET_OUTPUT_CONFIG_MODE, value: 0, index: 2, length: 1) else { return }
-        let val = Int(data[0])
-        DispatchQueue.main.async {
-            self.presetOutputConfigMode = (val == OUTPUT_CONFIG_MODE_WITH_PRESET) ? OUTPUT_CONFIG_MODE_WITH_PRESET
-                                                                                  : OUTPUT_CONFIG_MODE_INDEPENDENT
-        }
     }
 
     /// Persist the current live output configuration into the directory's
@@ -4876,13 +4387,6 @@ extension DSPViewModel {
     }
 
     // MARK: - Flash Storage Commands
-
-    func saveParams() -> UInt8 {
-        guard isDeviceConnected else { return FLASH_ERR_WRITE }
-        return transport.withDeviceLock(reason: "Saving to flash", timeout: 5) {
-            transport.getControlRequest(request: REQ_SAVE_PARAMS, value: 0, index: 0, length: 1)?.first
-        }.flatMap { $0 } ?? FLASH_ERR_WRITE
-    }
 
     func loadParams() -> UInt8 {
         guard isDeviceConnected else { return FLASH_ERR_WRITE }

@@ -91,6 +91,12 @@ final class LinkPolicyTests: XCTestCase {
               let source = try? String(contentsOf: url, encoding: .utf8) else {
             throw XCTSkip("firmware config.h not present on this machine")
         }
+        // Firmware 1.1.7 dropped the flat REQ_ opcode table for the paged
+        // protocol. The policy is re-keyed on paged command IDs in phase 7 of
+        // vendor_protocol_port_plan.md, which replaces this test.
+        guard source.contains("#define REQ_") else {
+            throw XCTSkip("firmware checkout is on the paged protocol and defines no REQ_ opcodes")
+        }
         let policy = try loadPolicy()
 
         let pattern = #"#define\s+(REQ_[A-Z0-9_]+)\s+(0x[0-9A-Fa-f]+|\d+)"#
