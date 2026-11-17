@@ -11726,7 +11726,9 @@ struct DSPi_ConsoleApp: App {
 
                 Button("Stats for nerbs") {
                     // specific method depends on your controller's API (e.g., show, open)
-                    statsWindowController.show(transport: AppState.shared.usb)
+                    // Through the hub, never the raw USBDevice: the hub only
+                    // attaches a board once its protocol is known.
+                    statsWindowController.show(transport: AppState.shared.transport)
                 }
                 .keyboardShortcut("T", modifiers: [.command, .shift])
 

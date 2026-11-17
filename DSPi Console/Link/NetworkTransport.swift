@@ -306,6 +306,10 @@ final class NetworkTransport: DeviceTransport {
     var selectedDevicePublisher: AnyPublisher<DSPiDevice?, Never> { selectedSubject.eraseToAnyPublisher() }
     var errorMessage: String? { errorSubject.value }
     var errorMessagePublisher: AnyPublisher<String?, Never> { errorSubject.eraseToAnyPublisher() }
+    /// A remote hub does not report its board's protocol yet; the Link
+    /// protocol gains that field in phase 7 of the paged-protocol port.
+    var deviceProtocol: DeviceProtocolState { .unknown }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { Just(.unknown).eraseToAnyPublisher() }
 
     func selectDevice(_ device: DSPiDevice) { bind(serial: device.serial) }
     func reconnect() { if let url = url { connect(to: url) } }
@@ -337,6 +341,17 @@ final class NetworkTransport: DeviceTransport {
                                  wValue: value, wIndex: index, payload: data)
         client.command(req) { response in
             if response.status == .locked { DeviceLock.notice.post() }
+        }
+    }
+
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           completion: @escaping (LinkStatus) -> Void) {
+        guard let handle = boundHandle else { completion(.noDevice); return }
+        let req = LinkCmdRequest(tag: 0, handle: handle, direction: .set, bRequest: request,
+                                 wValue: value, wIndex: index, payload: data)
+        client.command(req) { response in
+            if response.status == .locked { DeviceLock.notice.post() }
+            completion(response.status)
         }
     }
 

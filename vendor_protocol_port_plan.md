@@ -74,6 +74,17 @@ The new API lands next to the old one, so this phase builds green without touchi
 
 **Done when** the build and tests are green, and the app still behaves exactly as before on a 1.1.6 board.
 
+**Result (committed 2026-11-17).**
+
+- **Where the state lives.** The protocol state is kept in `USBDevice` for each connection, not in `HubDeviceInfo`. Phase 7 adds it to the Link device object.
+- **Hardware check on 1.1.7.** A board running 1.1.7 beta 1 (RP2350) passed these checks:
+  - The probe classified it as paged.
+  - The hub attached it.
+  - `SYS.PLATFORM` and `SYS.SERIAL` read correctly.
+  - A deliberately bad request came back as `VC_ERR_ADDRESS` through `SYS.LAST_RESULT`.
+- **Bug found and fixed.** The run exposed a wrong STALL constant. IOKit reports a STALL as `0xE000404F` (`kIOUSBPipeStalled`), but the code expected `0xE000402F`. The old code hid this by sending every unknown failure to `.error`. Without the fix, a 1.1.6 board's STALL would have read as a timeout, and the board would never have been classified as legacy.
+- **Not yet checked.** No 1.1.6 board was connected, so the legacy path has unit tests but no hardware check yet.
+
 ## Phase 3: Move every call site to the new API
 
 - **Mechanical renumbers.** Renumber the 130 mechanical opcodes and move the `wIndex` building out of the call sites. Widen the helpers that keep an 8-bit opcode: `sendFloatParamToDevice` (whose `wIndex: 0` default is removed), `sendLimiterParam`, `sendTubeParam` and `sendUpmixParam`.

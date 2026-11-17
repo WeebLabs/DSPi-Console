@@ -16,6 +16,13 @@ private final class RtaFakeTransport: DeviceTransport {
     var selectedDevicePublisher: AnyPublisher<DSPiDevice?, Never> { Just(nil).eraseToAnyPublisher() }
     var errorMessage: String? = nil
     var errorMessagePublisher: AnyPublisher<String?, Never> { Just(nil).eraseToAnyPublisher() }
+    var deviceProtocol: DeviceProtocolState { .unknown }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { Just(.unknown).eraseToAnyPublisher() }
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           completion: @escaping (LinkStatus) -> Void) {
+        sendControlRequest(request: request, value: value, index: index, data: data)
+        completion(.ok)
+    }
     func selectDevice(_ device: DSPiDevice) {}
     func reconnect() {}
     func disconnect() {}

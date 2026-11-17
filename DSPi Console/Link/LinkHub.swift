@@ -185,6 +185,10 @@ final class LinkHub {
         if connected {
             guard usbGeneration != generation else { return }   // same open
             usbGeneration = generation
+            // A switch publishes no `false`, so the old board's router, poller
+            // and snapshot would otherwise keep sending to the new board while
+            // it is probed, before its protocol is known.
+            detachDevice()
             usbDidConnect(generation: generation)
         } else if usbGeneration != nil {
             usbGeneration = nil

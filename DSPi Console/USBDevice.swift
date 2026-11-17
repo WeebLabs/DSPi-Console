@@ -76,10 +76,14 @@ private func handleDeviceTerminated(refCon: UnsafeMutableRawPointer?, iterator: 
     device.onTerminated(iterator: iterator)
 }
 
-/// IOKit's USB-family error macros are not imported into Swift.  This is
-/// iokit_usb_err(0x2f), the STALL the firmware answers unknown or rejected
-/// commands with.
-private let kIOUSBPipeStalledValue: IOReturn = IOReturn(bitPattern: 0xe000402f)
+/// IOKit's USB-family error macros are not imported into Swift.  These are
+/// kIOUSBPipeStalled, iokit_usb_err(0x4f), the STALL the firmware answers
+/// unknown or rejected commands with (seen on hardware, 2026-11-17), its
+/// IOUSBHost-family twin, and iokit_usb_err(0x51), the timeout
+/// DeviceRequestTO reports.
+private let kIOUSBPipeStalledValue: IOReturn = IOReturn(bitPattern: 0xe000404f)
+private let kUSBHostPipeStalledValue: IOReturn = IOReturn(bitPattern: 0xe0005000)
+private let kIOUSBTransactionTimeoutValue: IOReturn = IOReturn(bitPattern: 0xe0004051)
 
 class USBDevice: ObservableObject {
     typealias DeviceInterface = IOUSBDeviceInterface500
@@ -189,8 +193,54 @@ class USBDevice: ObservableObject {
 
     private func bumpGeneration() {
         generationLock.lock()
-        defer { generationLock.unlock() }
         connectionGeneration &+= 1
+        protocolStore = .unknown
+        generationLock.unlock()
+        DispatchQueue.main.async { self.deviceProtocol = .unknown }
+    }
+
+    // MARK: - Protocol State
+
+    /// What the probe found on the current connection.  Belongs to one
+    /// generation: every open and close resets it, so a new board starts
+    /// unprobed and the gate keeps paged requests off it until the probe runs.
+    private var protocolStore: DeviceProtocolState = .unknown
+
+    /// Main-thread copy of `protocolStore` for the UI.
+    @Published private(set) var deviceProtocol: DeviceProtocolState = .unknown
+
+    private var currentProtocol: DeviceProtocolState {
+        generationLock.lock(); defer { generationLock.unlock() }
+        return protocolStore
+    }
+
+    /// Probe the open board and record what it speaks for this connection.
+    /// Blocking; call off the main thread.  `.notReady` records nothing, so
+    /// the next attempt starts from the probe again.
+    func probeProtocol() -> ProtocolProbe.Outcome {
+        let probedGeneration = generation
+        let outcome = ProtocolProbe.run { request, index, length in
+            self.getControlResult(request: request, value: 0, index: index, length: length)
+        }
+        let state: DeviceProtocolState
+        switch outcome {
+        case .paged(let major, let minor): state = .paged(major: major, minor: minor)
+        case .unsupported(let major): state = .unsupported(major: major)
+        case .legacy(let reply):
+            guard let parsed = FirmwareVersion.fromPlatformReply([UInt8](reply)) else { return .notReady }
+            state = .legacy(parsed.version)
+        case .notReady: return outcome
+        }
+        generationLock.lock()
+        let current = connectionGeneration == probedGeneration
+        if current { protocolStore = state }
+        generationLock.unlock()
+        if current {
+            DispatchQueue.main.async {
+                if self.generation == probedGeneration { self.deviceProtocol = state }
+            }
+        }
+        return current ? outcome : .notReady
     }
 
     // MARK: - Device Open/Close Helpers
@@ -616,26 +666,15 @@ class USBDevice: ObservableObject {
 
     // MARK: - Control Transfers
 
+    // Every transfer binds to the connection that was open when the caller
+    // issued it: if a switch (close/open) intervenes before its block runs on
+    // `serialQueue`, it fails instead of reaching a different board.
+
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
-        // Bind the command to the device that was open when the caller issued
-        // it; if a switch (close/open) intervenes before the block runs, drop
-        // the command rather than deliver it to the wrong device.
         let expectedGeneration = generation
         serialQueue.async {
-            guard expectedGeneration == self.generation,
-                  let dev = self.deviceInterface else { return }
-
-            var requestPtr = IOUSBDevRequest(
-                bmRequestType: 0x41, // Host to Device | Vendor | Interface
-                bRequest: request,
-                wValue: value,
-                wIndex: index,
-                wLength: UInt16(data.count),
-                pData: UnsafeMutableRawPointer(mutating: (data as NSData).bytes),
-                wLenDone: 0
-            )
-
-            _ = dev.pointee!.pointee.DeviceRequest(dev, &requestPtr)
+            _ = self.performSet(request: request, value: value, index: index, data: data,
+                                generation: expectedGeneration, wantsReason: false)
         }
     }
 
@@ -646,76 +685,105 @@ class USBDevice: ObservableObject {
         return nil
     }
 
-    /// Synchronous OUT transfer that reports the outcome, for the Link hub:
-    /// `sendControlRequest` is fire-and-forget and cannot tell a caller whether
-    /// the device took the write.  Same device-binding as the other transfers.
-    /// A firmware STALL (unknown or rejected command) maps to `.error`, matching
-    /// the read path; success is `.ok`, which certifies dispatch, not apply.
+    /// Synchronous SET that reports the outcome, for the Link hub, which runs
+    /// it on the router's own queue.  `.ok` certifies dispatch, not apply.
     func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data) -> LinkStatus {
         let expectedGeneration = generation
         return serialQueue.sync {
-            guard expectedGeneration == self.generation,
-                  let dev = self.deviceInterface else { return .noDevice }
-            var mutable = data
-            let result: IOReturn = mutable.withUnsafeMutableBytes { raw in
-                var requestPtr = IOUSBDevRequest(
-                    bmRequestType: 0x41,
-                    bRequest: request,
-                    wValue: value,
-                    wIndex: index,
-                    wLength: UInt16(data.count),
-                    pData: raw.baseAddress,
-                    wLenDone: 0)
-                return dev.pointee!.pointee.DeviceRequest(dev, &requestPtr)
-            }
-            switch result {
-            case kIOReturnSuccess: return .ok
-            case kIOUSBPipeStalledValue: return .error
-            case kIOReturnTimeout: return .timeout
-            case kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnNotAttached: return .noDevice
-            default: return .error
-            }
+            performSet(request: request, value: value, index: index, data: data,
+                       generation: expectedGeneration, wantsReason: true)
+        }
+    }
+
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           completion: @escaping (LinkStatus) -> Void) {
+        let expectedGeneration = generation
+        serialQueue.async {
+            completion(self.performSet(request: request, value: value, index: index, data: data,
+                                       generation: expectedGeneration, wantsReason: true))
         }
     }
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Result<Data, LinkStatus> {
-        // Same device-binding as sendControlRequest: a read that was issued
-        // for the previously-open device fails instead of returning another
-        // device's data.
         let expectedGeneration = generation
         return serialQueue.sync {
-            guard expectedGeneration == self.generation,
-                  let dev = self.deviceInterface else { return .failure(.noDevice) }
-
-            let buffer = UnsafeMutableRawPointer.allocate(byteCount: Int(length), alignment: 1)
-            defer { buffer.deallocate() }
-
-            var requestPtr = IOUSBDevRequest(
-                bmRequestType: 0xC1, // Device to Host | Vendor | Interface
-                bRequest: request,
-                wValue: value,
-                wIndex: index,
-                wLength: length,
-                pData: buffer,
-                wLenDone: 0
-            )
-
-            let result = dev.pointee!.pointee.DeviceRequest(dev, &requestPtr)
-
-            switch result {
-            case kIOReturnSuccess:
-                return .success(Data(bytes: buffer, count: Int(requestPtr.wLenDone)))
-            case kIOUSBPipeStalledValue:
-                // The firmware STALLs an unknown command or a rejected
-                // parameter; that is the Link ERROR status, not a dead link.
-                return .failure(.error)
-            case kIOReturnTimeout:
-                return .failure(.timeout)
-            case kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnNotAttached:
+            guard expectedGeneration == self.generation, let dev = self.deviceInterface else {
                 return .failure(.noDevice)
-            default:
-                return .failure(.error)
             }
+            guard ProtocolGate.admits(request: request, index: index, isGet: true, state: self.currentProtocol) else {
+                return .failure(.noDevice)
+            }
+            let buffer = UnsafeMutableRawPointer.allocate(byteCount: max(Int(length), 1), alignment: 1)
+            defer { buffer.deallocate() }
+            let (result, done) = Self.transfer(dev, requestType: 0xC1, request: request, value: value,
+                                               index: index, length: length, buffer: buffer)
+            if result == kIOReturnSuccess { return .success(Data(bytes: buffer, count: done)) }
+            let status = Self.status(for: result)
+            guard status == .error else { return .failure(status) }
+            return .failure(self.refusalReason(dev, request: request, index: index, value: value, isGet: true))
+        }
+    }
+
+    /// Runs on `serialQueue`.
+    private func performSet(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                            generation expectedGeneration: UInt64, wantsReason: Bool) -> LinkStatus {
+        guard expectedGeneration == generation, let dev = deviceInterface else { return .noDevice }
+        guard ProtocolGate.admits(request: request, index: index, isGet: false, state: currentProtocol) else {
+            return .noDevice
+        }
+        var mutable = data
+        let result: IOReturn = mutable.withUnsafeMutableBytes { raw in
+            Self.transfer(dev, requestType: 0x41, request: request, value: value, index: index,
+                          length: UInt16(data.count), buffer: raw.baseAddress).0
+        }
+        if result == kIOReturnSuccess { return .ok }
+        let status = Self.status(for: result)
+        guard status == .error, wantsReason else { return status }
+        return refusalReason(dev, request: request, index: index, value: value, isGet: false)
+    }
+
+    /// Why a paged request was STALLed, from SYS.LAST_RESULT read in the same
+    /// `serialQueue` block, so no other request of ours can land in between.
+    /// Only paged requests to a paged board have a record; anything else, or a
+    /// record that names some other program's request, is `.error`.
+    private func refusalReason(_ dev: DeviceInterfacePtr, request: UInt8, index: UInt16,
+                               value: UInt16, isGet: Bool) -> LinkStatus {
+        guard index >> 8 != 0, currentProtocol.isPaged else { return .error }
+        let cmd = VC.SYS.LAST_RESULT
+        var reply = [UInt8](repeating: 0, count: Int(VendorLastResult.length))
+        let (result, done) = reply.withUnsafeMutableBytes { raw in
+            Self.transfer(dev, requestType: 0xC1, request: cmd.number, value: 0, index: cmd.usbIndex,
+                          length: VendorLastResult.length, buffer: raw.baseAddress)
+        }
+        guard result == kIOReturnSuccess else { return .error }
+        return VendorLastResult.status(from: Data(reply.prefix(done)), request: request,
+                                       index: index, value: value, isGet: isGet)
+    }
+
+    /// Bounded so a wedged device cannot hold `serialQueue`, and with it every
+    /// other request, for good.  Comfortably longer than a flash-busy window.
+    private static let transferTimeoutMs: UInt32 = 1500
+
+    private static func transfer(_ dev: DeviceInterfacePtr, requestType: UInt8, request: UInt8,
+                                 value: UInt16, index: UInt16, length: UInt16,
+                                 buffer: UnsafeMutableRawPointer?) -> (IOReturn, Int) {
+        var req = IOUSBDevRequestTO(bmRequestType: requestType, bRequest: request, wValue: value,
+                                    wIndex: index, wLength: length, pData: buffer, wLenDone: 0,
+                                    noDataTimeout: transferTimeoutMs, completionTimeout: transferTimeoutMs)
+        let result = dev!.pointee!.pointee.DeviceRequestTO(dev, &req)
+        return (result, Int(req.wLenDone))
+    }
+
+    /// Only a real STALL is `.error`: the probe takes `.error` to mean "this
+    /// board refused the request", so a timeout or an unexpected IOKit failure
+    /// must never look like one.  Unknown failures count as transient.
+    static func status(for result: IOReturn) -> LinkStatus {
+        switch result {
+        case kIOReturnSuccess: return .ok
+        case kIOUSBPipeStalledValue, kUSBHostPipeStalledValue: return .error
+        case kIOReturnTimeout, kIOUSBTransactionTimeoutValue: return .timeout
+        case kIOReturnNoDevice, kIOReturnNotResponding, kIOReturnNotAttached: return .noDevice
+        default: return .timeout
         }
     }
 
@@ -792,6 +860,7 @@ extension USBDevice: DeviceTransport {
     var availableDevicesPublisher: AnyPublisher<[DSPiDevice], Never> { $availableDevices.eraseToAnyPublisher() }
     var selectedDevicePublisher: AnyPublisher<DSPiDevice?, Never> { $selectedDevice.eraseToAnyPublisher() }
     var errorMessagePublisher: AnyPublisher<String?, Never> { $errorMessage.eraseToAnyPublisher() }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { $deviceProtocol.eraseToAnyPublisher() }
 
     func markDisconnected() {
         DispatchQueue.main.async { self.isConnected = false }

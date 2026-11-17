@@ -19,7 +19,9 @@ typealias LinkSessionID = UInt16
 
 /// Status of one tunnelled command.  0x00..0x07 are the firmware's
 /// CTRL_STATUS_* codes and must never diverge from them; 0x80 and above are
-/// Link-level (spec section 8.1).
+/// Link-level (spec section 8.1).  0x10..0x1A are the paged protocol's
+/// VC_ERR_* result codes (client update guide, section 4).  `.error` is a
+/// refusal whose reason is unknown, which 1.1.7 itself never reports.
 enum LinkStatus: UInt8, Error, Equatable {
     case ok          = 0x00
     case busy        = 0x01
@@ -29,6 +31,17 @@ enum LinkStatus: UInt8, Error, Equatable {
     case crcError    = 0x05
     case oversize    = 0x06
     case frameError  = 0x07
+    case vcUnknown     = 0x10   // no such page or command on this build
+    case vcDirection   = 0x11   // the command has no GET, or no SET
+    case vcLength      = 0x12   // wrong SET payload length
+    case vcAddress     = 0x13   // wValue out of range
+    case vcValue       = 0x14   // payload value out of range, or NaN
+    case vcUnsupported = 0x15   // a valid value this platform cannot do
+    case vcBlocked     = 0x16   // not allowed on this transport
+    case vcBusy        = 0x17   // try again shortly
+    case vcState       = 0x18   // not allowed in the current state
+    case vcPinInvalid  = 0x19   // the GPIO cannot be used for this function
+    case vcPinInUse    = 0x1A   // the GPIO is already claimed
     case noDevice    = 0x80
     case denied      = 0x81
     case timeout     = 0x82
@@ -50,10 +63,13 @@ enum LinkStatus: UInt8, Error, Equatable {
     /// True for the statuses a caller should simply retry after a short wait.
     var isRetryable: Bool {
         switch self {
-        case .busy, .bulkLocked, .crcError, .timeout, .rateLimited: return true
+        case .busy, .bulkLocked, .crcError, .timeout, .rateLimited, .vcBusy: return true
         default: return false
         }
     }
+
+    /// A paged-protocol result code from the device.
+    var isVendorResult: Bool { (0x10...0x1A).contains(rawValue) }
 }
 
 /// One notification packet from a device, as the transport delivered it.
@@ -166,6 +182,16 @@ protocol DeviceTransport: AnyObject {
     /// Blocking GET that reports why it failed.
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Result<Data, LinkStatus>
 
+    /// SET that reports its outcome without blocking the caller.  `completion`
+    /// runs once, on an arbitrary queue.  `.ok` means the device accepted the
+    /// write, which for a deferred command means queued, not applied.
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           completion: @escaping (LinkStatus) -> Void)
+
+    /// The connected board's vendor protocol generation.
+    var deviceProtocol: DeviceProtocolState { get }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { get }
+
     /// Subscribe to the device's notification stream.  Delivered on the main
     /// thread.  Drop the cancellable to unsubscribe.
     func addNotificationObserver(_ handler: @escaping (LinkNotification) -> Void) -> AnyCancellable
@@ -176,6 +202,14 @@ protocol DeviceTransport: AnyObject {
     /// never blocks.
     func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool
     func releaseDeviceLock()
+}
+
+/// Carries a status from a completion that may land after a timed-out wait.
+final class StatusBox {
+    private var value: LinkStatus?
+    private let lock = NSLock()
+    func set(_ v: LinkStatus) { lock.lock(); if value == nil { value = v }; lock.unlock() }
+    func get() -> LinkStatus? { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 /// Shared wording and limits for the device lock.
@@ -220,6 +254,62 @@ extension DeviceTransport {
         if case .success(let data) = getControlResult(request: request, value: value, index: index, length: length) {
             return data
         }
+        return nil
+    }
+
+    // MARK: Paged commands
+
+    /// GET a paged command.  `value` is the command's address, 0 for none.
+    func get(_ command: VendorCommand, value: UInt16 = 0, length: UInt16) -> Result<Data, LinkStatus> {
+        if let refusal = Self.localRefusal(command, isGet: true, payload: nil) { return .failure(refusal) }
+        return getControlResult(request: command.number, value: value, index: command.usbIndex, length: length)
+    }
+
+    /// GET a paged command, nil on any failure.
+    func getData(_ command: VendorCommand, value: UInt16 = 0, length: UInt16) -> Data? {
+        if case .success(let data) = get(command, value: value, length: length) { return data }
+        return nil
+    }
+
+    /// Fire-and-forget SET of a paged command, for live drags that must not
+    /// wait.  Use `set` wherever a refusal matters.
+    func send(_ command: VendorCommand, value: UInt16 = 0, data: Data = Data()) {
+        guard Self.localRefusal(command, isGet: false, payload: data) == nil else { return }
+        sendControlRequest(request: command.number, value: value, index: command.usbIndex, data: data)
+    }
+
+    /// SET of a paged command that reports the outcome.  `completion` runs on
+    /// an arbitrary queue.
+    func set(_ command: VendorCommand, value: UInt16 = 0, data: Data = Data(),
+             completion: @escaping (LinkStatus) -> Void) {
+        if let refusal = Self.localRefusal(command, isGet: false, payload: data) {
+            completion(refusal)
+            return
+        }
+        sendControlResult(request: command.number, value: value, index: command.usbIndex,
+                          data: data, completion: completion)
+    }
+
+    /// Blocking form of `set`, for code that already runs off the main thread
+    /// (flash saves, preset flows).  Never call it on the main thread.
+    func setAndWait(_ command: VendorCommand, value: UInt16 = 0, data: Data = Data(),
+                    timeout: TimeInterval = 10) -> LinkStatus {
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        let sem = DispatchSemaphore(value: 0)
+        let box = StatusBox()
+        set(command, value: value, data: data) { box.set($0); sem.signal() }
+        guard sem.wait(timeout: .now() + timeout) == .success else { return .timeout }
+        return box.get() ?? .timeout
+    }
+
+    /// Refuse locally what the registry says the device would refuse, so a
+    /// mistake in the app never costs a bus round trip or a flash-busy wait.
+    static func localRefusal(_ command: VendorCommand, isGet: Bool, payload: Data?) -> LinkStatus? {
+        guard let info = VendorCommandRegistry.info(for: command) else { return .vcUnknown }
+        if isGet { return info.hasGet ? nil : .vcDirection }
+        guard info.hasSet else { return .vcDirection }
+        let count = payload?.count ?? 0
+        guard count >= info.setMin, count <= info.setMax else { return .vcLength }
         return nil
     }
 

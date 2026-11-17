@@ -36,6 +36,7 @@ final class CompositeTransport: DeviceTransport {
     private let devicesSubject = CurrentValueSubject<[DSPiDevice], Never>([])
     private let selectedSubject = CurrentValueSubject<DSPiDevice?, Never>(nil)
     private let errorSubject = CurrentValueSubject<String?, Never>(nil)
+    private let protocolSubject = CurrentValueSubject<DeviceProtocolState, Never>(.unknown)
     private let notifyFanout = NotificationFanout()
 
     private var activeCancellables = Set<AnyCancellable>()
@@ -356,6 +357,8 @@ final class CompositeTransport: DeviceTransport {
             .store(in: &activeCancellables)
         transport.errorMessagePublisher.sink { [weak self] in self?.errorSubject.send($0) }
             .store(in: &activeCancellables)
+        transport.deviceProtocolPublisher.sink { [weak self] in self?.protocolSubject.send($0) }
+            .store(in: &activeCancellables)
         activeNotifyToken = transport.addNotificationObserver { [weak self] in self?.notifyFanout.publish($0) }
     }
 
@@ -371,6 +374,8 @@ final class CompositeTransport: DeviceTransport {
     var selectedDevicePublisher: AnyPublisher<DSPiDevice?, Never> { selectedSubject.eraseToAnyPublisher() }
     var errorMessage: String? { errorSubject.value }
     var errorMessagePublisher: AnyPublisher<String?, Never> { errorSubject.eraseToAnyPublisher() }
+    var deviceProtocol: DeviceProtocolState { protocolSubject.value }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { protocolSubject.eraseToAnyPublisher() }
 
     /// The user's choice: a remote picked here stays put when a local board
     /// appears.
@@ -423,6 +428,12 @@ final class CompositeTransport: DeviceTransport {
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
         -> Result<Data, LinkStatus> {
         active.getControlResult(request: request, value: value, index: index, length: length)
+    }
+
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           completion: @escaping (LinkStatus) -> Void) {
+        active.sendControlResult(request: request, value: value, index: index, data: data,
+                                 completion: completion)
     }
 
     func addNotificationObserver(_ handler: @escaping (LinkNotification) -> Void) -> AnyCancellable {

@@ -66,6 +66,10 @@ final class HubTransport: DeviceTransport {
     var selectedDevicePublisher: AnyPublisher<DSPiDevice?, Never> { usb.selectedDevicePublisher }
     var errorMessage: String? { usb.errorMessage }
     var errorMessagePublisher: AnyPublisher<String?, Never> { usb.errorMessagePublisher }
+    /// Read from USB, not the hub, so a board the hub never attaches (a
+    /// legacy board, from phase 3) can still be seen and updated.
+    var deviceProtocol: DeviceProtocolState { usb.deviceProtocol }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { usb.deviceProtocolPublisher }
 
     func selectDevice(_ device: DSPiDevice) { usb.selectDevice(device) }
     func reconnect() { usb.reconnect() }
@@ -79,6 +83,16 @@ final class HubTransport: DeviceTransport {
                                  bRequest: request, wValue: value, wIndex: index, payload: data)
         hub.submit(req, from: localSession.id) { response in
             if response.status == .locked { DeviceLock.notice.post() }
+        }
+    }
+
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           completion: @escaping (LinkStatus) -> Void) {
+        let req = LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
+                                 bRequest: request, wValue: value, wIndex: index, payload: data)
+        hub.submit(req, from: localSession.id) { response in
+            if response.status == .locked { DeviceLock.notice.post() }
+            completion(response.status)
         }
     }
 

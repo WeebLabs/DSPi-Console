@@ -55,27 +55,49 @@ final class USBHubDevice: HubDevice {
         }
     }
 
-    /// Read a device's identity over USB for the registry: REQ_GET_PLATFORM
-    /// (7 bytes, via FirmwareVersion.fromPlatformReply) and REQ_GET_SERIAL.
-    /// nil if the device does not answer, which the caller treats as not ready.
+    /// Read a device's identity over USB for the registry.  The protocol probe
+    /// runs first, as the first request a new connection ever sees, and
+    /// decides which requests may follow.  nil means not ready (probed again
+    /// by the caller) or a protocol this Console cannot drive.
     static func readInfo(from usb: USBDevice, serialFallback: String) -> HubDeviceInfo? {
+        switch usb.probeProtocol() {
+        case .paged:
+            return readIdentity(serialFallback: serialFallback,
+                                serial: usb.getData(VC.SYS.SERIAL, length: 16),
+                                platform: usb.getData(VC.SYS.PLATFORM, length: 7)) {
+                usb.getData(VC.SYS.DEVICE_NAME, length: UInt16(DEVICE_NAME_LEN))
+            }
+        case .legacy(let platformReply):
+            // Phase 2 of the paged-protocol port still attaches a legacy board
+            // and reads it with its old opcodes; phase 3 stops attaching it.
+            return readIdentity(serialFallback: serialFallback,
+                                serial: usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16),
+                                platform: platformReply) {
+                usb.getControlRequest(request: REQ_GET_DEVICE_NAME, value: 0, index: 2,
+                                      length: UInt16(DEVICE_NAME_LEN))
+            }
+        case .unsupported, .notReady:
+            return nil
+        }
+    }
+
+    /// `SYS.PLATFORM` keeps the old GET_PLATFORM layout, so both generations
+    /// share one decoder.
+    private static func readIdentity(serialFallback: String, serial s: Data?, platform p: Data?,
+                                     readName: () -> Data?) -> HubDeviceInfo? {
         let serial: String
-        if let s = usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16),
-           let str = String(data: s.prefix(while: { $0 != 0 }), encoding: .ascii), !str.isEmpty {
+        if let s, let str = String(data: s.prefix(while: { $0 != 0 }), encoding: .ascii), !str.isEmpty {
             serial = str
         } else {
             serial = serialFallback
         }
-        guard let p = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
-              let reply = FirmwareVersion.fromPlatformReply([UInt8](p)) else { return nil }
+        guard let p, let reply = FirmwareVersion.fromPlatformReply([UInt8](p)) else { return nil }
         let v = reply.version
         // A STALL or a short reply (older firmware) means no board name.  One
         // retry, so a transient miss does not treat a capable board as old.
         var boardName: String?
         for _ in 0..<2 where boardName == nil {
-            if let n = usb.getControlRequest(request: REQ_GET_DEVICE_NAME, value: 0, index: 2,
-                                             length: UInt16(DEVICE_NAME_LEN)),
-               n.count == DEVICE_NAME_LEN {
+            if let n = readName(), n.count == DEVICE_NAME_LEN {
                 boardName = DSPViewModel.decodeInputSourceName(n)
             }
         }
