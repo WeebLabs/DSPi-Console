@@ -295,8 +295,18 @@ extension DeviceTransport {
     /// prefer calling it off the main thread.
     func setAndWait(_ command: VendorCommand, value: UInt16 = 0, data: Data = Data(),
                     timeout: TimeInterval = 10) -> LinkStatus {
-        let sem = DispatchSemaphore(value: 0)
         let box = StatusBox()
+        if Thread.isMainThread {
+            // A transport may complete on the main queue (NetworkTransport
+            // does), so a semaphore here would wait out the timeout instead.
+            set(command, value: value, data: data) { box.set($0) }
+            let deadline = Date().addingTimeInterval(timeout)
+            while box.get() == nil, Date() < deadline {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            return box.get() ?? .timeout
+        }
+        let sem = DispatchSemaphore(value: 0)
         set(command, value: value, data: data) { box.set($0); sem.signal() }
         guard sem.wait(timeout: .now() + timeout) == .success else { return .timeout }
         return box.get() ?? .timeout

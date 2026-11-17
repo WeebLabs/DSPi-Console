@@ -15,10 +15,15 @@ final class USBHubDevice: HubDevice {
     private let usb: USBDevice
     private var cachedInfo: HubDeviceInfo
     private let infoLock = NSLock()
+    /// The USB connection this device was attached for.  USBDevice publishes
+    /// a new board's protocol before the hub hears of the switch, so without
+    /// this binding the old board's router would briefly reach the new board.
+    private let boundGeneration: UInt64
 
-    init(usb: USBDevice, info: HubDeviceInfo) {
+    init(usb: USBDevice, info: HubDeviceInfo, generation: UInt64) {
         self.usb = usb
         self.cachedInfo = info
+        self.boundGeneration = generation
     }
 
     var info: HubDeviceInfo {
@@ -30,8 +35,8 @@ final class USBHubDevice: HubDevice {
         infoLock.lock(); cachedInfo = info; infoLock.unlock()
     }
 
-    var generation: UInt64 { usb.generation }
-    var isConnected: Bool { usb.isConnected }
+    var generation: UInt64 { boundGeneration }
+    var isConnected: Bool { usb.isConnected && usb.generation == boundGeneration }
 
     /// A GET is an IN transfer; a SET is an OUT transfer.  Write-as-read
     /// commands are GETs at the wire level and the client sends them as such,
@@ -41,7 +46,8 @@ final class USBHubDevice: HubDevice {
         switch request.direction {
         case .get:
             let result = usb.getControlResult(request: request.bRequest, value: request.wValue,
-                                              index: request.wIndex, length: request.wLength)
+                                              index: request.wIndex, length: request.wLength,
+                                              generation: boundGeneration)
             switch result {
             case .success(let data):
                 return LinkCmdResponse(tag: request.tag, status: .ok, payload: data)
@@ -50,7 +56,8 @@ final class USBHubDevice: HubDevice {
             }
         case .set:
             let status = usb.sendControlResult(request: request.bRequest, value: request.wValue,
-                                              index: request.wIndex, data: request.payload)
+                                              index: request.wIndex, data: request.payload,
+                                              generation: boundGeneration)
             return LinkCmdResponse(tag: request.tag, status: status)
         }
     }
@@ -60,7 +67,9 @@ final class USBHubDevice: HubDevice {
     /// decides which requests may follow.  nil means not ready (probed again
     /// by the caller) or a protocol this Console cannot drive.
     static func readInfo(from usb: USBDevice, serialFallback: String) -> HubDeviceInfo? {
-        switch usb.probeProtocol() {
+        let outcome = usb.probeProtocol()
+        guard attaches(outcome) else { return nil }
+        switch outcome {
         case .paged:
             return readIdentity(serialFallback: serialFallback,
                                 serial: usb.getData(VC.SYS.SERIAL, length: 16),
@@ -68,11 +77,16 @@ final class USBHubDevice: HubDevice {
                 usb.getData(VC.SYS.DEVICE_NAME, length: UInt16(DEVICE_NAME_LEN))
             }
         case .legacy, .unsupported, .notReady:
-            // A legacy board is never attached: only the old GET_PLATFORM and
-            // ENTER_BOOTLOADER may reach it, and USBDevice publishes its
-            // version for the firmware update flow.
             return nil
         }
+    }
+
+    /// Only a paged board is attached.  A legacy board may receive nothing but
+    /// the old GET_PLATFORM and ENTER_BOOTLOADER, and USBDevice publishes its
+    /// version for the firmware update flow; a newer major is not ours to drive.
+    static func attaches(_ outcome: ProtocolProbe.Outcome) -> Bool {
+        if case .paged = outcome { return true }
+        return false
     }
 
     /// `SYS.PLATFORM` keeps the old GET_PLATFORM layout, so both generations

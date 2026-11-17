@@ -176,6 +176,8 @@ The BOOTSEL path also still works.
 **This phase starts only after the user confirms `~/DSPi-Link` is ready.** Until then, nothing reads or uses that repository.
 
 - **Policy table.** Key the policy on the 16-bit ID. `Link/policy/commands.json` is regenerated from the registry plus a class column. The 15 escalation rows of 13.3.8 are checked by hand.
+- **Client bulk timeout.** `LinkClient`'s `bulkOpcodes` (0xA0 to 0xA3) moves to the registry's `BULK` flag on the command ID. Today it can't be reached for paged traffic. Once remote paged traffic is allowed, `STORE.ALL_PARAMS` would miss the longer timeout and unrelated commands would get it.
+- **Hub-built rename.** Drop the rename's check against the old `SET_DEVICE_NAME` row (0x56) once the policy is keyed on command IDs.
 - **Status codes.** `LinkStatus` and `LinkFrames.decode` accept `0x10` to `0x1A`. The hub forwards the `SYS.LAST_RESULT` code instead of `0x02`.
 - **Device protocol field.** Add a protocol field to the device object. A remote hub publishes a legacy board with its version but no command access, following the Link spec.
 - **Lift the fail-closed rule.** The phase 3 rule that rejects non-local sessions is lifted.

@@ -218,4 +218,78 @@ final class DeviceProtocolTests: XCTestCase {
         XCTAssertFalse(hub.isDeviceAttached, "detached synchronously, before the new board answers")
         probing.signal()
     }
+
+    // MARK: Phase 3 review fixes
+
+    /// USBDevice publishes a new board's protocol before the hub hears of the
+    /// switch, so a hub device must answer only for the connection it was
+    /// attached for, never for whatever is open now.
+    func testHubDeviceIsBoundToItsConnection() {
+        let usb = USBDevice(startMonitoring: false)
+        let info = HubDeviceInfo(serial: "AAAA", platform: 1, firmware: "1.1.7", outputs: 9,
+                                 inputs: nil, wireVersion: nil, link: .usb)
+        let device = USBHubDevice(usb: usb, info: info, generation: usb.generation &+ 7)
+        XCTAssertEqual(device.generation, usb.generation &+ 7, "bound, not read live from USB")
+        XCTAssertFalse(device.isConnected)
+        let get = device.execute(LinkCmdRequest(tag: 1, handle: 0, direction: .get,
+                                                bRequest: VC.SYS.PLATFORM.number, wValue: 0,
+                                                wIndex: VC.SYS.PLATFORM.usbIndex, wLength: 7))
+        XCTAssertEqual(get.status, .noDevice)
+    }
+
+    func testOnlyAPagedBoardIsAttached() {
+        XCTAssertTrue(USBHubDevice.attaches(.paged(major: 1, minor: 0)))
+        XCTAssertFalse(USBHubDevice.attaches(.legacy(platformReply: platform116)))
+        XCTAssertFalse(USBHubDevice.attaches(.unsupported(major: 2)))
+        XCTAssertFalse(USBHubDevice.attaches(.notReady))
+    }
+
+    /// A board probed as legacy is never attached, and the hub stops probing it
+    /// rather than retrying as it would for a board that is still booting.
+    func testHubNeverAttachesASettledLegacyBoard() {
+        let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("legacy-\(UUID().uuidString).json"))
+        let hub = LinkHub(usb: USBDevice(startMonitoring: false),
+                          policy: LinkPolicy.bundled ?? LinkPolicy.empty, auth: auth)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        hub.identityRetryDelays = [0, 0.01, 0.01, 0.01]
+        let lock = NSLock()
+        var probes = 0
+        hub.usbDeviceFactory = { _ in lock.lock(); probes += 1; lock.unlock(); return nil }
+        hub.stopsProbing = { _ in true }      // as USBDevice reports after a legacy verdict
+
+        hub.usbConnectionChanged(connected: true, generation: 1)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        lock.lock(); let seen = probes; lock.unlock()
+        XCTAssertEqual(seen, 1, "one probe, then no retries")
+        XCTAssertFalse(hub.isDeviceAttached)
+    }
+
+    func testNamesAreCutOnUTF8BytesWithoutSplittingACharacter() {
+        XCTAssertEqual(DSPViewModel.utf8Prefix("Living Room", maxBytes: 31), "Living Room")
+        let long = String(repeating: "é", count: 20)          // 2 bytes each, 40 in all
+        let cut = DSPViewModel.utf8Prefix(long, maxBytes: 31)
+        XCTAssertEqual(cut, String(repeating: "é", count: 15))
+        XCTAssertLessThanOrEqual(cut.utf8.count, 31)
+        XCTAssertEqual(DSPViewModel.utf8Prefix("ab😀", maxBytes: 4), "ab", "a 4-byte character is not split")
+    }
+
+    /// NetworkTransport completes on the main queue; a main-thread setAndWait
+    /// must still get the answer instead of waiting out its timeout.
+    func testSetAndWaitOnTheMainThreadSeesAMainQueueCompletion() {
+        let client = LinkClientFake()
+        let transport = NetworkTransport(client: client, hubID: "hub-1", hubName: "Studio",
+                                         tokens: LinkTokenStore(service: "test-\(UUID().uuidString)"),
+                                         clientName: "Tester")
+        transport.allowsPagedRequests = true
+        client.responder = { LinkCmdResponse(tag: $0.tag, status: .ok) }
+        transport.bind(serial: "AAAA")
+        client.setDevices([LinkDeviceInfo(handle: 1, serial: "AAAA", name: nil, state: .online)])
+        client.setState(.ready)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+
+        let started = Date()
+        XCTAssertEqual(transport.setAndWait(VC.STORE.PRESET_SAVE, value: 1, timeout: 3), .ok)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+    }
 }

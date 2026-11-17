@@ -711,8 +711,11 @@ class USBDevice: ObservableObject {
 
     /// Synchronous SET that reports the outcome, for the Link hub, which runs
     /// it on the router's own queue.  `.ok` certifies dispatch, not apply.
-    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data) -> LinkStatus {
-        let expectedGeneration = generation
+    /// `generation` binds it to one connection (the hub's attached board);
+    /// nil means whichever is open now.
+    func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
+                           generation boundGeneration: UInt64? = nil) -> LinkStatus {
+        let expectedGeneration = boundGeneration ?? generation
         return serialQueue.sync {
             performSet(request: request, value: value, index: index, data: data,
                        generation: expectedGeneration, wantsReason: true)
@@ -729,8 +732,14 @@ class USBDevice: ObservableObject {
     }
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Result<Data, LinkStatus> {
-        let expectedGeneration = generation
-        return serialQueue.sync {
+        getControlResult(request: request, value: value, index: index, length: length, generation: generation)
+    }
+
+    /// GET bound to one connection: it fails rather than reach a board opened
+    /// after `expectedGeneration`.
+    func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16,
+                          generation expectedGeneration: UInt64) -> Result<Data, LinkStatus> {
+        serialQueue.sync {
             guard expectedGeneration == self.generation, let dev = self.deviceInterface else {
                 return .failure(.noDevice)
             }

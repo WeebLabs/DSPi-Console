@@ -2017,7 +2017,8 @@ extension DSPViewModel {
     /// Returns the firmware PIN_CONFIG_* status byte.
     @discardableResult
     func setAdatInputPin(_ pin: UInt8) -> UInt8 {
-        if let d = transport.legacyAction(VC.INPUT.ADAT_RX_PIN, payload: Data([pin]), family: .pin),
+        if let d = transport.legacyAction(VC.INPUT.ADAT_RX_PIN, payload: Data([pin]), family: .pin,
+                                            overrides: [.vcState: 2]),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
@@ -3991,12 +3992,27 @@ extension DSPViewModel {
     }
 
     func setPresetName(slot: Int, name: String) {
-        var nameData = Data(name.prefix(31).utf8)
+        let trimmed = Self.utf8Prefix(name, maxBytes: 31)
+        var nameData = Data(trimmed.utf8)
         nameData.append(0) // NUL terminator
         transport.send(VC.STORE.PRESET_NAME, value: UInt16(slot), data: nameData)
         DispatchQueue.main.async {
-            self.presetNames[slot] = String(name.prefix(31))
+            self.presetNames[slot] = trimmed
         }
+    }
+
+    /// The longest prefix of `s` that fits `maxBytes` of UTF-8 without
+    /// splitting a character.  The firmware takes names of at most 32 bytes
+    /// and refuses longer ones, so a cut by characters would drop a long
+    /// non-ASCII name instead of shortening it.
+    static func utf8Prefix(_ s: String, maxBytes: Int) -> String {
+        var out = "", used = 0
+        for ch in s {
+            let n = String(ch).utf8.count
+            guard used + n <= maxBytes else { break }
+            out.append(ch); used += n
+        }
+        return out
     }
 
     func setPresetStartup(mode: Int, defaultSlot: Int) {
@@ -4051,12 +4067,13 @@ extension DSPViewModel {
     // MARK: - Channel Names
 
     func setChannelName(channel: Int, name: String) {
+        let trimmed = Self.utf8Prefix(name, maxBytes: 31)
         var nameData = Data(count: 32)  // Always send full 32-byte buffer, zero-padded
-        let utf8 = Data(name.prefix(31).utf8)
+        let utf8 = Data(trimmed.utf8)
         nameData.replaceSubrange(0..<utf8.count, with: utf8)
         transport.send(VC.ROUTE.CHANNEL_NAME, value: UInt16(channel), data: nameData)
         DispatchQueue.main.async {
-            self.channelNames[channel] = String(name.prefix(31))
+            self.channelNames[channel] = trimmed
         }
     }
 

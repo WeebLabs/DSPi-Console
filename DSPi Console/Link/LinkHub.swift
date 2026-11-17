@@ -173,6 +173,11 @@ final class LinkHub {
     /// the switch and retry logic without hardware.
     var usbDeviceFactory: ((USBDevice) -> HubDevice?)?
 
+    /// Whether a board that did not attach is settled for good (legacy, or a
+    /// newer protocol major), so probing it again is pointless.  Tests replace
+    /// it to stand in for a probed legacy board.
+    var stopsProbing: (USBDevice) -> Bool = { $0.protocolState.isSettledUnattachable }
+
     /// Pauses before each identity probe, first one immediate: about 2.5 s in
     /// all, the same patience fetchAll(afterConnect:) has for a board that is
     /// still booting after re-enumeration.  Internal so tests can shorten it.
@@ -207,7 +212,7 @@ final class LinkHub {
         let probe: (USBDevice) -> HubDevice? = usbDeviceFactory ?? { usb in
             let fallback = usb.selectedDevice?.serial ?? "unknown"
             return USBHubDevice.readInfo(from: usb, serialFallback: fallback)
-                .map { USBHubDevice(usb: usb, info: $0) }
+                .map { USBHubDevice(usb: usb, info: $0, generation: generation) }
         }
         let delays = identityRetryDelays
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -217,7 +222,7 @@ final class LinkHub {
                 guard let device = probe(usb) else {
                     // A legacy or newer-protocol board is never attached; it
                     // only publishes its protocol, so stop probing it.
-                    if self.usbDeviceFactory == nil, usb.protocolState.isSettledUnattachable { return }
+                    if self.stopsProbing(usb) { return }
                     continue
                 }
                 DispatchQueue.main.async {
