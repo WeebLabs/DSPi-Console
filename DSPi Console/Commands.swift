@@ -3102,6 +3102,20 @@ extension DSPViewModel {
     /// refused and nothing was sent.
     func enterBootloaderForInstall(completion: @escaping (Bool) -> Void) {
         let transport = self.transport
+        if legacyFirmwareVersion != nil {
+            // A 1.1.6 board has no router, so there is no lock to take.  Its
+            // old request may STALL on firmware too old to have it; the update
+            // window then keeps asking the user to hold BOOTSEL, so this still
+            // reports "sent" (false means only "another session holds the lock").
+            DispatchQueue.global(qos: .userInitiated).async {
+                let status = transport.enterLegacyBootloader()
+                if status == .error || status == .unsupported {
+                    print("[FIRMWARE] legacy ENTER_BOOTLOADER not taken: \(status)")
+                }
+                DispatchQueue.main.async { completion(true) }
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             guard transport.acquireDeviceLock(reason: "Installing firmware", timeout: DeviceLock.maxTimeout) else {
                 DispatchQueue.main.async { completion(false) }

@@ -2086,13 +2086,28 @@ class DSPViewModel: ObservableObject {
     /// in every one of those cases we know too little to tell the user
     /// anything, so callers must stay silent rather than guess.
     var firmwareMatch: FirmwareMatch? {
-        guard isDeviceConnected,
-              let v = firmwareVersion,
+        guard let device = deviceFirmwareVersion,
               let expected = FirmwareVersion.expected else { return nil }
-        let device = FirmwareVersion(v.major, v.minor, v.patch, v.beta)
         if device == expected { return .match }
         return device < expected ? .deviceOlder : .deviceNewer
     }
+
+    /// Version of a local board running 1.1.6 or older.  Such a board is never
+    /// attached, so `isDeviceConnected` stays false, but its version is known
+    /// from the probe and is all the firmware update flow needs.
+    @Published var legacyFirmwareVersion: FirmwareVersion? = nil
+
+    /// The connected board's firmware, from SYS.PLATFORM on a paged board or
+    /// from the old GET_PLATFORM on a legacy one.  nil when neither is known.
+    var deviceFirmwareVersion: FirmwareVersion? {
+        if let legacy = legacyFirmwareVersion { return legacy }
+        guard isDeviceConnected, let v = firmwareVersion else { return nil }
+        return FirmwareVersion(v.major, v.minor, v.patch, v.beta)
+    }
+
+    /// A board the update flow can restart into its bootloader: a connected
+    /// paged board, or a local legacy one.
+    var canEnterBootloader: Bool { isDeviceConnected || legacyFirmwareVersion != nil }
 
     /// Bulk wire-format version (WIRE_FORMAT_VERSION), captured from byte 0 of
     /// the last STORE.ALL_PARAMS reply.  This - not the firmware release
@@ -2788,6 +2803,16 @@ class DSPViewModel: ObservableObject {
         AppState.shared.interruptMonitor.onBulkInvalidated = { [weak self] _ in
             self?.scheduleDeviceResync()
         }
+
+        // A legacy board publishes only its protocol state, never "connected".
+        transport.deviceProtocolPublisher
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                let legacy: FirmwareVersion? = { if case .legacy(let v) = state { return v } else { return nil } }()
+                if self.legacyFirmwareVersion != legacy { self.legacyFirmwareVersion = legacy }
+            }
+            .store(in: &cancellables)
 
         // 1. Subscribe to USB connection changes AND Trigger Fetch
         transport.isConnectedPublisher

@@ -188,6 +188,11 @@ protocol DeviceTransport: AnyObject {
     func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
                            completion: @escaping (LinkStatus) -> Void)
 
+    /// Send the old 1.1.6 ENTER_BOOTLOADER to a board on this transport that
+    /// was classified legacy, the only way to update it without BOOTSEL.
+    /// `.unsupported` when there is no such board or it is not local.
+    func enterLegacyBootloader() -> LinkStatus
+
     /// The connected board's vendor protocol generation.
     var deviceProtocol: DeviceProtocolState { get }
     var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { get }
@@ -322,6 +327,10 @@ extension DeviceTransport {
         guard count >= info.setMin, count <= info.setMax else { return .vcLength }
         return nil
     }
+
+    /// Only a local USB board can be updated from its legacy state (decision 2
+    /// of the paged-protocol port plan); remote transports and fakes refuse.
+    func enterLegacyBootloader() -> LinkStatus { .unsupported }
 
     /// With no hub there is nobody to lock out (USB, test fakes).
     func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool { true }

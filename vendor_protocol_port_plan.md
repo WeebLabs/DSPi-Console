@@ -143,6 +143,13 @@ The new API lands next to the old one, so this phase builds green without touchi
 
 The BOOTSEL path also still works.
 
+**Result (code committed 2026-11-17).**
+
+- **Transport.** `DeviceTransport.enterLegacyBootloader()` sends the old `0xF0` request. Only `USBDevice` implements it, and only for a board classified as legacy on that connection, bound to the connection. The hub and the composite transport forward it. Remote transports refuse it.
+- **View model.** `DSPViewModel.legacyFirmwareVersion`, `deviceFirmwareVersion` and `canEnterBootloader` drive the banner, `firmwareMatch` and the update window. As a result, a 1.1.6 board shows the "device is older" banner and can be updated without ever counting as connected.
+- **Tests.** The unit tests use a fake transport to cover the legacy branch and the paged branch.
+- **Hardware check: still to do.** The app still bundles the 1.1.6 images, so an install now would be a downgrade, and none has been run.
+
 ## Phase 5: Refusals and the former write-as-reads
 
 - **Pin family.** Port the 17 pin-family setters to SETs with a 1-byte payload through the outcome SET. They keep their `UInt8` `PIN_CONFIG_*` return by mapping result codes through `legacy_map.json`'s `status_families.pin`, including its per-command overrides. `assignOutputPin`'s PDM retry keys on `VC_ERR_STATE`.

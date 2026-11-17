@@ -209,6 +209,22 @@ class USBDevice: ObservableObject {
     /// Main-thread copy of `protocolStore` for the UI.
     @Published private(set) var deviceProtocol: DeviceProtocolState = .unknown
 
+    /// The old 1.1.6 ENTER_BOOTLOADER (0xF0, an IN transfer answering 01, then
+    /// a reboot into the USB drive), sent only to a board classified legacy
+    /// on this connection and bound to that connection.  A timeout or a dead
+    /// link can mean the board rebooted before its answer got out.
+    func enterLegacyBootloader() -> LinkStatus {
+        generationLock.lock()
+        let classified = connectionGeneration, state = protocolStore
+        generationLock.unlock()
+        guard state.isLegacy else { return .unsupported }
+        switch getControlResult(request: LegacyOpcode.enterBootloader, value: 0, index: 2,
+                                length: 1, generation: classified) {
+        case .success: return .ok
+        case .failure(let status): return status
+        }
+    }
+
     /// Thread-safe snapshot of the current connection's protocol.
     var protocolState: DeviceProtocolState { currentProtocol }
 

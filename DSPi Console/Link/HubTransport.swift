@@ -69,6 +69,9 @@ final class HubTransport: DeviceTransport {
     /// Read from USB, not the hub, so a board the hub never attaches (a
     /// legacy board, from phase 3) can still be seen and updated.
     var deviceProtocol: DeviceProtocolState { usb.deviceProtocol }
+    /// Straight to USB: the hub never attaches a legacy board, so no router
+    /// could carry it.
+    func enterLegacyBootloader() -> LinkStatus { usb.enterLegacyBootloader() }
     var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { usb.deviceProtocolPublisher }
 
     func selectDevice(_ device: DSPiDevice) { usb.selectDevice(device) }

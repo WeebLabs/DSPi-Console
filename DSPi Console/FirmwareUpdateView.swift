@@ -99,10 +99,7 @@ struct FirmwareUpdateView: View {
 
     private var bundledVersion: String { FirmwareVersion.expected?.description ?? "unknown" }
 
-    private var deviceVersion: String? {
-        guard let v = vm.firmwareVersion else { return nil }
-        return FirmwareVersion(v.major, v.minor, v.patch, v.beta).description
-    }
+    private var deviceVersion: String? { vm.deviceFirmwareVersion?.description }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -231,7 +228,7 @@ struct FirmwareUpdateView: View {
                     spinning: true,
                     title: "Looking for the board",
                     message: "Waiting for it to appear in bootloader mode. If nothing happens after a few seconds, unplug the board, hold BOOTSEL, and plug it back in.")
-            } else if vm.isDeviceConnected {
+            } else if vm.canEnterBootloader {
                 InstallStateCard(
                     icon: "checkmark.circle",
                     tint: .accentColor,
@@ -303,7 +300,7 @@ struct FirmwareUpdateView: View {
     private var showBootselHint: Bool {
         switch installer.state {
         case .idle, .waitingForBoard:
-            return confirmed || !vm.isDeviceConnected
+            return confirmed || !vm.canEnterBootloader
         case .failed(.noBoardFound):
             return true
         default:
@@ -318,7 +315,7 @@ struct FirmwareUpdateView: View {
     /// quiet footnote for anyone flashing a build of their own, in the slot
     /// the BOOTSEL hint vacates while a running device is connected.
     private var showManualBootloaderHint: Bool {
-        guard vm.isDeviceConnected, !confirmed else { return false }
+        guard vm.canEnterBootloader, !confirmed else { return false }
         switch installer.state {
         case .idle, .waitingForBoard: return true
         default: return false
@@ -342,8 +339,15 @@ struct FirmwareUpdateView: View {
     /// and nothing is written unless they ask.
     private func enterBootloaderOnly() {
         let transport = vm.transport
+        // A 1.1.6 board only understands its old request (decision 2 of the
+        // paged-protocol port: local boards only).
+        let legacy = vm.legacyFirmwareVersion != nil
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = transport.setAndWait(VC.SYS.ENTER_BOOTLOADER, timeout: 3)
+            if legacy {
+                _ = transport.enterLegacyBootloader()
+            } else {
+                _ = transport.setAndWait(VC.SYS.ENTER_BOOTLOADER, timeout: 3)
+            }
         }
     }
 
@@ -406,7 +410,7 @@ struct FirmwareUpdateView: View {
     private func start() {
         confirmed = true
         installer.installWhenReady()
-        guard vm.isDeviceConnected, !rebootRequested else { return }
+        guard vm.canEnterBootloader, !rebootRequested else { return }
         rebootRequested = true
         vm.enterBootloaderForInstall { sent in
             if !sent { installer.abandon(.deviceLocked) }
@@ -512,7 +516,7 @@ struct FirmwareMismatchBanner: View {
 
     private var message: String {
         let expected = FirmwareVersion.expected?.description ?? "unknown"
-        let device = vm.firmwareVersion.map { FirmwareVersion($0.major, $0.minor, $0.patch, $0.beta).description } ?? "unknown"
+        let device = vm.deviceFirmwareVersion?.description ?? "unknown"
         switch vm.firmwareMatch {
         case .deviceNewer:
             return "This device runs firmware \(device), which is newer than DSPi Console \(expected). Some of its features may not be shown."
