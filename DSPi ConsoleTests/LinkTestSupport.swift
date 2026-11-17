@@ -35,7 +35,8 @@ final class LinkFakeDevice: HubDevice {
     }
 
     var executed: [LinkCmdRequest] { lock.lock(); defer { lock.unlock() }; return log }
-    var executedCodes: [UInt8] { executed.map { $0.bRequest } }
+    /// Command IDs, `(page << 8) | bRequest`, so paged and page-0 traffic never alias.
+    var executedCodes: [UInt16] { executed.map { $0.commandID } }
 }
 
 /// A v2 PARAM_CHANGED packet with the given source byte, 4-byte value at

@@ -2,7 +2,7 @@ import Foundation
 
 enum FilterType: Int, CaseIterable, Identifiable {
     // PEQ types.  Raw values MUST match the firmware FilterType enum (config.h)
-    // exactly - they are sent verbatim as the type byte in REQ_SET_EQ_PARAM and
+    // exactly - they are sent verbatim as the type byte in FILTER.BAND and
     // persisted in flash.  The value space is partitioned (firmware "FilterType
     // value-space contract"): 0..7 core PEQ, 8..10 first-order PEQ, 11 Linkwitz
     // Transform, 12..13 first-order pass, 14..31 reserved for future PEQ,
@@ -91,7 +91,7 @@ enum FilterType: Int, CaseIterable, Identifiable {
 
     /// True for the Linkwitz Transform, which repurposes the wire fields
     /// (gain_db carries fp in Hz) and adds the `qp` sidecar - so it needs a
-    /// bespoke row layout and an 18-byte REQ_SET_EQ_PARAM payload.
+    /// bespoke row layout and a Qp field in the FILTER.BAND record.
     var isLinkwitzTransform: Bool { self == .linkwitzTransform }
 
     /// Order/phase label for the shapes that come in two orders (shelves, cuts,

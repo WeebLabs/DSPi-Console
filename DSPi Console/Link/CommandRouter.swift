@@ -56,18 +56,16 @@ final class CommandRouter {
     private struct WriterEntry {
         let token: UInt64
         let session: LinkSessionID
-        let code: UInt8
+        let command: UInt16
         let param: UInt32
         let at: Date
     }
 
     /// Which parameter a write targets, so repeats merge exactly where the
-    /// firmware coalesces.  REQ_SET_EQ_PARAM sends wValue 0 and names its
-    /// channel and band in the payload, and the device notifies once per band.
+    /// firmware coalesces.  Every paged command carries its address in
+    /// wValue (FILTER.BAND included), so the address is the key.
     static func parameterKey(_ request: LinkCmdRequest) -> UInt32 {
-        let p = request.payload
-        guard request.bRequest == REQ_SET_EQ_PARAM, p.count >= 2 else { return UInt32(request.wValue) }
-        return UInt32(request.wValue) | UInt32(p[p.startIndex]) << 16 | UInt32(p[p.startIndex + 1]) << 24
+        UInt32(request.wValue)
     }
     private var recentWriters: [WriterEntry] = []
     private var nextWriterToken: UInt64 = 0
@@ -83,11 +81,11 @@ final class CommandRouter {
     /// The firmware's own idle timeout, so a swallowed STOP never keeps the
     /// analyser running longer than an unread one would.
     static let rtaWatchWindow: TimeInterval = 5.0
-    static let rtaWatchCodes: Set<UInt8> = [REQ_RTA_GET_BANDS, REQ_RTA_GET_BINS, REQ_RTA_GET_BANDS_ALL]
+    static let rtaWatchCodes: Set<UInt16> = [VC.MEAS.RTA_BANDS.id, VC.MEAS.RTA_BINS.id, VC.MEAS.RTA_BANDS_ALL.id]
     /// Whether a session other than the given one holds a poll subscription
     /// for one of the codes.  Scheduler polls bypass the router, so the hub
     /// wires this to its PollScheduler.
-    var otherSessionPolls: ((_ codes: Set<UInt8>, _ excluding: LinkSessionID) -> Bool)?
+    var otherSessionPolls: ((_ commands: Set<UInt16>, _ excluding: LinkSessionID) -> Bool)?
     /// Injected so tests can age a watcher past the window without sleeping.
     var now: () -> Date = Date.init
 
@@ -96,9 +94,11 @@ final class CommandRouter {
     var bulkTimeout: TimeInterval = 5.0
     var maxInflightPerSession: Int = 8
 
-    /// Bulk opcodes, which get the longer timeout and (for a full set/get)
-    /// are the ones a lock is really meant to protect.
-    private static let bulkOpcodes: Set<UInt8> = [0xA0, 0xA1, 0xA2, 0xA3]
+    /// Bulk commands (the registry's BULK flag) get the longer timeout and,
+    /// for a full set or get, are the ones a lock is really meant to protect.
+    private static func isBulk(_ request: LinkCmdRequest) -> Bool {
+        VendorCommandRegistry.info(for: VendorCommand(request.commandID))?.flags.contains(.bulk) ?? false
+    }
 
     init(handle: UInt8, device: HubDevice, policy: LinkPolicy) {
         self.handle = handle
@@ -152,7 +152,7 @@ final class CommandRouter {
         inflight[session.id] = count + 1
         stateLock.unlock()
 
-        let timeout = Self.bulkOpcodes.contains(request.bRequest) ? bulkTimeout : commandTimeout
+        let timeout = Self.isBulk(request) ? bulkTimeout : commandTimeout
 
         // Bind the command to the attachment that is current now, as USBDevice
         // binds its own transfers: a switch (close/open) landing before the
@@ -180,8 +180,8 @@ final class CommandRouter {
             // Decided here, in queue order, so a band read queued ahead of a
             // STOP counts as watching.
             if self.rtaStopIsSwallowed(request, session: session.id) {
-                return completion(RoutedResult(response: LinkCmdResponse(tag: request.tag, status: .ok,
-                                                                         payload: Data([0x01])),
+                // MEAS.RTA_STOP is a zero-length SET, so its ACK carries nothing.
+                return completion(RoutedResult(response: LinkCmdResponse(tag: request.tag, status: .ok),
                                                attributedTo: 0))
             }
 
@@ -189,23 +189,28 @@ final class CommandRouter {
             // whichever transfer direction carries it (write-as-read included).
             var writerToken: UInt64?
             var previousWriter: WriterEntry?
-            if self.policy.classify(code: request.bRequest, direction: direction) != .read {
+            // In the paged protocol every GET is a read; 1.1.6 had
+            // write-as-reads, which only its policy table knows.
+            let isWrite = request.isPaged
+                ? direction == .set
+                : self.policy.classify(code: request.bRequest, direction: direction) != .read
+            if isWrite {
                 let param = Self.parameterKey(request)
                 self.stateLock.lock()
                 // A repeat of the same parameter by the same session is one entry,
                 // merged in place wherever it sits, as the firmware coalesces into
                 // any unsent ring slot; a drag alternating linked bands stays aligned.
                 if let i = self.recentWriters.lastIndex(where: {
-                    $0.session == session.id && $0.code == request.bRequest && $0.param == param }) {
+                    $0.session == session.id && $0.command == request.commandID && $0.param == param }) {
                     let last = self.recentWriters[i]
                     previousWriter = last
                     self.recentWriters[i] = WriterEntry(token: last.token, session: last.session,
-                                                        code: last.code, param: last.param, at: Date())
+                                                        command: last.command, param: last.param, at: Date())
                     writerToken = last.token
                 } else {
                     let token = self.nextWriterToken; self.nextWriterToken &+= 1
                     self.recentWriters.append(WriterEntry(token: token, session: session.id,
-                                                          code: request.bRequest,
+                                                          command: request.commandID,
                                                           param: param, at: Date()))
                     if self.recentWriters.count > 64 { self.recentWriters.removeFirst() }
                     writerToken = token
@@ -248,15 +253,14 @@ final class CommandRouter {
     /// STOP that must not reach the device because another session watches.
     /// Call on the router queue.
     private func rtaStopIsSwallowed(_ request: LinkCmdRequest, session: LinkSessionID) -> Bool {
-        let code = request.bRequest
-        let isControl = code == REQ_RTA_CONTROL
-        guard Self.rtaWatchCodes.contains(code) || isControl else { return false }
+        let id = request.commandID
+        let isStart = id == VC.MEAS.RTA_START.id, isStop = id == VC.MEAS.RTA_STOP.id
+        guard Self.rtaWatchCodes.contains(id) || isStart || isStop else { return false }
         let t = now()
-        if !isControl || request.wValue == RTA_CTL_START {
+        if !isStop {
             stateLock.lock(); rtaWatchers[session] = t; stateLock.unlock()
             return false
         }
-        guard request.wValue == RTA_CTL_STOP else { return false }
 
         stateLock.lock()
         rtaWatchers[session] = nil

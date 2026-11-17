@@ -325,7 +325,7 @@ struct PsychoacousticBassView: View {
                 range: 30...300,
                 maxDecimals: 0,
                 scrollStep: 1,
-                liveRequest: REQ_SET_PSYBASS_CUTOFF,
+                liveRequest: VC.FX.PSYBASS_CUTOFF,
                 liveKey: .cutoff,
                 help: "The speaker's low-frequency limit. Content below this feeds the harmonic generator; generated harmonics span roughly this to 4x.",
                 set: { vm.setPsybassCutoff($0) }
@@ -340,7 +340,7 @@ struct PsychoacousticBassView: View {
                 range: -24...12,
                 maxDecimals: 1,
                 scrollStep: 0.5,
-                liveRequest: REQ_SET_PSYBASS_HARMONICS,
+                liveRequest: VC.FX.PSYBASS_HARMONICS,
                 liveKey: .harmonicsDB,
                 help: "Level of the synthesized harmonics. The primary amount-of-effect control. Higher = more perceived bass.",
                 set: { vm.setPsybassHarmonics($0) }
@@ -363,7 +363,7 @@ struct PsychoacousticBassView: View {
                 range: 0...18,
                 maxDecimals: 1,
                 scrollStep: 0.5,
-                liveRequest: REQ_SET_PSYBASS_DRIVE,
+                liveRequest: VC.FX.PSYBASS_DRIVE,
                 help: "Pre-gain into the odd-harmonic soft clipper. Higher makes the effect audible on quieter passages. Mostly affects aggressive character.",
                 set: { vm.setPsybassDrive($0) }
             )
@@ -379,7 +379,7 @@ struct PsychoacousticBassView: View {
                 maxDecimals: 0,
                 ends: ("Warm", "Aggressive"),
                 isEnabled: vm.isDeviceConnected,
-                live: { vm.sendFloatParamToDevice(REQ_SET_PSYBASS_CHARACTER,
+                live: { vm.sendFloatParamToDevice(VC.FX.PSYBASS_CHARACTER,
                                                   min(max($0, 0), 100)) },
                 set: { vm.setPsybassCharacter(min(max($0, 0), 100)) }
             )
@@ -393,7 +393,7 @@ struct PsychoacousticBassView: View {
                 range: -60...0,
                 maxDecimals: 1,
                 scrollStep: 1,
-                liveRequest: REQ_SET_PSYBASS_ORIGINAL,
+                liveRequest: VC.FX.PSYBASS_ORIGINAL,
                 liveKey: .originalDB,
                 help: "Level of the un-reproducible fundamental below the cutoff. Lower attenuates it, freeing driver excursion and headroom. -60 dB is full removal. Speaker protection.",
                 set: { vm.setPsybassOriginal($0) }
@@ -411,7 +411,7 @@ struct PsychoacousticBassView: View {
         range: ClosedRange<Float>,
         maxDecimals: Int,
         scrollStep: Float,
-        liveRequest: UInt8,
+        liveRequest: VendorCommand,
         liveKey: PsybassGraphKey? = nil,
         help: String,
         set: @escaping (Float) -> Void

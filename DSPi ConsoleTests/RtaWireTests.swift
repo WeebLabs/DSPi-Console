@@ -6,30 +6,19 @@ import XCTest
 /// live-device tests SKIP (never fail) when no DSPi is attached.
 final class RtaWireTests: XCTestCase {
 
-    // MARK: - Command surface (spec §5.1)
+    // MARK: - Command surface (paged MEAS commands, firmware 1.1.7)
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_RTA_SET_CONFIG, 0x08)
-        XCTAssertEqual(REQ_RTA_GET_CONFIG, 0x09)
-        XCTAssertEqual(REQ_RTA_GET_CAPS, 0x0A)
-        XCTAssertEqual(REQ_RTA_GET_BANDS, 0x0B)
-        XCTAssertEqual(REQ_RTA_GET_BINS, 0x0C)
-        XCTAssertEqual(REQ_RTA_GET_STATUS, 0x0D)
-        XCTAssertEqual(REQ_RTA_CONTROL, 0x0E)
-        XCTAssertEqual(REQ_RTA_GET_BANDS_ALL, 0x0F)
-    }
-
-    /// The analyser took 0x08-0x0F, immediately below the subharmonic block at
-    /// 0x10-0x1F and above the auxiliary-output block at 0x02-0x07.  A
-    /// collision would silently point one feature's SET at another's handler.
-    func testCodesDoNotCollideWithNeighbours() {
-        let rta: Set<UInt8> = [REQ_RTA_SET_CONFIG, REQ_RTA_GET_CONFIG, REQ_RTA_GET_CAPS,
-                               REQ_RTA_GET_BANDS, REQ_RTA_GET_BINS, REQ_RTA_GET_STATUS,
-                               REQ_RTA_CONTROL, REQ_RTA_GET_BANDS_ALL]
-        XCTAssertEqual(rta.count, 8, "the eight codes must be distinct")
-        let subharm: Set<UInt8> = [REQ_SET_SUBHARM, REQ_GET_SUBHARM, REQ_GET_SUBHARM_METER]
-        XCTAssertTrue(rta.isDisjoint(with: subharm))
-        XCTAssertTrue(rta.allSatisfy { $0 >= 0x08 && $0 <= 0x0F })
+        XCTAssertEqual(VC.MEAS.RTA_CONFIG.id, 0x0920)
+        XCTAssertEqual(VC.MEAS.RTA_CAPS.id, 0x0921)
+        XCTAssertEqual(VC.MEAS.RTA_BAND_CENTRES.id, 0x0922)
+        XCTAssertEqual(VC.MEAS.RTA_BANDS.id, 0x0923)
+        XCTAssertEqual(VC.MEAS.RTA_BINS.id, 0x0924)
+        XCTAssertEqual(VC.MEAS.RTA_STATUS.id, 0x0925)
+        XCTAssertEqual(VC.MEAS.RTA_BANDS_ALL.id, 0x0926)
+        XCTAssertEqual(VC.MEAS.RTA_START.id, 0x0928)
+        XCTAssertEqual(VC.MEAS.RTA_STOP.id, 0x0929)
+        XCTAssertEqual(VC.MEAS.RTA_RESET.id, 0x092A)
     }
 
     func testWireSizes() {
@@ -712,8 +701,7 @@ final class RtaWireTests: XCTestCase {
     /// analyser STALLs it, which is a skip here rather than a failure.
     func testLiveCapsAgreeWithTheSpec() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let d = usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: 0, index: 2,
-                                            length: UInt16(RTA_CAPS_SIZE)),
+        guard let d = usb.getData(VC.MEAS.RTA_CAPS, length: UInt16(RTA_CAPS_SIZE)),
               let caps = RtaCaps.fromData(d) else {
             throw XCTSkip("Connected firmware has no spectrum analyser.")
         }
@@ -729,8 +717,9 @@ final class RtaWireTests: XCTestCase {
     /// sits, so the app's axis labels come from it rather than a table of ours.
     func testLiveBandCentresAreThirdOctaveFrom10Hz() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let c = usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: 1, index: 2,
-                                            length: UInt16(RTA_CENTRES_PER_CHUNK * 2)),
+        // Chunks are 0-based here; 1.1.6 numbered them from 1 behind the caps.
+        guard let c = usb.getData(VC.MEAS.RTA_BAND_CENTRES, value: 0,
+                                  length: UInt16(RTA_CENTRES_PER_CHUNK * 2)),
               c.count >= 8 else {
             throw XCTSkip("Connected firmware has no spectrum analyser.")
         }
@@ -752,8 +741,7 @@ final class RtaWireTests: XCTestCase {
     /// the analyser must report itself running once band frames are read.
     func testLiveConfigRoundTripAndAutoStart() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let d = usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: 0, index: 2,
-                                            length: UInt16(RTA_CAPS_SIZE)),
+        guard let d = usb.getData(VC.MEAS.RTA_CAPS, length: UInt16(RTA_CAPS_SIZE)),
               let caps = RtaCaps.fromData(d) else {
             throw XCTSkip("Connected firmware has no spectrum analyser.")
         }
@@ -761,14 +749,13 @@ final class RtaWireTests: XCTestCase {
         let want = RtaConfig(tap: RTA_TAP_OUTPUT, channelMask: 0x0001,
                              fftOrder: caps.fftOrderDefault,
                              avgMs: 300, peakDecayDBs: 12, flags: 0)
-        usb.sendControlRequest(request: REQ_RTA_SET_CONFIG, value: 0, index: 2, data: want.toData())
+        usb.send(VC.MEAS.RTA_CONFIG, data: want.toData())
 
         // The device applies a staged config from its main loop, so give it a
         // few passes before reading back.
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
 
-        let applied = usb.getControlRequest(request: REQ_RTA_GET_CONFIG, value: 0, index: 2,
-                                            length: UInt16(RTA_CONFIG_SIZE))
+        let applied = usb.getData(VC.MEAS.RTA_CONFIG, length: UInt16(RTA_CONFIG_SIZE))
             .flatMap(RtaConfig.fromData)
         XCTAssertEqual(applied?.tap, want.tap)
         XCTAssertEqual(applied?.channelMask, want.channelMask)
@@ -776,45 +763,41 @@ final class RtaWireTests: XCTestCase {
 
         // A band read counts as a read: it starts the analyser and keeps it
         // alive, which is why the Console never has to send START.
-        let frame = usb.getControlRequest(request: REQ_RTA_GET_BANDS, value: 0, index: 2,
-                                          length: UInt16(RTA_BAND_FRAME_SIZE))
+        let frame = usb.getData(VC.MEAS.RTA_BANDS, length: UInt16(RTA_BAND_FRAME_SIZE))
             .flatMap { RtaBandFrame.fromData($0) }
         XCTAssertNotNil(frame)
         XCTAssertEqual(frame?.channel, 0)
         XCTAssertGreaterThan(frame?.nBands ?? 0, 0)
 
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
-        let status = usb.getControlRequest(request: REQ_RTA_GET_STATUS, value: 0, index: 2,
-                                           length: UInt16(RTA_STATUS_SIZE))
+        let status = usb.getData(VC.MEAS.RTA_STATUS, length: UInt16(RTA_STATUS_SIZE))
             .flatMap(RtaStatus.fromData)
         XCTAssertEqual(status?.isRunning, true, "a band read should have auto-started the analyser")
         XCTAssertEqual(status?.tap, RTA_TAP_OUTPUT)
 
         // Leave the device as we found it rather than spinning the analyser on
         // for the rest of the run.
-        _ = usb.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
+        _ = usb.setAndWait(VC.MEAS.RTA_STOP)
     }
 
-    /// An empty channel mask is a STALL, not a silently-ignored configuration.
+    /// An empty channel mask is refused, not a silently-ignored configuration.
     func testLiveEmptyMaskIsRefused() throws {
         let usb = try HardwareTest.requireDevice()
-        guard usb.getControlRequest(request: REQ_RTA_GET_CAPS, value: 0, index: 2,
-                                    length: UInt16(RTA_CAPS_SIZE)).flatMap(RtaCaps.fromData) != nil else {
+        guard usb.getData(VC.MEAS.RTA_CAPS, length: UInt16(RTA_CAPS_SIZE)).flatMap(RtaCaps.fromData) != nil else {
             throw XCTSkip("Connected firmware has no spectrum analyser.")
         }
         let good = RtaConfig(tap: RTA_TAP_OUTPUT, channelMask: 0x0001)
-        usb.sendControlRequest(request: REQ_RTA_SET_CONFIG, value: 0, index: 2, data: good.toData())
+        usb.send(VC.MEAS.RTA_CONFIG, data: good.toData())
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
 
         var empty = good
         empty.channelMask = 0
-        usb.sendControlRequest(request: REQ_RTA_SET_CONFIG, value: 0, index: 2, data: empty.toData())
+        usb.send(VC.MEAS.RTA_CONFIG, data: empty.toData())
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
 
-        let applied = usb.getControlRequest(request: REQ_RTA_GET_CONFIG, value: 0, index: 2,
-                                            length: UInt16(RTA_CONFIG_SIZE))
+        let applied = usb.getData(VC.MEAS.RTA_CONFIG, length: UInt16(RTA_CONFIG_SIZE))
             .flatMap(RtaConfig.fromData)
         XCTAssertEqual(applied?.channelMask, 0x0001, "the refused config must not have been applied")
-        _ = usb.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
+        _ = usb.setAndWait(VC.MEAS.RTA_STOP)
     }
 }

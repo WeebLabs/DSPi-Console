@@ -9,9 +9,8 @@ final class I2sSlaveWireTests: XCTestCase {
     // MARK: - Constants (spec §4 "Vendor commands" / §6 "Persistence")
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_I2S_CLOCK_MODE, 0x88)
-        XCTAssertEqual(REQ_GET_I2S_CLOCK_MODE, 0x89)
-        XCTAssertEqual(REQ_GET_I2S_SLAVE_STATUS, 0x8A)
+        XCTAssertEqual(VC.CLOCK.I2S_CLOCK_MODE.id, 0x0C12)
+        XCTAssertEqual(VC.CLOCK.I2S_SLAVE_STATUS.id, 0x0C13)
         XCTAssertEqual(I2S_CLOCK_MODE_MASTER, 0)
         XCTAssertEqual(I2S_CLOCK_MODE_SLAVE, 1)
     }
@@ -118,29 +117,29 @@ final class I2sSlaveWireTests: XCTestCase {
 
     // MARK: - Live-device round-trips (skip when no DSPi attached)
 
-    /// REQ_GET_I2S_CLOCK_MODE returns a valid 0/1 byte and matches the mode
+    /// CLOCK.I2S_CLOCK_MODE returns a valid 0/1 byte and matches the mode
     /// mirrored in the status packet's clock_mode field.
     func testClockModeReadable() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let m = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_MODE, value: 0, index: 2, length: 1),
+        guard let m = usb.getData(VC.CLOCK.I2S_CLOCK_MODE, length: 1),
               let mode = m.first else {
-            throw XCTSkip("Firmware predates I2S clock-slave mode (0x89 STALLed).")
+            throw XCTSkip("Firmware predates I2S clock-slave mode (CLOCK.I2S_CLOCK_MODE refused).")
         }
         XCTAssertLessThanOrEqual(mode, 1, "clock mode must be 0 (master) or 1 (slave)")
 
-        guard let st = usb.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+        guard let st = usb.getData(VC.CLOCK.I2S_SLAVE_STATUS, length: 16),
               let status = I2sSlaveStatus.fromData(st) else {
-            throw XCTSkip("REQ_GET_I2S_SLAVE_STATUS STALLed.")
+            throw XCTSkip("CLOCK.I2S_SLAVE_STATUS refused.")
         }
         XCTAssertEqual(st.count, 16)
-        XCTAssertEqual(status.clockMode, mode, "0x8A clock_mode must match 0x89")
+        XCTAssertEqual(status.clockMode, mode, "the status clock_mode must match CLOCK.I2S_CLOCK_MODE")
     }
 
     /// Status invariants: a LOCKED slave reports a supported detected rate; an
     /// unlocked state reports detected_rate = 0.
     func testSlaveStatusInvariants() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let st = usb.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+        guard let st = usb.getData(VC.CLOCK.I2S_SLAVE_STATUS, length: 16),
               let status = I2sSlaveStatus.fromData(st) else {
             throw XCTSkip("Firmware predates I2S clock-slave mode.")
         }
@@ -156,14 +155,14 @@ final class I2sSlaveWireTests: XCTestCase {
     /// supported firmware (the SET is fire-and-forget OUT, deferred-applied).
     func testSetCurrentClockModeIdempotent() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let m = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_MODE, value: 0, index: 2, length: 1),
+        guard let m = usb.getData(VC.CLOCK.I2S_CLOCK_MODE, length: 1),
               let mode = m.first else {
             throw XCTSkip("Firmware predates I2S clock-slave mode.")
         }
-        // OUT transfer; sendControlRequest is fire-and-forget, so just confirm
+        // OUT transfer; send is fire-and-forget, so just confirm
         // the round-trip GET still reports the same live mode afterwards.
-        usb.sendControlRequest(request: REQ_SET_I2S_CLOCK_MODE, value: 0, index: 2, data: Data([mode]))
-        guard let after = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_MODE, value: 0, index: 2, length: 1),
+        usb.send(VC.CLOCK.I2S_CLOCK_MODE, data: Data([mode]))
+        guard let after = usb.getData(VC.CLOCK.I2S_CLOCK_MODE, length: 1),
               let m2 = after.first else {
             throw XCTSkip("GET after SET STALLed.")
         }

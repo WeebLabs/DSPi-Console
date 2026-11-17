@@ -220,7 +220,7 @@ final class SaveCoordinationTests: XCTestCase {
         let coord = SettingsSaveCoordinator.shared
 
         func deviceMode() -> Int? {
-            guard let d = usb.getControlRequest(request: REQ_GET_OUTPUT_CONFIG_MODE, value: 0, index: 2, length: 1),
+            guard let d = usb.getData(VC.STORE.OUTPUT_CONFIG_MODE, length: 1),
                   let b = d.first else { return nil }
             return Int(b)
         }

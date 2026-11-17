@@ -43,6 +43,14 @@ enum LinkFrameError: Error, Equatable {
 
 // MARK: - Frame bodies
 
+extension LinkCmdRequest {
+    /// The paged command this request addresses, `(page << 8) | command`;
+    /// page 0 for a 1.1.6-style request.  Different pages reuse the same
+    /// command numbers, so tables key on this, never on `bRequest` alone.
+    var commandID: UInt16 { (wIndex & 0xFF00) | UInt16(bRequest) }
+    var isPaged: Bool { wIndex >> 8 != 0 }
+}
+
 struct LinkCmdRequest: Equatable {
     var tag: UInt16
     var handle: UInt8

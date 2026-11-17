@@ -1232,7 +1232,7 @@ final class SettingsSaveCoordinator: ObservableObject {
     var outputDirty: Bool {
         outputConfigDirty && vm.presetOutputConfigMode == OUTPUT_CONFIG_MODE_INDEPENDENT
     }
-    /// Control Surfaces applies are live-only previews until REQ_CS_SAVE; the
+    /// Control Surfaces applies are live-only previews until CS.SAVE; the
     /// device reports the unsaved state, so this is just a passthrough.
     var csDirty: Bool { vm.controlSurfacesSupported && vm.csDirty }
     /// Edited source names that differ from the stored ones, trimmed as saved.
@@ -1505,7 +1505,7 @@ final class SettingsSaveCoordinator: ObservableObject {
         }
     }
 
-    /// Discard the Control Surfaces live preview (REQ_CS_REVERT; spec §3.5).
+    /// Discard the Control Surfaces live preview (CS.REVERT; spec §3.5).
     /// The device restores the stored bindings, names, and IR commands and
     /// clears `dirty`; `csReloadToken` then tells the page to re-seed its
     /// drafts from what came back.
@@ -2421,7 +2421,7 @@ private struct OnboardingDeveloperSection: View {
 //     draft and commit them with an explicit Apply, so a single flash write
 //     covers a whole enable+pins+baud change rather than one per control.
 //   • The firmware validates pins/baud/address at apply time and reports the
-//     outcome via REQ_GET_CTRL_IFACE_STATUS; we surface that inline.
+//     outcome via XPORT.STATUS; we surface that inline.
 struct ControlInterfacesSettingsTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
 

@@ -6,20 +6,21 @@ import XCTest
 /// when no DSPi is attached, and restore every parameter they touch.
 final class TubeWireTests: XCTestCase {
 
-    // MARK: - Constants (spec §3 command summary)
+    // MARK: - Constants (paged FX commands, firmware 1.1.7)
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_TUBE_PARAM, 0x3E)
-        XCTAssertEqual(REQ_GET_TUBE_PARAM, 0x3F)
+        XCTAssertEqual(VC.FX.TUBE_ENABLE.id, 0x0860)
+        XCTAssertEqual(VC.FX.TUBE_TRIM.id, 0x086D)
         XCTAssertEqual(TUBE_DEFAULT_OUTPUT_MASK, 0xFFFF)
     }
 
-    /// The indexed pair sits directly above the psybass block (0x30-0x3D) and
-    /// must not collide with it.
-    func testCodesDoNotCollideWithPsybass() {
-        let psybass: Set<UInt8> = Set((0x30...0x3D).map { UInt8($0) })
-        XCTAssertFalse(psybass.contains(REQ_SET_TUBE_PARAM))
-        XCTAssertFalse(psybass.contains(REQ_GET_TUBE_PARAM))
+    /// 1.1.6 picked the parameter with wValue; 1.1.7 gives each its own
+    /// command, so the app's table must keep the TUBE_PARAM_* order.
+    func testCommandTableFollowsParameterIndices() {
+        let table = DSPViewModel.tubeCommands
+        XCTAssertEqual(table.count, 14)
+        XCTAssertEqual(table.map(\.id), Array(0x0860...0x086D).map { UInt16($0) })
+        XCTAssertEqual(table[Int(TUBE_PARAM_ENABLED)], VC.FX.TUBE_ENABLE)
     }
 
     /// Indices are wire and flash order (spec §2 table).
@@ -349,20 +350,22 @@ final class TubeWireTests: XCTestCase {
     // MARK: - Live device (skip when no DSPi is attached)
 
     private func getParam(_ usb: USBDevice, _ index: UInt16) -> Float? {
-        guard let d = usb.getControlRequest(request: REQ_GET_TUBE_PARAM, value: index, index: 0, length: 4),
+        guard Int(index) < DSPViewModel.tubeCommands.count,
+              let d = usb.getData(DSPViewModel.tubeCommands[Int(index)], length: 4),
               d.count >= 4 else { return nil }
         return d.withUnsafeBytes { $0.load(as: Float.self) }
     }
 
     private func setParam(_ usb: USBDevice, _ index: UInt16, _ value: Float) {
+        guard Int(index) < DSPViewModel.tubeCommands.count else { return }
         var v = value
-        usb.sendControlRequest(request: REQ_SET_TUBE_PARAM, value: index, index: 0, data: Data(bytes: &v, count: 4))
+        usb.send(DSPViewModel.tubeCommands[Int(index)], data: Data(bytes: &v, count: 4))
     }
 
     private func requireTube() throws -> USBDevice {
         let usb = try HardwareTest.requireDevice()
         guard getParam(usb, TUBE_PARAM_ENABLED) != nil else {
-            throw XCTSkip("Firmware has no tube modeller (REQ_GET_TUBE_PARAM index 0 STALLed).")
+            throw XCTSkip("Firmware has no tube modeller (FX.TUBE_ENABLE refused).")
         }
         return usb
     }
@@ -387,7 +390,7 @@ final class TubeWireTests: XCTestCase {
     /// The bulk tube section agrees with the fourteen indexed GETs.
     func testBulkAgreesWithIndexedGets() throws {
         let usb = try requireTube()
-        guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let all = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
             throw XCTSkip("Bulk image is not the current wire format.")
         }

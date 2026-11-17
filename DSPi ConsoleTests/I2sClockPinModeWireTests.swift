@@ -9,15 +9,12 @@ final class I2sClockPinModeWireTests: XCTestCase {
     // MARK: - Constants (spec §3 "Vendor commands")
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_I2S_CLOCK_PIN_MODE, 0xFE)
-        XCTAssertEqual(REQ_GET_I2S_CLOCK_PIN_MODE, 0xFF)
+        XCTAssertEqual(VC.CLOCK.I2S_CLOCK_PIN_MODE.id, 0x0C11)
         XCTAssertEqual(I2S_CLOCK_PIN_MODE_UNIFIED, 0)
         XCTAssertEqual(I2S_CLOCK_PIN_MODE_SPLIT, 1)
         XCTAssertEqual(I2S_BCK_ROLE_MASTER, 0)
         XCTAssertEqual(I2S_BCK_ROLE_SLAVE, 1)
-        // Reuses the extended pin commands.
-        XCTAssertEqual(REQ_SET_I2S_BCK_PIN, 0xC2)
-        XCTAssertEqual(REQ_GET_I2S_BCK_PIN, 0xC3)
+        XCTAssertEqual(VC.CLOCK.I2S_BCK_PIN.id, 0x0C10)
     }
 
     /// The two fields claim former reserved bytes of the 16-byte WireI2SConfig
@@ -39,14 +36,15 @@ final class I2sClockPinModeWireTests: XCTestCase {
 
     // MARK: - Encodings (spec §3 role byte, §4/§5 +1 mode sentinel)
 
-    /// REQ_SET_I2S_BCK_PIN packs the role in the wValue high byte; a bare GPIO
-    /// (legacy hosts) means role 0 (master/unified pair).
+    /// CLOCK.I2S_BCK_PIN addresses the role in wValue and carries the GPIO as
+    /// a one-byte payload, where 1.1.6 packed both into wValue.
     func testBckPinRoleWValueEncoding() {
-        func wValue(role: UInt8, pin: UInt8) -> UInt16 { (UInt16(role) << 8) | UInt16(pin) }
-        XCTAssertEqual(wValue(role: I2S_BCK_ROLE_MASTER, pin: 14), 0x000E)
-        XCTAssertEqual(wValue(role: I2S_BCK_ROLE_SLAVE, pin: 26), 0x011A)
-        // Legacy bare-GPIO call decodes to role 0.
-        XCTAssertEqual(UInt16(14) >> 8, 0)
+        let info = VendorCommandRegistry.info(for: VC.CLOCK.I2S_BCK_PIN)
+        XCTAssertEqual(info?.address, .role)
+        XCTAssertEqual(info?.setMin, 1)
+        XCTAssertEqual(info?.setMax, 1)
+        XCTAssertEqual(UInt16(I2S_BCK_ROLE_MASTER), 0)
+        XCTAssertEqual(UInt16(I2S_BCK_ROLE_SLAVE), 1)
     }
 
     /// clock_pin_mode_p1 is +1 encoded so that 0 (a reserved byte on old
@@ -87,20 +85,18 @@ final class I2sClockPinModeWireTests: XCTestCase {
 
     // MARK: - Live-device round-trips (skip when no DSPi attached)
 
-    /// REQ_GET_I2S_CLOCK_PIN_MODE returns a valid 0/1 byte; the slave pair GPIO
-    /// (0xC3 role 1) is a plausible GPIO distinct from the master pair.
+    /// CLOCK.I2S_CLOCK_PIN_MODE returns a valid 0/1 byte; the slave pair GPIO
+    /// (CLOCK.I2S_BCK_PIN role 1) is a plausible GPIO distinct from the master pair.
     func testClockPinModeReadable() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let m = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
+        guard let m = usb.getData(VC.CLOCK.I2S_CLOCK_PIN_MODE, length: 1),
               let mode = m.first else {
-            throw XCTSkip("Firmware predates I2S clock-pin mode (0xFF STALLed).")
+            throw XCTSkip("Firmware predates I2S clock-pin mode (CLOCK.I2S_CLOCK_PIN_MODE refused).")
         }
         XCTAssertLessThanOrEqual(mode, 1, "clock-pin mode must be 0 (unified) or 1 (split)")
 
-        let master = usb.getControlRequest(request: REQ_GET_I2S_BCK_PIN,
-                                           value: UInt16(I2S_BCK_ROLE_MASTER), index: 2, length: 1)?.first
-        let slave = usb.getControlRequest(request: REQ_GET_I2S_BCK_PIN,
-                                          value: UInt16(I2S_BCK_ROLE_SLAVE), index: 2, length: 1)?.first
+        let master = usb.getData(VC.CLOCK.I2S_BCK_PIN, value: UInt16(I2S_BCK_ROLE_MASTER), length: 1)?.first
+        let slave = usb.getData(VC.CLOCK.I2S_BCK_PIN, value: UInt16(I2S_BCK_ROLE_SLAVE), length: 1)?.first
         XCTAssertNotNil(master)
         XCTAssertNotNil(slave)
         if mode == I2S_CLOCK_PIN_MODE_SPLIT, let mp = master, let sp = slave {
@@ -115,37 +111,37 @@ final class I2sClockPinModeWireTests: XCTestCase {
     /// PIN_CONFIG_SUCCESS and leaves the live mode unchanged.
     func testSetCurrentPinModeIdempotent() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let m = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
+        guard let m = usb.getData(VC.CLOCK.I2S_CLOCK_PIN_MODE, length: 1),
               let mode = m.first else {
             throw XCTSkip("Firmware predates I2S clock-pin mode.")
         }
-        guard let r = usb.getControlRequest(request: REQ_SET_I2S_CLOCK_PIN_MODE,
-                                            value: UInt16(mode), index: 2, length: 1),
+        // The old status byte, recovered from the SET's result as the app does.
+        guard let r = usb.legacyAction(VC.CLOCK.I2S_CLOCK_PIN_MODE, payload: Data([mode]), family: .pin),
               let status = r.first else {
-            throw XCTSkip("0xFE STALLed.")
+            throw XCTSkip("CLOCK.I2S_CLOCK_PIN_MODE SET gave no verdict.")
         }
         XCTAssertEqual(status, PIN_CONFIG_SUCCESS, "re-setting the current mode is a no-op success")
-        guard let after = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
+        guard let after = usb.getData(VC.CLOCK.I2S_CLOCK_PIN_MODE, length: 1),
               let m2 = after.first else {
             throw XCTSkip("GET after SET STALLed.")
         }
         XCTAssertEqual(m2, mode, "re-setting the current mode must leave it unchanged")
     }
 
-    /// An out-of-range mode (wValue > 1) is rejected with INVALID_PARAM, and the
+    /// An out-of-range mode (payload > 1) is rejected with INVALID_PARAM, and the
     /// live mode is unaffected.
     func testInvalidPinModeRejected() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let m = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1),
+        guard let m = usb.getData(VC.CLOCK.I2S_CLOCK_PIN_MODE, length: 1),
               let mode = m.first else {
             throw XCTSkip("Firmware predates I2S clock-pin mode.")
         }
-        guard let r = usb.getControlRequest(request: REQ_SET_I2S_CLOCK_PIN_MODE, value: 2, index: 2, length: 1),
+        guard let r = usb.legacyAction(VC.CLOCK.I2S_CLOCK_PIN_MODE, payload: Data([2]), family: .pin),
               let status = r.first else {
-            throw XCTSkip("0xFE STALLed.")
+            throw XCTSkip("CLOCK.I2S_CLOCK_PIN_MODE SET gave no verdict.")
         }
-        XCTAssertEqual(status, PIN_CONFIG_INVALID_PARAM, "wValue > 1 must be rejected")
-        let after = usb.getControlRequest(request: REQ_GET_I2S_CLOCK_PIN_MODE, value: 0, index: 2, length: 1)?.first
+        XCTAssertEqual(status, PIN_CONFIG_INVALID_PARAM, "a mode > 1 must be rejected")
+        let after = usb.getData(VC.CLOCK.I2S_CLOCK_PIN_MODE, length: 1)?.first
         XCTAssertEqual(after, mode, "a rejected set must not move the live mode")
     }
 }

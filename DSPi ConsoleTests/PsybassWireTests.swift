@@ -6,23 +6,16 @@ import XCTest
 /// live-device tests SKIP (never fail) when no DSPi is attached.
 final class PsybassWireTests: XCTestCase {
 
-    // MARK: - Constants (spec §3 command summary)
+    // MARK: - Constants (paged FX commands, firmware 1.1.7)
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_PSYBASS, 0x30)
-        XCTAssertEqual(REQ_GET_PSYBASS, 0x31)
-        XCTAssertEqual(REQ_SET_PSYBASS_CUTOFF, 0x32)
-        XCTAssertEqual(REQ_GET_PSYBASS_CUTOFF, 0x33)
-        XCTAssertEqual(REQ_SET_PSYBASS_HARMONICS, 0x34)
-        XCTAssertEqual(REQ_GET_PSYBASS_HARMONICS, 0x35)
-        XCTAssertEqual(REQ_SET_PSYBASS_DRIVE, 0x36)
-        XCTAssertEqual(REQ_GET_PSYBASS_DRIVE, 0x37)
-        XCTAssertEqual(REQ_SET_PSYBASS_CHARACTER, 0x38)
-        XCTAssertEqual(REQ_GET_PSYBASS_CHARACTER, 0x39)
-        XCTAssertEqual(REQ_SET_PSYBASS_ORIGINAL, 0x3A)
-        XCTAssertEqual(REQ_GET_PSYBASS_ORIGINAL, 0x3B)
-        XCTAssertEqual(REQ_SET_PSYBASS_MASK, 0x3C)
-        XCTAssertEqual(REQ_GET_PSYBASS_MASK, 0x3D)
+        XCTAssertEqual(VC.FX.PSYBASS_ENABLE.id, 0x0840)
+        XCTAssertEqual(VC.FX.PSYBASS_CUTOFF.id, 0x0841)
+        XCTAssertEqual(VC.FX.PSYBASS_HARMONICS.id, 0x0842)
+        XCTAssertEqual(VC.FX.PSYBASS_DRIVE.id, 0x0843)
+        XCTAssertEqual(VC.FX.PSYBASS_CHARACTER.id, 0x0844)
+        XCTAssertEqual(VC.FX.PSYBASS_ORIGINAL.id, 0x0845)
+        XCTAssertEqual(VC.FX.PSYBASS_MASK.id, 0x0846)
         XCTAssertEqual(PSYBASS_DEFAULT_OUTPUT_MASK, 0xFFFF)
     }
 
@@ -103,7 +96,7 @@ final class PsybassWireTests: XCTestCase {
     /// bulk psybass section agrees with the seven individual GETs.
     func testPsybassReadbackConsistency() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let all = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
             throw XCTSkip("Firmware predates Psychoacoustic Bass (wire format < V23).")
         }
@@ -115,9 +108,9 @@ final class PsybassWireTests: XCTestCase {
         let bulkCutoff: Float = all.withUnsafeBytes { $0.load(fromByteOffset: o + 4, as: Float.self) }
 
         // Individual GETs.
-        guard let en = usb.getControlRequest(request: REQ_GET_PSYBASS, value: 0, index: 0, length: 1),
-              let mk = usb.getControlRequest(request: REQ_GET_PSYBASS_MASK, value: 0, index: 0, length: 2),
-              let ct = usb.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4),
+        guard let en = usb.getData(VC.FX.PSYBASS_ENABLE, length: 1),
+              let mk = usb.getData(VC.FX.PSYBASS_MASK, length: 2),
+              let ct = usb.getData(VC.FX.PSYBASS_CUTOFF, length: 4),
               mk.count >= 2, ct.count >= 4 else {
             throw XCTSkip("Psybass individual GETs STALLed.")
         }
@@ -135,19 +128,19 @@ final class PsybassWireTests: XCTestCase {
     /// value; restores the original afterwards so the test is non-destructive.
     func testCutoffClampsAndRestores() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let orig = usb.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4),
+        guard let orig = usb.getData(VC.FX.PSYBASS_CUTOFF, length: 4),
               orig.count >= 4 else {
             throw XCTSkip("Firmware predates Psychoacoustic Bass.")
         }
         let original: Float = orig.withUnsafeBytes { $0.load(as: Float.self) }
         defer {
             var restore = original
-            usb.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: Data(bytes: &restore, count: 4))
+            usb.send(VC.FX.PSYBASS_CUTOFF, data: Data(bytes: &restore, count: 4))
         }
 
         var over: Float = 5000.0   // well above the 300 Hz ceiling
-        usb.sendControlRequest(request: REQ_SET_PSYBASS_CUTOFF, value: 0, index: 0, data: Data(bytes: &over, count: 4))
-        guard let back = usb.getControlRequest(request: REQ_GET_PSYBASS_CUTOFF, value: 0, index: 0, length: 4),
+        usb.send(VC.FX.PSYBASS_CUTOFF, data: Data(bytes: &over, count: 4))
+        guard let back = usb.getData(VC.FX.PSYBASS_CUTOFF, length: 4),
               back.count >= 4 else {
             throw XCTSkip("Cutoff GET STALLed.")
         }

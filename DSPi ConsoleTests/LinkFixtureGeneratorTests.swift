@@ -15,9 +15,6 @@ import XCTest
 
 final class LinkFixtureGeneratorTests: XCTestCase {
 
-    /// The firmware's REQ_GET_BUILD_INFO; the app itself never sends it.
-    private static let reqGetBuildInfo: UInt8 = 0x80
-
     private var root: URL? {
         guard let path = UserDefaults.standard.string(forKey: "DSPiFixtureDir"), !path.isEmpty else { return nil }
         return URL(fileURLWithPath: path)
@@ -130,16 +127,16 @@ final class LinkFixtureGeneratorTests: XCTestCase {
         guard root != nil else { throw XCTSkip("DSPiFixtureDir not set") }
         let usb = try HardwareTest.requireDevice()
         HardwareTest.settle()
-        guard let bulk = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let bulk = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               bulk.count == Int(BULK_PARAMS_SIZE),
-              let platform = usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+              let platform = usb.getData(VC.SYS.PLATFORM, length: 7),
               let reply = FirmwareVersion.fromPlatformReply([UInt8](platform)),
-              let serial = usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16) else {
+              let serial = usb.getData(VC.SYS.SERIAL, length: 16) else {
             return XCTFail("device did not answer the capture reads")
         }
         let numCh = Int(bulk[2])
         let statusLen = UInt16(numCh * 2 + 2 + 4 + 1)
-        guard let status = usb.getControlRequest(request: REQ_GET_STATUS, value: 9, index: 0, length: statusLen),
+        guard let status = usb.getData(VC.MEAS.LEVELS, length: statusLen),
               status.count == Int(statusLen) else {
             return XCTFail("no status")
         }
@@ -163,7 +160,7 @@ final class LinkFixtureGeneratorTests: XCTestCase {
             "bulk": ["file": "bulk_v\(wire).bin", "wire_version": wire, "size": bulk.count,
                      "num_channels": numCh, "num_output_channels": Int(bulk[3]), "num_input_channels": Int(bulk[4]),
                      "master_volume_db": masterVol, "global_preamp_db": preamp,
-                     "note": "WireBulkParams as REQ_GET_ALL_PARAMS (0xA0) returned it; decode per the firmware's bulk_params.h for this wire version"],
+                     "note": "WireBulkParams as STORE.ALL_PARAMS (0x0240) returned it; decode per the firmware's bulk_params.h for this wire version"],
             "status": ["file": "status_wvalue9.bin", "size": status.count,
                        "cpu0": Int(s[numCh * 2]), "cpu1": Int(s[numCh * 2 + 1]),
                        "clip_flags": Int(s[numCh * 2 + 2]) | Int(s[numCh * 2 + 3]) << 8
@@ -171,9 +168,9 @@ final class LinkFixtureGeneratorTests: XCTestCase {
                        "active_input_channels": Int(s[numCh * 2 + 6]),
                        "layout": "peaks[num_channels] u16, cpu0 u8, cpu1 u8, clip_flags u32, active_input_channels u8"],
         ]
-        if let info = usb.getControlRequest(request: Self.reqGetBuildInfo, value: 0, index: 2, length: 64),
+        if let info = usb.getData(VC.SYS.BUILD_INFO, length: 64),
            let describe = String(data: info.prefix(48).prefix(while: { $0 != 0 }), encoding: .ascii) {
-            sidecar["firmware"] = "\(describe) (REQ_GET_BUILD_INFO)"
+            sidecar["firmware"] = "\(describe) (SYS.BUILD_INFO)"
         }
         try writeJSON(sidecar, "device/capture.json")
     }

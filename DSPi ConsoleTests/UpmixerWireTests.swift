@@ -9,11 +9,18 @@ final class UpmixerWireTests: XCTestCase {
     // MARK: - Constants (spec §6, §4)
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_UPMIX_SET_CONFIG, 0x4A)
-        XCTAssertEqual(REQ_UPMIX_GET_CONFIG, 0x4B)
-        XCTAssertEqual(REQ_UPMIX_SET_PARAM,  0x4C)
-        XCTAssertEqual(REQ_UPMIX_GET_PARAM,  0x4D)
-        XCTAssertEqual(REQ_UPMIX_GET_STATUS, 0x4E)
+        XCTAssertEqual(VC.FX.UPMIX_CONFIG.id, 0x0880)
+        XCTAssertEqual(VC.FX.UPMIX_STATUS.id, 0x0881)
+        XCTAssertEqual(VC.FX.UPMIX_ENABLE.id, 0x0890)
+        XCTAssertEqual(VC.FX.UPMIX_PRESENCE.id, 0x089D)
+    }
+
+    /// One command per UPMIX_PARAM_* index, where 1.1.6 had a wValue selector.
+    func testCommandTableFollowsParamIds() {
+        let table = DSPViewModel.upmixCommands
+        XCTAssertEqual(table.count, 14)
+        XCTAssertEqual(table.map(\.id), Array(0x0890...0x089D).map { UInt16($0) })
+        XCTAssertEqual(table[Int(UPMIX_PARAM_STRENGTH)], VC.FX.UPMIX_STRENGTH)
     }
 
     func testParamIds() {
@@ -194,7 +201,7 @@ final class UpmixerWireTests: XCTestCase {
     /// The bulk upmix section agrees with the individual GET_CONFIG readback.
     func testUpmixReadbackConsistency() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let all = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
             throw XCTSkip("Firmware predates the Stereo Upmixer (wire format < V25).")
         }
@@ -203,8 +210,7 @@ final class UpmixerWireTests: XCTestCase {
         let bulkEnabled = all[o] != 0
         let bulkStrength: Float = all.withUnsafeBytes { $0.load(fromByteOffset: o + 4, as: Float.self) }
 
-        guard let cfg = usb.getControlRequest(request: REQ_UPMIX_GET_CONFIG, value: 0, index: 0,
-                                              length: UInt16(UPMIX_CONFIG_PACKET_SIZE)),
+        guard let cfg = usb.getData(VC.FX.UPMIX_CONFIG, length: UInt16(UPMIX_CONFIG_PACKET_SIZE)),
               cfg.count >= UPMIX_CONFIG_PACKET_SIZE else {
             throw XCTSkip("Upmix GET_CONFIG STALLed.")
         }
@@ -220,24 +226,20 @@ final class UpmixerWireTests: XCTestCase {
     /// must read back exactly.
     func testStrengthParamRoundTrips() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let cfg = usb.getControlRequest(request: REQ_UPMIX_GET_CONFIG, value: 0, index: 0,
-                                              length: UInt16(UPMIX_CONFIG_PACKET_SIZE)),
+        guard let cfg = usb.getData(VC.FX.UPMIX_CONFIG, length: UInt16(UPMIX_CONFIG_PACKET_SIZE)),
               cfg.count >= UPMIX_CONFIG_PACKET_SIZE else {
             throw XCTSkip("Firmware predates the Stereo Upmixer.")
         }
         let original: Float = cfg.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Float.self) }
         defer {
             var restore = original
-            usb.sendControlRequest(request: REQ_UPMIX_SET_PARAM, value: UPMIX_PARAM_STRENGTH,
-                                   index: 0, data: Data(bytes: &restore, count: 4))
+            usb.send(VC.FX.UPMIX_STRENGTH, data: Data(bytes: &restore, count: 4))
         }
 
         var probe: Float = 55.0   // a distinct in-range value
-        usb.sendControlRequest(request: REQ_UPMIX_SET_PARAM, value: UPMIX_PARAM_STRENGTH,
-                               index: 0, data: Data(bytes: &probe, count: 4))
-        guard let back = usb.getControlRequest(request: REQ_UPMIX_GET_PARAM, value: UPMIX_PARAM_STRENGTH,
-                                               index: 0, length: 4), back.count >= 4 else {
-            throw XCTSkip("Upmix GET_PARAM STALLed.")
+        usb.send(VC.FX.UPMIX_STRENGTH, data: Data(bytes: &probe, count: 4))
+        guard let back = usb.getData(VC.FX.UPMIX_STRENGTH, length: 4), back.count >= 4 else {
+            throw XCTSkip("FX.UPMIX_STRENGTH GET refused.")
         }
         let readback: Float = back.withUnsafeBytes { $0.load(as: Float.self) }
         XCTAssertEqual(readback, 55.0, accuracy: 0.01, "an in-range strength must round-trip exactly")

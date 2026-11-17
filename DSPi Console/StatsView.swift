@@ -37,7 +37,7 @@ struct SpdifBufferStats {
     }
 }
 
-/// The scale REQ_GET_BUFFER_STATS percentages are measured against, in frames.
+/// The scale SYS.BUFFER_STATS percentages are measured against, in frames.
 let SLOT_FILL_SCALE_FRAMES = 768
 /// Output slot ring size on firmware with the output latency setting.
 let OUTPUT_RING_FRAMES = 512
@@ -174,7 +174,7 @@ struct SpdifRxChannelStatus {
 
 // MARK: - LG Sound Sync Status
 
-/// 16-byte runtime status returned by REQ_GET_LG_SOUND_SYNC_STATUS.
+/// 16-byte runtime status returned by INPUT.LG_SOUND_SYNC_STATUS.
 /// Only the first 4 bytes are meaningful today; the remaining 12 are
 /// reserved by the firmware for future fields.
 struct LgSoundSyncStatus {
@@ -238,7 +238,7 @@ class StatsViewModel: ObservableObject {
     @Published var usbRingOverruns: UInt32 = 0
     @Published var isConnected: Bool = false
 
-    // Output ring health (REQ_GET_STATUS 26 to 31), from the firmware that added
+    // Output ring health (SYS.PIPELINE_STATS and SYS.USB_AUDIO_STATUS), from the firmware that added
     // the output latency setting.  Older firmware answers those indices with 0
     // rather than a STALL, so the latency status read is the feature gate, and
     // it also supplies the fill target the lowest fill is judged against.
@@ -284,19 +284,19 @@ class StatsViewModel: ObservableObject {
 
     // LG Sound Sync runtime status (V8+ firmware).  Polled on the same
     // 2-second cadence as fetchStats; stays at default until a successful
-    // REQ_GET_LG_SOUND_SYNC_STATUS response sets `lgSoundSyncSupported`.
+    // INPUT.LG_SOUND_SYNC_STATUS response sets `lgSoundSyncSupported`.
     @Published var lgSoundSyncStatus: LgSoundSyncStatus = LgSoundSyncStatus()
     @Published var lgSoundSyncSupported: Bool = false
 
     // ADAT bulk output diagnostics (RP2350 only).  Polled on the same
     // 2-second cadence; `adatSupported` stays false on RP2040 (zeros) and on
-    // firmware that STALLs REQ_GET_ADAT_STATUS.  See adat_output_spec.md.
+    // firmware that STALLs OUTPUT.ADAT_TX_STATUS.  See adat_output_spec.md.
     @Published var adatStatus: AdatStatus = AdatStatus()
     @Published var adatSupported: Bool = false
 
     // I2S clock-slave lock diagnostics (firmware V18+).  Polled on the same
     // cadence; `i2sClockModeSupported` stays false on firmware that STALLs
-    // REQ_GET_I2S_SLAVE_STATUS.  The section is shown only while the device is
+    // CLOCK.I2S_SLAVE_STATUS.  The section is shown only while the device is
     // in the slave role.  See i2s_slave_input_spec.md.
     @Published var i2sSlaveStatus: I2sSlaveStatus = I2sSlaveStatus()
     @Published var i2sClockModeSupported: Bool = false
@@ -392,79 +392,54 @@ class StatsViewModel: ObservableObject {
         guard isConnected else { return }
         fetchQueue.async { [weak self] in
             guard let transport = self?.transport else { return }
-            _ = transport.getControlRequest(request: REQ_RESET_BUFFER_STATS, value: 1, index: 0, length: 1)
+            // Mask bit 0: the buffer watermarks.
+            transport.send(VC.SYS.STATS_RESET, data: Data([1]))
         }
     }
 
     // MARK: Reads (fetch queue)
 
+    private static func u32(_ d: Data, _ offset: Int) -> UInt32 {
+        d.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
+    }
+
+    private static func u16(_ d: Data, _ offset: Int) -> UInt16 {
+        d.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt16.self) }
+    }
+
     private func readStats() {
         guard let transport = transport, isConnected else { return }
 
-        // wValue=3: pdm_ring_overruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 3, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.pdmRingOverruns = value }
+        // 1.1.6 read each counter with its own GET_STATUS selector; 1.1.7
+        // groups them into struct reads.  A short reply leaves its rows alone.
+        if let d = transport.getData(VC.SYS.PDM_STATS, length: 16), d.count >= 16 {
+            let v = (Self.u32(d, 0), Self.u32(d, 4), Self.u32(d, 8), Self.u32(d, 12))
+            DispatchQueue.main.async {
+                self.pdmRingOverruns = v.0; self.pdmRingUnderruns = v.1
+                self.pdmDmaOverruns = v.2; self.pdmDmaUnderruns = v.3
+            }
         }
-
-        // wValue=4: pdm_ring_underruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 4, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.pdmRingUnderruns = value }
-        }
-
-        // wValue=5: pdm_dma_overruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 5, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.pdmDmaOverruns = value }
-        }
-
-        // wValue=6: pdm_dma_underruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 6, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.pdmDmaUnderruns = value }
-        }
-
-        // wValue=7: spdif_overruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 7, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.spdifOverruns = value }
-        }
-
-        // wValue=8: spdif_underruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 8, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        // spdif_overruns (old selector 7) always read 0 and is retired.
+        if let d = transport.getData(VC.SYS.SPDIF_TX_STATS, length: 24), d.count >= 4 {
+            let value = Self.u32(d, 0)   // USB audio packet gaps of 2 to 50 ms
             DispatchQueue.main.async { self.spdifUnderruns = value }
         }
-
-        // wValue=22: USB audio ring overruns
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 22, index: 2, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        if let d = transport.getData(VC.SYS.USB_AUDIO_STATUS, length: 16), d.count >= 8 {
+            let value = Self.u32(d, 4)
             DispatchQueue.main.async { self.usbRingOverruns = value }
         }
-
-        // wValue=13: system clock frequency (Hz)
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 13, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.systemClockHz = value }
-        }
-
-        // wValue=14: core voltage (millivolts)
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 14, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.coreVoltageMillivolts = value }
-        }
-
-        // wValue=15: sample rate (Hz)
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 15, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: UInt32.self) }
-            DispatchQueue.main.async { self.sampleRateHz = value }
-        }
-
-        // wValue=16: system temperature (centi-degrees C)
-        if let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 16, index: 0, length: 4) {
-            let value = data.withUnsafeBytes { $0.load(as: Int32.self) }
-            DispatchQueue.main.async { self.systemTempCentiC = value }
+        if let d = transport.getData(VC.SYS.SYSTEM_STATUS, length: 16), d.count >= 12 {
+            let clock = Self.u32(d, 0), rate = Self.u32(d, 4)
+            // Core voltage is a u16 and the temperature an i16 here; reading 4
+            // bytes would fold the neighbouring field into the high half.
+            let millivolts = UInt32(Self.u16(d, 8))
+            let centiC = Int32(Int16(bitPattern: Self.u16(d, 10)))
+            DispatchQueue.main.async {
+                self.systemClockHz = clock
+                self.sampleRateHz = rate
+                self.coreVoltageMillivolts = millivolts
+                self.systemTempCentiC = centiC
+            }
         }
 
         fetchRingHealth()
@@ -477,39 +452,36 @@ class StatsViewModel: ObservableObject {
 
     private func fetchRingHealth() {
         guard let transport = transport, isConnected else { return }
-        guard let d = transport.getControlRequest(request: REQ_OUTPUT_LATENCY, value: OUTPUT_LATENCY_GET_STATUS,
-                                                  index: 2, length: UInt16(OUTPUT_LATENCY_STATUS_SIZE)),
+        guard let d = transport.getData(VC.OUTPUT.LATENCY_STATUS, length: UInt16(OUTPUT_LATENCY_STATUS_SIZE)),
               let latency = OutputLatencyStatus.fromData(d) else {
             fillOnRingScale = false
             DispatchQueue.main.async { self.ringHealth = nil }
             return
         }
         fillOnRingScale = true
-        func read(_ index: UInt16) -> UInt32? {
-            guard let data = transport.getControlRequest(request: REQ_GET_STATUS, value: index, index: 0, length: 4),
-                  data.count >= 4 else { return nil }
-            return data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-        }
+        let pipe = transport.getData(VC.SYS.PIPELINE_STATS, length: 24).flatMap { $0.count >= 20 ? $0 : nil }
+        let usbAudio = transport.getData(VC.SYS.USB_AUDIO_STATUS, length: 16).flatMap { $0.count >= 12 ? $0 : nil }
         let health = RingHealth(
             targetFrames: latency.targetFrames,
             targetUs: latency.effectiveUs,
             batchFrames: latency.batchFrames,
-            underrunEpisodes: read(26) ?? 0,
-            refusedBlocks: read(27) ?? 0,
-            lowestPrewriteFill: read(28).flatMap { $0 == UInt32.max ? nil : $0 },
-            worstInputGapUs: read(29) ?? 0,
-            worstUsbPacketGapUs: read(30) ?? 0,
-            overBudgetSteps: read(31) ?? 0
+            underrunEpisodes: pipe.map { Self.u32($0, 0) } ?? 0,
+            refusedBlocks: pipe.map { Self.u32($0, 4) } ?? 0,
+            // 0xFFFFFFFF: no write sampled yet.
+            lowestPrewriteFill: pipe.map { Self.u32($0, 8) }.flatMap { $0 == UInt32.max ? nil : $0 },
+            worstInputGapUs: pipe.map { Self.u32($0, 12) } ?? 0,
+            worstUsbPacketGapUs: usbAudio.map { Self.u32($0, 8) } ?? 0,
+            overBudgetSteps: pipe.map { Self.u32($0, 16) } ?? 0
         )
         DispatchQueue.main.async { self.ringHealth = health }
     }
 
-    /// Poll REQ_GET_I2S_SLAVE_STATUS (0x8A) for the I2S clock-slave lock
+    /// Poll CLOCK.I2S_SLAVE_STATUS for the I2S clock-slave lock
     /// diagnostics.  A STALL (nil) leaves `i2sClockModeSupported` false so the
     /// section stays hidden on firmware that predates the feature.
     private func fetchI2SSlaveStatus() {
         guard let transport = transport, isConnected else { return }
-        guard let data = transport.getControlRequest(request: REQ_GET_I2S_SLAVE_STATUS, value: 0, index: 2, length: 16),
+        guard let data = transport.getData(VC.CLOCK.I2S_SLAVE_STATUS, length: 16),
               let status = I2sSlaveStatus.fromData(data) else {
             DispatchQueue.main.async { self.i2sClockModeSupported = false }
             return
@@ -520,12 +492,12 @@ class StatsViewModel: ObservableObject {
         }
     }
 
-    /// Poll REQ_GET_ADAT_STATUS (0xCE) for the ADAT diagnostics section.  A
+    /// Poll OUTPUT.ADAT_TX_STATUS for the ADAT diagnostics section.  A
     /// STALL (nil) or a non-RP2350 platform leaves `adatSupported` false so the
     /// section stays hidden.  RP2040 returns all-zero, also treated as absent.
     private func fetchAdatStatus() {
         guard let transport = transport, isConnected else { return }
-        guard let data = transport.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+        guard let data = transport.getData(VC.OUTPUT.ADAT_TX_STATUS, length: 8),
               let status = AdatStatus.fromData(data) else {
             DispatchQueue.main.async { self.adatSupported = false }
             return
@@ -536,13 +508,13 @@ class StatsViewModel: ObservableObject {
         }
     }
 
-    /// REQ_GET_LG_SOUND_SYNC_STATUS (0xE8): returns the 16-byte
+    /// INPUT.LG_SOUND_SYNC_STATUS: returns the 16-byte
     /// LgSoundSyncStatus struct.  STALLs on V7 / older firmware - we
     /// detect that via the nil response and leave `lgSoundSyncSupported`
     /// false, which hides the section in the UI.
     private func fetchLgSoundSyncStatus() {
         guard let transport = transport, isConnected else { return }
-        guard let data = transport.getControlRequest(request: REQ_GET_LG_SOUND_SYNC_STATUS, value: 0, index: 0, length: 16),
+        guard let data = transport.getData(VC.INPUT.LG_SOUND_SYNC_STATUS, length: 16),
               data.count >= 4 else { return }
 
         var status = LgSoundSyncStatus()
@@ -559,7 +531,7 @@ class StatsViewModel: ObservableObject {
 
     private func readBufferStats() {
         guard let transport = transport, isConnected else { return }
-        guard let data = transport.getControlRequest(request: REQ_GET_BUFFER_STATS, value: 0, index: 0, length: 44),
+        guard let data = transport.getData(VC.SYS.BUFFER_STATS, length: 44),
               data.count >= 44 else { return }
 
         var packet = BufferStatsPacket()
@@ -600,9 +572,10 @@ class StatsViewModel: ObservableObject {
     private func fetchStarvationStats() {
         guard let transport = transport, isConnected else { return }
 
-        // wValue=17: total SPDIF DMA starvations (wIndex=2 per spec)
-        guard let data = transport.getControlRequest(request: REQ_GET_STATUS, value: 17, index: 2, length: 4) else { return }
-        let total = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        // SYS.SPDIF_TX_STATS: total output DMA starvations at 4, then one
+        // counter per slot at 8, 12, 16 and 20.
+        guard let data = transport.getData(VC.SYS.SPDIF_TX_STATS, length: 24), data.count >= 24 else { return }
+        let total = Self.u32(data, 4)
 
         var delta: UInt32 = 0
         if let prev = previousStarvationTotal {
@@ -616,19 +589,11 @@ class StatsViewModel: ObservableObject {
         var prevEventTime: Date? = starvationPreviousEventTime
         if delta > 0 {
             prevEventTime = starvationLastEventTime
-            for i in 0..<4 {
-                if let d = transport.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
-                    perInstance[i] = d.withUnsafeBytes { $0.load(as: UInt32.self) }
-                }
-            }
+            for i in 0..<4 { perInstance[i] = Self.u32(data, 8 + 4 * i) }
             eventTime = Date()
         } else if total > 0 {
             // No new events but have historical - still read per-instance for display
-            for i in 0..<4 {
-                if let d = transport.getControlRequest(request: REQ_GET_STATUS, value: UInt16(18 + i), index: 2, length: 4) {
-                    perInstance[i] = d.withUnsafeBytes { $0.load(as: UInt32.self) }
-                }
-            }
+            for i in 0..<4 { perInstance[i] = Self.u32(data, 8 + 4 * i) }
         }
 
         DispatchQueue.main.async {
@@ -643,7 +608,7 @@ class StatsViewModel: ObservableObject {
     private func fetchSpdifRxStatus() {
         guard let transport = transport, isConnected, inputSourceSupported else { return }
 
-        guard let data = transport.getControlRequest(request: REQ_GET_SPDIF_RX_STATUS, value: 0, index: 2, length: 16),
+        guard let data = transport.getData(VC.INPUT.SPDIF_RX_STATUS, length: 16),
               data.count >= 16 else { return }
 
         var status = SpdifRxStatus()
@@ -660,7 +625,7 @@ class StatsViewModel: ObservableObject {
         // Fetch IEC 60958 channel status when locked
         var chStatus = SpdifRxChannelStatus()
         if status.state == 2 {
-            if let chData = transport.getControlRequest(request: REQ_GET_SPDIF_RX_CH_STATUS, value: 0, index: 2, length: 24),
+            if let chData = transport.getData(VC.INPUT.SPDIF_RX_CH_STATUS, length: 24),
                chData.count >= 24 {
                 chStatus.raw = Array(chData.prefix(24))
             }
@@ -673,7 +638,7 @@ class StatsViewModel: ObservableObject {
         let extIndex = src - INPUT_SOURCE_SPDIF2 + 1
         let srcIndex = (1..<SPDIF_RX_NUM_INPUTS).contains(extIndex) ? extIndex : 0
         var activePin = self.spdifRxPin
-        if let pd = transport.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: UInt16(srcIndex), index: 2, length: 1),
+        if let pd = transport.getData(VC.INPUT.SPDIF_RX_PIN, value: UInt16(srcIndex), length: 1),
            pd.count >= 1, pd[0] != 0 {
             activePin = pd[0]
         }
@@ -688,16 +653,16 @@ class StatsViewModel: ObservableObject {
     private func readDeviceInfo() {
         guard let transport = transport else { return }
 
-        // REQ_GET_SERIAL (0x7E): 16-byte ASCII hex serial
-        if let data = transport.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16) {
+        // SYS.SERIAL: 16-byte ASCII hex serial
+        if let data = transport.getData(VC.SYS.SERIAL, length: 16) {
             let serial = String(data: data, encoding: .ascii)?
                 .trimmingCharacters(in: .controlCharacters.union(.whitespaces)) ?? "-"
             DispatchQueue.main.async { self.serialNumber = serial.isEmpty ? "-" : serial }
         }
 
-        // REQ_GET_PLATFORM (0x7F): decoded, short replies included, by
+        // SYS.PLATFORM: decoded, short replies included, by
         // FirmwareVersion.fromPlatformReply, the same as fetchPlatform().
-        if let data = transport.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 7),
+        if let data = transport.getData(VC.SYS.PLATFORM, length: 7),
            let reply = FirmwareVersion.fromPlatformReply([UInt8](data)) {
             let outputs = Int(data[data.startIndex + 3])
 
@@ -717,9 +682,9 @@ class StatsViewModel: ObservableObject {
         }
 
         // Probe input source feature support
-        if let data = transport.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 2, length: 1),
+        if let data = transport.getData(VC.INPUT.SOURCE, length: 1),
            data.count >= 1 {
-            if let pinData = transport.getControlRequest(request: REQ_GET_SPDIF_RX_PIN, value: 0, index: 2, length: 1),
+            if let pinData = transport.getData(VC.INPUT.SPDIF_RX_PIN, length: 1),
                pinData.count >= 1 {
                 DispatchQueue.main.async { self.spdifRxPin = pinData[0] }
             }

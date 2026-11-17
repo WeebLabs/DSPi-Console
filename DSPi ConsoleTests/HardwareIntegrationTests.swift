@@ -8,7 +8,7 @@ import XCTest
 /// the original value and restores it on exit.
 ///
 /// All tests SKIP cleanly when no DSPi is attached (`requireDevice`). Reads use
-/// the synchronous `getControlRequest`, which serializes behind the preceding
+/// the synchronous `getData`, which serializes behind the preceding
 /// async `set*` through the DSPi Link hub, whose router runs the local
 /// session's commands in order; `HardwareTest.readFloat` settles behind them
 /// first, so a read right after a write observes the new value deterministically.
@@ -18,13 +18,13 @@ final class HardwareIntegrationTests: XCTestCase {
         let usb = try HardwareTest.requireDevice()
         let vm = AppState.shared.viewModel
 
-        let original = HardwareTest.readFloat(usb, REQ_GET_MASTER_VOLUME, value: 0)
+        let original = HardwareTest.readFloat(usb, VC.ROUTE.MASTER_VOLUME)
         try XCTSkipIf(original == nil, "device did not report master volume")
         defer { if let o = original { vm.setMasterVolume(o) } }
 
         let target: Float = -12.0
         vm.setMasterVolume(target)
-        let readBack = HardwareTest.readFloat(usb, REQ_GET_MASTER_VOLUME, value: 0)
+        let readBack = HardwareTest.readFloat(usb, VC.ROUTE.MASTER_VOLUME)
         XCTAssertEqual(readBack ?? .nan, target, accuracy: 0.05,
                        "master volume set via ViewModel should land on the device")
     }
@@ -34,13 +34,13 @@ final class HardwareIntegrationTests: XCTestCase {
         let vm = AppState.shared.viewModel
         let output = 0
 
-        let original = HardwareTest.readFloat(usb, REQ_GET_OUTPUT_GAIN, value: UInt16(output), index: 2)
+        let original = HardwareTest.readFloat(usb, VC.ROUTE.OUTPUT_GAIN, value: UInt16(output))
         try XCTSkipIf(original == nil, "device did not report output gain")
         defer { if let o = original { vm.setOutputGain(output: output, db: o) } }
 
         let target: Float = -6.0
         vm.setOutputGain(output: output, db: target)
-        let readBack = HardwareTest.readFloat(usb, REQ_GET_OUTPUT_GAIN, value: UInt16(output), index: 2)
+        let readBack = HardwareTest.readFloat(usb, VC.ROUTE.OUTPUT_GAIN, value: UInt16(output))
         XCTAssertEqual(readBack ?? .nan, target, accuracy: 0.05,
                        "output \(output) gain set via ViewModel should land on the device")
     }
@@ -50,35 +50,28 @@ final class HardwareIntegrationTests: XCTestCase {
         let vm = AppState.shared.viewModel
         let ch = 0, band = 0
 
-        func get(_ param: Int) -> UInt32? {
-            HardwareTest.readU32(usb, REQ_GET_EQ_PARAM, value: HardwareTest.eqWValue(ch: ch, band: band, param: param))
-        }
-        func getF(_ param: Int) -> Float? {
-            HardwareTest.readFloat(usb, REQ_GET_EQ_PARAM, value: HardwareTest.eqWValue(ch: ch, band: band, param: param))
-        }
-
-        let origType = get(0), origFreq = getF(1), origQ = getF(2), origGain = getF(3)
-        try XCTSkipIf(origType == nil || origFreq == nil, "device did not return EQ band 0")
+        let orig = HardwareTest.readBand(usb, ch: ch, band: band)
+        try XCTSkipIf(orig == nil, "device did not return EQ band 0")
         defer {
-            if let t = origType, let f = origFreq, let q = origQ, let g = origGain,
-               let ft = FilterType(rawValue: Int(t)) {
-                vm.setFilter(ch: ch, band: band, p: FilterParams(type: ft, freq: f, q: q, gain: g))
+            if let o = orig, let ft = FilterType(rawValue: Int(o.type)) {
+                vm.setFilter(ch: ch, band: band, p: FilterParams(type: ft, freq: o.freq, q: o.q, gain: o.gain))
             }
         }
 
         vm.setFilter(ch: ch, band: band,
                      p: FilterParams(type: .peaking, freq: 1234.5, q: 1.5, gain: 3.0))
 
-        XCTAssertEqual(get(0).map { Int($0) }, FilterType.peaking.rawValue, "type round-trip")
-        XCTAssertEqual(getF(1) ?? .nan, 1234.5, accuracy: 0.5, "freq round-trip")
-        XCTAssertEqual(getF(2) ?? .nan, 1.5, accuracy: 0.01, "Q round-trip")
-        XCTAssertEqual(getF(3) ?? .nan, 3.0, accuracy: 0.05, "gain round-trip")
+        let back = HardwareTest.readBand(usb, ch: ch, band: band)
+        XCTAssertEqual(back.map { Int($0.type) }, FilterType.peaking.rawValue, "type round-trip")
+        XCTAssertEqual(back?.freq ?? .nan, 1234.5, accuracy: 0.5, "freq round-trip")
+        XCTAssertEqual(back?.q ?? .nan, 1.5, accuracy: 0.01, "Q round-trip")
+        XCTAssertEqual(back?.gain ?? .nan, 3.0, accuracy: 0.05, "gain round-trip")
     }
 
     func testInputSourceReadable() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let d = usb.getControlRequest(request: REQ_GET_INPUT_SOURCE, value: 0, index: 0, length: 1) else {
-            throw XCTSkip("Firmware does not support input-source switching (0xE1 STALLed).")
+        guard let d = usb.getData(VC.INPUT.SOURCE, length: 1) else {
+            throw XCTSkip("Firmware does not support input-source switching (INPUT.SOURCE refused).")
         }
         let src = d.first ?? 255
         XCTAssertTrue((0...2).contains(src),

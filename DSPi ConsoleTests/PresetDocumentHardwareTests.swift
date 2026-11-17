@@ -62,18 +62,16 @@ final class PresetDocumentHardwareTests: XCTestCase {
         let report = try apply(modified, to: vm)
         XCTAssertGreaterThan(report.channelsApplied, 0, "nothing was applied")
 
-        XCTAssertEqual(HardwareTest.readFloat(usb, REQ_GET_PREAMP_CH, value: 0) ?? .nan, -7.5,
+        XCTAssertEqual(HardwareTest.readFloat(usb, VC.ROUTE.PREAMP, value: 0) ?? .nan, -7.5,
                        accuracy: 0.05, "input preamp did not land on the device")
 
-        // REQ_GET_EQ_PARAM wValue: channel << 8 | band << 3 | param (1 = freq).
-        let freqValue = UInt16((0 << 8) | (0 << 3) | 1)
-        XCTAssertEqual(HardwareTest.readFloat(usb, REQ_GET_EQ_PARAM, value: freqValue) ?? .nan, 137.0,
+        XCTAssertEqual(HardwareTest.readBand(usb, ch: 0, band: 0)?.freq ?? .nan, 137.0,
                        accuracy: 0.05, "EQ band frequency did not land on the device")
 
-        XCTAssertEqual(HardwareTest.readFloat(usb, REQ_GET_OUTPUT_GAIN, value: 0, index: 2) ?? .nan, -5.5,
+        XCTAssertEqual(HardwareTest.readFloat(usb, VC.ROUTE.OUTPUT_GAIN, value: 0) ?? .nan, -5.5,
                        accuracy: 0.05, "output gain did not land on the device")
 
-        XCTAssertEqual(HardwareTest.readFloat(usb, REQ_GET_OUTPUT_DELAY, value: 0, index: 2) ?? .nan, 3,
+        XCTAssertEqual(HardwareTest.readFloat(usb, VC.ROUTE.OUTPUT_DELAY, value: 0) ?? .nan, 3,
                        accuracy: 0.05, "output delay did not land on the device")
     }
 
@@ -86,14 +84,14 @@ final class PresetDocumentHardwareTests: XCTestCase {
         let vm = AppState.shared.viewModel
 
         let before = PresetDocument.capture(from: vm)
-        let gainBefore = HardwareTest.readFloat(usb, REQ_GET_OUTPUT_GAIN, value: 0, index: 2)
-        let preampBefore = HardwareTest.readFloat(usb, REQ_GET_PREAMP_CH, value: 0)
+        let gainBefore = HardwareTest.readFloat(usb, VC.ROUTE.OUTPUT_GAIN, value: 0)
+        let preampBefore = HardwareTest.readFloat(usb, VC.ROUTE.PREAMP, value: 0)
 
         _ = try apply(before, to: vm)
 
-        XCTAssertEqual(HardwareTest.readFloat(usb, REQ_GET_OUTPUT_GAIN, value: 0, index: 2) ?? .nan,
+        XCTAssertEqual(HardwareTest.readFloat(usb, VC.ROUTE.OUTPUT_GAIN, value: 0) ?? .nan,
                        gainBefore ?? .nan, accuracy: 0.05, "output gain moved on a no-op apply")
-        XCTAssertEqual(HardwareTest.readFloat(usb, REQ_GET_PREAMP_CH, value: 0) ?? .nan,
+        XCTAssertEqual(HardwareTest.readFloat(usb, VC.ROUTE.PREAMP, value: 0) ?? .nan,
                        preampBefore ?? .nan, accuracy: 0.05, "input preamp moved on a no-op apply")
 
         // And the capture itself must be stable: encoding the device twice in a

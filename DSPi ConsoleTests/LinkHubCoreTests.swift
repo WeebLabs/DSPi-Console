@@ -520,18 +520,18 @@ extension LinkHubCoreTests {
         XCTAssertEqual(router.consumeAttribution(within: 1), 0, "five sweeps, one entry")
     }
 
-    /// EQ writes name their channel and band in the payload (wValue is 0), and
-    /// the firmware notifies once per band: a drag on a linked pair alternates
+    /// FILTER.BAND writes name their channel and band in wValue, and the
+    /// firmware notifies once per band: a drag on a linked pair alternates
     /// two bands and must leave exactly two entries, not one and not six.
     func testEqWritesCoalescePerChannelAndBand() {
         let dev = FakeDevice()
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let done = expectation(description: "drag"); done.expectedFulfillmentCount = 6
+        let band = VC.FILTER.BAND
         for _ in 0..<3 {
-            for ch: UInt8 in [0, 1] {
-                var payload = Data(count: 16); payload[0] = ch; payload[1] = 3
-                let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: REQ_SET_EQ_PARAM,
-                                       wIndex: 0, payload: payload)
+            for ch: UInt16 in [0, 1] {
+                let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: band.number,
+                                       wValue: (ch << 8) | 3, wIndex: band.usbIndex, payload: Data(count: 16))
                 router.submit(r, session: control(7)) { _ in done.fulfill() }
             }
         }

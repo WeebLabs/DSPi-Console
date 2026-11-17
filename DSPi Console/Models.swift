@@ -19,7 +19,7 @@ class DSPMeterModel: ObservableObject {
 /// edits. Kept off `DSPViewModel` so a poll tick only re-evaluates the views
 /// that actually show them (see `PlatformInfo` for the same reasoning).
 final class DeviceTelemetry: ObservableObject {
-    /// Live device sample rate (REQ_GET_STATUS wValue=15), 0 until first read.
+    /// Live device sample rate (SYS.SYSTEM_STATUS offset 4), 0 until first read.
     @Published var sampleRateHz: UInt32 = 0
 }
 

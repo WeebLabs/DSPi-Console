@@ -6,53 +6,29 @@ import XCTest
 /// live-device tests SKIP (never fail) when no DSPi is attached.
 final class SubharmWireTests: XCTestCase {
 
-    // MARK: - Constants (spec §3 command summary)
+    // MARK: - Constants (paged FX commands, firmware 1.1.7)
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_SUBHARM, 0x10)
-        XCTAssertEqual(REQ_GET_SUBHARM, 0x11)
-        XCTAssertEqual(REQ_SET_SUBHARM_LOW, 0x12)
-        XCTAssertEqual(REQ_GET_SUBHARM_LOW, 0x13)
-        XCTAssertEqual(REQ_SET_SUBHARM_HIGH, 0x14)
-        XCTAssertEqual(REQ_GET_SUBHARM_HIGH, 0x15)
-        XCTAssertEqual(REQ_SET_SUBHARM_BOOST, 0x16)
-        XCTAssertEqual(REQ_GET_SUBHARM_BOOST, 0x17)
-        XCTAssertEqual(REQ_SET_SUBHARM_MASK, 0x18)
-        XCTAssertEqual(REQ_GET_SUBHARM_MASK, 0x19)
-        XCTAssertEqual(REQ_GET_SUBHARM_HEADROOM, 0x1A)
+        XCTAssertEqual(VC.FX.SUBHARM_ENABLE.id, 0x0820)
+        XCTAssertEqual(VC.FX.SUBHARM_LOW.id, 0x0821)
+        XCTAssertEqual(VC.FX.SUBHARM_HIGH.id, 0x0822)
+        XCTAssertEqual(VC.FX.SUBHARM_BOOST.id, 0x0824)
+        XCTAssertEqual(VC.FX.SUBHARM_MASK.id, 0x0825)
+        XCTAssertEqual(VC.FX.SUBHARM_HEADROOM.id, 0x082E)
         XCTAssertEqual(SUBHARM_DEFAULT_OUTPUT_MASK, 0xFFFF)
     }
 
-    /// V30 spread the block over three ranges (spec §3): the rest of 0x10-0x1F,
-    /// then 0x2C-0x2F and 0xA9-0xAE.
+    /// The V30 additions, which 1.1.6 spread over three opcode ranges, now
+    /// sit in the same FX block as the rest.
     func testExtendedRequestCodes() {
-        XCTAssertEqual(REQ_SET_SUBHARM_TOP, 0x1B)
-        XCTAssertEqual(REQ_GET_SUBHARM_TOP, 0x1C)
-        XCTAssertEqual(REQ_SET_SUBHARM_SELECT, 0x1D)
-        XCTAssertEqual(REQ_GET_SUBHARM_SELECT, 0x1E)
-        XCTAssertEqual(REQ_GET_SUBHARM_METER, 0x1F)
-        XCTAssertEqual(REQ_SET_SUBHARM_SOLO, 0x2C)
-        XCTAssertEqual(REQ_GET_SUBHARM_SOLO, 0x2D)
-        XCTAssertEqual(REQ_SET_SUBHARM_LINK, 0x2E)
-        XCTAssertEqual(REQ_GET_SUBHARM_LINK, 0x2F)
-        XCTAssertEqual(REQ_SET_SUBHARM_DEPTH, 0xA9)
-        XCTAssertEqual(REQ_GET_SUBHARM_DEPTH, 0xAA)
-        XCTAssertEqual(REQ_SET_SUBHARM_HOLD, 0xAB)
-        XCTAssertEqual(REQ_GET_SUBHARM_HOLD, 0xAC)
-        XCTAssertEqual(REQ_SET_SUBHARM_CEILING, 0xAD)
-        XCTAssertEqual(REQ_GET_SUBHARM_CEILING, 0xAE)
-    }
-
-    /// The block must not collide with the siggen codes it sits next to: siggen
-    /// keeps 0xA4-0xA8 and subharm took the reserved range above it at V30.
-    func testExtendedCodesDoNotCollideWithSiggen() {
-        let siggen: Set<UInt8> = [REQ_SIGGEN_SET_CONFIG, REQ_SIGGEN_GET_CONFIG,
-                                  REQ_SIGGEN_CONTROL, REQ_SIGGEN_GET_STATUS,
-                                  REQ_SIGGEN_GET_CAPS]
-        let subharm: Set<UInt8> = [REQ_SET_SUBHARM_DEPTH, REQ_GET_SUBHARM_DEPTH,
-                                   REQ_SET_SUBHARM_HOLD, REQ_GET_SUBHARM_HOLD,
-                                   REQ_SET_SUBHARM_CEILING, REQ_GET_SUBHARM_CEILING]
-        XCTAssertTrue(siggen.isDisjoint(with: subharm))
+        XCTAssertEqual(VC.FX.SUBHARM_TOP.id, 0x0823)
+        XCTAssertEqual(VC.FX.SUBHARM_SELECT.id, 0x0826)
+        XCTAssertEqual(VC.FX.SUBHARM_DEPTH.id, 0x0827)
+        XCTAssertEqual(VC.FX.SUBHARM_HOLD.id, 0x0828)
+        XCTAssertEqual(VC.FX.SUBHARM_CEILING.id, 0x0829)
+        XCTAssertEqual(VC.FX.SUBHARM_LINK.id, 0x082A)
+        XCTAssertEqual(VC.FX.SUBHARM_SOLO.id, 0x082B)
+        XCTAssertEqual(VC.FX.SUBHARM_METER.id, 0x082F)
     }
 
     /// Parameter ranges the app enforces on commit so its state matches the
@@ -251,7 +227,7 @@ final class SubharmWireTests: XCTestCase {
     /// value sits inside its documented range.
     func testSubharmReadbackConsistency() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let all = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
             throw XCTSkip("Firmware predates the Subharmonic Synthesizer (wire format < V29).")
         }
@@ -263,11 +239,11 @@ final class SubharmWireTests: XCTestCase {
         let bulkHigh: Float = all.withUnsafeBytes { $0.load(fromByteOffset: o + 8, as: Float.self) }
         let bulkBoost: Float = all.withUnsafeBytes { $0.load(fromByteOffset: o + 12, as: Float.self) }
 
-        guard let en = usb.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1),
-              let mk = usb.getControlRequest(request: REQ_GET_SUBHARM_MASK, value: 0, index: 0, length: 2),
-              let lo = usb.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4),
-              let hi = usb.getControlRequest(request: REQ_GET_SUBHARM_HIGH, value: 0, index: 0, length: 4),
-              let bo = usb.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4),
+        guard let en = usb.getData(VC.FX.SUBHARM_ENABLE, length: 1),
+              let mk = usb.getData(VC.FX.SUBHARM_MASK, length: 2),
+              let lo = usb.getData(VC.FX.SUBHARM_LOW, length: 4),
+              let hi = usb.getData(VC.FX.SUBHARM_HIGH, length: 4),
+              let bo = usb.getData(VC.FX.SUBHARM_BOOST, length: 4),
               mk.count >= 2, lo.count >= 4, hi.count >= 4, bo.count >= 4 else {
             throw XCTSkip("Subharm individual GETs STALLed.")
         }
@@ -289,7 +265,7 @@ final class SubharmWireTests: XCTestCase {
     /// inside the documented ranges (spec §2.7 to §2.12).
     func testExtendedReadbackConsistency() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let all = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
             throw XCTSkip("Firmware predates the extended Subharmonic Synthesizer (wire format < V30).")
         }
@@ -300,12 +276,12 @@ final class SubharmWireTests: XCTestCase {
         let bulkMode = Int(all[o + 32])
         let bulkLink = all[o + 33] != 0
 
-        guard let tp = usb.getControlRequest(request: REQ_GET_SUBHARM_TOP, value: 0, index: 0, length: 4),
-              let sm = usb.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1),
-              let dp = usb.getControlRequest(request: REQ_GET_SUBHARM_DEPTH, value: 0, index: 0, length: 4),
-              let hd = usb.getControlRequest(request: REQ_GET_SUBHARM_HOLD, value: 0, index: 0, length: 4),
-              let cl = usb.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4),
-              let lk = usb.getControlRequest(request: REQ_GET_SUBHARM_LINK, value: 0, index: 0, length: 1),
+        guard let tp = usb.getData(VC.FX.SUBHARM_TOP, length: 4),
+              let sm = usb.getData(VC.FX.SUBHARM_SELECT, length: 1),
+              let dp = usb.getData(VC.FX.SUBHARM_DEPTH, length: 4),
+              let hd = usb.getData(VC.FX.SUBHARM_HOLD, length: 4),
+              let cl = usb.getData(VC.FX.SUBHARM_CEILING, length: 4),
+              let lk = usb.getData(VC.FX.SUBHARM_LINK, length: 1),
               tp.count >= 4, !sm.isEmpty, dp.count >= 4, hd.count >= 4, cl.count >= 4, !lk.isEmpty else {
             throw XCTSkip("Extended subharm GETs STALLed.")
         }
@@ -331,18 +307,18 @@ final class SubharmWireTests: XCTestCase {
     /// back as 2 (spec §2.8).  Non-destructive - the original is restored.
     func testSelectModeClampsOnDevice() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let orig = usb.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1),
+        guard let orig = usb.getData(VC.FX.SUBHARM_SELECT, length: 1),
               !orig.isEmpty else {
             throw XCTSkip("Firmware predates the extended Subharmonic Synthesizer.")
         }
         defer {
             var restore = orig[0]
-            usb.sendControlRequest(request: REQ_SET_SUBHARM_SELECT, value: 0, index: 0, data: Data(bytes: &restore, count: 1))
+            usb.send(VC.FX.SUBHARM_SELECT, data: Data(bytes: &restore, count: 1))
         }
 
         var over: UInt8 = 7
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_SELECT, value: 0, index: 0, data: Data(bytes: &over, count: 1))
-        guard let back = usb.getControlRequest(request: REQ_GET_SUBHARM_SELECT, value: 0, index: 0, length: 1),
+        usb.send(VC.FX.SUBHARM_SELECT, data: Data(bytes: &over, count: 1))
+        guard let back = usb.getData(VC.FX.SUBHARM_SELECT, length: 1),
               !back.isEmpty else {
             throw XCTSkip("Subharm select GET STALLed.")
         }
@@ -354,7 +330,7 @@ final class SubharmWireTests: XCTestCase {
     func testSubMeterShape() throws {
         let usb = try HardwareTest.requireDevice()
         // 9 outputs on RP2350, 5 on RP2040; ask for the larger and accept either.
-        guard let d = usb.getControlRequest(request: REQ_GET_SUBHARM_METER, value: 0, index: 0, length: 18),
+        guard let d = usb.getData(VC.FX.SUBHARM_METER, length: 18),
               d.count >= 10 else {
             throw XCTSkip("Firmware has no subharm sub meter (wire format < V30).")
         }
@@ -373,13 +349,13 @@ final class SubharmWireTests: XCTestCase {
         let usb = try HardwareTest.requireDevice()
 
         func headroom() -> Float? {
-            guard let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HEADROOM, value: 0, index: 0, length: 4),
+            guard let d = usb.getData(VC.FX.SUBHARM_HEADROOM, length: 4),
                   d.count >= 4 else { return nil }
             return d.withUnsafeBytes { $0.load(as: Float.self) }
         }
-        guard let origCeilingData = usb.getControlRequest(request: REQ_GET_SUBHARM_CEILING, value: 0, index: 0, length: 4),
+        guard let origCeilingData = usb.getData(VC.FX.SUBHARM_CEILING, length: 4),
               origCeilingData.count >= 4,
-              let origEnabled = usb.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1),
+              let origEnabled = usb.getData(VC.FX.SUBHARM_ENABLE, length: 1),
               headroom() != nil else {
             throw XCTSkip("Firmware predates the extended Subharmonic Synthesizer.")
         }
@@ -387,19 +363,19 @@ final class SubharmWireTests: XCTestCase {
         let wasEnabled = (origEnabled.first ?? 0) != 0
         defer {
             var c = origCeiling
-            usb.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: Data(bytes: &c, count: 4))
+            usb.send(VC.FX.SUBHARM_CEILING, data: Data(bytes: &c, count: 4))
             var en: UInt8 = wasEnabled ? 1 : 0
-            usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: Data(bytes: &en, count: 1))
+            usb.send(VC.FX.SUBHARM_ENABLE, data: Data(bytes: &en, count: 1))
         }
 
         var on: UInt8 = 1
-        usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: Data(bytes: &on, count: 1))
+        usb.send(VC.FX.SUBHARM_ENABLE, data: Data(bytes: &on, count: 1))
         var noCeiling = SUBHARM_CEILING_MAX
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: Data(bytes: &noCeiling, count: 4))
+        usb.send(VC.FX.SUBHARM_CEILING, data: Data(bytes: &noCeiling, count: 4))
         let unlimited = try XCTUnwrap(headroom())
 
         var tight = SUBHARM_CEILING_MIN
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_CEILING, value: 0, index: 0, data: Data(bytes: &tight, count: 4))
+        usb.send(VC.FX.SUBHARM_CEILING, data: Data(bytes: &tight, count: 4))
         let limited = try XCTUnwrap(headroom())
 
         XCTAssertLessThanOrEqual(limited, unlimited + 0.001,
@@ -410,19 +386,19 @@ final class SubharmWireTests: XCTestCase {
     /// clamped value; the original is restored so the test is non-destructive.
     func testLowBandClampsAndRestores() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let orig = usb.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4),
+        guard let orig = usb.getData(VC.FX.SUBHARM_LOW, length: 4),
               orig.count >= 4 else {
             throw XCTSkip("Firmware predates the Subharmonic Synthesizer.")
         }
         let original: Float = orig.withUnsafeBytes { $0.load(as: Float.self) }
         defer {
             var restore = original
-            usb.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: Data(bytes: &restore, count: 4))
+            usb.send(VC.FX.SUBHARM_LOW, data: Data(bytes: &restore, count: 4))
         }
 
         var over: Float = 40.0   // well above the +12 dB ceiling
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_LOW, value: 0, index: 0, data: Data(bytes: &over, count: 4))
-        guard let back = usb.getControlRequest(request: REQ_GET_SUBHARM_LOW, value: 0, index: 0, length: 4),
+        usb.send(VC.FX.SUBHARM_LOW, data: Data(bytes: &over, count: 4))
+        guard let back = usb.getData(VC.FX.SUBHARM_LOW, length: 4),
               back.count >= 4 else {
             throw XCTSkip("Subharm low GET STALLed.")
         }
@@ -438,13 +414,13 @@ final class SubharmWireTests: XCTestCase {
         let usb = try HardwareTest.requireDevice()
 
         func headroom() -> Float? {
-            guard let d = usb.getControlRequest(request: REQ_GET_SUBHARM_HEADROOM, value: 0, index: 0, length: 4),
+            guard let d = usb.getData(VC.FX.SUBHARM_HEADROOM, length: 4),
                   d.count >= 4 else { return nil }
             return d.withUnsafeBytes { $0.load(as: Float.self) }
         }
         guard headroom() != nil,
-              let origEnabled = usb.getControlRequest(request: REQ_GET_SUBHARM, value: 0, index: 0, length: 1),
-              let origBoostData = usb.getControlRequest(request: REQ_GET_SUBHARM_BOOST, value: 0, index: 0, length: 4),
+              let origEnabled = usb.getData(VC.FX.SUBHARM_ENABLE, length: 1),
+              let origBoostData = usb.getData(VC.FX.SUBHARM_BOOST, length: 4),
               origBoostData.count >= 4 else {
             throw XCTSkip("Firmware predates the Subharmonic Synthesizer.")
         }
@@ -452,28 +428,28 @@ final class SubharmWireTests: XCTestCase {
         let origBoost: Float = origBoostData.withUnsafeBytes { $0.load(as: Float.self) }
         defer {
             var boost = origBoost
-            usb.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: Data(bytes: &boost, count: 4))
+            usb.send(VC.FX.SUBHARM_BOOST, data: Data(bytes: &boost, count: 4))
             var en: UInt8 = wasEnabled ? 1 : 0
-            usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: Data(bytes: &en, count: 1))
+            usb.send(VC.FX.SUBHARM_ENABLE, data: Data(bytes: &en, count: 1))
         }
 
         var off: UInt8 = 0
-        usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: Data(bytes: &off, count: 1))
+        usb.send(VC.FX.SUBHARM_ENABLE, data: Data(bytes: &off, count: 1))
         XCTAssertEqual(try XCTUnwrap(headroom()), 0.0, accuracy: 0.001,
                        "headroom must read 0 while the effect is disabled")
 
         var on: UInt8 = 1
-        usb.sendControlRequest(request: REQ_SET_SUBHARM, value: 0, index: 0, data: Data(bytes: &on, count: 1))
+        usb.send(VC.FX.SUBHARM_ENABLE, data: Data(bytes: &on, count: 1))
         // Start from a known boost so the comparison below is against a floor,
         // not against whatever the device happened to be set to.
         var noBoost = SUBHARM_BOOST_MIN
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: Data(bytes: &noBoost, count: 4))
+        usb.send(VC.FX.SUBHARM_BOOST, data: Data(bytes: &noBoost, count: 4))
         let enabledHeadroom = try XCTUnwrap(headroom())
         XCTAssertGreaterThan(enabledHeadroom, 0.0,
                              "an enabled effect always has some worst-case gain")
 
         var maxBoost = SUBHARM_BOOST_MAX
-        usb.sendControlRequest(request: REQ_SET_SUBHARM_BOOST, value: 0, index: 0, data: Data(bytes: &maxBoost, count: 4))
+        usb.send(VC.FX.SUBHARM_BOOST, data: Data(bytes: &maxBoost, count: 4))
         let boostedHeadroom = try XCTUnwrap(headroom())
         XCTAssertGreaterThan(boostedHeadroom, enabledHeadroom,
                              "the LF boost adds gain, so it must raise the reported headroom")

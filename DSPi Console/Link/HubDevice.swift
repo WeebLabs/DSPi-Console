@@ -22,7 +22,7 @@ struct HubDeviceInfo: Equatable {
     var inputs: Int?
     var wireVersion: Int?
     var link: LinkDeviceLink     // usb or uart
-    /// The board's own name (REQ_GET_DEVICE_NAME): nil when the firmware cannot
+    /// The board's own name (SYS.DEVICE_NAME): nil when the firmware cannot
     /// store one, empty when it can but is unnamed (device_name_spec.md 5).
     var boardName: String? = nil
 }

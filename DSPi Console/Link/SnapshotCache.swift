@@ -33,7 +33,7 @@ final class SnapshotCache {
     private static let paramHeaderLen = 12
     private static let eventParamChanged: UInt8 = 0x02
 
-    /// Replace the whole blob after a fresh REQ_GET_ALL_PARAMS.  The wire
+    /// Replace the whole blob after a fresh STORE.ALL_PARAMS.  The wire
     /// version is byte 0 of the header.
     func setBulk(_ data: Data, now: Date = Date()) {
         lock.lock(); defer { lock.unlock() }
@@ -41,7 +41,7 @@ final class SnapshotCache {
         updatedAt = now
     }
 
-    /// Record the latest status frame (REQ_GET_STATUS wValue 9), which the
+    /// Record the latest status frame (MEAS.LEVELS), which the
     /// snapshot reply carries alongside the blob.
     func setStatus(_ data: Data) {
         lock.lock(); defer { lock.unlock() }

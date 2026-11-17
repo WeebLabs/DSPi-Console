@@ -10,7 +10,7 @@ import Combine
 // the caller: firmware without the analyser STALLs these requests, and a STALL
 // arrives as a nil or a short read.
 
-/// The staged configuration (REQ_RTA_SET_CONFIG / GET_CONFIG, 12 bytes).
+/// The staged configuration (MEAS.RTA_CONFIG / GET_CONFIG, 12 bytes).
 ///
 /// A change of tap, channel mask or FFT size restarts the frame in flight and
 /// clears the averaging; a change of averaging or peak decay alone takes effect
@@ -84,7 +84,7 @@ enum RtaOwnership: Equatable {
     case following(origin: LinkSessionID)
 }
 
-/// What this device's analyser can do (REQ_RTA_GET_CAPS wValue 0, 16 bytes).
+/// What this device's analyser can do (MEAS.RTA_CAPS, 16 bytes).
 /// A successful read is the feature probe: the analyser is transient and absent
 /// from the bulk parameter blob, so there is no wire-format version to gate on.
 struct RtaCaps: Equatable {
@@ -132,7 +132,7 @@ struct RtaCaps: Equatable {
     }
 }
 
-/// One channel's third-octave picture (REQ_RTA_GET_BANDS, 82 bytes).
+/// One channel's third-octave picture (MEAS.RTA_BANDS, 82 bytes).
 ///
 /// `avg` and `peak` always carry `RTA_MAX_BANDS` slots; only the first
 /// `nBands` are meaningful at the current sample rate. The first `bassBands`
@@ -168,7 +168,7 @@ struct RtaBandFrame: Equatable {
     }
 }
 
-/// The most recent frame's raw magnitude bins (REQ_RTA_GET_BINS).
+/// The most recent frame's raw magnitude bins (MEAS.RTA_BINS).
 ///
 /// Only the latest frame is kept, tagged with the channel it came from, so a
 /// multichannel selection makes this rotate.  The sequence number appears in
@@ -220,7 +220,7 @@ struct RtaBinFrame: Equatable {
     }
 }
 
-/// Engine telemetry (REQ_RTA_GET_STATUS, 24 bytes).  Reading it deliberately
+/// Engine telemetry (MEAS.RTA_STATUS, 24 bytes).  Reading it deliberately
 /// does not count as a data read, so polling status neither starts the analyser
 /// nor keeps it alive.
 struct RtaStatus: Equatable {
@@ -433,7 +433,7 @@ final class RtaEngine: ObservableObject {
 
     // MARK: Published state
 
-    /// True once REQ_RTA_GET_CAPS has answered.  Firmware without the analyser
+    /// True once MEAS.RTA_CAPS has answered.  Firmware without the analyser
     /// STALLs it, which is the whole feature gate.
     @Published private(set) var supported: Bool = false
     @Published private(set) var caps = RtaCaps()
@@ -582,7 +582,7 @@ final class RtaEngine: ObservableObject {
         let transport = self.transport
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self, !self.isWatching else { return }
-            _ = transport?.getControlRequest(request: REQ_RTA_CONTROL, value: RTA_CTL_STOP, index: 2, length: 1)
+            _ = transport?.setAndWait(VC.MEAS.RTA_STOP)
             DispatchQueue.main.async { [weak self] in
                 // A hidden window can be shown again before STOP completes.
                 // Never clear data belonging to that new subscription.
@@ -745,8 +745,7 @@ final class RtaEngine: ObservableObject {
     func fetchCaps() {
         guard let transport else { return }
         let generation = transport.generation
-        guard let d = transport.getControlRequest(request: REQ_RTA_GET_CAPS, value: 0, index: 2,
-                                            length: UInt16(RTA_CAPS_SIZE)),
+        guard let d = transport.getData(VC.MEAS.RTA_CAPS, length: UInt16(RTA_CAPS_SIZE)),
               let caps = RtaCaps.fromData(d) else {
             DispatchQueue.main.async { [weak self] in
                 self?.supported = false
@@ -761,8 +760,9 @@ final class RtaEngine: ObservableObject {
         var chunk: UInt16 = 1
         while centres.count < Int(caps.maxBands), chunk < 16 {
             guard transport.generation == generation,
-                  let c = transport.getControlRequest(request: REQ_RTA_GET_CAPS, value: chunk, index: 2,
-                                                length: UInt16(RTA_CENTRES_PER_CHUNK * 2)),
+                  // 1.1.6 numbered the centre chunks from 1; MEAS.RTA_BAND_CENTRES from 0.
+                  let c = transport.getData(VC.MEAS.RTA_BAND_CENTRES, value: chunk - 1,
+                                            length: UInt16(RTA_CENTRES_PER_CHUNK * 2)),
                   c.count >= 2 else { break }
             let b = [UInt8](c)
             for i in stride(from: 0, to: b.count - 1, by: 2) {
@@ -878,7 +878,7 @@ final class RtaEngine: ObservableObject {
         lock.unlock()
 
         if needsPush {
-            transport.sendControlRequest(request: REQ_RTA_SET_CONFIG, value: 0, index: 2, data: want.toData())
+            transport.send(VC.MEAS.RTA_CONFIG, data: want.toData())
         }
 
         // Band frames.  GET_BANDS_ALL answers for every live channel in one
@@ -887,8 +887,7 @@ final class RtaEngine: ObservableObject {
         var frames: [UInt8: RtaBandFrame] = [:]
         if want.channelMask.nonzeroBitCount > 1 {
             let maxFrames = 16
-            if let d = transport.getControlRequest(request: REQ_RTA_GET_BANDS_ALL, value: 0, index: 2,
-                                             length: UInt16(bandFrameSize * maxFrames)) {
+            if let d = transport.getData(VC.MEAS.RTA_BANDS_ALL, length: UInt16(bandFrameSize * maxFrames)) {
                 var off = 0
                 while off + bandFrameSize <= d.count {
                     if let f = RtaBandFrame.fromData(d, at: off, maxBands: bandSlots) { frames[f.channel] = f }
@@ -897,8 +896,7 @@ final class RtaEngine: ObservableObject {
             }
         } else {
             let ch = want.channelMask.trailingZeroBitCount   // exactly one bit set here
-            if let d = transport.getControlRequest(request: REQ_RTA_GET_BANDS, value: UInt16(ch), index: 2,
-                                             length: UInt16(bandFrameSize)),
+            if let d = transport.getData(VC.MEAS.RTA_BANDS, value: UInt16(ch), length: UInt16(bandFrameSize)),
                let f = RtaBandFrame.fromData(d, maxBands: bandSlots) {
                 frames[f.channel] = f
             }
@@ -913,14 +911,12 @@ final class RtaEngine: ObservableObject {
         var status: RtaStatus? = nil
         var applied: RtaConfig? = nil
         if readStatus {
-            if let d = transport.getControlRequest(request: REQ_RTA_GET_STATUS, value: 0, index: 2,
-                                             length: UInt16(RTA_STATUS_SIZE)) {
+            if let d = transport.getData(VC.MEAS.RTA_STATUS, length: UInt16(RTA_STATUS_SIZE)) {
                 status = RtaStatus.fromData(d)
             }
         }
         if readConfig {
-            if let d = transport.getControlRequest(request: REQ_RTA_GET_CONFIG, value: 0, index: 2,
-                                             length: UInt16(RTA_CONFIG_SIZE)) {
+            if let d = transport.getData(VC.MEAS.RTA_CONFIG, length: UInt16(RTA_CONFIG_SIZE)) {
                 applied = RtaConfig.fromData(d)
             }
         }
@@ -1122,9 +1118,7 @@ final class RtaEngine: ObservableObject {
         for _ in 0..<2 {
             var frame = Data()
             while frame.count < length {
-                guard let chunk = transport.getControlRequest(request: REQ_RTA_GET_BINS,
-                                                        value: UInt16(frame.count), index: 2,
-                                                        length: UInt16(length - frame.count)),
+                guard let chunk = transport.getData(VC.MEAS.RTA_BINS, value: UInt16(frame.count), length: UInt16(length - frame.count)),
                       !chunk.isEmpty else { break }
                 frame.append(chunk)
                 // A complete frame is shorter than the ceiling at every size

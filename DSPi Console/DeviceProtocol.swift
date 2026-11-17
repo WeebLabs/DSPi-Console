@@ -25,6 +25,13 @@ enum DeviceProtocolState: Equatable {
 
     var isPaged: Bool { if case .paged = self { return true }; return false }
     var isLegacy: Bool { if case .legacy = self { return true }; return false }
+    /// Probed, and not something the hub drives: legacy or a newer major.
+    var isSettledUnattachable: Bool {
+        switch self {
+        case .legacy, .unsupported: return true
+        case .unknown, .paged: return false
+        }
+    }
 }
 
 extension VendorCommand {
@@ -84,11 +91,6 @@ enum ProtocolProbe {
 // MARK: - Gate
 
 enum ProtocolGate {
-    /// Phase 2 of the port leaves the old 8-bit call sites working on 1.1.6
-    /// boards, so page-0 requests are not restricted yet. Phase 3 moves every
-    /// call site to paged commands and removes this.
-    static let allowsUnrestrictedPageZero = true
-
     /// Whether a request may go to a board in `state`. A refused request
     /// never reaches the bus.
     static func admits(request: UInt8, index: UInt16, isGet: Bool, state: DeviceProtocolState) -> Bool {
@@ -96,13 +98,62 @@ enum ProtocolGate {
         let probe = VC.SYS.PROTOCOL_INFO
         if isGet, page == probe.page, request == probe.number { return true }   // the probe, in any state
         if page != 0 { return state.isPaged }
-        if allowsUnrestrictedPageZero { return true }
         // Page 0 holds no paged commands; only the two old opcodes go there.
         switch state {
         case .unknown: return isGet && request == LegacyOpcode.getPlatform
         case .legacy: return isGet && (request == LegacyOpcode.getPlatform || request == LegacyOpcode.enterBootloader)
         case .paged, .unsupported: return false
         }
+    }
+}
+
+// MARK: - Old status bytes
+
+/// The status byte a 1.1.6 write-as-read answered, recovered from the result
+/// of the SET that replaces it, so existing callers and their messages keep
+/// working (Protocol/legacy_map.json, `status_families`).
+enum LegacyStatusFamily {
+    /// PIN_CONFIG_*: 0 success.
+    case pin
+    /// PRESET_*: 0 success.
+    case preset
+    /// FLASH_OK: 0 success; 1.1.6 never refused these.
+    case flash
+    /// A plain acknowledge byte, 1.
+    case ack1
+
+    var success: UInt8 { self == .ack1 ? 1 : 0 }
+
+    private var fromResult: [LinkStatus: UInt8] {
+        switch self {
+        case .pin:
+            return [.vcPinInvalid: 1, .vcPinInUse: 2, .vcAddress: 3, .vcUnknown: 3,
+                    .vcUnsupported: 3, .vcState: 4, .vcValue: 5]
+        case .preset:
+            return [.vcAddress: 1, .vcState: 2]
+        case .flash, .ack1:
+            return [:]
+        }
+    }
+
+    /// The old byte for `status`, or nil when the device gave no verdict (a
+    /// timeout, a dead link) or refused for a reason the old protocol had no
+    /// code for.  `overrides` are the per-command entries of the legacy map.
+    func byte(for status: LinkStatus, overrides: [LinkStatus: UInt8] = [:]) -> UInt8? {
+        if status == .ok { return success }
+        return overrides[status] ?? fromResult[status]
+    }
+}
+
+extension DeviceTransport {
+    /// Send the SET that replaced a 1.1.6 write-as-read and answer the old
+    /// status byte as a one-byte reply, the shape the old GET returned, so a
+    /// caller's `if let d = ..., d.first == ...` checks stay as they were.
+    /// Blocks until the device answers.
+    func legacyAction(_ command: VendorCommand, value: UInt16 = 0, payload: Data = Data(),
+                      family: LegacyStatusFamily, overrides: [LinkStatus: UInt8] = [:]) -> Data? {
+        let status = setAndWait(command, value: value, data: payload)
+        return family.byte(for: status, overrides: overrides).map { Data([$0]) }
     }
 }
 

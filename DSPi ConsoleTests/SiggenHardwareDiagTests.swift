@@ -10,16 +10,14 @@ final class SiggenHardwareDiagTests: XCTestCase {
     func testSineStartAdvances() throws {
         let usb = try HardwareTest.requireDevice()
 
-        guard let capsData = usb.getControlRequest(request: REQ_SIGGEN_GET_CAPS,
-                                                   value: SIGGEN_CAPS_HEADER, index: 2, length: 8),
+        guard let capsData = usb.getData(VC.MEAS.SIGGEN_CAPS, length: 8),
               let caps = SiggenCapsHeader.fromData(capsData) else {
-            throw XCTSkip("Firmware has no siggen (GET_CAPS stalled)")
+            throw XCTSkip("Firmware has no siggen (MEAS.SIGGEN_CAPS refused)")
         }
         print("SIGGEN caps: types=\(caps.typeCount) outputs=\(caps.outputChannels) mask=0x\(String(caps.validChannelMask, radix: 16))")
 
         defer {
-            _ = usb.getControlRequest(request: REQ_SIGGEN_CONTROL,
-                                      value: SIGGEN_CTL_STOP_NOW, index: 2, length: 1)
+            _ = usb.setAndWait(VC.MEAS.SIGGEN_STOP_NOW)
         }
 
         // Note whether the host USB stream is warm (buffer-stats flags bit 1
@@ -27,28 +25,25 @@ final class SiggenHardwareDiagTests: XCTestCase {
         // firmware's zero-input pump - including pumping through a latched
         // preset_loading mute (the boot-with-no-stream deadlock found
         // 2026-07-05); when warm, phase 1 is host-driven and trivially passes.
-        if let bs = usb.getControlRequest(request: REQ_GET_BUFFER_STATS,
-                                          value: 0, index: 0, length: 44) {
+        if let bs = usb.getData(VC.SYS.BUFFER_STATS, length: 44) {
             print("PHASE0: usb stream \(bs[1] & 0x02 != 0 ? "warm (host-driven)" : "cold (pump-driven)")")
         }
 
         // Quiet 1 kHz sine on output 0 only.
         let cfg = SiggenConfig(signalType: SIGGEN_SINE, channelMask: 0x0001,
                                levelDB: -40.0, p1: 1000.0)
-        usb.sendControlRequest(request: REQ_SIGGEN_SET_CONFIG, value: 0, index: 2, data: cfg.toData())
+        usb.send(VC.MEAS.SIGGEN_CONFIG, data: cfg.toData())
 
-        let ack = usb.getControlRequest(request: REQ_SIGGEN_CONTROL,
-                                        value: SIGGEN_CTL_START, index: 2, length: 1)
-        print("SIGGEN start ack: \(ack.map { Array($0) }.map(String.init(describing:)) ?? "STALL")")
-        XCTAssertEqual(ack?.first, 1, "START was not accepted")
+        let ack = usb.setAndWait(VC.MEAS.SIGGEN_START)
+        print("SIGGEN start result: \(ack)")
+        XCTAssertEqual(ack, .ok, "START was not accepted")
 
         // Phase 1: no host stream - only the firmware pump can drive blocks.
         var lastState: UInt8 = 0xFF
         var sawRunIdle = false
         for i in 0..<10 {
             Thread.sleep(forTimeInterval: 0.1)
-            guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_STATUS,
-                                                value: 0, index: 2, length: 16),
+            guard let d = usb.getData(VC.MEAS.SIGGEN_STATUS, length: 16),
                   let st = SiggenStatus.fromData(d) else { continue }
             if st.state != lastState || i % 5 == 0 {
                 print("idle poll \(i): state=\(st.state) elapsed=\(st.elapsedMS)ms")
@@ -61,7 +56,7 @@ final class SiggenHardwareDiagTests: XCTestCase {
         // Dump buffer stats while stuck: slot-0 consumer fill is the pump's
         // pacing signal (pump refuses to push while fill >= 50%), and flags
         // bit 1 mirrors sync_started / usb_audio_stream_active.
-        if let bs = usb.getControlRequest(request: REQ_GET_BUFFER_STATS, value: 0, index: 0, length: 44) {
+        if let bs = usb.getData(VC.SYS.BUFFER_STATS, length: 44) {
             let numSpdif = Int(bs[0])
             print("BUFSTATS: flags=0x\(String(bs[1], radix: 16)) (bit1=streaming) numSpdif=\(numSpdif)")
             for i in 0..<min(numSpdif, 4) {
@@ -83,8 +78,7 @@ final class SiggenHardwareDiagTests: XCTestCase {
         var lastElapsed: UInt32 = 0
         for i in 0..<20 {
             Thread.sleep(forTimeInterval: 0.1)
-            guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_STATUS,
-                                                value: 0, index: 2, length: 16),
+            guard let d = usb.getData(VC.MEAS.SIGGEN_STATUS, length: 16),
                   let st = SiggenStatus.fromData(d) else {
                 print("poll \(i): GET_STATUS failed")
                 continue
@@ -123,8 +117,7 @@ final class SiggenHardwareDiagTests: XCTestCase {
         }
 
         defer {
-            _ = usb.getControlRequest(request: REQ_SIGGEN_CONTROL,
-                                      value: SIGGEN_CTL_STOP_NOW, index: 2, length: 1)
+            _ = usb.setAndWait(VC.MEAS.SIGGEN_STOP_NOW)
         }
 
         // Output 1 is enabled by default (stereo pass-through) and gives a
@@ -145,8 +138,7 @@ final class SiggenHardwareDiagTests: XCTestCase {
         var sawCompleted = false
         for i in 0..<40 {
             Thread.sleep(forTimeInterval: 0.1)
-            guard let d = usb.getControlRequest(request: REQ_SIGGEN_GET_STATUS,
-                                                value: 0, index: 2, length: 16),
+            guard let d = usb.getData(VC.MEAS.SIGGEN_STATUS, length: 16),
                   let st = SiggenStatus.fromData(d) else { continue }
             if i % 5 == 0 || st.state == SIGGEN_STATE_IDLE {
                 print("identify poll \(i): state=\(st.state) type=\(st.signalType) walkCh=\(st.activeChannel) cycles=\(st.cyclesDone) reason=\(st.stopReason)")

@@ -92,7 +92,7 @@ struct DacHwMuteConfig: Equatable {
 
 // MARK: - Output Latency
 //
-// Wire structs for REQ_OUTPUT_LATENCY (0x03), mirroring firmware
+// Wire structs for OUTPUT.LATENCY_*, mirroring firmware
 // `OutputLatencyStatus` and `OutputLatencyOptionWire` (config.h).  Packed,
 // little-endian.
 //
@@ -170,7 +170,7 @@ func formatLatencyMs(_ us: UInt16) -> String {
 // MARK: - ADAT Bulk Output Status
 //
 // 8-byte wire-format struct mirroring firmware `AdatStatus`
-// (REQ_GET_ADAT_STATUS, adat_output_spec.md §"AdatStatus").  Packed,
+// (OUTPUT.ADAT_TX_STATUS, adat_output_spec.md §"AdatStatus").  Packed,
 // little-endian.  RP2040 returns all zeros.
 //
 // Byte layout:
@@ -221,7 +221,7 @@ struct AdatStatus: Equatable {
 
 // MARK: - I2S Clock-Slave Status Data Model
 //
-// 16-byte I2sSlaveStatusPacket from REQ_GET_I2S_SLAVE_STATUS (0x8A), little-
+// 16-byte I2sSlaveStatusPacket from CLOCK.I2S_SLAVE_STATUS, little-
 // endian.  Mirrors the SPDIF RX lock state machine but for the I2S clock-slave
 // role (external master drives BCK/LRCLK; the rate is auto-detected).  See
 // Documentation/Features/i2s_slave_input_spec.md §4.  Layout:
@@ -299,7 +299,7 @@ struct I2sSlaveStatus: Equatable {
 
 // MARK: - ADAT Input Status Data Model
 //
-// 20-byte AdatInputStatusPacket from REQ_GET_ADAT_INPUT_STATUS (0x6E), little-
+// 20-byte AdatInputStatusPacket from INPUT.ADAT_RX_STATUS, little-
 // endian.  The lock FSM mirrors the SPDIF/I2S input receivers but for the
 // 8-channel ADAT lightpipe.  RP2040 returns all zeros.  See
 // Documentation/Features/adat_input_spec.md.  Layout:
@@ -474,7 +474,7 @@ struct I2cCtrlConfig: Equatable {
     }
 }
 
-/// REQ_GET_CTRL_IFACE_STATUS response (8 bytes).  `*_lastStatus` is the
+/// XPORT.STATUS response (8 bytes).  `*_lastStatus` is the
 /// PIN_CONFIG_* outcome of the most recent SET; `*_live` is 1 when the
 /// peripheral is actually up and listening (0 if a stored-but-enabled config's
 /// pins collide with the current output wiring at boot).
@@ -507,7 +507,7 @@ struct CtrlIfaceStatus: Equatable {
 // is device-global (stored in the preset directory; survives factory reset).
 
 /// One user-wired control binding (24 bytes, capability format v2).  The same
-/// bytes appear on the wire (REQ_SET/GET_CS_BINDING) and in flash.  Numeric
+/// bytes appear on the wire (CS.BINDING) and in flash.  Numeric
 /// operands are unit-encoded per the noun's unit (spec §2.1): dB / Q / percent
 /// as signed 8.8 fixed point, Hz as a plain integer, enum/bool as plain ints.
 struct CsBinding: Equatable {
@@ -610,7 +610,7 @@ struct CsTypeDesc: Equatable {
     var pinClass: UInt8 = 0   // CS_PINCLASS_ANY / _ADC
 }
 
-/// Capability header returned by REQ_GET_CS_CAPS, wValue = 0xFFFF (40 bytes in
+/// Capability header returned by CS.CAPS (40 bytes in
 /// v3: 4-byte header + 8 CsTypeDesc + a 4-byte tail; spec §2.4).  Hosts build
 /// their picker UI from this, not from hardcoded tables, so a future firmware's
 /// new types appear with no app change.  The parser reads `typeCount` entries
@@ -659,7 +659,7 @@ struct CsCapsHeader: Equatable {
     }
 }
 
-/// Per-noun descriptor returned by REQ_GET_CS_CAPS, wValue = noun index
+/// Per-noun descriptor returned by CS.NOUN_DESC, wValue = noun index
 /// (12 bytes in v2; spec §2.5).  Says the noun's kind, enum size, unit-encoded
 /// range, unit, target addressing, and the action mask it accepts.  An
 /// `actions == 0` noun is unavailable on this platform (e.g. ADAT on RP2040).
@@ -694,7 +694,7 @@ struct CsNounDesc: Equatable {
     }
 }
 
-/// REQ_GET_CS_STATUS response (41 bytes in v6; spec §2.6).  `lastStatus`/
+/// CS.STATUS response (41 bytes in v6; spec §2.6).  `lastStatus`/
 /// `lastSlot` report the most recent deferred SET's outcome (`lastSlot` =
 /// 0x80|n for an IR sub-slot, 0xFF for save/revert); `dirty` = the live config
 /// differs from flash (unsaved preview); `activeMask` (uint16) bit N = binding N
@@ -765,7 +765,7 @@ struct CsStatusPacket: Equatable {
 /// One learned IR remote-button command (16 bytes; spec §2.7).  Semantically a
 /// button-shaped binding: the noun/action/target/value/step fields follow the
 /// same CsBinding rules, fired by the learned `code` instead of a GPIO edge.
-/// The same bytes appear on the wire (REQ_SET/GET_CS_IR_CMD) and in flash.
+/// The same bytes appear on the wire (CS.IR_CMD) and in flash.
 struct IrCommand: Equatable {
     var noun: UInt8 = 0            // Byte 0: CsNoun
     var action: UInt8 = 0         // Byte 1: CsAction (button subset)
@@ -843,7 +843,7 @@ final class HeldFlag {
     }
 }
 
-/// Result of REQ_CS_IR_LEARN, wValue = 2 (8 bytes; spec §3.6.1):
+/// Result of CS.IR_LEARN_STATUS (8 bytes; spec §3.6.1):
 /// {state, protocol, 0, 0, code_le32}.  `state` is CS_IR_LEARN_STATE_DONE (2)
 /// with protocol/code valid, or _TIMEOUT (3) / _ARMED (1) / _IDLE (0).
 struct CsIrLearnResult: Equatable {
@@ -970,7 +970,7 @@ struct CsMacroStep: Equatable {
     }
 }
 
-/// One macro (132 bytes read back whole via REQ_GET_CS_MACRO; spec §2.4).  It
+/// One macro (132 bytes read back whole via CS.MACRO; spec §2.4).  It
 /// is written in pieces: a 36-byte header carrying the name and step count,
 /// plus one SET per step, because the whole record exceeds the 64-byte vendor
 /// SET buffer.  Only `steps[0..<stepCount]` execute.
@@ -984,7 +984,7 @@ struct CsMacro: Equatable {
     /// The steps that actually execute, in order.
     var activeSteps: ArraySlice<CsMacroStep> { steps.prefix(Int(stepCount)) }
 
-    /// The 36-byte REQ_SET_CS_MACRO payload (name + step count only).
+    /// The 36-byte CS.MACRO_HEADER payload (name + step count only).
     func headerData() -> Data {
         var d = Data(count: 36)
         csWriteName(name, into: &d, at: 0)
@@ -993,7 +993,7 @@ struct CsMacro: Equatable {
         return d
     }
 
-    /// Parse the 132-byte REQ_GET_CS_MACRO response.
+    /// Parse the 132-byte CS.MACRO response.
     static func fromData(_ data: Data) -> CsMacro? {
         guard data.count >= 132 else { return nil }
         let b = data.startIndex
@@ -1013,7 +1013,7 @@ struct CsMacro: Equatable {
     }
 }
 
-/// REQ_GET_CS_EXT_STATUS response (24 bytes; spec §2.6).  Carries the device's
+/// CS.EXT_STATUS response (24 bytes; spec §2.6).  Carries the device's
 /// group and macro limits again (the caps header has them too), what the
 /// sequencer is doing right now, and the stored-record validity of every group
 /// and macro - the group/macro counterpart of `CsStatusPacket.slotStatus`.
@@ -1162,8 +1162,8 @@ struct CsDisplayStatus: Equatable {
 // single precision.  The generator is transient: never persisted to flash,
 // stopped by preset load and factory reset.
 
-/// The 36-byte generator configuration - payload of REQ_SIGGEN_SET_CONFIG and
-/// response of REQ_SIGGEN_GET_CONFIG (spec §3.1).  p1..p4 are per-type
+/// The 36-byte generator configuration - payload of MEAS.SIGGEN_CONFIG and
+/// response of MEAS.SIGGEN_CONFIG (spec §3.1).  p1..p4 are per-type
 /// parameters (spec §2); duration/repeat/gap depend on the timing model
 /// (spec §6).
 struct SiggenConfig: Equatable {
@@ -1229,7 +1229,7 @@ struct SiggenConfig: Equatable {
     }
 }
 
-/// REQ_SIGGEN_GET_STATUS response (16 bytes; spec §3.2).  `state` already
+/// MEAS.SIGGEN_STATUS response (16 bytes; spec §3.2).  `state` already
 /// folds in the fade overlay (FADE_IN / FADE_OUT).
 struct SiggenStatus: Equatable {
     var version: UInt8 = SIGGEN_CFG_VERSION
@@ -1259,7 +1259,7 @@ struct SiggenStatus: Equatable {
     }
 }
 
-/// Caps header returned by REQ_SIGGEN_GET_CAPS, wValue = 0xFFFF (8 bytes;
+/// Caps header returned by MEAS.SIGGEN_CAPS (8 bytes;
 /// spec §3.3).  `multitoneMax` and `outputChannels` are the two
 /// platform-dependent fields (RP2040: 5/8, RP2350: 9/16).
 struct SiggenCapsHeader: Equatable {
@@ -1290,7 +1290,7 @@ struct SiggenParamDesc: Equatable {
     var isUsed: Bool { semantic != SIGGEN_PARAM_UNUSED }
 }
 
-/// Per-type descriptor returned by REQ_SIGGEN_GET_CAPS with wValue = type
+/// Per-type descriptor returned by MEAS.SIGGEN_TYPE_DESC with wValue = type
 /// index (62 bytes; spec §3.4).  The authoritative source for parameter
 /// ranges and defaults - already reflects the running platform's
 /// multitone_max.
@@ -1363,7 +1363,7 @@ class DSPViewModel: ObservableObject {
     private var isRestoringInputPairLinks = false
     @Published var masterVolumeDB: Float = 0.0
     /// Vendor-channel "user volume" — same field as the UAC1 host slider
-    /// (`audio_state.volume`), driven via REQ_SET_USER_VOLUME (0xDA).
+    /// (`audio_state.volume`), driven via ROUTE.USER_VOLUME.
     /// Used as the sidebar volume control when input source is non-USB.
     /// Range: -60.0 ... 0.0 dB.
     @Published var userVolumeDB: Float = 0.0
@@ -1445,7 +1445,7 @@ class DSPViewModel: ObservableObject {
     @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
     @Published var spdifRxPin: UInt8 = 11             // GPIO pin for S/PDIF input 1
 
-    // Multiple S/PDIF inputs (firmware v1.1.5+, probed via REQ_GET_SPDIF_INPUT_CONFIG).
+    // Multiple S/PDIF inputs (firmware v1.1.5+, probed via INPUT.SPDIF_RX_CONFIG).
     // `multiSpdifSupported` is false on older firmware that STALLs 0xEF, in which
     // case only input 1 (`spdifRxPin`) exists.  Inputs 2/3/4 are optional and
     // disabled by default; a disabled input's pin is a stored preference only.
@@ -1460,7 +1460,7 @@ class DSPViewModel: ObservableObject {
     @Published var spdifExtEnabled: [Bool] = Array(repeating: false, count: SPDIF_RX_NUM_INPUTS - 1)
 
     // I2S input state (firmware wire format V12+).  `i2sInputSupported` is
-    // false on older firmware that STALLs REQ_GET_I2S_RX_PIN (0xF2) or returns
+    // false on older firmware that STALLs INPUT.I2S_RX_PIN or returns
     // a pre-V12 bulk payload.  See i2s_multi_input.md.
     @Published var i2sInputSupported: Bool = false
     /// Active I2S input channel count: 2 / 4 / 6 / 8 (1..4 stereo pairs).
@@ -1474,8 +1474,8 @@ class DSPViewModel: ObservableObject {
     // I2S clock-slave input mode (firmware wire format V18+).  In SLAVE mode an
     // external master drives BCK/LRCLK and the rate is auto-detected; MASTER
     // (default) keeps DSPi as the clock authority.  `i2sClockModeSupported` is
-    // false on firmware that STALLs REQ_GET_I2S_CLOCK_MODE (0x89).  Live lock
-    // state arrives via REQ_GET_I2S_SLAVE_STATUS (0x8A) and NOTIFY event 0x09.
+    // false on firmware that STALLs CLOCK.I2S_CLOCK_MODE.  Live lock
+    // state arrives via CLOCK.I2S_SLAVE_STATUS and NOTIFY event 0x09.
     // See i2s_slave_input_spec.md.
     @Published var i2sClockModeSupported: Bool = false
     @Published var i2sClockMode: UInt8 = 0                      // 0=master, 1=slave (live)
@@ -1498,7 +1498,7 @@ class DSPViewModel: ObservableObject {
     // There is no free default GPIO, so the pin ships unset (0xFF) and must be
     // assigned before the input can be enabled.  Clock mode mirrors I2S: MASTER
     // (default) makes DSPi the rate authority; SLAVE auto-detects the wire rate.
-    // Live lock state arrives via REQ_GET_ADAT_INPUT_STATUS (0x6E) and NOTIFY
+    // Live lock state arrives via INPUT.ADAT_RX_STATUS and NOTIFY
     // event 0x0B.  See adat_input_spec.md.
     @Published var adatInputSupported: Bool = false
     @Published var adatInputEnabled: Bool = false
@@ -1605,7 +1605,7 @@ class DSPViewModel: ObservableObject {
     @Published var inputSourceNamesSupported: Bool = false
 
     /// The board's own name, device-global; empty means unnamed.
-    /// `deviceNameSupported` stays false on firmware without REQ_GET_DEVICE_NAME.
+    /// `deviceNameSupported` stays false on firmware without SYS.DEVICE_NAME.
     @Published var deviceName: String = "" {
         didSet {
             if let d = selectedDevice, !d.isRemote, knownDeviceNames[d.serial] != deviceName {
@@ -1677,7 +1677,7 @@ class DSPViewModel: ObservableObject {
     // the DAC's mute input before clock-stop on pipeline reset.  Per-board
     // attribute, persisted in the firmware's directory sector (not per
     // preset).  `dacHwMuteSupported` flips true when the firmware responds
-    // to REQ_GET_DAC_HW_MUTE_CONFIG (V10+ wire format).
+    // to OUTPUT.DAC_MUTE_CONFIG (V10+ wire format).
     @Published var dacHwMuteConfig: DacHwMuteConfig = DacHwMuteConfig()
     @Published var dacHwMuteSupported: Bool = false
 
@@ -1685,14 +1685,14 @@ class DSPViewModel: ObservableObject {
     // table and stored device-globally (not per preset).  Which options run as
     // themselves depends on the input source and rate, so the table is re-read
     // whenever those may have moved.  `outputLatencySupported` stays false on
-    // firmware that STALLs REQ_OUTPUT_LATENCY.
+    // firmware that STALLs OUTPUT.LATENCY_STATUS.
     @Published var outputLatencySupported: Bool = false
     @Published var outputLatencyStatus: OutputLatencyStatus = OutputLatencyStatus()
     @Published var outputLatencyOptions: [OutputLatencyOption] = []
 
     // ADAT bulk output — streams all 8 main output channels as one ADAT
     // lightpipe signal on a single GPIO (RP2350 only).  `adatSupported` flips
-    // true when the firmware answers REQ_GET_ADAT_STATUS (0xCE); older firmware
+    // true when the firmware answers OUTPUT.ADAT_TX_STATUS; older firmware
     // and RP2040 STALL / return zeros and the Outputs page hides the section.
     // Config (enable + pin) is part of the IO block governed by
     // `presetOutputConfigMode`; `adatStatus` is the live engine state, refreshed
@@ -1705,7 +1705,7 @@ class DSPViewModel: ObservableObject {
     // External control interfaces (UART / I2C target) - device-level config
     // exposing the vendor-command surface to an external microcontroller.
     // `controlInterfacesSupported` flips true when the firmware answers
-    // REQ_GET_CTRL_IFACE_STATUS (0xF9); older firmware STALLs and the Settings
+    // XPORT.STATUS; older firmware STALLs and the Settings
     // page hides itself.  See control_interfaces_spec.md.
     @Published var uartCtrlConfig: UartCtrlConfig = UartCtrlConfig()
     @Published var i2cCtrlConfig: I2cCtrlConfig = I2cCtrlConfig()
@@ -1716,7 +1716,7 @@ class DSPViewModel: ObservableObject {
     // encoders, indicator LEDs) bound to firmware parameters on spare GPIOs.
     // Device-global config (stored in the preset directory, survives factory
     // reset).  `controlSurfacesSupported` flips true when the firmware answers
-    // REQ_GET_CS_CAPS (0x86); older firmware STALLs and the Settings page hides
+    // CS.CAPS; older firmware STALLs and the Settings page hides
     // itself.  The picker UI is built entirely from the device-served caps
     // (`csCaps` + `csNounDescs`), never from hardcoded tables (spec §4).  See
     // control_surfaces_spec.md.
@@ -1768,7 +1768,7 @@ class DSPViewModel: ObservableObject {
     @Published var csDisplayCfg: CsDisplayCfg = CsDisplayCfg()
     @Published var csDisplayPages: [CsDisplayPage] = Array(repeating: CsDisplayPage(), count: CS_MAX_DISPLAY_PAGES)
     @Published var csDisplayStatus: CsDisplayStatus = CsDisplayStatus()
-    /// Page slots and model count the device serves from REQ_GET_CS_DISPLAY_CFG.
+    /// Page slots and model count the device serves from CS.DISPLAY_CAPS.
     @Published var csDisplayMaxPages: UInt8 = 0
     @Published var csDisplayModelCount: UInt8 = 0
     /// Outcome of the last display config or page write.  They apply live with
@@ -1888,7 +1888,7 @@ class DSPViewModel: ObservableObject {
     // Test signal generator (siggen) - onboard measurement/diagnostic signals
     // injected into the output mix buffers.  Transient only: never persisted,
     // stopped by preset load / factory reset.  `siggenSupported` flips true
-    // when the firmware answers REQ_SIGGEN_GET_CAPS (0xA8); older firmware
+    // when the firmware answers MEAS.SIGGEN_CAPS; older firmware
     // STALLs and the Tools window shows an unsupported notice.  `siggenDraft`
     // is the host-side editing config (what Start sends); `siggenStatus` is
     // the live engine state, refreshed by polling and by the
@@ -2075,7 +2075,7 @@ class DSPViewModel: ObservableObject {
         return UInt8(truncatingIfNeeded: stored)
     }
 
-    // Firmware version decoded from REQ_GET_PLATFORM by
+    // Firmware version decoded from SYS.PLATFORM by
     // FirmwareVersion.fromPlatformReply.  nil from disconnect until the
     // connected device's fetchPlatform() lands.
     @Published var firmwareVersion: (major: Int, minor: Int, patch: Int, beta: Int)? = nil
@@ -2095,7 +2095,7 @@ class DSPViewModel: ObservableObject {
     }
 
     /// Bulk wire-format version (WIRE_FORMAT_VERSION), captured from byte 0 of
-    /// the last REQ_GET_BULK_PARAMS reply.  This - not the firmware release
+    /// the last STORE.ALL_PARAMS reply.  This - not the firmware release
     /// version, which lagged behind - is the reliable signal for filter-type
     /// capabilities: the crossover-type renumber and first-order all-pass
     /// shipped in V13, the first-order shelves in V14.  0 before the first
@@ -2199,7 +2199,7 @@ class DSPViewModel: ObservableObject {
     /// appends WireTubeParams to the bulk layout.  Both platforms run it.
     var firmwareSupportsTube: Bool { firmwareWireFormatVersion >= 31 }
 
-    /// Output Limiter (REQ_LIMITER 0x81) shipped in wire format V32, which
+    /// Output Limiter (DYN.LIMITER_*) shipped in wire format V32, which
     /// appends WireLimiterParams to the bulk layout.  Both platforms run it.
     var firmwareSupportsLimiter: Bool { firmwareWireFormatVersion >= 32 }
 
@@ -2263,7 +2263,7 @@ class DSPViewModel: ObservableObject {
     }
 
     /// Notch filter type was added in firmware 1.1.4.  Older firmware won't
-    /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
+    /// recognize the type byte and would reject or misbehave on a FILTER.BAND write.
     /// Defaults to `false` when the version is unknown (pre-connection) so the
     /// UI is conservative — the option becomes available the moment we confirm
     /// a supporting firmware.
@@ -2273,7 +2273,7 @@ class DSPViewModel: ObservableObject {
     }
 
     /// AllPass filter shipped in firmware 1.1.4.  Older firmware won't
-    /// recognize the type byte and would reject or misbehave on REQ_SET_EQ_PARAM.
+    /// recognize the type byte and would reject or misbehave on a FILTER.BAND write.
     /// Defaults to `false` when the version is unknown (pre-connection) so the
     /// UI is conservative — the option becomes available the moment we confirm
     /// a supporting firmware.
@@ -2328,7 +2328,7 @@ class DSPViewModel: ObservableObject {
     var numOutputChannels: Int { platformName == "RP2040" ? 5 : 9 }
     var pdmOutputIndex: Int { numOutputChannels - 1 }     // matrix output index (4 / 8)
     /// Index of the PDM output in `outputPins` (the physical-output index used
-    /// by REQ_SET_OUTPUT_PIN), distinct from its matrix index above.
+    /// by OUTPUT.PIN), distinct from its matrix index above.
     var pdmPinIndex: Int { platformName == "RP2040" ? 2 : 4 }
     // EQ-worker outputs that share Core 1 with the PDM sub (matrix output indices).
     var eqWorkerRange: ClosedRange<Int> { platformName == "RP2040" ? 2...3 : 2...7 }

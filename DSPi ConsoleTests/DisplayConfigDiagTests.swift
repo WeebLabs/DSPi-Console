@@ -55,8 +55,7 @@ final class DisplayConfigDiagTests: XCTestCase {
         // Read the first few page slots straight off the wire, to tell "the
         // device has no pages" apart from "the app fails to read them".
         for i in 0..<4 {
-            let raw = usb.getControlRequest(request: REQ_GET_CS_DISPLAY_PAGE, value: UInt16(i),
-                                            index: 2, length: CS_DISPLAY_PAGE_LEN)
+            let raw = usb.getData(VC.CS.DISPLAY_PAGE, value: UInt16(i), length: CS_DISPLAY_PAGE_LEN)
             let bytes = raw.map { $0.map { String(format: "%02x", $0) }.joined(separator: " ") } ?? "nil"
             print("[diag] raw page \(i): [\(bytes)]")
         }

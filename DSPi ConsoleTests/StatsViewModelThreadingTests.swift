@@ -17,6 +17,9 @@ final class StatsViewModelThreadingTests: XCTestCase {
         let tokens = LinkTokenStore(service: "test-\(UUID().uuidString)")
         let transport = NetworkTransport(client: client, hubID: "hub-1", hubName: "Studio",
                                          tokens: tokens, clientName: "Tester")
+        // The Stats reads are paged; this tests where they run, not the
+        // phase-3 refusal of paged requests to remote hubs.
+        transport.allowsPagedRequests = true
         let lock = NSLock()
         var onMain: [UInt8] = []
         var count = 0

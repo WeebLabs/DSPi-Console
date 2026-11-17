@@ -335,7 +335,19 @@ final class NetworkTransport: DeviceTransport {
         }
     }
 
+    /// No hub reports its board's protocol until the Link protocol gains that
+    /// field (phase 7 of the paged-protocol port).  An older hub may front a
+    /// 1.1.6 board, which would run a paged request as an unrelated old
+    /// opcode, so paged requests are not sent to any hub until then.  Tests of
+    /// the transport's own behaviour turn this on.
+    var allowsPagedRequests = false
+
+    private func isRefusedUntilHubsReportProtocol(_ index: UInt16) -> Bool {
+        index >> 8 != 0 && !allowsPagedRequests
+    }
+
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
+        guard !isRefusedUntilHubsReportProtocol(index) else { return }
         guard let handle = boundHandle else { return }
         let req = LinkCmdRequest(tag: 0, handle: handle, direction: .set, bRequest: request,
                                  wValue: value, wIndex: index, payload: data)
@@ -346,6 +358,7 @@ final class NetworkTransport: DeviceTransport {
 
     func sendControlResult(request: UInt8, value: UInt16, index: UInt16, data: Data,
                            completion: @escaping (LinkStatus) -> Void) {
+        guard !isRefusedUntilHubsReportProtocol(index) else { completion(.unsupported); return }
         guard let handle = boundHandle else { completion(.noDevice); return }
         let req = LinkCmdRequest(tag: 0, handle: handle, direction: .set, bRequest: request,
                                  wValue: value, wIndex: index, payload: data)
@@ -357,6 +370,7 @@ final class NetworkTransport: DeviceTransport {
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16)
         -> Result<Data, LinkStatus> {
+        guard !isRefusedUntilHubsReportProtocol(index) else { return .failure(.unsupported) }
         guard let handle = boundHandle else { return .failure(.noDevice) }
         // A main-thread caller cannot be left waiting on the network: with no
         // ready session the answer is known now, so give it without a wait.
@@ -364,7 +378,8 @@ final class NetworkTransport: DeviceTransport {
 
         // The bulk read is the one the hub can answer from its cache in a
         // single reply; use it when offered and fall through on any failure.
-        if request == REQ_GET_ALL_PARAMS, client.capabilities.contains(LinkCapability.snapshot.rawValue),
+        if request == VC.STORE.ALL_PARAMS.number, index & 0xFF00 == VC.STORE.ALL_PARAMS.usbIndex & 0xFF00,
+           client.capabilities.contains(LinkCapability.snapshot.rawValue),
            let blob = awaitSnapshot(handle: handle), blob.count >= Int(length) {
             return .success(blob)
         }

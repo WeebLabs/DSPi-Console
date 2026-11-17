@@ -33,6 +33,9 @@ final class PollScheduler {
         var wValue: UInt16
         var wIndex: UInt16
         var len: UInt16
+
+        /// `(page << 8) | command`, as for LinkCmdRequest.commandID.
+        var commandID: UInt16 { (wIndex & 0xFF00) | UInt16(req) }
     }
 
     // MARK: - Delivery callbacks
@@ -196,10 +199,10 @@ final class PollScheduler {
 
     /// True when a session other than `excluding` holds a live subscription
     /// for any of the given request codes (the router's RTA STOP rule).
-    func sessionsSubscribed(toAnyOf codes: Set<UInt8>, excluding: LinkSessionID) -> Bool {
+    func sessionsSubscribed(toAnyOf commands: Set<UInt16>, excluding: LinkSessionID) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return specs.values.contains { state in
-            codes.contains(state.spec.req) && state.subs.keys.contains { $0.session != excluding }
+            commands.contains(state.spec.commandID) && state.subs.keys.contains { $0.session != excluding }
         }
     }
 

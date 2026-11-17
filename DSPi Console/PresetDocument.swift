@@ -362,14 +362,14 @@ struct PresetDocument: Codable {
         var inputIndex: Int?
         var outputIndex: Int?
 
-        /// Pre-matrix channel delay (REQ_SET_DELAY).
+        /// Pre-matrix channel delay (ROUTE.CHANNEL_DELAY).
         var delayMs: Float = 0
 
         /// Output channels only.
         var gainDb: Float = 0
         var muted = false
         var enabled = true
-        /// additive: post-matrix output delay (REQ_SET_OUTPUT_DELAY), which is a
+        /// additive: post-matrix output delay (ROUTE.OUTPUT_DELAY), which is a
         /// separate value from `delayMs` and which the Windows document omits.
         var outputDelayMs: Float?
         /// additive: this output's limiter (V32+).  Absent on inputs and when

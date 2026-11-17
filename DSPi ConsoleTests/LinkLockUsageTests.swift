@@ -47,6 +47,8 @@ final class LinkLockUsageTests: XCTestCase {
 
     /// A master-volume SET from the remote session, answered synchronously
     /// when refused.  Safe to call from inside the fake device's responder.
+    /// Sent as 1.1.6-style page-0 traffic (0xD2), which the hub still routes
+    /// for remote sessions; only the lock decides its answer here.
     private func probe(_ rig: Rig) -> LinkStatus {
         let req = LinkCmdRequest(tag: 1, handle: rig.hub.currentHandle, direction: .set,
                                  bRequest: 0xD2, wValue: 0, wIndex: 2, payload: Data([0, 0, 0, 0]))
@@ -77,11 +79,13 @@ final class LinkLockUsageTests: XCTestCase {
         var seenProbes: [LinkStatus] { lock.lock(); defer { lock.unlock() }; return probes }
     }
 
-    private func instrument(_ rig: Rig, code: UInt8,
+    private func instrument(_ rig: Rig, code: VendorCommand,
                             answer: @escaping (LinkCmdRequest) -> LinkCmdResponse) -> Recorder {
         let rec = Recorder()
         rig.device.responder = { [unowned self] req in
-            if req.bRequest == code { rec.record(self.holder(rig), self.probe(rig)) }
+            // Writes only: ROUTE.PREAMP shares its ID with its GET, which
+            // 1.1.6 kept on a separate opcode.
+            if req.commandID == code.id, req.direction == .set { rec.record(self.holder(rig), self.probe(rig)) }
             return answer(req)
         }
         return rec
@@ -99,8 +103,8 @@ final class LinkLockUsageTests: XCTestCase {
         return out!
     }
 
-    private func executed(_ rig: Rig, _ code: UInt8) -> Int {
-        rig.device.executedCodes.filter { $0 == code }.count
+    private func executed(_ rig: Rig, _ code: VendorCommand) -> Int {
+        rig.device.executed.filter { $0.commandID == code.id && $0.direction == .set }.count
     }
 
     // MARK: Transport lock pair
@@ -147,7 +151,7 @@ final class LinkLockUsageTests: XCTestCase {
 
     func testSavePresetHoldsTheLockAndReleasesIt() {
         let rig = makeRig()
-        let rec = instrument(rig, code: REQ_PRESET_SAVE) { self.ok($0) }
+        let rec = instrument(rig, code: VC.STORE.PRESET_SAVE) { self.ok($0) }
         let status = offMain { rig.vm.savePreset(slot: 2) }
         XCTAssertEqual(status, PRESET_OK)
         XCTAssertEqual(rec.seenHolders, [LinkHub.localSessionID])
@@ -157,7 +161,7 @@ final class LinkLockUsageTests: XCTestCase {
 
     func testSavePresetReleasesWhenTheDeviceFails() {
         let rig = makeRig()
-        let rec = instrument(rig, code: REQ_PRESET_SAVE) {
+        let rec = instrument(rig, code: VC.STORE.PRESET_SAVE) {
             LinkCmdResponse(tag: $0.tag, status: .error)
         }
         let status = offMain { rig.vm.savePreset(slot: 2) }
@@ -171,7 +175,7 @@ final class LinkLockUsageTests: XCTestCase {
         XCTAssertTrue(rig.hub.acquireLock(session: rig.remote.id, timeout: 5))
         let status = offMain { rig.vm.savePreset(slot: 2) }
         XCTAssertEqual(status, PRESET_STATUS_LOCKED)
-        XCTAssertEqual(executed(rig, REQ_PRESET_SAVE), 0)
+        XCTAssertEqual(executed(rig, VC.STORE.PRESET_SAVE), 0)
         XCTAssertEqual(presetFailureText(status), DeviceLock.lockedMessage)
         XCTAssertEqual(holder(rig), rig.remote.id)
     }
@@ -183,12 +187,12 @@ final class LinkLockUsageTests: XCTestCase {
         let lastSaved = StatusBoxInt()
         let rec = Recorder()
         rig.device.responder = { [unowned self] req in
-            switch req.bRequest {
-            case REQ_PRESET_SAVE:
+            switch req.commandID {
+            case VC.STORE.PRESET_SAVE.id:
                 rec.record(self.holder(rig), self.probe(rig))
                 lastSaved.set(Int(req.wValue))
                 return self.ok(req)
-            case REQ_PRESET_GET_ACTIVE:
+            case VC.STORE.PRESET_ACTIVE.id:
                 return self.ok(req, Data([UInt8(lastSaved.get())]))
             default:
                 return self.ok(req)
@@ -204,9 +208,11 @@ final class LinkLockUsageTests: XCTestCase {
 
     func testCopyPresetReleasesWhenTheFirstSaveFails() {
         let rig = makeRig()
-        let rec = instrument(rig, code: REQ_PRESET_SAVE) { self.ok($0, Data([PRESET_ERR_FLASH_WRITE])) }
+        // A refused save: the result code maps back to the old status byte
+        // (VC_ERR_ADDRESS is PRESET_ERR_INVALID_SLOT).
+        let rec = instrument(rig, code: VC.STORE.PRESET_SAVE) { LinkCmdResponse(tag: $0.tag, status: .vcAddress) }
         let status = offMain { rig.vm.copyPreset(from: 1, to: 4) }
-        XCTAssertEqual(status, PRESET_ERR_FLASH_WRITE)
+        XCTAssertEqual(status, PRESET_ERR_INVALID_SLOT)
         XCTAssertEqual(rec.seenHolders.count, 1)
         XCTAssertNil(holder(rig))
     }
@@ -222,7 +228,7 @@ final class LinkLockUsageTests: XCTestCase {
 
     func testSaveOutputConfigHoldsTheLock() {
         let rig = makeRig()
-        let rec = instrument(rig, code: REQ_SAVE_OUTPUT_CONFIG) { self.ok($0) }
+        let rec = instrument(rig, code: VC.STORE.OUTPUT_CONFIG_SAVE) { self.ok($0) }
         XCTAssertTrue(offMain { rig.vm.saveOutputConfig() })
         XCTAssertEqual(rec.seenHolders, [LinkHub.localSessionID])
         XCTAssertEqual(rec.seenProbes, [.locked])
@@ -231,7 +237,7 @@ final class LinkLockUsageTests: XCTestCase {
 
     func testSaveOutputConfigReleasesOnDeviceError() {
         let rig = makeRig()
-        _ = instrument(rig, code: REQ_SAVE_OUTPUT_CONFIG) { LinkCmdResponse(tag: $0.tag, status: .error) }
+        _ = instrument(rig, code: VC.STORE.OUTPUT_CONFIG_SAVE) { LinkCmdResponse(tag: $0.tag, status: .error) }
         let result = offMain { rig.vm.saveOutputConfigResult() }
         guard case .failure(.error) = result else { return XCTFail("expected .error, got \(result)") }
         XCTAssertNil(holder(rig))
@@ -242,19 +248,25 @@ final class LinkLockUsageTests: XCTestCase {
         XCTAssertTrue(rig.hub.acquireLock(session: rig.remote.id, timeout: 5))
         let result = offMain { rig.vm.saveOutputConfigResult() }
         guard case .failure(.locked) = result else { return XCTFail("expected .locked, got \(result)") }
-        XCTAssertEqual(executed(rig, REQ_SAVE_OUTPUT_CONFIG), 0)
+        XCTAssertEqual(executed(rig, VC.STORE.OUTPUT_CONFIG_SAVE), 0)
     }
 
     // MARK: IR learn
 
+    private static let irLearnCommands: Set<UInt16> =
+        [VC.CS.IR_LEARN_ARM.id, VC.CS.IR_LEARN_CANCEL.id, VC.CS.IR_LEARN_STATUS.id]
+
     private func learnAnswer(state: UInt8) -> (LinkCmdRequest) -> LinkCmdResponse {
         { req in
-            guard req.bRequest == REQ_CS_IR_LEARN else { return self.ok(req) }
-            if req.wValue == CS_IR_LEARN_READ {
+            if req.commandID == VC.CS.IR_LEARN_STATUS.id {
                 return self.ok(req, Data([state, 1, 0, 0, 0x78, 0x56, 0x34, 0x12]))
             }
-            return self.ok(req, Data([0]))
+            return self.ok(req)
         }
+    }
+
+    private func executedIrLearn(_ rig: Rig) -> Int {
+        rig.device.executedCodes.filter { Self.irLearnCommands.contains($0) }.count
     }
 
     func testIrLearnHoldsTheLockFromArmUntilTheResult() {
@@ -292,7 +304,7 @@ final class LinkLockUsageTests: XCTestCase {
     func testIrLearnArmStallReleasesAndReportsNoReceiver() {
         let rig = makeRig()
         rig.device.responder = { req in
-            req.bRequest == REQ_CS_IR_LEARN ? LinkCmdResponse(tag: req.tag, status: .error) : self.ok(req)
+            req.commandID == VC.CS.IR_LEARN_ARM.id ? LinkCmdResponse(tag: req.tag, status: .error) : self.ok(req)
         }
         XCTAssertEqual(offMain { rig.vm.csIrLearnArm() }, .noReceiver)
         XCTAssertNil(holder(rig))
@@ -315,14 +327,14 @@ final class LinkLockUsageTests: XCTestCase {
         let rig = makeRig()
         XCTAssertTrue(rig.hub.acquireLock(session: rig.remote.id, timeout: 5))
         XCTAssertEqual(offMain { rig.vm.csIrLearnArm() }, .locked)
-        XCTAssertEqual(executed(rig, REQ_CS_IR_LEARN), 0)
+        XCTAssertEqual(executedIrLearn(rig), 0)
     }
 
     // MARK: Firmware install
 
     func testFirmwareInstallLocksBeforeTheRebootAndReleases() {
         let rig = makeRig()
-        let rec = instrument(rig, code: REQ_ENTER_BOOTLOADER) { self.ok($0) }
+        let rec = instrument(rig, code: VC.SYS.ENTER_BOOTLOADER) { self.ok($0) }
         let e = expectation(description: "rebooted")
         rig.vm.enterBootloaderForInstall { sent in XCTAssertTrue(sent); e.fulfill() }
         wait(for: [e], timeout: 5)
@@ -339,7 +351,7 @@ final class LinkLockUsageTests: XCTestCase {
         let e = expectation(description: "refused")
         rig.vm.enterBootloaderForInstall { sent in XCTAssertFalse(sent); e.fulfill() }
         wait(for: [e], timeout: 5)
-        XCTAssertEqual(executed(rig, REQ_ENTER_BOOTLOADER), 0)
+        XCTAssertEqual(executed(rig, VC.SYS.ENTER_BOOTLOADER), 0)
         rig.vm.releaseFirmwareInstallLock()
         XCTAssertEqual(holder(rig), rig.remote.id, "releasing a lock never taken leaves the holder alone")
     }
@@ -369,7 +381,7 @@ final class LinkLockUsageTests: XCTestCase {
 
     func testConfigurationImportHoldsTheLockForTheWholeApply() {
         let rig = makeRig()
-        let rec = instrument(rig, code: REQ_SET_PREAMP_CH) { self.ok($0) }
+        let rec = instrument(rig, code: VC.ROUTE.PREAMP) { self.ok($0) }
         let report = applyDocument(rig)
         XCTAssertFalse(report.lockedOut)
         XCTAssertFalse(rec.seenHolders.isEmpty, "the apply wrote preamps")
@@ -390,10 +402,10 @@ final class LinkLockUsageTests: XCTestCase {
     func testConfigurationImportRefusedWhenLockedSendsNothing() {
         let rig = makeRig()
         XCTAssertTrue(rig.hub.acquireLock(session: rig.remote.id, timeout: 5))
-        let before = executed(rig, REQ_SET_PREAMP_CH)
+        let before = executed(rig, VC.ROUTE.PREAMP)
         let report = applyDocument(rig)
         XCTAssertTrue(report.lockedOut)
-        XCTAssertEqual(executed(rig, REQ_SET_PREAMP_CH), before)
+        XCTAssertEqual(executed(rig, VC.ROUTE.PREAMP), before)
         XCTAssertEqual(holder(rig), rig.remote.id)
     }
 

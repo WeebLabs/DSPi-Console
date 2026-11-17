@@ -3,58 +3,22 @@ import Foundation
 // MARK: - USB Request Constants
 
 // EQ / Preamp / Bypass / Delay
-let REQ_SET_EQ_PARAM: UInt8 = 0x42
-let REQ_GET_EQ_PARAM: UInt8 = 0x43
-let REQ_SET_PREAMP: UInt8   = 0x44
-let REQ_GET_PREAMP: UInt8   = 0x45
-let REQ_SET_BYPASS: UInt8   = 0x46
-let REQ_GET_BYPASS: UInt8   = 0x47
-let REQ_SET_DELAY: UInt8    = 0x48
-let REQ_GET_DELAY: UInt8    = 0x49
-let REQ_GET_STATUS: UInt8   = 0x50
-let REQ_SAVE_PARAMS: UInt8  = 0x51
 // 0x52 was the deprecated synchronous REQ_LOAD_PARAMS; repurposed as the
 // device-global output-config save (see REQ_SAVE_OUTPUT_CONFIG below).
-let REQ_SAVE_OUTPUT_CONFIG: UInt8 = 0x52
-let REQ_FACTORY_RESET: UInt8 = 0x53
 // Device-global input source names (wValue = source ID, 32-byte name).
 // Firmware before them answers the GET with the 4-byte legacy gain, which is
 // how support is detected; never SET on such firmware.
-let REQ_SET_INPUT_SOURCE_NAME: UInt8 = 0x54
-let REQ_GET_INPUT_SOURCE_NAME: UInt8 = 0x55
 let INPUT_SOURCE_NAME_LEN: Int = 32
 let INPUT_SOURCE_NAME_SLOTS: Int = 8
 // Device-global board name (wValue 0, 32-byte name).  Probe the GET on its own:
 // older firmware STALLs it or answers with the 1-byte legacy mute, and must
 // never receive the SET.
-let REQ_SET_DEVICE_NAME: UInt8 = 0x56
-let REQ_GET_DEVICE_NAME: UInt8 = 0x57
 let DEVICE_NAME_LEN: Int = 32
-let REQ_SET_LOUDNESS: UInt8           = 0x58
-let REQ_GET_LOUDNESS: UInt8           = 0x59
-let REQ_SET_LOUDNESS_REF: UInt8       = 0x5A
-let REQ_GET_LOUDNESS_REF: UInt8       = 0x5B
-let REQ_SET_LOUDNESS_INTENSITY: UInt8 = 0x5C
-let REQ_GET_LOUDNESS_INTENSITY: UInt8 = 0x5D
 // Loudness output mask (V19): 2 bytes uint16 LE, bit k = output channel k
-let REQ_SET_LOUDNESS_MASK: UInt8      = 0xFA
-let REQ_GET_LOUDNESS_MASK: UInt8      = 0xFB
 /// Factory-default loudness output mask (all outputs compensated).
 let LOUDNESS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
-let REQ_SET_CROSSFEED: UInt8           = 0x5E
-let REQ_GET_CROSSFEED: UInt8           = 0x5F
-let REQ_SET_CROSSFEED_PRESET: UInt8    = 0x60
-let REQ_GET_CROSSFEED_PRESET: UInt8    = 0x61
-let REQ_SET_CROSSFEED_FREQ: UInt8      = 0x62
-let REQ_GET_CROSSFEED_FREQ: UInt8      = 0x63
-let REQ_SET_CROSSFEED_FEED: UInt8      = 0x64
-let REQ_GET_CROSSFEED_FEED: UInt8      = 0x65
-let REQ_SET_CROSSFEED_ITD: UInt8       = 0x66
-let REQ_GET_CROSSFEED_ITD: UInt8       = 0x67
 // Crossfeed output-pair mask (V20): 1 byte, bit p = run crossfeed on output pair p
 // (outputs 2p / 2p+1).  Filter settings stay global; the mask only selects pairs.
-let REQ_SET_CROSSFEED_OUTPUTS: UInt8   = 0xFC
-let REQ_GET_CROSSFEED_OUTPUTS: UInt8   = 0xFD
 /// Factory-default crossfeed output-pair mask (pair 1 only, i.e. outputs 0/1).
 let CROSSFEED_DEFAULT_OUTPUT_MASK: UInt8 = 0x01
 
@@ -62,20 +26,6 @@ let CROSSFEED_DEFAULT_OUTPUT_MASK: UInt8 = 0x01
 // One global parameter set applied per output channel selected by a 16-bit mask,
 // exactly like loudness.  Value SETs take a 4-byte LE float; enable is 1 byte and
 // the mask is 2 bytes LE uint16.  The firmware clamps every value to its range.
-let REQ_SET_PSYBASS: UInt8            = 0x30
-let REQ_GET_PSYBASS: UInt8            = 0x31
-let REQ_SET_PSYBASS_CUTOFF: UInt8     = 0x32
-let REQ_GET_PSYBASS_CUTOFF: UInt8     = 0x33
-let REQ_SET_PSYBASS_HARMONICS: UInt8  = 0x34
-let REQ_GET_PSYBASS_HARMONICS: UInt8  = 0x35
-let REQ_SET_PSYBASS_DRIVE: UInt8      = 0x36
-let REQ_GET_PSYBASS_DRIVE: UInt8      = 0x37
-let REQ_SET_PSYBASS_CHARACTER: UInt8  = 0x38
-let REQ_GET_PSYBASS_CHARACTER: UInt8  = 0x39
-let REQ_SET_PSYBASS_ORIGINAL: UInt8   = 0x3A
-let REQ_GET_PSYBASS_ORIGINAL: UInt8   = 0x3B
-let REQ_SET_PSYBASS_MASK: UInt8       = 0x3C
-let REQ_GET_PSYBASS_MASK: UInt8       = 0x3D
 /// Factory-default psybass output mask (all outputs).  A typical setup masks off
 /// the PDM sub and any full-range outputs, since synthesizing harmonics on a
 /// channel that can reproduce real bass is counterproductive.
@@ -93,14 +43,6 @@ let PSYBASS_DEFAULT_OUTPUT_MASK: UInt16 = 0xFFFF
 // That is why the feature is gated on a successful GET_CAPS rather than on a
 // wire-format version - there is no wire-format change to gate on.
 // See Documentation/Features/spectrum_analyser_spec.md in the firmware repo.
-let REQ_RTA_SET_CONFIG: UInt8    = 0x08   // OUT: 12-byte RtaConfig; STALL on invalid
-let REQ_RTA_GET_CONFIG: UInt8    = 0x09   // IN 12 bytes: the applied RtaConfig
-let REQ_RTA_GET_CAPS: UInt8      = 0x0A   // IN: wValue 0 = RtaCaps (16 B), 1.. = band centres
-let REQ_RTA_GET_BANDS: UInt8     = 0x0B   // IN 82 bytes: wValue = channel at the applied tap
-let REQ_RTA_GET_BINS: UInt8      = 0x0C   // IN: wValue = byte offset into the bin frame
-let REQ_RTA_GET_STATUS: UInt8    = 0x0D   // IN 24 bytes: RtaStatus
-let REQ_RTA_CONTROL: UInt8       = 0x0E   // IN 1 byte: wValue = RTA_CTL_*
-let REQ_RTA_GET_BANDS_ALL: UInt8 = 0x0F   // IN: every live channel's band frame, USB only
 
 let RTA_CFG_VERSION: UInt8 = 3
 /// Wire sizes.  Fixed for the life of the config version; a short read means
@@ -150,10 +92,6 @@ let RTA_STATE_IDLE: UInt8         = 0
 let RTA_STATE_CAPTURING: UInt8    = 1
 let RTA_STATE_TRANSFORMING: UInt8 = 2
 
-let RTA_CTL_STOP: UInt16      = 0
-let RTA_CTL_START: UInt16     = 1
-let RTA_CTL_RESET_AVG: UInt16 = 2
-
 /// Pushed once per applied REQ_RTA_SET_CONFIG, attributed to the writer, so a
 /// console sharing the analyser learns another took it without reading back.
 /// 17 bytes: v2 header, the applied 12-byte RtaConfig at 4-15, source at 16
@@ -191,46 +129,20 @@ let RTA_CENTRES_PER_CHUNK: Int = 32
 // one global parameter set applied to the outputs a 16-bit mask selects.
 // The block occupies 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 0x10-0x1F are the first
 // application commands allocated inside 0x00-0x1F.
-let REQ_SET_SUBHARM: UInt8            = 0x10
-let REQ_GET_SUBHARM: UInt8            = 0x11
-let REQ_SET_SUBHARM_LOW: UInt8        = 0x12
-let REQ_GET_SUBHARM_LOW: UInt8        = 0x13
-let REQ_SET_SUBHARM_HIGH: UInt8       = 0x14
-let REQ_GET_SUBHARM_HIGH: UInt8       = 0x15
-let REQ_SET_SUBHARM_BOOST: UInt8      = 0x16
-let REQ_GET_SUBHARM_BOOST: UInt8      = 0x17
-let REQ_SET_SUBHARM_MASK: UInt8       = 0x18
-let REQ_GET_SUBHARM_MASK: UInt8       = 0x19
 /// Read-only: the worst-case gain of the current configuration, in dB.  The
 /// effect is amplitude-linear, so cutting the preamp feeding the masked outputs
 /// by this much is an exact fix rather than an approximation.  Computed from
 /// live state on every GET, so a SET may be followed immediately by this GET.
-let REQ_GET_SUBHARM_HEADROOM: UInt8   = 0x1A
 // V30 additions.  The third band and the selectivity/ceiling settings all feed
 // the coefficient recompute, so each of their SETs is followed by a headroom
 // re-read exactly like the first three levels.
-let REQ_SET_SUBHARM_TOP: UInt8        = 0x1B
-let REQ_GET_SUBHARM_TOP: UInt8        = 0x1C
-let REQ_SET_SUBHARM_SELECT: UInt8     = 0x1D
-let REQ_GET_SUBHARM_SELECT: UInt8     = 0x1E
 /// Read-only: a decaying peak of the synthesized sub per output channel, one
 /// uint16 LE each on the same 0..32767 scale as SystemStatusPacket.peaks.  It
 /// meters the sub alone rather than the output, which is what makes it useful
 /// while the band levels are being dialled in.
-let REQ_GET_SUBHARM_METER: UInt8      = 0x1F
 /// Runtime-only monitoring aid: masked outputs carry the synthesized sub with
 /// the program signal removed.  Never persisted and absent from the bulk wire
 /// format, so no saved configuration can leave a device playing without program.
-let REQ_SET_SUBHARM_SOLO: UInt8       = 0x2C
-let REQ_GET_SUBHARM_SOLO: UInt8       = 0x2D
-let REQ_SET_SUBHARM_LINK: UInt8       = 0x2E
-let REQ_GET_SUBHARM_LINK: UInt8       = 0x2F
-let REQ_SET_SUBHARM_DEPTH: UInt8      = 0xA9
-let REQ_GET_SUBHARM_DEPTH: UInt8      = 0xAA
-let REQ_SET_SUBHARM_HOLD: UInt8       = 0xAB
-let REQ_GET_SUBHARM_HOLD: UInt8       = 0xAC
-let REQ_SET_SUBHARM_CEILING: UInt8    = 0xAD
-let REQ_GET_SUBHARM_CEILING: UInt8    = 0xAE
 /// Factory-default subharm output mask (all outputs).  Safe because the effect
 /// ships disabled; a real setup masks exactly the subwoofer or full-range
 /// outputs, since a satellite's highpass crossover removes the sub again.
@@ -287,8 +199,6 @@ let SUBHARM_DIVIDER_GAIN: Float = 0.849
 // Unlike every other module it has one indexed SET/GET pair: wValue carries the
 // parameter index and every payload is a float32, including the bools, the mask
 // and the enums.  See tube_preamp_spec.md.
-let REQ_SET_TUBE_PARAM: UInt8 = 0x3E
-let REQ_GET_TUBE_PARAM: UInt8 = 0x3F
 
 /// Parameter indices (wValue low byte), in wire order.  An out-of-range index
 /// makes a SET a no-op and a GET STALL.
@@ -435,7 +345,6 @@ func tubeRectifierName(_ rect: Int) -> String {
 // with its own enable, threshold, release and link group.  One opcode carries
 // everything: OUT sets, IN gets, wValue = (output << 8) | index, payload float32
 // for every parameter.  See output_limiter_spec.md.
-let REQ_LIMITER: UInt8 = 0x81
 
 /// Parameter indices (wValue low byte).  A bad index or output STALLs a GET and
 /// is a silent no-op on a SET.
@@ -444,11 +353,6 @@ let LIMITER_PARAM_THRESHOLD_DB: UInt8 = 1
 let LIMITER_PARAM_RELEASE_MS: UInt8   = 2
 let LIMITER_PARAM_LINK_GROUP: UInt8   = 3
 let LIMITER_NUM_PARAMS: UInt8         = 4
-/// Read-only GET blocks, output byte ignored.  The meter is one uint16 LE per
-/// output, gain reduction in 0.01 dB; the status is engaged, lookahead samples,
-/// block samples, output count.  Reading the status block feature-detects.
-let LIMITER_GET_METER: UInt8  = 0x80
-let LIMITER_GET_STATUS: UInt8 = 0x81
 /// Output byte that makes a SET apply to every output.
 let LIMITER_ALL_OUTPUTS: UInt8 = 0xFF
 
@@ -473,13 +377,10 @@ func limiterLinkGroupName(_ group: Int) -> String {
 }
 
 // Output latency: how full the output rings are kept, picked from
-// a fixed option table the device reports.  OUT sets a 1-byte option ID (an
-// unknown ID is ignored); IN wValue 0 reads the 12-byte status, wValue 1 the
-// table as 8-byte entries.  Stored device-globally, never in a preset.
+// a fixed option table the device reports.  OUTPUT.LATENCY sets a 1-byte option
+// ID; OUTPUT.LATENCY_STATUS reads the 12-byte status and OUTPUT.LATENCY_OPTIONS
+// the table as 8-byte entries.  Stored device-globally, never in a preset.
 // See current_architecture.md "Output Latency".
-let REQ_OUTPUT_LATENCY: UInt8 = 0x03
-let OUTPUT_LATENCY_GET_STATUS: UInt16  = 0
-let OUTPUT_LATENCY_GET_OPTIONS: UInt16 = 1
 let OUTPUT_LATENCY_STATUS_SIZE: Int = 12
 let OUTPUT_LATENCY_OPTION_SIZE: Int = 8
 /// The ID a factory-fresh device runs (4 ms).  IDs are stable; 0 is never valid.
@@ -496,11 +397,6 @@ let OUTPUT_LATENCY_WIRE_AVAILABLE: UInt8 = 0x80
 // Documentation/Features/upmixer_spec.md.  Live single-parameter SETs carry the
 // param id in wValue and a 4-byte LE float payload (including enable/modes, which
 // the firmware rounds).  SET_CONFIG applies a whole 44-byte packet atomically.
-let REQ_UPMIX_SET_CONFIG: UInt8   = 0x4A   // OUT: UpmixConfigPacket, exactly 44 bytes
-let REQ_UPMIX_GET_CONFIG: UInt8   = 0x4B   // IN 44 bytes: UpmixConfigPacket
-let REQ_UPMIX_SET_PARAM:  UInt8   = 0x4C   // OUT: wValue = param id (0-12), 4-byte float
-let REQ_UPMIX_GET_PARAM:  UInt8   = 0x4D   // IN 4 bytes: wValue = param id (0-12)
-let REQ_UPMIX_GET_STATUS: UInt8   = 0x4E   // IN 16 bytes: UpmixStatus telemetry
 
 // Upmix parameter ids (wValue of REQ_UPMIX_SET/GET_PARAM; spec §4 table).
 let UPMIX_PARAM_ENABLED:       UInt16 = 0
@@ -544,45 +440,19 @@ let UPMIX_CONFIG_PACKET_SIZE: Int    = 44
 let UPMIX_STATUS_SIZE: UInt16        = 16
 
 // Matrix mixer request codes
-let REQ_SET_MATRIX_ROUTE: UInt8    = 0x70
-let REQ_GET_MATRIX_ROUTE: UInt8    = 0x71
-let REQ_SET_OUTPUT_ENABLE: UInt8   = 0x72
-let REQ_GET_OUTPUT_ENABLE: UInt8   = 0x73
-let REQ_SET_OUTPUT_GAIN: UInt8     = 0x74
-let REQ_GET_OUTPUT_GAIN: UInt8     = 0x75
-let REQ_SET_OUTPUT_MUTE: UInt8     = 0x76
-let REQ_GET_OUTPUT_MUTE: UInt8     = 0x77
-let REQ_SET_OUTPUT_DELAY: UInt8    = 0x78
-let REQ_GET_OUTPUT_DELAY: UInt8    = 0x79
 
 // Core 1 mode request codes
-let REQ_GET_CORE1_MODE: UInt8      = 0x7A
-let REQ_GET_CORE1_CONFLICT: UInt8  = 0x7B
 
 // Pin configuration request codes
-let REQ_SET_OUTPUT_PIN: UInt8      = 0x7C
-let REQ_GET_OUTPUT_PIN: UInt8      = 0x7D
 
 // Device identification request codes
-let REQ_GET_SERIAL: UInt8          = 0x7E
-let REQ_GET_PLATFORM: UInt8        = 0x7F
 
 // I2S output configuration request codes
-let REQ_SET_OUTPUT_TYPE: UInt8     = 0xC0
-let REQ_GET_OUTPUT_TYPE: UInt8     = 0xC1
-let REQ_SET_I2S_BCK_PIN: UInt8    = 0xC2   // IN: wValue = (role<<8)|GPIO, returns PIN_CONFIG_*
-let REQ_GET_I2S_BCK_PIN: UInt8    = 0xC3   // IN 1 byte: wValue = role (0=master/1=slave pair)
 
 /// Role byte carried in the REQ_SET/GET_I2S_BCK_PIN wValue high byte
 /// (clock_pins_spec.md §3).  Legacy hosts send a bare GPIO (role 0 implicit).
 let I2S_BCK_ROLE_MASTER: UInt8    = 0      // master/unified clock pair
 let I2S_BCK_ROLE_SLAVE: UInt8     = 1      // slave clock pair (SPLIT mode only)
-let REQ_SET_MCK_ENABLE: UInt8     = 0xC4
-let REQ_GET_MCK_ENABLE: UInt8     = 0xC5
-let REQ_SET_MCK_PIN: UInt8        = 0xC6
-let REQ_GET_MCK_PIN: UInt8        = 0xC7
-let REQ_SET_MCK_MULTIPLIER: UInt8 = 0xC8
-let REQ_GET_MCK_MULTIPLIER: UInt8 = 0xC9
 
 // ADAT bulk output request codes (RP2350 only).  Streams all 8 main output
 // channels (post-EQ/crossover/gain/mute/delay) as one ADAT lightpipe signal on
@@ -591,11 +461,6 @@ let REQ_GET_MCK_MULTIPLIER: UInt8 = 0xC9
 // carrying the value in wValue and returning a PIN_CONFIG_* status byte (same
 // shape as REQ_SET_SPDIF_RX_PIN).  On RP2040 both SETs return INVALID_OUTPUT
 // and the GETs return zeros.
-let REQ_SET_ADAT_ENABLE: UInt8    = 0xCA   // IN: wValue = 0/1, returns status
-let REQ_GET_ADAT_ENABLE: UInt8    = 0xCB   // IN 1 byte: configured enable (0/1)
-let REQ_SET_ADAT_PIN: UInt8       = 0xCC   // IN: wValue = GPIO (0 = default), returns status
-let REQ_GET_ADAT_PIN: UInt8       = 0xCD   // IN 1 byte: configured GPIO
-let REQ_GET_ADAT_STATUS: UInt8    = 0xCE   // IN 8 bytes: AdatStatus
 
 /// Platform default ADAT data GPIO (PICO_ADAT_PIN); pin 0 in flash/wire means
 /// "unset, use this default".
@@ -609,13 +474,6 @@ let ADAT_PIN_DEFAULT: UInt8       = 12
 // and 0x6E returns 20 zero bytes (the config GETs still round-trip).  There is no
 // free default GPIO: the pin ships unset (0xFF) and must be assigned before
 // enable.  Order matters - set the pin (0x6A) before enabling (0x68).
-let REQ_SET_ADAT_INPUT_ENABLE: UInt8     = 0x68   // IN: wValue = 0/1, returns status
-let REQ_GET_ADAT_INPUT_ENABLE: UInt8     = 0x69   // IN 1 byte: configured enable (0/1)
-let REQ_SET_ADAT_INPUT_PIN: UInt8        = 0x6A   // IN: wValue = GPIO (0xFF clears), returns status
-let REQ_GET_ADAT_INPUT_PIN: UInt8        = 0x6B   // IN 1 byte: configured GPIO (0xFF = unset)
-let REQ_SET_ADAT_INPUT_CLOCK_MODE: UInt8 = 0x6C   // IN: wValue = 0/1, deferred, returns status
-let REQ_GET_ADAT_INPUT_CLOCK_MODE: UInt8 = 0x6D   // IN 1 byte: live mode (0/1)
-let REQ_GET_ADAT_INPUT_STATUS: UInt8     = 0x6E   // IN 20 bytes: AdatInputStatusPacket
 
 /// ADAT input RX GPIO sentinel meaning "unset" (no default pin is free).
 let ADAT_INPUT_PIN_UNSET: UInt8   = 0xFF
@@ -628,7 +486,6 @@ let ADAT_INPUT_CLOCK_MODE_MASTER: UInt8 = 0
 let ADAT_INPUT_CLOCK_MODE_SLAVE: UInt8  = 1
 
 // Clip detection request codes
-let REQ_CLEAR_CLIPS: UInt8            = 0x83
 
 // Pin configuration status codes
 let PIN_CONFIG_SUCCESS: UInt8        = 0x00
@@ -641,21 +498,10 @@ let PIN_CONFIG_OUTPUT_ACTIVE: UInt8  = 0x04
 let PIN_CONFIG_INVALID_PARAM: UInt8  = 0x05
 
 // Preset request codes (0x90-0x9A)
-let REQ_PRESET_SAVE: UInt8              = 0x90
-let REQ_PRESET_LOAD: UInt8              = 0x91
-let REQ_PRESET_DELETE: UInt8            = 0x92
-let REQ_PRESET_GET_NAME: UInt8          = 0x93
-let REQ_PRESET_SET_NAME: UInt8          = 0x94
-let REQ_PRESET_GET_DIR: UInt8           = 0x95
-let REQ_PRESET_SET_STARTUP: UInt8       = 0x96
-let REQ_PRESET_GET_STARTUP: UInt8       = 0x97
 // 0x98/0x99 were REQ_PRESET_SET/GET_INCLUDE_PINS; repurposed as the
 // output-config persistence mode (the former include-pins flag is now a
 // mode governing the whole IO block — pins, output types, I2S MCK/BCK, and
 // the S/PDIF RX pin).  Payload/return is the 0/1 mode byte.
-let REQ_SET_OUTPUT_CONFIG_MODE: UInt8   = 0x98
-let REQ_GET_OUTPUT_CONFIG_MODE: UInt8   = 0x99
-let REQ_PRESET_GET_ACTIVE: UInt8        = 0x9A
 
 // Output-config persistence modes (payload of 0x98 / response of 0x99, and
 // byte [5] of the REQ_PRESET_GET_DIR summary).  Mirrors the master-volume
@@ -664,12 +510,8 @@ let OUTPUT_CONFIG_MODE_INDEPENDENT: Int = 0   // Stored in directory, applied at
 let OUTPUT_CONFIG_MODE_WITH_PRESET: Int = 1   // Saved with each preset, restored on preset load (default)
 
 // Channel name request codes
-let REQ_SET_CHANNEL_NAME: UInt8  = 0x9B
-let REQ_GET_CHANNEL_NAME: UInt8  = 0x9C
 
 // Bulk parameter transfer request codes
-let REQ_GET_ALL_PARAMS: UInt8           = 0xA0
-let REQ_SET_ALL_PARAMS: UInt8           = 0xA1
 /// Wire format V32 (Output Limiter): appends a 108-byte WireLimiterParams
 /// section at offset 6028, one 12-byte record per output slot, growing the flat
 /// layout from 6028 to 6136 bytes.  Present on both platforms.
@@ -813,74 +655,38 @@ let MAX_MATRIX_INPUTS: Int              = 8
 let BASE_MATRIX_INPUTS: Int             = 2
 
 // Buffer statistics request codes
-let REQ_GET_BUFFER_STATS: UInt8         = 0xB0
-let REQ_RESET_BUFFER_STATS: UInt8       = 0xB1
 
 // Volume Leveller request codes
-let REQ_SET_LEVELLER: UInt8             = 0xB4
-let REQ_GET_LEVELLER: UInt8             = 0xB5
-let REQ_SET_LEVELLER_AMOUNT: UInt8      = 0xB6
-let REQ_GET_LEVELLER_AMOUNT: UInt8      = 0xB7
-let REQ_SET_LEVELLER_SPEED: UInt8       = 0xB8
-let REQ_GET_LEVELLER_SPEED: UInt8       = 0xB9
-let REQ_SET_LEVELLER_MAXGAIN: UInt8     = 0xBA
-let REQ_GET_LEVELLER_MAXGAIN: UInt8     = 0xBB
-let REQ_SET_LEVELLER_LOOKAHEAD: UInt8   = 0xBC
-let REQ_GET_LEVELLER_LOOKAHEAD: UInt8   = 0xBD
-let REQ_SET_LEVELLER_GATE: UInt8        = 0xBE
-let REQ_GET_LEVELLER_GATE: UInt8        = 0xBF
 // Channel masks (V18): 2 bytes [detector_mask, apply_mask], bit k = input channel k
-let REQ_SET_LEVELLER_MASKS: UInt8       = 0xDE
-let REQ_GET_LEVELLER_MASKS: UInt8       = 0xDF
 
 // Per-channel preamp request codes
-let REQ_SET_PREAMP_CH: UInt8           = 0xD0
-let REQ_GET_PREAMP_CH: UInt8           = 0xD1
 
 // Per-band bypass request codes (firmware 1.1.4+)
-let REQ_SET_BAND_BYPASS: UInt8         = 0xD8
-let REQ_GET_BAND_BYPASS: UInt8         = 0xD9
 
 // User volume request codes — vendor-channel access to the same field
 // the UAC1 host slider drives (audio_state.volume).  Applies regardless
 // of input source so SPDIF/I2S playback honours user-perceived volume
 // changes (and loudness compensation tracks them).
 // Range: float dB, clamped to [-CENTER_VOLUME_INDEX, 0] = [-60, 0] dB.
-let REQ_SET_USER_VOLUME: UInt8         = 0xDA
-let REQ_GET_USER_VOLUME: UInt8         = 0xDB
 let USER_VOLUME_MIN_DB: Float          = -60.0
 let USER_VOLUME_MAX_DB: Float          = 0.0
 
 // Master volume request codes
-let REQ_SET_MASTER_VOLUME: UInt8         = 0xD2
-let REQ_GET_MASTER_VOLUME: UInt8         = 0xD3
-let REQ_SET_MASTER_VOLUME_MODE: UInt8    = 0xD4
-let REQ_GET_MASTER_VOLUME_MODE: UInt8    = 0xD5
-let REQ_SAVE_MASTER_VOLUME: UInt8        = 0xD6
-let REQ_GET_SAVED_MASTER_VOLUME: UInt8   = 0xD7
 
 // Master volume persistence modes (payload of 0xD4 / response of 0xD5)
 let MASTER_VOLUME_MODE_INDEPENDENT: Int  = 0   // Saved in directory, applied at boot, untouched by presets
 let MASTER_VOLUME_MODE_WITH_PRESET: Int  = 1   // Saved with each preset, restored on preset load
 
 // Input source switching request codes
-let REQ_SET_INPUT_SOURCE: UInt8       = 0xE0
-let REQ_GET_INPUT_SOURCE: UInt8       = 0xE1
-let REQ_GET_SPDIF_RX_STATUS: UInt8    = 0xE2
-let REQ_GET_SPDIF_RX_CH_STATUS: UInt8 = 0xE3
 // REQ_SET/GET_SPDIF_RX_PIN are indexed since firmware v1.1.5: wValue high byte
 // selects the S/PDIF input (0..2), low byte is the GPIO.  A bare pin in wValue
 // (high byte 0) still addresses input 1, so older callers keep working.  The
 // SET is hot-swappable while the input is active (no OUTPUT_ACTIVE rejection).
-let REQ_SET_SPDIF_RX_PIN: UInt8       = 0xE4
-let REQ_GET_SPDIF_RX_PIN: UInt8       = 0xE5
 // Multiple-S/PDIF-input commands (firmware v1.1.5+).  STALL on older firmware,
 // which the app treats as "single S/PDIF input only".
-let REQ_SET_SPDIF_INPUT_ENABLE: UInt8 = 0xE9   // IN: wValue = (index<<8)|enable, returns status
 // IN, 2 + count bytes: count, enable_mask, then one GPIO per input.  Firmware
 // that predates the fourth input answers with 5 bytes rather than 6, so read
 // the count and treat the pin list as short rather than assuming a fixed size.
-let REQ_GET_SPDIF_INPUT_CONFIG: UInt8 = 0xEF
 
 // Input source enum values (payload of 0xE0 / response of 0xE1, and
 // WireInputConfig byte 0).  Value 3 is the 8-channel ADAT input (RP2350 only);
@@ -905,12 +711,6 @@ let SPDIF_RX_PIN_DEFAULTS: [UInt8]   = [5, 20, 21, 22]
 // Documentation/Features/i2s_input_spec.md.  The SET pin command is an
 // IN-direction transfer carrying the pin in wValue and returning a
 // PIN_CONFIG_* status byte (same shape as REQ_SET_SPDIF_RX_PIN).
-let REQ_SET_INPUT_RATE: UInt8         = 0xED   // OUT 4 bytes: uint32 LE Hz
-let REQ_GET_INPUT_RATE: UInt8         = 0xEE   // IN 8 bytes: {current_hz, selected_i2s_hz}
-let REQ_SET_I2S_RX_PIN: UInt8         = 0xF1   // IN: wValue = (pair<<8)|gpio, returns status
-let REQ_GET_I2S_RX_PIN: UInt8         = 0xF2   // IN 1 byte: wValue = pair (0..3), returns that pair's pin
-let REQ_SET_I2S_INPUT_CHANNELS: UInt8 = 0xF3   // IN: wValue = count 2/4/6/8, returns status
-let REQ_GET_I2S_INPUT_CHANNELS: UInt8 = 0xF4   // IN 1 byte: active I2S input channel count
 
 // I2S input defaults and rate table.  The wire/preset encoding stores the
 // rate as an enum (0/1/2); vendor SET/GET commands use Hz.
@@ -937,9 +737,6 @@ func i2sRateHzToEnum(_ hz: UInt32) -> UInt8 {
 // master drives BCK/LRCLK (DSPi's clock pins become inputs) and the rate is
 // auto-detected; in MASTER mode (default) DSPi drives the clocks and the app
 // picks the rate.  The mode is only meaningful while the input source is I2S.
-let REQ_SET_I2S_CLOCK_MODE: UInt8   = 0x88   // OUT 1 byte: 0=master, 1=slave (deferred apply)
-let REQ_GET_I2S_CLOCK_MODE: UInt8   = 0x89   // IN 1 byte: live mode (0/1)
-let REQ_GET_I2S_SLAVE_STATUS: UInt8 = 0x8A   // IN 16 bytes: I2sSlaveStatusPacket
 
 let I2S_CLOCK_MODE_MASTER: UInt8    = 0
 let I2S_CLOCK_MODE_SLAVE: UInt8     = 1
@@ -950,8 +747,6 @@ let I2S_CLOCK_MODE_SLAVE: UInt8     = 1
 // roles to separate connectors.  The slave pair is dormant (constrains nothing)
 // in UNIFIED mode; in SPLIT both pairs are reserved.  Set/read via 0xFE/0xFF;
 // the slave pair GPIO is set/read via REQ_SET/GET_I2S_BCK_PIN with role 1.
-let REQ_SET_I2S_CLOCK_PIN_MODE: UInt8 = 0xFE  // IN 1 byte: wValue 0=unified/1=split, returns PIN_CONFIG_*
-let REQ_GET_I2S_CLOCK_PIN_MODE: UInt8 = 0xFF  // IN 1 byte: live mode (0/1)
 
 let I2S_CLOCK_PIN_MODE_UNIFIED: UInt8 = 0
 let I2S_CLOCK_PIN_MODE_SPLIT: UInt8   = 1
@@ -960,9 +755,6 @@ let I2S_CLOCK_PIN_MODE_SPLIT: UInt8   = 1
 // a 16-byte DacHwMuteConfig OUT payload; GET returns 16 bytes; TEST is a
 // fire-and-forget command that asserts mute for ~1 s.  See
 // `dac_hardware_mute_spec.md`.
-let REQ_SET_DAC_HW_MUTE_CONFIG: UInt8 = 0xEA
-let REQ_GET_DAC_HW_MUTE_CONFIG: UInt8 = 0xEB
-let REQ_TEST_DAC_HW_MUTE: UInt8       = 0xEC
 
 let DAC_HW_MUTE_PIN_NONE: UInt8       = 0xFF
 let DAC_HW_MUTE_HOLD_MIN_MS: UInt16   = 1
@@ -975,9 +767,6 @@ let DAC_HW_MUTE_RELEASE_MAX_MS: UInt16 = 500
 // GET_ENABLE returns: 1 byte.
 // GET_STATUS returns: 16-byte LgSoundSyncStatus (enabled, present,
 // volume 0..100 / 0xFF, muted, 12 reserved).
-let REQ_SET_LG_SOUND_SYNC_ENABLE: UInt8 = 0xE6
-let REQ_GET_LG_SOUND_SYNC_ENABLE: UInt8 = 0xE7
-let REQ_GET_LG_SOUND_SYNC_STATUS: UInt8 = 0xE8
 
 // Note: REQ_SET_SPDIF_RX_PIN (0xE4) reuses PIN_CONFIG_* status codes (0x00-0x04)
 
@@ -987,11 +776,6 @@ let REQ_GET_LG_SOUND_SYNC_STATUS: UInt8 = 0xE8
 // readbacks are available on every transport.  SET is an OUT transfer carrying
 // the 8-byte config; its PIN_CONFIG_* outcome is read back via the last-status
 // bytes of REQ_GET_CTRL_IFACE_STATUS (0xF9).
-let REQ_SET_UART_CONFIG: UInt8         = 0xF5   // OUT 8 bytes: UartCtrlConfig (USB only)
-let REQ_GET_UART_CONFIG: UInt8         = 0xF6   // IN 8 bytes: live UartCtrlConfig
-let REQ_SET_I2C_CONFIG: UInt8          = 0xF7   // OUT 8 bytes: I2cCtrlConfig (USB only)
-let REQ_GET_I2C_CONFIG: UInt8          = 0xF8   // IN 8 bytes: live I2cCtrlConfig
-let REQ_GET_CTRL_IFACE_STATUS: UInt8   = 0xF9   // IN 8 bytes: CtrlIfaceStatus
 
 // Control-interface defaults (control_interfaces_spec.md §2.2).  Both ship
 // disabled; these are the pin/baud/address values a fresh flash populates.
@@ -1055,39 +839,16 @@ let PARAM_SRC_GPIO: UInt8              = 5
 // CS_UNIT_MS_LOG unit, v21 the PRESET_SAVE trigger noun 79, and v22 the
 // OUTPUT_LATENCY enum noun 80.  No caps header
 // field is added after v9: the type table simply grows.
-let REQ_SET_CS_BINDING: UInt8 = 0x84   // OUT 24 bytes: CsBinding, wValue = slot (0-15); live-only preview
-let REQ_GET_CS_BINDING: UInt8 = 0x85   // IN 24 bytes: live CsBinding, wValue = slot
-let REQ_GET_CS_CAPS: UInt8    = 0x86   // IN: wValue=0xFFFF -> 40-byte header+types; wValue=noun -> 12-byte CsNounDesc
-let REQ_GET_CS_STATUS: UInt8  = 0x87   // IN CS_STATUS_LEN bytes: CsStatusPacket
-let REQ_SET_CS_NAME: UInt8    = 0x8B   // OUT 1-32 byte name, wValue = slot; deferred, persists immediately
-let REQ_GET_CS_NAME: UInt8    = 0x8C   // IN 32-byte NUL-terminated name, wValue = slot
-let REQ_SET_CS_IR_CMD: UInt8  = 0x8D   // OUT 16 bytes: IrCommand, wValue = sub-slot (0-15); live-only preview
-let REQ_GET_CS_IR_CMD: UInt8  = 0x8E   // IN 16 bytes: live IrCommand, wValue = sub-slot
-let REQ_CS_IR_LEARN: UInt8    = 0x8F   // IN: wValue 1=arm/0=cancel -> 1 ack byte; wValue 2=read -> 8-byte result
-let REQ_CS_SAVE: UInt8        = 0x9D   // IN 1 ack byte: persist the whole live config (deferred, lastSlot=0xFF)
-let REQ_CS_REVERT: UInt8      = 0x9E   // IN 1 ack byte: discard the preview, reload flash (deferred, lastSlot=0xFF)
 
 // Target-group and macro commands (caps v9; groups+macros spec §3).  Same
 // conventions as the rest of the feature: SETs are deferred previews polled
 // back through REQ_GET_CS_STATUS, and REQ_CS_SAVE / REQ_CS_REVERT cover this
 // config too.  A whole 132-byte CsMacro exceeds the 64-byte vendor SET buffer,
 // so a macro is written as a header plus one SET per step.
-let REQ_SET_CS_GROUP: UInt8       = 0x20   // OUT 40 bytes: CsGroup, wValue = group (0-7); all-zero clears
-let REQ_GET_CS_GROUP: UInt8       = 0x21   // IN 40 bytes: live CsGroup, wValue = group
-let REQ_SET_CS_MACRO: UInt8       = 0x22   // OUT 36 bytes: CsMacroHeaderWire (name + step count), wValue = macro
-let REQ_GET_CS_MACRO: UInt8       = 0x23   // IN 132 bytes: live CsMacro, wValue = macro
-let REQ_SET_CS_MACRO_STEP: UInt8  = 0x24   // OUT 12 bytes: CsMacroStep, wValue = (step << 8) | macro; all-zero clears
-let REQ_CS_MACRO_FIRE: UInt8      = 0x25   // IN 1 status byte: wValue = macro fires it, 0xFFFF cancels
-let REQ_GET_CS_EXT_STATUS: UInt8  = 0x26   // IN 24 bytes: CsExtStatusPacket
 
 // I2C display commands (caps v10; display spec §2.4).  Same deferred-preview
 // conventions as the rest of the feature, reported with `lastSlot` 0x50 for
 // the config and 0x50 | page for a page.
-let REQ_SET_CS_DISPLAY_CFG: UInt8    = 0x27   // OUT 12 bytes: CsDisplayCfg
-let REQ_GET_CS_DISPLAY_CFG: UInt8    = 0x28   // IN 16 bytes: {maxPages, modelCount, rsv[2]} + CsDisplayCfg
-let REQ_SET_CS_DISPLAY_PAGE: UInt8   = 0x29   // OUT 4 bytes: CsDisplayPage, wValue = page (0-15)
-let REQ_GET_CS_DISPLAY_PAGE: UInt8   = 0x2A   // IN 4 bytes: CsDisplayPage, wValue = page
-let REQ_GET_CS_DISPLAY_STATUS: UInt8 = 0x2B   // IN 8 bytes: CsDisplayStatus
 
 // Auxiliary outputs (caps v18; control_surfaces_aux_spec.md).  An output is a
 // CS_TYPE_AUX_OUT / CS_TYPE_AUX_PWM binding that owns its GPIO, so its pin,
@@ -1096,10 +857,6 @@ let REQ_GET_CS_DISPLAY_STATUS: UInt8 = 0x2B   // IN 8 bytes: CsDisplayStatus
 // firmware's handler with no flash write, so a front-panel toggle never stalls
 // the audio clocks.  On USB a rejected write is acknowledged and reported only
 // through REQ_GET_CS_STATUS (CS_STATUS_INVALID_AUX).
-let REQ_SET_CS_AUX_STATE: UInt8 = 0x04   // OUT 1 byte (non-zero = on), wValue = slot; immediate
-let REQ_GET_CS_AUX_STATE: UInt8 = 0x05   // IN 1 byte, wValue = slot; wValue 0xFFFF -> 48 bytes (16 states, 16 x 8.8 levels LE)
-let REQ_SET_CS_AUX_LEVEL: UInt8 = 0x06   // OUT 2 bytes 8.8 percent LE, wValue = slot (AUX_PWM only); immediate
-let REQ_GET_CS_AUX_LEVEL: UInt8 = 0x07   // IN 2 bytes 8.8 percent LE, wValue = slot
 
 // Status codes (0x10+).  0x00-0x05 reuse the shared PIN_CONFIG_* namespace
 // above; these extend it.  Returned in CsStatusPacket.lastStatus / slotStatus[].
@@ -1138,7 +895,6 @@ let CS_IR_CONFIG_VERSION: UInt8 = 2   // CsIrConfig.version (IR command table; v
 /// Older firmware short-reads it (32 bytes for caps v3-v5, 22 pre-v3) and
 /// CsStatusPacket parses whichever of the three layouts comes back.
 let CS_STATUS_LEN: UInt16      = 41
-let CS_CAPS_ALL: UInt16        = 0xFFFF   // wValue selecting the caps header + type table
 /// `lastSlot` sentinel for a save/revert outcome (spec §2.6).
 let CS_LAST_SLOT_SAVE: UInt8   = 0xFF
 /// `lastSlot` high bit marks an IR sub-slot outcome: 0x80 | sub-slot.
@@ -1169,7 +925,6 @@ let CS_MACRO_HEADER_LEN: UInt16 = 36
 let CS_MACRO_STEP_LEN: UInt16   = 12
 let CS_EXT_STATUS_LEN: UInt16   = 24
 let CS_DISPLAY_CFG_LEN: UInt16      = 12   // the SET payload
-let CS_DISPLAY_CFG_GET_LEN: UInt16  = 16   // 4-byte limits header + the config
 let CS_DISPLAY_PAGE_LEN: UInt16     = 4
 let CS_DISPLAY_STATUS_LEN: UInt16   = 8
 
@@ -1178,9 +933,6 @@ let CS_MAX_DISPLAY_PAGES: Int = 16
 
 // Auxiliary outputs (caps v18; aux spec 2.2 / 3.3).  One output per binding
 // slot, so the wire maximum is CS_MAX_BINDINGS and needs no constant of its own.
-/// `REQ_GET_CS_AUX_STATE` wValue that reads every slot's state and level in
-/// one 48-byte transfer.
-let CS_AUX_STATE_ALL: UInt16    = 0xFFFF
 /// Levels are 8.8 percent; the firmware clamps above 100 %.
 let CS_AUX_LEVEL_MAX_Q8: UInt16 = 25600
 
@@ -1538,11 +1290,6 @@ let CS_IR_PROTO_RC5: UInt8  = 2
 let CS_IR_PROTO_RC6: UInt8  = 3
 let CS_IR_PROTO_HASH: UInt8 = 4     // timing-signature hash (any undecoded remote)
 
-// REQ_CS_IR_LEARN wValue actions (spec §3.6.1).
-let CS_IR_LEARN_CANCEL: UInt16 = 0
-let CS_IR_LEARN_ARM: UInt16    = 1
-let CS_IR_LEARN_READ: UInt16   = 2
-
 // CsStatusPacket.ir_learn_state / learn-result state values (spec §2.6 / §3.6.1).
 let CS_IR_LEARN_STATE_IDLE: UInt8    = 0
 let CS_IR_LEARN_STATE_ARMED: UInt8   = 1   // listening on the receiver
@@ -1617,14 +1364,8 @@ func csUnitSymbol(_ unit: UInt8) -> String {
 // is an OUT transfer carrying the 36-byte SiggenConfig (never auto-starts;
 // restarts with a fade if already running); CONTROL is write-as-read (an IN
 // transfer carrying the action in wValue, returning 1 status byte).
-let REQ_SIGGEN_SET_CONFIG: UInt8 = 0xA4   // OUT 36 bytes: SiggenConfig
-let REQ_SIGGEN_GET_CONFIG: UInt8 = 0xA5   // IN 36 bytes: applied SiggenConfig
-let REQ_SIGGEN_CONTROL: UInt8    = 0xA6   // IN 1 byte: wValue = SIGGEN_CTL_*
-let REQ_SIGGEN_GET_STATUS: UInt8 = 0xA7   // IN 16 bytes: SiggenStatus
-let REQ_SIGGEN_GET_CAPS: UInt8   = 0xA8   // IN: wValue=0xFFFF header, else SiggenTypeDesc
 
 let SIGGEN_CFG_VERSION: UInt8 = 1
-let SIGGEN_CAPS_HEADER: UInt16 = 0xFFFF   // wValue selecting the caps header
 
 // SiggenConfig.flags bitmask (spec §5).
 let SIGGEN_FLAG_RAW: UInt8    = 0x01   // bypass per-channel crossover + PEQ
@@ -1686,7 +1427,6 @@ let SIGGEN_LEVEL_MIN_DB: Float = -120.0
 let SIGGEN_LEVEL_MAX_DB: Float = 0.0
 
 // Firmware update request codes
-let REQ_ENTER_BOOTLOADER: UInt8        = 0xF0
 
 // Preset status codes
 let PRESET_OK: UInt8                    = 0x00

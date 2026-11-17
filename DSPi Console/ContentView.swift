@@ -776,7 +776,7 @@ struct ContentView: View {
                         }
 
                         // Volume control — always drives the firmware's
-                        // user volume directly via REQ_SET_USER_VOLUME (the
+                        // user volume directly via ROUTE.USER_VOLUME (the
                         // same `audio_state.volume` field the OS volume
                         // slider writes via UAC1), regardless of input
                         // source.  We no longer touch the macOS system
@@ -1224,7 +1224,7 @@ struct OutputChannelDetail: View {
 
 // MARK: - User Volume Section
 //
-// Drives REQ_SET_USER_VOLUME (0xDA) — the vendor-channel access to the
+// Drives ROUTE.USER_VOLUME — the vendor-channel access to the
 // same `audio_state.volume` field the OS volume slider writes via UAC1.
 // This is the sole "Auto" volume control for every input source: the
 // firmware applies the value to vol_mul + the loudness coefficient

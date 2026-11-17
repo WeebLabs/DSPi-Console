@@ -256,7 +256,7 @@ final class UpmixParameters: ObservableObject {
     @Published var statusPolling: Bool = false
 }
 
-/// REQ_UPMIX_GET_STATUS (spec §6.3), polled only while the upmixer window is
+/// FX.UPMIX_STATUS (spec §6.3), polled only while the upmixer window is
 /// open. Observed only by the status pane inside its `LiveGraphHost`.
 final class UpmixTelemetry: ObservableObject {
     @Published var active: Bool = false

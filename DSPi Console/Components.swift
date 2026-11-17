@@ -610,7 +610,7 @@ enum MasterVolumeTaper {
 // menu with those two choices.  The `inputSource` parameter is retained
 // for callers but no longer reflected in the menu — the user-facing label
 // reads "User Volume" regardless of whether the underlying path is the
-// CoreAudio host slider (USB) or REQ_SET_USER_VOLUME (SPDIF/I2S).
+// CoreAudio host slider (USB) or ROUTE.USER_VOLUME (SPDIF/I2S).
 struct VolumeModeSelector: View {
     @Binding var modeRaw: String
     /// Retained for API compatibility with callers; not used in the menu.

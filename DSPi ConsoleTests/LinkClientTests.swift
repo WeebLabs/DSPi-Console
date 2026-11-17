@@ -39,11 +39,11 @@ final class LinkClientTests: XCTestCase {
         device = LinkFakeDevice()
         device.responsePayload = shortPayload
         // The hub warms its snapshot with a bulk read the moment the device
-        // attaches, so the responder has to answer 0xA0 with a real blob.
+        // attaches, so the responder has to answer STORE.ALL_PARAMS with a real blob.
         let bulk = Self.makeBulkBlob()
         let short = shortPayload
         device.responder = { request in
-            if request.bRequest == REQ_GET_ALL_PARAMS {
+            if request.commandID == VC.STORE.ALL_PARAMS.id {
                 return LinkCmdResponse(tag: request.tag, status: .ok, payload: bulk)
             }
             return LinkCmdResponse(tag: request.tag, status: .ok,
@@ -226,16 +226,22 @@ final class LinkClientTests: XCTestCase {
 
     // MARK: - Commands
 
+    // These tests tunnel 1.1.6-style page-0 traffic (0x50 GET_STATUS, 0xD2
+    // SET_MASTER_VOLUME): until phase 7 the hub refuses remote paged commands,
+    // and page 0 still exercises the frames, roles and sessions the same way.
+    private static let getStatus: UInt8 = 0x50
+    private static let setMasterVolume: UInt8 = 0xD2
+
     func testCommandsTunnelGetsAndSetsAndHonourTheRole() throws {
         let (client, _) = try connectAndPair(name: "Command Test")
 
         let get = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                 bRequest: REQ_GET_STATUS, wValue: 9, wIndex: 2, wLength: 4))
+                                                 bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
         XCTAssertEqual(get.status, .ok)
         XCTAssertEqual(get.payload, shortPayload)
 
         let set = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
-                                                 bRequest: REQ_SET_MASTER_VOLUME, wValue: 0, wIndex: 0,
+                                                 bRequest: Self.setMasterVolume, wValue: 0, wIndex: 0,
                                                  payload: Data([0xEC])))
         XCTAssertEqual(set.status, .ok)
 
@@ -243,19 +249,26 @@ final class LinkClientTests: XCTestCase {
         let (viewer, _) = try connectAndPair(name: "Viewer Test", role: .viewer)
         XCTAssertEqual(viewer.role, .viewer)
         let denied = try run(viewer, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
-                                                    bRequest: REQ_SET_MASTER_VOLUME, wValue: 0, wIndex: 0,
+                                                    bRequest: Self.setMasterVolume, wValue: 0, wIndex: 0,
                                                     payload: Data([0xEC])))
         XCTAssertEqual(denied.status, .denied)
 
         let viewerGet = try run(viewer, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                       bRequest: REQ_GET_STATUS, wValue: 9, wIndex: 2, wLength: 4))
+                                                       bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
         XCTAssertEqual(viewerGet.status, .ok)
+
+        // A remote paged command is refused until phase 7 keys the policy on
+        // paged IDs.
+        let levels = VC.MEAS.LEVELS
+        let paged = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
+                                                   bRequest: levels.number, wIndex: levels.usbIndex, wLength: 4))
+        XCTAssertEqual(paged.status, .unsupported)
     }
 
     func testCommandBeforeReadyAnswersNoDevice() throws {
         let client = makeClient()
         let response = try run(client, LinkCmdRequest(tag: 7, handle: 0, direction: .get,
-                                                      bRequest: REQ_GET_STATUS, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
         XCTAssertEqual(response.status, .noDevice)
         XCTAssertEqual(response.tag, 7)
     }
@@ -282,7 +295,7 @@ final class LinkClientTests: XCTestCase {
         }
 
         let set = try run(a, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
-                                            bRequest: REQ_SET_MASTER_VOLUME, wValue: 0, wIndex: 0,
+                                            bRequest: Self.setMasterVolume, wValue: 0, wIndex: 0,
                                             payload: Data([0xEC])))
         XCTAssertEqual(set.status, .ok)
 
@@ -339,7 +352,7 @@ final class LinkClientTests: XCTestCase {
         waitForDevices(client) { $0.count == 1 }
 
         let response = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                      bRequest: REQ_GET_STATUS, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
         XCTAssertEqual(response.status, .ok)
         XCTAssertEqual(response.payload, shortPayload)
     }
@@ -359,7 +372,7 @@ final class LinkClientTests: XCTestCase {
         XCTAssertTrue(reason.lowercased().contains("revok"), "unexpected reason: \(reason)")
 
         let response = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                      bRequest: REQ_GET_STATUS, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
         XCTAssertNotEqual(response.status, .ok)
     }
 
@@ -376,7 +389,7 @@ final class LinkClientTests: XCTestCase {
         waitForDevices(client) { $0.count == 1 }
 
         let response = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                      bRequest: REQ_GET_STATUS, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
         XCTAssertEqual(response.status, .ok)
     }
 }

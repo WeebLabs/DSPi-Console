@@ -162,6 +162,7 @@ final class NetworkTransportTests: XCTestCase {
     func testBulkReadUsesSnapshotWhenOffered() {
         let (t, client, _) = make()
         client.capabilities.append("snapshot")
+        t.allowsPagedRequests = true   // the shortcut, not the phase-3 refusal, is under test
         var blob = Data(count: Int(BULK_PARAMS_SIZE)); blob[0] = UInt8(WIRE_FORMAT_VERSION)
         client.snapshotBody = LinkSnapshotBody(handle: 0, wireVersion: WIRE_FORMAT_VERSION, ageMs: 5,
                                                bulkB64: blob.base64EncodedString(), statusB64: nil)
@@ -170,7 +171,7 @@ final class NetworkTransportTests: XCTestCase {
         client.setState(.ready)
         let e = expectation(description: "bulk")
         DispatchQueue.global().async {
-            let r = t.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE)
+            let r = t.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE)
             XCTAssertEqual(r?.count, Int(BULK_PARAMS_SIZE))
             e.fulfill()
         }

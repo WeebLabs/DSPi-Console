@@ -209,9 +209,24 @@ class USBDevice: ObservableObject {
     /// Main-thread copy of `protocolStore` for the UI.
     @Published private(set) var deviceProtocol: DeviceProtocolState = .unknown
 
+    /// Thread-safe snapshot of the current connection's protocol.
+    var protocolState: DeviceProtocolState { currentProtocol }
+
     private var currentProtocol: DeviceProtocolState {
         generationLock.lock(); defer { generationLock.unlock() }
         return protocolStore
+    }
+
+    /// A board that has just re-enumerated (after a flash, say) may not answer
+    /// at once.  Short, about 1.5 s in all; the hub keeps probing after that.
+    private static let openProbeDelays: [TimeInterval] = [0, 0.1, 0.2, 0.4, 0.8]
+
+    private func probeAfterOpen(generation openedGeneration: UInt64) {
+        for delay in Self.openProbeDelays {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            guard generation == openedGeneration else { return }
+            if probeProtocol() != .notReady { return }
+        }
     }
 
     /// Probe the open board and record what it speaks for this connection.
@@ -308,13 +323,22 @@ class USBDevice: ObservableObject {
 
         if result == kIOReturnSuccess {
             IOObjectRelease(service)
-            DispatchQueue.main.async {
-                // Attach the notification reader before publishing, so a
-                // subscriber reacting to isConnected already has a live stream.
-                self.notificationReader.start()
-                self.selectedDevice = device
-                self.isConnected = true
-                self.errorMessage = nil
+            let openedGeneration = generation
+            // Probe before announcing the connection, so nothing that reacts to
+            // isConnected meets a board whose protocol is unknown: the gate would
+            // refuse its first reads and it would take the link for dead.  Off
+            // `serialQueue`, which the probe's own transfers need.
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.probeAfterOpen(generation: openedGeneration)
+                DispatchQueue.main.async {
+                    guard self.generation == openedGeneration else { return }
+                    // Attach the notification reader before publishing, so a
+                    // subscriber reacting to isConnected already has a live stream.
+                    self.notificationReader.start()
+                    self.selectedDevice = device
+                    self.isConnected = true
+                    self.errorMessage = nil
+                }
             }
             return
         }

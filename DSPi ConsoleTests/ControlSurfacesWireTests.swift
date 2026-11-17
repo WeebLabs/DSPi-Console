@@ -418,14 +418,14 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CS_CONFIG_VERSION, 2)
         XCTAssertEqual(CS_IR_CONFIG_VERSION, 2)  // CsIrConfig grew to 16 sub-slots
         XCTAssertEqual(CS_STATUS_LEN, 41)
-        // Request codes for the v3 additions.
-        XCTAssertEqual(REQ_SET_CS_NAME, 0x8B)
-        XCTAssertEqual(REQ_GET_CS_NAME, 0x8C)
-        XCTAssertEqual(REQ_SET_CS_IR_CMD, 0x8D)
-        XCTAssertEqual(REQ_GET_CS_IR_CMD, 0x8E)
-        XCTAssertEqual(REQ_CS_IR_LEARN, 0x8F)
-        XCTAssertEqual(REQ_CS_SAVE, 0x9D)
-        XCTAssertEqual(REQ_CS_REVERT, 0x9E)
+        // Paged commands for the v3 additions (firmware 1.1.7).
+        XCTAssertEqual(VC.CS.SLOT_NAME.id, 0x0A21)
+        XCTAssertEqual(VC.CS.IR_CMD.id, 0x0A30)
+        XCTAssertEqual(VC.CS.IR_LEARN_STATUS.id, 0x0A31)
+        XCTAssertEqual(VC.CS.IR_LEARN_ARM.id, 0x0A32)
+        XCTAssertEqual(VC.CS.IR_LEARN_CANCEL.id, 0x0A33)
+        XCTAssertEqual(VC.CS.SAVE.id, 0x0A18)
+        XCTAssertEqual(VC.CS.REVERT.id, 0x0A19)
     }
 
     // MARK: - Caps v4 additions (§11.4)
@@ -1014,17 +1014,17 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CsDisplayCfg.fromData(d), cfg)
     }
 
-    /// The GET response puts a 4-byte limits header before the config, so the
-    /// parser has to skip it - reading from offset 0 would take max_pages as
-    /// the mode.
+    /// 1.1.6 put a 4-byte limits header before the config in one GET; 1.1.7
+    /// splits it into CS.DISPLAY_CAPS and a bare 12-byte CS.DISPLAY_CONFIG,
+    /// which therefore parses from offset 0.
     func testDisplayCfgParsesPastTheLimitsHeader() {
         let cfg = CsDisplayCfg(mode: CS_DMODE_FIXED, homePage: 1, dwell: 30,
                                overlayHold: 20, brightness: 0, flags: 0, editTimeout: 100)
-        var d = Data([16, 9, 0, 0])          // max_pages, model_count, reserved
-        d.append(cfg.toData())
-        XCTAssertEqual(d.count, Int(CS_DISPLAY_CFG_GET_LEN))
-        XCTAssertEqual(CsDisplayCfg.fromData(d, offset: 4), cfg)
-        XCTAssertEqual(d[d.startIndex], 16)  // the limit the page loop uses
+        let d = cfg.toData()
+        XCTAssertEqual(VendorCommandRegistry.info(for: VC.CS.DISPLAY_CONFIG)?.getLength, .fixed(Int(CS_DISPLAY_CFG_LEN)))
+        XCTAssertEqual(VendorCommandRegistry.info(for: VC.CS.DISPLAY_CAPS)?.getLength, .fixed(4))
+        XCTAssertEqual(d.count, Int(CS_DISPLAY_CFG_LEN))
+        XCTAssertEqual(CsDisplayCfg.fromData(d, offset: 0), cfg)
     }
 
     /// 4 bytes; an all-zero record is an empty slot.
@@ -1280,16 +1280,15 @@ final class ControlSurfacesWireTests: XCTestCase {
         XCTAssertEqual(CS_AUX_LEVEL_MAX_Q8, 25600, "100 % in 8.8")
     }
 
-    /// §3: four commands in the low block, 0x02/0x03 gone, and the status code
+    /// §3: the aux commands (one paged command each, plus CS.AUX_ALL where
+    /// 1.1.6 used the 0xFFFF selector), and the status code
     /// and target kind the spec fixes.  An aux apply reports as a plain binding
     /// slot, so there is no longer a tag of its own in the status channel.
     func testAuxCommandAndConstantAllocation() {
-        XCTAssertEqual(REQ_SET_CS_AUX_STATE, 0x04)
-        XCTAssertEqual(REQ_GET_CS_AUX_STATE, 0x05)
-        XCTAssertEqual(REQ_SET_CS_AUX_LEVEL, 0x06)
-        XCTAssertEqual(REQ_GET_CS_AUX_LEVEL, 0x07)
+        XCTAssertEqual(VC.CS.AUX_STATE.id, 0x0A60)
+        XCTAssertEqual(VC.CS.AUX_LEVEL.id, 0x0A61)
+        XCTAssertEqual(VC.CS.AUX_ALL.id, 0x0A62)
         XCTAssertEqual(CS_STATUS_INVALID_AUX, 0x26)
-        XCTAssertEqual(CS_AUX_STATE_ALL, 0xFFFF)
         XCTAssertEqual(CS_NOUN_AUX, 68)
         XCTAssertEqual(CS_NOUN_AUX_LEVEL, 69)
         XCTAssertEqual(CS_TARGET_AUX, 5)

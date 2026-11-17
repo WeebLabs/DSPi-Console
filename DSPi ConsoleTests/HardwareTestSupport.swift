@@ -40,15 +40,23 @@ enum HardwareTest {
         // notifications on the main run loop.
         func linkIsLive() -> Bool {
             usb.isConnected && transport.isConnected
-                && usb.getControlRequest(request: REQ_GET_PLATFORM, value: 0, index: 2, length: 6) != nil
+                && usb.getData(VC.SYS.PLATFORM, length: 7) != nil
         }
         let deadline = Date().addingTimeInterval(timeout)
-        while !linkIsLive() && Date() < deadline {
+        while !linkIsLive() && !usb.protocolState.isSettledUnattachable && Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        // A board on 1.1.6 or older never attaches and refuses every paged
+        // request, so the live suites cannot run against it.
+        if usb.protocolState.isSettledUnattachable {
+            throw XCTSkip("The connected DSPi runs old firmware (not the 1.1.7 paged protocol) - skipping live-device tests.")
         }
         guard linkIsLive() else {
             probedAbsent = true
             throw XCTSkip("No DSPi connected (VID 0x2E8B / PID 0xFEAA) - skipping live-device tests.")
+        }
+        guard usb.protocolState.isPaged else {
+            throw XCTSkip("The connected DSPi runs old firmware (not the 1.1.7 paged protocol) - skipping live-device tests.")
         }
         // Let the app's initial fetch-all settle so we read steady state.
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
@@ -62,35 +70,50 @@ enum HardwareTest {
     /// raw reads below call this first; without it a raw read on the USB serial
     /// queue can overtake a write still crossing the router's queues.
     static func settle() {
-        _ = AppState.shared.transport.getControlRequest(request: REQ_GET_PLATFORM, value: 0,
-                                                        index: 2, length: 6)
+        _ = AppState.shared.transport.getData(VC.SYS.PLATFORM, length: 7)
     }
 
-    /// Synchronous little-endian `Float` read of a vendor GET request. This is
-    /// an INDEPENDENT decode path - it does not route through the app's
+    /// Synchronous little-endian `Float` read of a vendor GET. This is an
+    /// INDEPENDENT decode path - it does not route through the app's
     /// `fetch*`/parse code - so a shared encode/decode bug cannot make a
     /// round-trip falsely pass.  Ordered after the view model's writes by
     /// `settle()`.
-    static func readFloat(_ usb: USBDevice, _ request: UInt8,
-                          value: UInt16, index: UInt16 = 0) -> Float? {
+    static func readFloat(_ usb: USBDevice, _ command: VendorCommand, value: UInt16 = 0) -> Float? {
         settle()
-        guard let d = usb.getControlRequest(request: request, value: value, index: index, length: 4),
-              d.count == 4 else { return nil }
-        return d.withUnsafeBytes { $0.load(as: Float.self) }
+        guard let d = usb.getData(command, value: value, length: 4), d.count == 4 else { return nil }
+        return d.withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
     }
 
-    /// Synchronous unsigned-32 read (EQ type / bypass words are 4-byte ints).
-    static func readU32(_ usb: USBDevice, _ request: UInt8,
-                        value: UInt16, index: UInt16 = 0) -> UInt32? {
+    /// Synchronous unsigned-32 read, decoded the same independent way.
+    static func readU32(_ usb: USBDevice, _ command: VendorCommand, value: UInt16 = 0) -> UInt32? {
         settle()
-        guard let d = usb.getControlRequest(request: request, value: value, index: index, length: 4),
-              d.count == 4 else { return nil }
-        return d.withUnsafeBytes { $0.load(as: UInt32.self) }
+        guard let d = usb.getData(command, value: value, length: 4), d.count == 4 else { return nil }
+        return d.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
     }
 
-    /// REQ_GET_EQ_PARAM wValue: bits[15:8]=channel, bits[7:3]=band, bits[2:0]=param
-    /// (0=type, 1=freq, 2=Q, 3=gain, 4=bypass).
-    static func eqWValue(ch: Int, band: Int, param: Int) -> UInt16 {
-        UInt16((ch << 8) | (band << 3) | param)
+    /// One FILTER.BAND record, read raw: type u8 @0, bypass u8 @1, Qp x 512
+    /// u16 @2, then frequency @4, Q @8 and gain @12 as f32.
+    struct BandRecord {
+        let type: UInt8
+        let bypass: UInt8
+        let qp: UInt16
+        let freq: Float
+        let q: Float
+        let gain: Float
+    }
+
+    /// FILTER.BAND GET at `(ch << 8) | band`, decoded independently of the
+    /// app's band parser.  nil on a refused or short read.
+    static func readBand(_ usb: USBDevice, ch: Int, band: Int) -> BandRecord? {
+        settle()
+        guard let d = usb.getData(VC.FILTER.BAND, value: UInt16((ch << 8) | band), length: 16),
+              d.count == 16 else { return nil }
+        return d.withUnsafeBytes { b in
+            BandRecord(type: b[0], bypass: b[1],
+                       qp: b.loadUnaligned(fromByteOffset: 2, as: UInt16.self),
+                       freq: b.loadUnaligned(fromByteOffset: 4, as: Float.self),
+                       q: b.loadUnaligned(fromByteOffset: 8, as: Float.self),
+                       gain: b.loadUnaligned(fromByteOffset: 12, as: Float.self))
+        }
     }
 }

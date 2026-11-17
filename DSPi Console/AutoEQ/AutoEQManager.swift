@@ -177,7 +177,7 @@ class AutoEQManager: ObservableObject {
         let maxBands = Channel.masterLeft.bandCount // 10
 
         for ch in masterChannels {
-            // Per-channel, not the legacy all-input REQ_SET_PREAMP: that one
+            // Per-channel, not the old all-input SET_PREAMP: that one
             // trims every input on the device, not just the two the profile EQs.
             vm.setPreampChannel(channel: ch, db: Float(entry.preamp))
 

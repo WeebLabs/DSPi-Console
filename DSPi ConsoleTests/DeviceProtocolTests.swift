@@ -113,11 +113,27 @@ final class DeviceProtocolTests: XCTestCase {
                        "only the probe's GET is exempt, not a SET to the same number")
     }
 
-    func testPageZeroIsUnrestrictedDuringPhaseTwo() {
-        // The old call sites still drive 1.1.6 boards until phase 3 removes them.
-        XCTAssertTrue(ProtocolGate.allowsUnrestrictedPageZero)
-        XCTAssertTrue(ProtocolGate.admits(request: 0x42, index: 0, isGet: false, state: legacy))
+    func testPageZeroAdmitsOnlyTheTwoOldOpcodes() {
+        // Unprobed: only the old GET_PLATFORM, which the probe falls back to.
         XCTAssertTrue(ProtocolGate.admits(request: 0x7F, index: 2, isGet: true, state: .unknown))
+        XCTAssertFalse(ProtocolGate.admits(request: 0xF0, index: 2, isGet: true, state: .unknown))
+        XCTAssertFalse(ProtocolGate.admits(request: 0x7F, index: 2, isGet: false, state: .unknown))
+        // Legacy: GET_PLATFORM and the old ENTER_BOOTLOADER, both as GETs.
+        XCTAssertTrue(ProtocolGate.admits(request: 0x7F, index: 2, isGet: true, state: legacy))
+        XCTAssertTrue(ProtocolGate.admits(request: 0xF0, index: 2, isGet: true, state: legacy))
+        XCTAssertFalse(ProtocolGate.admits(request: 0xF0, index: 2, isGet: false, state: legacy))
+        // 0x42 was SET_EQ_PARAM and 0x53 FACTORY_RESET on 1.1.6.
+        for state in [DeviceProtocolState.unknown, legacy] {
+            XCTAssertFalse(ProtocolGate.admits(request: 0x42, index: 0, isGet: false, state: state), "\(state)")
+            XCTAssertFalse(ProtocolGate.admits(request: 0x53, index: 2, isGet: true, state: state), "\(state)")
+        }
+        // Paged or a newer major: nothing at page 0.
+        for state in [paged, DeviceProtocolState.unsupported(major: 2)] {
+            for request: UInt8 in [0x7F, 0xF0, 0x42] {
+                XCTAssertFalse(ProtocolGate.admits(request: request, index: 2, isGet: true, state: state), "\(state)")
+                XCTAssertFalse(ProtocolGate.admits(request: request, index: 2, isGet: false, state: state), "\(state)")
+            }
+        }
     }
 
     // MARK: Last result

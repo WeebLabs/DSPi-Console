@@ -181,13 +181,13 @@ final class LinkHubIntegrationTests: XCTestCase {
         let blob = bulkBlob()
         device.responder = { req in
             LinkCmdResponse(tag: req.tag, status: .ok,
-                            payload: req.bRequest == REQ_GET_ALL_PARAMS ? blob : Data())
+                            payload: req.commandID == VC.STORE.ALL_PARAMS.id ? blob : Data())
         }
         hub.attachDevice(device)
         let deadline = Date().addingTimeInterval(3)
         while hub.currentSnapshot() == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         XCTAssertEqual(hub.currentSnapshot()?.wireVersion, WIRE_FORMAT_VERSION)
-        XCTAssertTrue(device.executedCodes.contains(REQ_GET_ALL_PARAMS),
+        XCTAssertTrue(device.executedCodes.contains(VC.STORE.ALL_PARAMS.id),
                       "the bulk read went through the device via the router, not a side channel")
     }
 
@@ -362,7 +362,7 @@ final class LinkHubIntegrationTests: XCTestCase {
         let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
         device.responder = { req in
             // The hub's own snapshot warm-up read goes straight through.
-            guard req.bRequest != REQ_GET_ALL_PARAMS else { return LinkCmdResponse(tag: req.tag, status: .ok) }
+            guard req.commandID != VC.STORE.ALL_PARAMS.id else { return LinkCmdResponse(tag: req.tag, status: .ok) }
             entered.signal(); gate.wait()
             return LinkCmdResponse(tag: req.tag, status: .ok, payload: Data([1, 2, 3, 4]))
         }
@@ -396,7 +396,7 @@ final class LinkHubIntegrationTests: XCTestCase {
         let device = LinkFakeDevice()
         let gate = DispatchSemaphore(value: 0)
         device.responder = { req in
-            if req.bRequest != REQ_GET_ALL_PARAMS { gate.wait() }
+            if req.commandID != VC.STORE.ALL_PARAMS.id { gate.wait() }
             return LinkCmdResponse(tag: req.tag, status: .ok)
         }
         hub.attachDevice(device)

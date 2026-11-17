@@ -343,7 +343,7 @@ struct FirmwareUpdateView: View {
     private func enterBootloaderOnly() {
         let transport = vm.transport
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = transport.getControlRequest(request: REQ_ENTER_BOOTLOADER, value: 0, index: 2, length: 1)
+            _ = transport.setAndWait(VC.SYS.ENTER_BOOTLOADER, timeout: 3)
         }
     }
 

@@ -133,7 +133,7 @@ struct VolumeLevellerView: View {
                 maxDecimals: 1,
                 isEnabled: vm.isDeviceConnected,
                 caption: "Compression strength. Higher values reduce dynamic range more aggressively.",
-                live: { vm.sendFloatParamToDevice(REQ_SET_LEVELLER_AMOUNT, min(100, max(0, $0))) },
+                live: { vm.sendFloatParamToDevice(VC.DYN.LEVELLER_AMOUNT, min(100, max(0, $0))) },
                 set: { vm.setLevellerAmount(min(100, max(0, $0))) }
             )
 
@@ -172,7 +172,7 @@ struct VolumeLevellerView: View {
                 maxDecimals: 1,
                 isEnabled: vm.isDeviceConnected,
                 caption: "Maximum boost for quiet passages. Higher values risk amplifying noise.",
-                live: { vm.sendFloatParamToDevice(REQ_SET_LEVELLER_MAXGAIN, min(35, max(0, $0))) },
+                live: { vm.sendFloatParamToDevice(VC.DYN.LEVELLER_MAX_GAIN, min(35, max(0, $0))) },
                 set: { vm.setLevellerMaxGain(min(35, max(0, $0))) }
             )
 
@@ -187,7 +187,7 @@ struct VolumeLevellerView: View {
                 maxDecimals: 1,
                 isEnabled: vm.isDeviceConnected,
                 caption: "Silence gate. Signals below this level are not boosted, preventing noise amplification.",
-                live: { vm.sendFloatParamToDevice(REQ_SET_LEVELLER_GATE, min(0, max(-96, $0))) },
+                live: { vm.sendFloatParamToDevice(VC.DYN.LEVELLER_GATE, min(0, max(-96, $0))) },
                 set: { vm.setLevellerGate(min(0, max(-96, $0))) }
             )
 

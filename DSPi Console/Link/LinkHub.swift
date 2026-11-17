@@ -199,7 +199,7 @@ final class LinkHub {
     // MARK: - Device lifecycle
 
     /// Read the new connection's identity and attach it.  A board that STALLs
-    /// or ignores its first REQ_GET_PLATFORM (still booting after a firmware
+    /// or ignores its first SYS.PLATFORM (still booting after a firmware
     /// flash) is probed again with backoff; the loop stops as soon as the
     /// connection it was started for is gone or replaced.
     private func usbDidConnect(generation: UInt64) {
@@ -214,7 +214,12 @@ final class LinkHub {
             for delay in delays {
                 if delay > 0 { Thread.sleep(forTimeInterval: delay) }
                 guard let self = self, self.usbGeneration == generation else { return }
-                guard let device = probe(usb) else { continue }
+                guard let device = probe(usb) else {
+                    // A legacy or newer-protocol board is never attached; it
+                    // only publishes its protocol, so stop probing it.
+                    if self.usbDeviceFactory == nil, usb.protocolState.isSettledUnattachable { return }
+                    continue
+                }
                 DispatchQueue.main.async {
                     guard self.usbGeneration == generation else { return }
                     self.attachDevice(device)
@@ -349,17 +354,24 @@ final class LinkHub {
         completion(.ok)
     }
 
-    /// Send REQ_SET_DEVICE_NAME through the router, as the given session or as
+    /// Send SYS.DEVICE_NAME through the router, as the given session or as
     /// the hub itself (nil) for adoption.
     private func writeBoardName(_ ascii: String, from sessionID: LinkSessionID?,
                                 completion: @escaping (LinkStatus) -> Void) {
         var payload = Data(count: DEVICE_NAME_LEN)
         payload.replaceSubrange(0..<ascii.utf8.count, with: Data(ascii.utf8))
         let req = LinkCmdRequest(tag: 0, handle: currentHandle, direction: .set,
-                                 bRequest: REQ_SET_DEVICE_NAME, wValue: 0, wIndex: 2,
+                                 bRequest: VC.SYS.DEVICE_NAME.number, wValue: 0,
+                                 wIndex: VC.SYS.DEVICE_NAME.usbIndex,
                                  wLength: UInt16(payload.count), payload: payload)
         if let sessionID {
-            submit(req, from: sessionID) { completion($0.status) }
+            // The 8-bit policy would read SYS.DEVICE_NAME (0x24) as an unrelated
+            // 1.1.6 opcode, so check the rename's rights against the row it has
+            // always had, the old SET_DEVICE_NAME (0x56), then route it as the
+            // hub.  Phase 7 re-keys the policy and drops this.
+            guard let role = session(sessionID)?.role else { return completion(.noDevice) }
+            guard policy.isAllowed(role: role, code: 0x56, direction: .set) else { return completion(.denied) }
+            route(req, from: sessionID, roleOverride: .admin) { completion($0.status) }
             return
         }
         guard let router = currentRouter else { return completion(.noDevice) }
@@ -376,7 +388,8 @@ final class LinkHub {
     private func warmSnapshot() {
         guard let router = currentRouter else { return }
         let req = LinkCmdRequest(tag: 0, handle: currentHandle, direction: .get,
-                                 bRequest: REQ_GET_ALL_PARAMS, wValue: 0, wIndex: 2,
+                                 bRequest: VC.STORE.ALL_PARAMS.number, wValue: 0,
+                                 wIndex: VC.STORE.ALL_PARAMS.usbIndex,
                                  wLength: BULK_PARAMS_SIZE)
         let internalSession = RouterSession(id: Self.internalSessionID, role: .admin,
                                             exemptFromInflightCap: true)
@@ -476,16 +489,37 @@ final class LinkHub {
     /// no device is attached, answers NO_DEVICE.
     func submit(_ request: LinkCmdRequest, from sessionID: LinkSessionID,
                 completion: @escaping (LinkCmdResponse) -> Void) {
+        guard !refusesRemotePaged(session: sessionID, wIndex: request.wIndex) else {
+            return completion(LinkCmdResponse(tag: request.tag, status: .unsupported))
+        }
+        route(request, from: sessionID, completion: completion)
+    }
+
+    /// Hand a request to the router as the given session.
+    private func route(_ request: LinkCmdRequest, from sessionID: LinkSessionID,
+                       roleOverride: LinkRole? = nil,
+                       completion: @escaping (LinkCmdResponse) -> Void) {
         guard let session = session(sessionID),
               request.handle == currentHandle,
               let router = currentRouter else {
             return completion(LinkCmdResponse(tag: request.tag, status: .noDevice))
         }
-        let routerSession = RouterSession(id: session.id, role: session.role,
+        let routerSession = RouterSession(id: session.id, role: roleOverride ?? session.role,
                                           exemptFromInflightCap: session.id == Self.localSessionID)
         router.submit(request, session: routerSession) { result in
             completion(result.response)
         }
+    }
+
+    /// Until the Link policy is keyed on paged command IDs (phase 7 of the
+    /// paged-protocol port), its 8-bit table would give remote sessions the
+    /// wrong rights for paged commands: SYS.ENTER_BOOTLOADER would pass as
+    /// SET_PSYBASS.  Page-0 traffic keeps its 1.1.6 handling, which a 1.1.7
+    /// board refuses harmlessly.  Tests of multi-session behaviour turn this on.
+    var allowsRemotePagedCommands = false
+
+    private func refusesRemotePaged(session: LinkSessionID, wIndex: UInt16) -> Bool {
+        session != Self.localSessionID && wIndex >> 8 != 0 && !allowsRemotePagedCommands
     }
 
     // MARK: - Polls and locks
@@ -496,7 +530,11 @@ final class LinkHub {
         guard let s = self.session(session), let scheduler = currentScheduler else {
             return requests.map { ($0.slot, 0) }
         }
-        return scheduler.subscribe(session: session, role: s.role, requests: requests)
+        // Polls bypass `submit`, so the same remote shutout applies here.
+        let refused = Set(requests.filter { refusesRemotePaged(session: session, wIndex: $0.spec.wIndex) }.map(\.slot))
+        let granted = scheduler.subscribe(session: session, role: s.role,
+                                          requests: requests.filter { !refused.contains($0.slot) })
+        return granted + refused.sorted().map { ($0, 0) }
     }
 
     func unsubscribePolls(session: LinkSessionID, slots: [Int]) {

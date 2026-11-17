@@ -3,7 +3,7 @@ import Combine
 @testable import DSPi_Console
 
 /// A device with one analyser configuration, driven only through vendor
-/// requests: SET_CONFIG stages, GET_CONFIG reads back.  Records what the
+/// requests: an MEAS.RTA_CONFIG SET stages, its GET reads back.  Records what the
 /// engine sent so the tests can count pushes and readbacks.
 private final class RtaFakeTransport: DeviceTransport {
     var session: LinkSessionID = 1
@@ -40,11 +40,16 @@ private final class RtaFakeTransport: DeviceTransport {
 
     private(set) var pushes: [RtaConfig] = []
     private(set) var configReads = 0
-    private(set) var bandReads: [(request: UInt8, value: UInt16)] = []
+    private(set) var bandReads: [(request: VendorCommand, value: UInt16)] = []
     private(set) var binReads = 0
 
+    /// The paged command a request addresses: page from wIndex, number from bRequest.
+    private func command(_ request: UInt8, _ index: UInt16) -> VendorCommand {
+        VendorCommand((index & 0xFF00) | UInt16(request))
+    }
+
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {
-        guard request == REQ_RTA_SET_CONFIG, let c = RtaConfig.fromData(data) else { return }
+        guard command(request, index) == VC.MEAS.RTA_CONFIG, let c = RtaConfig.fromData(data) else { return }
         pushes.append(c)
         guard applies else { return }
         var applied = c
@@ -53,17 +58,20 @@ private final class RtaFakeTransport: DeviceTransport {
     }
 
     func getControlResult(request: UInt8, value: UInt16, index: UInt16, length: UInt16) -> Result<Data, LinkStatus> {
-        switch request {
-        case REQ_RTA_GET_CAPS:
-            return .success(value == 0 ? Self.caps : Data(count: Int(length)))
-        case REQ_RTA_GET_CONFIG:
+        let cmd = command(request, index)
+        switch cmd {
+        case VC.MEAS.RTA_CAPS:
+            return .success(Self.caps)
+        case VC.MEAS.RTA_BAND_CENTRES:
+            return .success(Data(count: Int(length)))
+        case VC.MEAS.RTA_CONFIG:
             configReads += 1
             return .success(config.toData())
-        case REQ_RTA_GET_BINS:
+        case VC.MEAS.RTA_BINS:
             binReads += 1
             return .failure(.error)
-        case REQ_RTA_GET_BANDS, REQ_RTA_GET_BANDS_ALL:
-            bandReads.append((request, value))
+        case VC.MEAS.RTA_BANDS, VC.MEAS.RTA_BANDS_ALL:
+            bandReads.append((cmd, value))
             return .failure(.error)
         default:
             return .failure(.error)
@@ -97,7 +105,10 @@ final class RtaSharingTests: XCTestCase {
         engine = RtaEngine(transport: fake)
         engine.statusInterval = 0     // read status and config back on every tick
         engine.fetchCaps()
-        pump()
+        // The caps land on the main queue, which the host app shares; with a
+        // live board attached it can be busy for longer than one pump.
+        let deadline = Date().addingTimeInterval(2)
+        repeat { pump() } while !engine.supported && Date() < deadline
         XCTAssertTrue(engine.supported)
         engine.setOptions(outOptions)
     }
@@ -164,7 +175,7 @@ final class RtaSharingTests: XCTestCase {
         let pushes = fake.pushes.count
         tick(3)
         XCTAssertEqual(fake.pushes.count, pushes, "a follower never pushes")
-        XCTAssertEqual(fake.bandReads.last?.request, REQ_RTA_GET_BANDS)
+        XCTAssertEqual(fake.bandReads.last?.request, VC.MEAS.RTA_BANDS)
         XCTAssertEqual(fake.bandReads.last?.value, 2, "bands are read for the device's channel")
         XCTAssertFalse(engine.configRejected)
     }

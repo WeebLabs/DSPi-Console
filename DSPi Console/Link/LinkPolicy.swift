@@ -42,7 +42,7 @@ enum LinkCommandDirection: String, Codable {
 /// One row of the table.
 struct LinkCommandEntry: Codable, Equatable {
     let code: UInt8
-    /// The firmware's REQ_ name without the prefix, for logs and UI.
+    /// The 1.1.6 opcode name without its REQ_ prefix, for logs and UI.
     let name: String
     /// Directions the firmware accepts for this code.  Anything else STALLs.
     let dirs: [LinkCommandDirection]

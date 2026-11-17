@@ -2,14 +2,14 @@ import XCTest
 @testable import DSPi_Console
 
 /// Byte-exact wire-format tests for the output latency setting
-/// (REQ_OUTPUT_LATENCY, current_architecture.md "Output Latency").  Pure logic;
+/// (OUTPUT.LATENCY, current_architecture.md "Output Latency").  Pure logic;
 /// no device needed.
 final class OutputLatencyWireTests: XCTestCase {
 
     func testConstants() {
-        XCTAssertEqual(REQ_OUTPUT_LATENCY, 0x03)
-        XCTAssertEqual(OUTPUT_LATENCY_GET_STATUS, 0)
-        XCTAssertEqual(OUTPUT_LATENCY_GET_OPTIONS, 1)
+        XCTAssertEqual(VC.OUTPUT.LATENCY.id, 0x0420)
+        XCTAssertEqual(VC.OUTPUT.LATENCY_STATUS.id, 0x0421)
+        XCTAssertEqual(VC.OUTPUT.LATENCY_OPTIONS.id, 0x0422)
         XCTAssertEqual(OUTPUT_LATENCY_STATUS_SIZE, 12)
         XCTAssertEqual(OUTPUT_LATENCY_OPTION_SIZE, 8)
         XCTAssertEqual(OUTPUT_LATENCY_DEFAULT_ID, 5)

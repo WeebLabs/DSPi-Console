@@ -33,7 +33,7 @@ final class LinkHubDeviceNameTests: XCTestCase {
     }
 
     private func nameSets(_ device: LinkFakeDevice) -> [LinkCmdRequest] {
-        device.executed.filter { $0.bRequest == REQ_SET_DEVICE_NAME }
+        device.executed.filter { $0.commandID == VC.SYS.DEVICE_NAME.id && $0.direction == .set }
     }
 
     /// Wait until the router has run at least `count` board-name writes.

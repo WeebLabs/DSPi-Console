@@ -9,14 +9,20 @@ final class LimiterWireTests: XCTestCase {
     // MARK: - Constants (spec §3, §4)
 
     func testRequestCodeAndIndices() {
-        XCTAssertEqual(REQ_LIMITER, 0x81)
+        XCTAssertEqual(VC.DYN.LIMITER_ENABLE.id, 0x0710)
+        XCTAssertEqual(VC.DYN.LIMITER_THRESHOLD.id, 0x0711)
+        XCTAssertEqual(VC.DYN.LIMITER_RELEASE.id, 0x0712)
+        XCTAssertEqual(VC.DYN.LIMITER_LINK_GROUP.id, 0x0713)
+        XCTAssertEqual(VC.DYN.LIMITER_METERS.id, 0x0718)
+        XCTAssertEqual(VC.DYN.LIMITER_STATUS.id, 0x0719)
+        XCTAssertEqual(DSPViewModel.limiterCommands,
+                       [VC.DYN.LIMITER_ENABLE, VC.DYN.LIMITER_THRESHOLD,
+                        VC.DYN.LIMITER_RELEASE, VC.DYN.LIMITER_LINK_GROUP])
         XCTAssertEqual(LIMITER_PARAM_ENABLED, 0)
         XCTAssertEqual(LIMITER_PARAM_THRESHOLD_DB, 1)
         XCTAssertEqual(LIMITER_PARAM_RELEASE_MS, 2)
         XCTAssertEqual(LIMITER_PARAM_LINK_GROUP, 3)
         XCTAssertEqual(LIMITER_NUM_PARAMS, 4)
-        XCTAssertEqual(LIMITER_GET_METER, 0x80)
-        XCTAssertEqual(LIMITER_GET_STATUS, 0x81)
         XCTAssertEqual(LIMITER_ALL_OUTPUTS, 0xFF)
     }
 
@@ -194,21 +200,20 @@ final class LimiterWireTests: XCTestCase {
     // MARK: - Live device (skip when no DSPi is attached)
 
     private func getParam(_ usb: USBDevice, output: Int, _ index: UInt8) -> Float? {
-        guard let d = usb.getControlRequest(request: REQ_LIMITER, value: (UInt16(output) << 8) | UInt16(index),
-                                            index: 0, length: 4),
+        guard Int(index) < DSPViewModel.limiterCommands.count,
+              let d = usb.getData(DSPViewModel.limiterCommands[Int(index)], value: UInt16(output), length: 4),
               d.count >= 4 else { return nil }
         return d.withUnsafeBytes { $0.load(as: Float.self) }
     }
 
     private func setParam(_ usb: USBDevice, output: UInt8, _ index: UInt8, _ value: Float) {
+        guard Int(index) < DSPViewModel.limiterCommands.count else { return }
         var v = value
-        usb.sendControlRequest(request: REQ_LIMITER, value: (UInt16(output) << 8) | UInt16(index),
-                               index: 0, data: Data(bytes: &v, count: 4))
+        usb.send(DSPViewModel.limiterCommands[Int(index)], value: UInt16(output), data: Data(bytes: &v, count: 4))
     }
 
     private func status(_ usb: USBDevice) -> Data? {
-        guard let d = usb.getControlRequest(request: REQ_LIMITER, value: UInt16(LIMITER_GET_STATUS),
-                                            index: 0, length: 4), d.count >= 4 else { return nil }
+        guard let d = usb.getData(VC.DYN.LIMITER_STATUS, length: 4), d.count >= 4 else { return nil }
         return d
     }
 
@@ -216,7 +221,7 @@ final class LimiterWireTests: XCTestCase {
     private func requireLimiter() throws -> (USBDevice, Int) {
         let usb = try HardwareTest.requireDevice()
         guard let s = status(usb) else {
-            throw XCTSkip("Firmware has no output limiter (REQ_LIMITER status block STALLed).")
+            throw XCTSkip("Firmware has no output limiter (DYN.LIMITER_STATUS refused).")
         }
         return (usb, Int(s[3]))
     }
@@ -257,22 +262,26 @@ final class LimiterWireTests: XCTestCase {
     /// The meter is one uint16 per output.
     func testMeterLength() throws {
         let (usb, outputs) = try requireLimiter()
-        let d = try XCTUnwrap(usb.getControlRequest(request: REQ_LIMITER, value: UInt16(LIMITER_GET_METER),
-                                                     index: 0, length: UInt16(outputs * 2)))
+        let d = try XCTUnwrap(usb.getData(VC.DYN.LIMITER_METERS, length: UInt16(outputs * 2)))
         XCTAssertEqual(d.count, outputs * 2)
     }
 
-    /// A bad index or output STALLs a GET.
+    /// An output past the end is refused as an address error.  A bad
+    /// parameter index no longer reaches the wire: 1.1.7 has one command per
+    /// parameter, so there is nothing to send for index LIMITER_NUM_PARAMS.
     func testBadIndexAndOutputStall() throws {
         let (usb, outputs) = try requireLimiter()
         XCTAssertNil(getParam(usb, output: 0, LIMITER_NUM_PARAMS))
-        XCTAssertNil(getParam(usb, output: outputs, LIMITER_PARAM_ENABLED))
+        guard case .failure(let status) = usb.get(VC.DYN.LIMITER_ENABLE, value: UInt16(outputs), length: 4) else {
+            return XCTFail("output \(outputs) should be refused")
+        }
+        XCTAssertEqual(status, .vcAddress)
     }
 
     /// The bulk section agrees with the indexed GETs for every output.
     func testBulkAgreesWithIndexedGets() throws {
         let (usb, outputs) = try requireLimiter()
-        guard let all = usb.getControlRequest(request: REQ_GET_ALL_PARAMS, value: 0, index: 2, length: BULK_PARAMS_SIZE),
+        guard let all = usb.getData(VC.STORE.ALL_PARAMS, length: BULK_PARAMS_SIZE),
               all.count >= Int(BULK_PARAMS_SIZE), Int(all[0]) == WIRE_FORMAT_VERSION else {
             throw XCTSkip("Bulk image is not the current wire format.")
         }

@@ -290,11 +290,11 @@ extension DeviceTransport {
                           data: data, completion: completion)
     }
 
-    /// Blocking form of `set`, for code that already runs off the main thread
-    /// (flash saves, preset flows).  Never call it on the main thread.
+    /// Blocking form of `set`, for flows that need the verdict before going
+    /// on (flash saves, preset flows, pin changes).  Blocks like a GET does, so
+    /// prefer calling it off the main thread.
     func setAndWait(_ command: VendorCommand, value: UInt16 = 0, data: Data = Data(),
                     timeout: TimeInterval = 10) -> LinkStatus {
-        dispatchPrecondition(condition: .notOnQueue(.main))
         let sem = DispatchSemaphore(value: 0)
         let box = StatusBox()
         set(command, value: value, data: data) { box.set($0); sem.signal() }

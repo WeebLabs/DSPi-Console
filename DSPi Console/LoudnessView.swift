@@ -246,7 +246,7 @@ struct LoudnessView: View {
                 maxDecimals: 1,
                 isEnabled: vm.isDeviceConnected,
                 caption: "SPL at 1 kHz when USB volume is 0 dB. Lower = more compensation per dB of volume reduction.",
-                live: { v in vm.sendFloatParamToDevice(REQ_SET_LOUDNESS_REF, v); graphLive.set(.refSPL, v) },
+                live: { v in vm.sendFloatParamToDevice(VC.DYN.LOUDNESS_REF, v); graphLive.set(.refSPL, v) },
                 set: { vm.setLoudnessRef($0) }
             )
 
@@ -261,7 +261,7 @@ struct LoudnessView: View {
                 maxDecimals: 1,
                 isEnabled: vm.isDeviceConnected,
                 caption: "Scales the ISO 226 compensation. 100% = standard curve. 0% = bypassed. >100% = exaggerated.",
-                live: { v in vm.sendFloatParamToDevice(REQ_SET_LOUDNESS_INTENSITY, v); graphLive.set(.intensity, v) },
+                live: { v in vm.sendFloatParamToDevice(VC.DYN.LOUDNESS_INTENSITY, v); graphLive.set(.intensity, v) },
                 set: { vm.setLoudnessIntensity($0) }
             )
         }

@@ -9,11 +9,9 @@ final class AdatWireTests: XCTestCase {
     // MARK: - Constants (spec §"Vendor commands" / §"Bulk params")
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_ADAT_ENABLE, 0xCA)
-        XCTAssertEqual(REQ_GET_ADAT_ENABLE, 0xCB)
-        XCTAssertEqual(REQ_SET_ADAT_PIN, 0xCC)
-        XCTAssertEqual(REQ_GET_ADAT_PIN, 0xCD)
-        XCTAssertEqual(REQ_GET_ADAT_STATUS, 0xCE)
+        XCTAssertEqual(VC.OUTPUT.ADAT_TX_ENABLE.id, 0x0430)
+        XCTAssertEqual(VC.OUTPUT.ADAT_TX_PIN.id, 0x0431)
+        XCTAssertEqual(VC.OUTPUT.ADAT_TX_STATUS.id, 0x0432)
         XCTAssertEqual(ADAT_PIN_DEFAULT, 12)
     }
 
@@ -102,13 +100,13 @@ final class AdatWireTests: XCTestCase {
 
     // MARK: - Live-device round-trips (skip when no DSPi attached)
 
-    /// REQ_GET_ADAT_STATUS returns a well-formed 8-byte struct whose fields are
+    /// OUTPUT.ADAT_TX_STATUS returns a well-formed 8-byte struct whose fields are
     /// internally consistent.  On RP2040 it's all zeros, which is still valid.
     func testAdatStatusReadable() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let d = usb.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+        guard let d = usb.getData(VC.OUTPUT.ADAT_TX_STATUS, length: 8),
               let status = AdatStatus.fromData(d) else {
-            throw XCTSkip("Firmware predates ADAT bulk output (0xCE STALLed).")
+            throw XCTSkip("Firmware predates ADAT bulk output (OUTPUT.ADAT_TX_STATUS refused).")
         }
         XCTAssertEqual(d.count, 8)
         // An active stream implies it's enabled and at a supported rate.
@@ -118,13 +116,13 @@ final class AdatWireTests: XCTestCase {
         }
     }
 
-    /// The configured enable byte (0xCB) and pin byte (0xCD) agree with the
+    /// The configured enable byte and pin byte agree with the
     /// status struct's mirror fields.
     func testAdatConfigConsistency() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let en = usb.getControlRequest(request: REQ_GET_ADAT_ENABLE, value: 0, index: 2, length: 1),
-              let pin = usb.getControlRequest(request: REQ_GET_ADAT_PIN, value: 0, index: 2, length: 1),
-              let st = usb.getControlRequest(request: REQ_GET_ADAT_STATUS, value: 0, index: 2, length: 8),
+        guard let en = usb.getData(VC.OUTPUT.ADAT_TX_ENABLE, length: 1),
+              let pin = usb.getData(VC.OUTPUT.ADAT_TX_PIN, length: 1),
+              let st = usb.getData(VC.OUTPUT.ADAT_TX_STATUS, length: 8),
               let status = AdatStatus.fromData(st) else {
             throw XCTSkip("Firmware predates ADAT bulk output.")
         }
@@ -133,20 +131,16 @@ final class AdatWireTests: XCTestCase {
     }
 
     /// Setting the ADAT pin to its current value is a no-op success; restores
-    /// nothing because it never changes.  Verifies the SET path returns a
-    /// PIN_CONFIG_* status byte rather than STALLing on supported firmware.
+    /// nothing because it never changes.  Verifies the SET is accepted on
+    /// supported firmware.  The pin travels in the payload, where 0 is GPIO 0
+    /// and 0xFF asks for the default.
     func testAdatPinSetIdempotent() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let pin = usb.getControlRequest(request: REQ_GET_ADAT_PIN, value: 0, index: 2, length: 1),
-              let current = pin.first, current != 0 else {
+        guard let pin = usb.getData(VC.OUTPUT.ADAT_TX_PIN, length: 1),
+              let current = pin.first else {
             throw XCTSkip("Firmware predates ADAT bulk output or reported no pin.")
         }
-        guard let resp = usb.getControlRequest(request: REQ_SET_ADAT_PIN,
-                                               value: UInt16(current), index: 2, length: 1),
-              let status = resp.first else {
-            throw XCTSkip("REQ_SET_ADAT_PIN STALLed.")
-        }
-        XCTAssertEqual(status, PIN_CONFIG_SUCCESS,
-                       "re-setting the current ADAT pin should succeed, got 0x\(String(status, radix: 16))")
+        let status = usb.setAndWait(VC.OUTPUT.ADAT_TX_PIN, data: Data([current]))
+        XCTAssertEqual(status, .ok, "re-setting the current ADAT pin should succeed, got \(status)")
     }
 }

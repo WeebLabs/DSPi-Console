@@ -25,13 +25,12 @@ final class SpdifInputWireTests: XCTestCase {
         vm.inputSource = INPUT_SOURCE_USB
     }
 
-    // MARK: - Constants (spec §1 / §4)
+    // MARK: - Constants (paged INPUT commands, firmware 1.1.7)
 
     func testRequestCodes() {
-        XCTAssertEqual(REQ_SET_SPDIF_RX_PIN, 0xE4)
-        XCTAssertEqual(REQ_GET_SPDIF_RX_PIN, 0xE5)
-        XCTAssertEqual(REQ_SET_SPDIF_INPUT_ENABLE, 0xE9)
-        XCTAssertEqual(REQ_GET_SPDIF_INPUT_CONFIG, 0xEF)
+        XCTAssertEqual(VC.INPUT.SPDIF_RX_PIN.id, 0x0322)
+        XCTAssertEqual(VC.INPUT.SPDIF_RX_ENABLE.id, 0x0323)
+        XCTAssertEqual(VC.INPUT.SPDIF_RX_CONFIG.id, 0x0324)
     }
 
     /// The optional sources are contiguous from INPUT_SOURCE_SPDIF2, which is
@@ -86,11 +85,13 @@ final class SpdifInputWireTests: XCTestCase {
     }
 
     func testTitlesAndStereoLayout() {
-        XCTAssertEqual(vm.inputSourceTitle(INPUT_SOURCE_SPDIF4), "S/PDIF 4")
+        // The built-in titles: a connected board's own source names (which
+        // inputSourceTitle prefers) must not decide this test.
+        XCTAssertEqual(vm.builtInInputSourceTitle(INPUT_SOURCE_SPDIF4), "S/PDIF 4")
         // Input 1 drops its number until an optional input is on.
-        XCTAssertEqual(vm.inputSourceTitle(INPUT_SOURCE_SPDIF), "S/PDIF")
+        XCTAssertEqual(vm.builtInInputSourceTitle(INPUT_SOURCE_SPDIF), "S/PDIF")
         vm.spdifExtEnabled = [false, false, true]
-        XCTAssertEqual(vm.inputSourceTitle(INPUT_SOURCE_SPDIF), "S/PDIF 1")
+        XCTAssertEqual(vm.builtInInputSourceTitle(INPUT_SOURCE_SPDIF), "S/PDIF 1")
         // Every S/PDIF input is stereo regardless of which one is selected.
         vm.inputSource = INPUT_SOURCE_SPDIF4
         XCTAssertEqual(vm.effectiveInputChannels, BASE_MATRIX_INPUTS)
@@ -125,16 +126,15 @@ final class SpdifInputWireTests: XCTestCase {
 
     // MARK: - Live device (spec §4.8)
 
-    /// REQ_GET_SPDIF_INPUT_CONFIG returns 2 + count bytes: count, an enable mask
+    /// INPUT.SPDIF_RX_CONFIG returns 2 + count bytes: count, an enable mask
     /// whose bit 0 is hard-set (input 1 is never disableable), then one GPIO per
-    /// input.  Cross-checked against per-index REQ_GET_SPDIF_RX_PIN reads, which
+    /// input.  Cross-checked against per-index INPUT.SPDIF_RX_PIN reads, which
     /// is an independent path - a shared decode bug can't make this pass.
     func testLiveInventoryMatchesPerIndexPins() throws {
         let usb = try HardwareTest.requireDevice()
-        guard let d = usb.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0,
-                                            index: 2, length: UInt16(2 + SPDIF_RX_NUM_INPUTS)),
+        guard let d = usb.getData(VC.INPUT.SPDIF_RX_CONFIG, length: UInt16(2 + SPDIF_RX_NUM_INPUTS)),
               d.count >= 3 else {
-            throw XCTSkip("Firmware predates the multiple-S/PDIF feature (0xEF STALLs).")
+            throw XCTSkip("Firmware predates the multiple-S/PDIF feature (INPUT.SPDIF_RX_CONFIG refused).")
         }
         let count = Int(d[0])
         XCTAssertGreaterThanOrEqual(count, 1)
@@ -143,8 +143,7 @@ final class SpdifInputWireTests: XCTestCase {
         XCTAssertEqual(d[1] & 0x01, 0x01, "input 1 is always enabled")
 
         for idx in 0..<count {
-            guard let p = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN,
-                                                value: UInt16(idx), index: 2, length: 1),
+            guard let p = usb.getData(VC.INPUT.SPDIF_RX_PIN, value: UInt16(idx), length: 1),
                   p.count >= 1 else {
                 XCTFail("0xE5 index \(idx) returned nothing")
                 continue
@@ -152,8 +151,7 @@ final class SpdifInputWireTests: XCTestCase {
             XCTAssertEqual(p[0], d[2 + idx], "0xEF pin \(idx) disagrees with 0xE5")
         }
         // Out-of-range indices report 0 rather than stalling or aliasing.
-        if let p = usb.getControlRequest(request: REQ_GET_SPDIF_RX_PIN,
-                                         value: UInt16(SPDIF_RX_NUM_INPUTS), index: 2, length: 1),
+        if let p = usb.getData(VC.INPUT.SPDIF_RX_PIN, value: UInt16(SPDIF_RX_NUM_INPUTS), length: 1),
            p.count >= 1 {
             XCTAssertEqual(p[0], 0, "index past the inventory should read back 0")
         }
@@ -166,10 +164,9 @@ final class SpdifInputWireTests: XCTestCase {
         vm.fetchSpdifInputConfig()
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
         try XCTSkipUnless(vm.multiSpdifSupported,
-                          "Firmware predates the multiple-S/PDIF feature (0xEF STALLs).")
+                          "Firmware predates the multiple-S/PDIF feature (INPUT.SPDIF_RX_CONFIG refused).")
 
-        guard let d = usb.getControlRequest(request: REQ_GET_SPDIF_INPUT_CONFIG, value: 0,
-                                            index: 2, length: UInt16(2 + SPDIF_RX_NUM_INPUTS)),
+        guard let d = usb.getData(VC.INPUT.SPDIF_RX_CONFIG, length: UInt16(2 + SPDIF_RX_NUM_INPUTS)),
               d.count >= 3 else {
             return XCTFail("0xEF returned nothing on the confirmation read")
         }

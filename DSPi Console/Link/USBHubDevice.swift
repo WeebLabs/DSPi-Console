@@ -67,16 +67,10 @@ final class USBHubDevice: HubDevice {
                                 platform: usb.getData(VC.SYS.PLATFORM, length: 7)) {
                 usb.getData(VC.SYS.DEVICE_NAME, length: UInt16(DEVICE_NAME_LEN))
             }
-        case .legacy(let platformReply):
-            // Phase 2 of the paged-protocol port still attaches a legacy board
-            // and reads it with its old opcodes; phase 3 stops attaching it.
-            return readIdentity(serialFallback: serialFallback,
-                                serial: usb.getControlRequest(request: REQ_GET_SERIAL, value: 0, index: 2, length: 16),
-                                platform: platformReply) {
-                usb.getControlRequest(request: REQ_GET_DEVICE_NAME, value: 0, index: 2,
-                                      length: UInt16(DEVICE_NAME_LEN))
-            }
-        case .unsupported, .notReady:
+        case .legacy, .unsupported, .notReady:
+            // A legacy board is never attached: only the old GET_PLATFORM and
+            // ENTER_BOOTLOADER may reach it, and USBDevice publishes its
+            // version for the firmware update flow.
             return nil
         }
     }

@@ -110,6 +110,22 @@ The new API lands next to the old one, so this phase builds green without touchi
 - On a 1.1.7 board, the main window connects, and volume, meters, EQ reads and the bulk read work.
 - On a 1.1.6 board, a request log shows only the probe and 0x7F. That covers a cold attach, a switch from a 1.1.7 board to a 1.1.6 board, and a 1.1.6 board with the Stats window already open.
 
+**Result (committed 2026-11-17).** Phase 3 went further than planned, so phases 5 and 6 are smaller.
+
+- **Ported early.** Every per-site opcode was ported instead of stubbed, except the `BandWriter` busy retry, which stays in phase 6. That brought forward these items from phases 5 and 6:
+  - the 17 pin-family setters, through `legacyAction`, which maps result codes back to `PIN_CONFIG_*`;
+  - the preset and flash actions;
+  - the splits;
+  - the `FILTER.BAND` encoder;
+  - the matrix route;
+  - the statistics struct reads;
+  - the ADAT `0xFF` default.
+- **Remote shutout, narrowed.** The hub refuses only *paged* commands and polls from remote sessions, controlled by `allowsRemotePagedCommands`. The network client refuses paged requests, controlled by `allowsPagedRequests`. Page-0 traffic keeps its 1.1.6 handling. A remote rename, which the hub builds itself, is checked against the old `SET_DEVICE_NAME` row.
+- **Probe on open.** `USBDevice` now probes a newly opened board before it publishes `isConnected`, so nothing sees a connected board whose protocol is unknown.
+- **Existing bug fixed.** `fetchAll` and `fetchAllParams` used to mark the link dead when a newer connection replaced the one they were reading. They now only do so for the same connection.
+- **Tests.** The full suite, live tests included, passed against a 1.1.7 beta 1 RP2350 board: 995 tests, 8 skips (the environment-dependent and phase 7 ones), and only the known tube-rendering flake failing.
+- **Not yet checked.** The 1.1.6 path has had no hardware check yet.
+
 ## Phase 4: Firmware update for both generations
 
 - **Version and banner.** `firmwareMatch` and the banner read the protocol state and version from phase 2, so a legacy board shows "This device runs firmware 1.1.6; DSPi Console expects 1.1.7".

@@ -26,17 +26,25 @@ final class LinkRtaArbitrationTests: XCTestCase {
         return router
     }
 
-    private func session(_ id: LinkSessionID) -> RouterSession { RouterSession(id: id, role: .control) }
+    /// Admin, because the router still checks rights in the 8-bit policy table,
+    /// which misclassifies paged RTA commands until phase 7 re-keys it.  These
+    /// tests are about arbitration, not rights.
+    private func session(_ id: LinkSessionID) -> RouterSession { RouterSession(id: id, role: .admin) }
 
-    private func bands(_ ch: UInt16 = 0) -> LinkCmdRequest {
-        LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: REQ_RTA_GET_BANDS,
-                       wValue: ch, wIndex: 2, wLength: 82)
+    private func get(_ command: VendorCommand, _ value: UInt16 = 0, tag: UInt16 = 1, length: UInt16 = 82) -> LinkCmdRequest {
+        LinkCmdRequest(tag: tag, handle: 0, direction: .get, bRequest: command.number,
+                       wValue: value, wIndex: command.usbIndex, wLength: length)
     }
 
-    private func control(_ op: UInt16) -> LinkCmdRequest {
-        LinkCmdRequest(tag: 2, handle: 0, direction: .get, bRequest: REQ_RTA_CONTROL,
-                       wValue: op, wIndex: 2, wLength: 1)
+    private func bands(_ ch: UInt16 = 0) -> LinkCmdRequest { get(VC.MEAS.RTA_BANDS, ch) }
+
+    /// MEAS.RTA_START, _STOP and _RESET are zero-length SETs.
+    private func control(_ command: VendorCommand) -> LinkCmdRequest {
+        LinkCmdRequest(tag: 2, handle: 0, direction: .set, bRequest: command.number,
+                       wIndex: command.usbIndex)
     }
+
+    private static let controls: Set<UInt16> = [VC.MEAS.RTA_START.id, VC.MEAS.RTA_STOP.id, VC.MEAS.RTA_RESET.id]
 
     /// Submit and wait, so each call lands in a known order against the clock.
     @discardableResult
@@ -49,14 +57,14 @@ final class LinkRtaArbitrationTests: XCTestCase {
     }
 
     private func stopsReachingDevice(_ device: LinkFakeDevice) -> Int {
-        device.executed.filter { $0.bRequest == REQ_RTA_CONTROL && $0.wValue == RTA_CTL_STOP }.count
+        device.executed.filter { $0.commandID == VC.MEAS.RTA_STOP.id }.count
     }
 
     func testStopForwardedWhenAlone() {
         let dev = LinkFakeDevice(); dev.responsePayload = Data([0x01])
         let router = makeRouter(dev)
         run(router, bands(), from: 10)
-        let r = run(router, control(RTA_CTL_STOP), from: 10)
+        let r = run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(r.status, .ok)
         XCTAssertEqual(stopsReachingDevice(dev), 1, "the stopping session's own reads do not hold it")
     }
@@ -66,9 +74,9 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let router = makeRouter(dev)
         run(router, bands(), from: 11)
         clock += 4.9
-        let r = run(router, control(RTA_CTL_STOP), from: 10)
+        let r = run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(r.status, .ok)
-        XCTAssertEqual(r.payload, Data([0x01]), "the ack the device would have sent")
+        XCTAssertEqual(r.payload, Data(), "a zero-length SET's ACK carries nothing")
         XCTAssertEqual(r.tag, 2)
         XCTAssertEqual(stopsReachingDevice(dev), 0)
     }
@@ -79,9 +87,9 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let e = expectation(description: "both"); e.expectedFulfillmentCount = 2
         var stop: LinkCmdResponse?
         router.submit(bands(), session: session(11)) { _ in e.fulfill() }
-        router.submit(control(RTA_CTL_STOP), session: session(10)) { stop = $0.response; e.fulfill() }
+        router.submit(control(VC.MEAS.RTA_STOP), session: session(10)) { stop = $0.response; e.fulfill() }
         wait(for: [e], timeout: 2)
-        XCTAssertEqual(stop?.payload, Data([0x01]))
+        XCTAssertEqual(stop?.status, .ok)
         XCTAssertEqual(stopsReachingDevice(dev), 0)
     }
 
@@ -90,21 +98,19 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let router = makeRouter(dev)
         run(router, bands(), from: 11)
         clock += 5.1
-        run(router, control(RTA_CTL_STOP), from: 10)
+        run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(stopsReachingDevice(dev), 1)
     }
 
     func testStartAndBinReadsCountAsWatching() {
         let dev = LinkFakeDevice()
         let router = makeRouter(dev)
-        run(router, control(RTA_CTL_START), from: 11)
-        run(router, control(RTA_CTL_STOP), from: 10)
-        run(router, LinkCmdRequest(tag: 3, handle: 0, direction: .get, bRequest: REQ_RTA_GET_BINS,
-                                   wValue: 0, wIndex: 2, wLength: 64), from: 12)
+        run(router, control(VC.MEAS.RTA_START), from: 11)
+        run(router, control(VC.MEAS.RTA_STOP), from: 10)
+        run(router, get(VC.MEAS.RTA_BINS, tag: 3, length: 64), from: 12)
         clock += 6
-        run(router, LinkCmdRequest(tag: 3, handle: 0, direction: .get, bRequest: REQ_RTA_GET_BANDS_ALL,
-                                   wValue: 0, wIndex: 2, wLength: 64), from: 13)
-        run(router, control(RTA_CTL_STOP), from: 10)
+        run(router, get(VC.MEAS.RTA_BANDS_ALL, tag: 3, length: 64), from: 13)
+        run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(stopsReachingDevice(dev), 0)
     }
 
@@ -112,17 +118,18 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let dev = LinkFakeDevice()
         let scheduler = PollScheduler(device: dev, policy: LinkPolicy.bundled!, driveWithTimer: false)
         let router = makeRouter(dev, scheduler: scheduler)
-        let spec = PollScheduler.PollSpec(handle: 0, req: REQ_RTA_GET_BANDS, wValue: 0, wIndex: 2, len: 82)
-        let granted = scheduler.subscribe(session: 11, role: .control, requests: [(slot: 0, spec: spec, hz: 10)])
+        let spec = PollScheduler.PollSpec(handle: 0, req: VC.MEAS.RTA_BANDS.number, wValue: 0,
+                                          wIndex: VC.MEAS.RTA_BANDS.usbIndex, len: 82)
+        let granted = scheduler.subscribe(session: 11, role: .admin, requests: [(slot: 0, spec: spec, hz: 10)])
         XCTAssertGreaterThan(granted.first?.grantedHz ?? 0, 0)
 
-        run(router, control(RTA_CTL_STOP), from: 10)
+        run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(stopsReachingDevice(dev), 0)
 
         // The stopping session's own subscription does not hold it.
         scheduler.unsubscribeAll(session: 11)
-        _ = scheduler.subscribe(session: 10, role: .control, requests: [(slot: 0, spec: spec, hz: 10)])
-        run(router, control(RTA_CTL_STOP), from: 10)
+        _ = scheduler.subscribe(session: 10, role: .admin, requests: [(slot: 0, spec: spec, hz: 10)])
+        run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(stopsReachingDevice(dev), 1)
         scheduler.stop()
     }
@@ -132,9 +139,9 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let router = makeRouter(dev)
         run(router, bands(), from: 11)
         router.sessionDidClose(11)
-        XCTAssertTrue(dev.executed.allSatisfy { $0.bRequest != REQ_RTA_CONTROL },
+        XCTAssertTrue(dev.executed.allSatisfy { !Self.controls.contains($0.commandID) },
                       "closing a session sends nothing to the device")
-        run(router, control(RTA_CTL_STOP), from: 10)
+        run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(stopsReachingDevice(dev), 1)
     }
 
@@ -142,10 +149,10 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let dev = LinkFakeDevice()
         let router = makeRouter(dev)
         run(router, bands(), from: 11)
-        run(router, control(RTA_CTL_START), from: 10)
-        run(router, control(RTA_CTL_RESET_AVG), from: 10)
-        let ops = dev.executed.filter { $0.bRequest == REQ_RTA_CONTROL }.map { $0.wValue }
-        XCTAssertEqual(ops, [RTA_CTL_START, RTA_CTL_RESET_AVG])
+        run(router, control(VC.MEAS.RTA_START), from: 10)
+        run(router, control(VC.MEAS.RTA_RESET), from: 10)
+        let ops = dev.executed.filter { Self.controls.contains($0.commandID) }.map { $0.commandID }
+        XCTAssertEqual(ops, [VC.MEAS.RTA_START.id, VC.MEAS.RTA_RESET.id])
     }
 
     /// The hub wires its own scheduler into the router, and the local UI
@@ -155,28 +162,55 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("rta-arb-\(UUID().uuidString).json"))
         let hub = LinkHub(usb: usb, policy: LinkPolicy.bundled ?? LinkPolicy.empty, auth: auth)
+        // A remote session's paged poll is refused until phase 7; this
+        // exercises the arbitration that goes live then.
+        hub.allowsRemotePagedCommands = true
         let dev = LinkFakeDevice()
         hub.attachDevice(dev)
         let local = hub.openSession(role: .admin, id: LinkHub.localSessionID)
-        let remote = hub.openSession(role: .control)
-        let spec = PollScheduler.PollSpec(handle: hub.currentHandle, req: REQ_RTA_GET_BANDS,
-                                          wValue: 0, wIndex: 2, len: 82)
+        let remote = hub.openSession(role: .admin)
+        let spec = PollScheduler.PollSpec(handle: hub.currentHandle, req: VC.MEAS.RTA_BANDS.number,
+                                          wValue: 0, wIndex: VC.MEAS.RTA_BANDS.usbIndex, len: 82)
         _ = hub.subscribePolls(session: remote.id, requests: [(slot: 0, spec: spec, hz: 10)])
 
         func stop() -> LinkCmdResponse {
             let e = expectation(description: "stop")
             var out: LinkCmdResponse?
-            let req = LinkCmdRequest(tag: 7, handle: hub.currentHandle, direction: .get,
-                                     bRequest: REQ_RTA_CONTROL, wValue: RTA_CTL_STOP, wIndex: 2, wLength: 1)
+            let req = LinkCmdRequest(tag: 7, handle: hub.currentHandle, direction: .set,
+                                     bRequest: VC.MEAS.RTA_STOP.number, wIndex: VC.MEAS.RTA_STOP.usbIndex)
             hub.submit(req, from: local.id) { out = $0; e.fulfill() }
             wait(for: [e], timeout: 2)
             return out!
         }
-        XCTAssertEqual(stop().payload, Data([0x01]))
+        XCTAssertEqual(stop().status, .ok)
         XCTAssertEqual(stopsReachingDevice(dev), 0)
 
         hub.closeSession(remote.id)
         _ = stop()
         XCTAssertEqual(stopsReachingDevice(dev), 1)
+    }
+
+    /// Until phase 7 a remote session's paged band poll is refused (0 Hz), so
+    /// it neither reaches the device nor holds the local session's STOP.
+    func testRemotePagedPollIsRefusedBeforePhaseSeven() {
+        let usb = USBDevice(startMonitoring: false)
+        let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("rta-arb-\(UUID().uuidString).json"))
+        let hub = LinkHub(usb: usb, policy: LinkPolicy.bundled ?? LinkPolicy.empty, auth: auth)
+        let dev = LinkFakeDevice()
+        hub.attachDevice(dev)
+        let local = hub.openSession(role: .admin, id: LinkHub.localSessionID)
+        let remote = hub.openSession(role: .admin)
+        let spec = PollScheduler.PollSpec(handle: hub.currentHandle, req: VC.MEAS.RTA_BANDS.number,
+                                          wValue: 0, wIndex: VC.MEAS.RTA_BANDS.usbIndex, len: 82)
+        let granted = hub.subscribePolls(session: remote.id, requests: [(slot: 0, spec: spec, hz: 10)])
+        XCTAssertEqual(granted.first?.grantedHz, 0)
+
+        let e = expectation(description: "stop")
+        let req = LinkCmdRequest(tag: 7, handle: hub.currentHandle, direction: .set,
+                                 bRequest: VC.MEAS.RTA_STOP.number, wIndex: VC.MEAS.RTA_STOP.usbIndex)
+        hub.submit(req, from: local.id) { r in XCTAssertEqual(r.status, .ok); e.fulfill() }
+        wait(for: [e], timeout: 2)
+        XCTAssertEqual(stopsReachingDevice(dev), 1, "a refused poll does not count as watching")
     }
 }

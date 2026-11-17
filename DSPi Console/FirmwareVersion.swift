@@ -84,7 +84,7 @@ struct FirmwareVersion: Comparable, Hashable, CustomStringConvertible {
 }
 
 extension FirmwareVersion {
-    /// Decodes a REQ_GET_PLATFORM reply into its platform byte and version.
+    /// Decodes a SYS.PLATFORM reply into its platform byte and version.
     ///
     /// The request asks for 7 bytes.  Bytes 4-5 are full-width minor and patch,
     /// because the legacy byte 2 packs them into a nibble each and so caps both
