@@ -320,7 +320,7 @@ extension DSPViewModel {
         p.gain = (p.gain * 1000).rounded() / 1000
         if p.gain == -0.0 { p.gain = 0.0 }
         channelData[ch]?[band] = p
-        transport.send(VC.FILTER.BAND, value: Self.filterBandAddress(ch: ch, band: band), data: Self.filterBandRecord(p))
+        bandWriter.write(address: Self.filterBandAddress(ch: ch, band: band), record: Self.filterBandRecord(p))
         recomputeMagnitudes(for: ch)
     }
 
@@ -331,7 +331,7 @@ extension DSPViewModel {
         var p = p
         p.gain = (p.gain * 1000).rounded() / 1000
         if p.gain == -0.0 { p.gain = 0.0 }
-        transport.send(VC.FILTER.BAND, value: Self.filterBandAddress(ch: ch, band: band), data: Self.filterBandRecord(p))
+        bandWriter.write(address: Self.filterBandAddress(ch: ch, band: band), record: Self.filterBandRecord(p))
     }
 
     /// FILTER.BAND address: `(channel << 8) | band`.  Bands 0-9 are PEQ,
@@ -368,9 +368,7 @@ extension DSPViewModel {
             recomputeMagnitudes(for: ch)
         }
 
-        let wValue = UInt16((ch << 8) | band)
-        let payload = Data([bypass ? 1 : 0])
-        transport.send(VC.FILTER.BAND_BYPASS, value: wValue, data: payload)
+        bandWriter.writeBypass(address: Self.filterBandAddress(ch: ch, band: band), bypass: bypass)
     }
 
     // MARK: - Crossover Bands
@@ -400,8 +398,8 @@ extension DSPViewModel {
             recomputeMagnitudes(for: ch)
         }
 
-        transport.send(VC.FILTER.BAND, value: Self.filterBandAddress(ch: ch, band: wireBand),
-                       data: Self.filterBandRecord(p))
+        bandWriter.write(address: Self.filterBandAddress(ch: ch, band: wireBand),
+                         record: Self.filterBandRecord(p))
     }
 
     /// Toggle a single crossover band's bypass flag.  Uses FILTER.BAND_BYPASS
@@ -416,9 +414,7 @@ extension DSPViewModel {
             xoverData[ch] = bands
             recomputeMagnitudes(for: ch)
         }
-        let wValue = UInt16((ch << 8) | wireBand)
-        let payload = Data([bypass ? 1 : 0])
-        transport.send(VC.FILTER.BAND_BYPASS, value: wValue, data: payload)
+        bandWriter.writeBypass(address: Self.filterBandAddress(ch: ch, band: wireBand), bypass: bypass)
     }
 
     /// Clear all crossover bands on an output channel by writing the default

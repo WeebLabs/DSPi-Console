@@ -193,6 +193,10 @@ protocol DeviceTransport: AnyObject {
     /// `.unsupported` when there is no such board or it is not local.
     func enterLegacyBootloader() -> LinkStatus
 
+    /// Whether the connected board implements `command` (SYS.PAGE_COMMANDS);
+    /// nil when not known, as for a remote board.
+    func implements(_ command: VendorCommand, set: Bool) -> Bool?
+
     /// The connected board's vendor protocol generation.
     var deviceProtocol: DeviceProtocolState { get }
     var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { get }
@@ -329,6 +333,9 @@ extension DeviceTransport {
     /// GET a paged command.  `value` is the command's address, 0 for none.
     func get(_ command: VendorCommand, value: UInt16 = 0, length: UInt16) -> Result<Data, LinkStatus> {
         if let refusal = Self.localRefusal(command, isGet: true, payload: nil) { return .failure(refusal) }
+        // A command this build lacks: answer as the board would, without
+        // spending a transfer on it.
+        if implements(command, set: false) == false { return .failure(.vcUnknown) }
         return getControlResult(request: command.number, value: value, index: command.usbIndex, length: length)
     }
 
@@ -402,6 +409,10 @@ extension DeviceTransport {
     /// Only a local USB board can be updated from its legacy state (decision 2
     /// of the paged-protocol port plan); remote transports and fakes refuse.
     func enterLegacyBootloader() -> LinkStatus { .unsupported }
+
+    func implements(_ command: VendorCommand, set: Bool) -> Bool? { nil }
+
+    func implements(_ command: VendorCommand) -> Bool? { implements(command, set: false) }
 
     /// With no hub there is nobody to lock out (USB, test fakes).
     func acquireDeviceLock(reason: String, timeout: TimeInterval) -> Bool { true }

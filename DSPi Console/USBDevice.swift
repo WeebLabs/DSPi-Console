@@ -195,6 +195,7 @@ class USBDevice: ObservableObject {
         generationLock.lock()
         connectionGeneration &+= 1
         protocolStore = .unknown
+        commandStore = nil
         generationLock.unlock()
         DispatchQueue.main.async { self.deviceProtocol = .unknown }
     }
@@ -205,6 +206,9 @@ class USBDevice: ObservableObject {
     /// generation: every open and close resets it, so a new board starts
     /// unprobed and the gate keeps paged requests off it until the probe runs.
     private var protocolStore: DeviceProtocolState = .unknown
+    /// SYS.PAGE_COMMANDS of the current connection, read once the probe has
+    /// shown it paged.  Reset with the protocol state.
+    private var commandStore: DeviceCommandSet?
 
     /// Main-thread copy of `protocolStore` for the UI.
     @Published private(set) var deviceProtocol: DeviceProtocolState = .unknown
@@ -223,6 +227,12 @@ class USBDevice: ObservableObject {
         case .success: return .ok
         case .failure(let status): return status
         }
+    }
+
+    /// Whether the open board implements `command`; nil when not known.
+    func implements(_ command: VendorCommand, set: Bool) -> Bool? {
+        generationLock.lock(); defer { generationLock.unlock() }
+        return commandStore?.implements(command, set: set)
     }
 
     /// Thread-safe snapshot of the current connection's protocol.
@@ -265,7 +275,18 @@ class USBDevice: ObservableObject {
         generationLock.lock()
         let current = connectionGeneration == probedGeneration
         if current { protocolStore = state }
+        let needCommands = current && state.isPaged && commandStore == nil
         generationLock.unlock()
+        if needCommands {
+            let commands = DeviceCommandSet.read { page in
+                self.getControlResult(request: VC.SYS.PAGE_COMMANDS.number, value: page,
+                                      index: VC.SYS.PAGE_COMMANDS.usbIndex, length: 64,
+                                      generation: probedGeneration)
+            }
+            generationLock.lock()
+            if connectionGeneration == probedGeneration { commandStore = commands }
+            generationLock.unlock()
+        }
         if current {
             DispatchQueue.main.async {
                 if self.generation == probedGeneration { self.deviceProtocol = state }

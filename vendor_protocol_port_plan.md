@@ -193,6 +193,16 @@ The BOOTSEL path also still works.
 - A linked-pair band drag, Clear All and paste each read back identical bands.
 - The statistics window shows about 1100 mV and a plausible temperature.
 
+**Result (committed 2026-11-17).** Phase 3 had already done the encoder, the matrix route, names, splits and statistics. This phase added the following:
+
+- **`BandWriter`.** It carries every band and band-bypass write, as specified above. On the busy rule:
+  - A bypass merges into a pending record for the same band.
+  - A band that stays busy past 50 ms is kept and retried 200 ms later, rather than waiting for the next edit.
+  - Pending bands are dropped on a device change.
+- **Feature gates.** `USBDevice` reads `SYS.PAGE_COMMANDS` for all 13 pages once a connection probes as paged. `DeviceTransport.implements(_:set:)` exposes the result, and the paged `get` answers a command the build lacks with `VC_ERR_UNKNOWN` without a transfer. So absence is decided by the bitmap and never probed on the wire.
+  - **Deliberate change.** The feature flags still need a successful read before a feature shows, because the signal generator, Control Surfaces, the analyser and the other features build their UI from the data that read fetches. Showing a feature after a failed read would give an empty panel.
+- **Hardware check.** On the 1.1.7 bench board, a burst of 30 band writes across 10 bands left every band holding its final value, and the board's bitmaps read as expected.
+
 ## Phase 7: The embedded DSPi Link hub and client
 
 **This phase starts only after the user confirms `~/DSPi-Link` is ready.** Until then, nothing reads or uses that repository.

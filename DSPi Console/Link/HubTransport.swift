@@ -72,6 +72,7 @@ final class HubTransport: DeviceTransport {
     /// Straight to USB: the hub never attaches a legacy board, so no router
     /// could carry it.
     func enterLegacyBootloader() -> LinkStatus { usb.enterLegacyBootloader() }
+    func implements(_ command: VendorCommand, set: Bool) -> Bool? { usb.implements(command, set: set) }
     var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { usb.deviceProtocolPublisher }
 
     func selectDevice(_ device: DSPiDevice) { usb.selectDevice(device) }

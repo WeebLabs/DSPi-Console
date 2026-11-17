@@ -46,6 +46,51 @@ enum LegacyOpcode {
     static let enterBootloader: UInt8 = 0xF0
 }
 
+// MARK: - Implemented commands
+
+/// Which commands the connected board's firmware implements, from
+/// SYS.PAGE_COMMANDS (64 bytes per page: GET bitmap, then SET bitmap; command
+/// n has bit n & 7 of byte n >> 3).  Features are gated on this, not on the
+/// version or on whether a probing read STALLed: in 1.1.7 a STALL can mean
+/// busy, a bad address or a bad value as well as "not built".
+struct DeviceCommandSet: Equatable {
+    /// Bitmaps of the pages the board answered.
+    private var bitmaps: [UInt8: [UInt8]] = [:]
+    /// Pages the board refused: not implemented by this build.
+    private var absentPages: Set<UInt8> = []
+
+    init() {}
+
+    mutating func record(page: UInt8, bitmap: Data) {
+        guard bitmap.count >= 64 else { return }
+        bitmaps[page] = [UInt8](bitmap.prefix(64))
+    }
+
+    mutating func recordAbsent(page: UInt8) { absentPages.insert(page) }
+
+    /// true or false when the board said, nil when its page could not be read.
+    func implements(_ command: VendorCommand, set: Bool = false) -> Bool? {
+        if absentPages.contains(command.page) { return false }
+        guard let map = bitmaps[command.page] else { return nil }
+        let n = Int(command.number)
+        return map[(set ? 32 : 0) + (n >> 3)] & (1 << (n & 7)) != 0
+    }
+
+    /// Reads every page of the registry through `get(wValue)`.
+    static func read(_ get: (UInt16) -> Result<Data, LinkStatus>) -> DeviceCommandSet {
+        var set = DeviceCommandSet()
+        for page in VendorCommandRegistry.pages {
+            switch get(UInt16(page.number)) {
+            case .success(let d): set.record(page: page.number, bitmap: d)
+            // A page this build lacks STALLs with VC_ERR_ADDRESS.
+            case .failure(.vcAddress), .failure(.vcUnknown): set.recordAbsent(page: page.number)
+            case .failure: break
+            }
+        }
+        return set
+    }
+}
+
 // MARK: - Probe
 
 enum ProtocolProbe {

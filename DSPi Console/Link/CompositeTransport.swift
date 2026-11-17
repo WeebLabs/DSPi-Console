@@ -376,6 +376,7 @@ final class CompositeTransport: DeviceTransport {
     var errorMessagePublisher: AnyPublisher<String?, Never> { errorSubject.eraseToAnyPublisher() }
     var deviceProtocol: DeviceProtocolState { protocolSubject.value }
     func enterLegacyBootloader() -> LinkStatus { active.enterLegacyBootloader() }
+    func implements(_ command: VendorCommand, set: Bool) -> Bool? { active.implements(command, set: set) }
     var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { protocolSubject.eraseToAnyPublisher() }
 
     /// The user's choice: a remote picked here stays put when a local board

@@ -2530,6 +2530,9 @@ class DSPViewModel: ObservableObject {
     var pendingDisplayPages: [Int: CsDisplayPage] = [:]
 
     let transport: any DeviceTransport
+    /// Every FILTER.BAND and FILTER.BAND_BYPASS write goes through this, so a
+    /// burst of band edits cannot lose writes to the device's busy slot.
+    lazy var bandWriter = BandWriter(transport: transport)
     /// Set while an IR learn holds the device lock (see `csIrLearnArm`).
     let irLearnLock = HeldFlag()
     /// Set while a firmware install holds the device lock.
