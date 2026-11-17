@@ -110,8 +110,9 @@ enum FilterFile {
     static func parse(line rawLine: String) -> Band? {
         let line = rawLine.trimmingCharacters(in: .whitespaces)
 
-        // "<keyword> <n>:" - requiring the index keeps unrelated prose (e.g. a
-        // "Filters: 5" summary line) from being read as a band.
+        // MSO's Equalizer APO exports use "Filter:" without an index.
+        // Any nonempty index must still be numeric, rejecting prose such as
+        // "Filters: 5". Crossover entries retain their required index.
         guard let match = readKeywords.first(where: {
                   line.lowercased().hasPrefix($0.keyword.lowercased())
               }),
@@ -120,7 +121,7 @@ enum FilterFile {
         let keywordEnd = line.index(line.startIndex, offsetBy: match.keyword.count)
         guard keywordEnd <= colon else { return nil }
         let indexText = line[keywordEnd..<colon].trimmingCharacters(in: .whitespaces)
-        guard Int(indexText) != nil else { return nil }
+        guard (bank == .peq && indexText.isEmpty) || Int(indexText) != nil else { return nil }
 
         var tokens = line[line.index(after: colon)...]
             .split(whereSeparator: { $0.isWhitespace })
