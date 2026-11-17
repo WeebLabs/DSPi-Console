@@ -110,6 +110,22 @@ final class LegacyFirmwareUpdateTests: XCTestCase {
         XCTAssertTrue(fake.calls.paged.contains(VC.SYS.ENTER_BOOTLOADER))
     }
 
+    /// A board flashed back to 1.1.6 is never attached; the verifier must still
+    /// confirm the write from its probed version (seen on the bench: a good
+    /// downgrade was reported as "did not return").
+    func testVerifierConfirmsALegacyBoard() {
+        let vm = DSPViewModel(transport: FakeTransport(protocolState: .legacy(old), connected: false))
+        pump { vm.legacyFirmwareVersion != nil }
+        let done = expectation(description: "verified")
+        var got: FirmwareVersion?
+        DispatchQueue.global().async {
+            got = ViewModelFirmwareVerifier(vm: vm).awaitDeviceVersion(timeout: 2)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(got, old)
+    }
+
     func testUSBRefusesTheOldRequestUnlessTheBoardIsLegacy() {
         // An inert USBDevice has no board, so its state is unknown.
         XCTAssertEqual(USBDevice(startMonitoring: false).enterLegacyBootloader(), .unsupported)

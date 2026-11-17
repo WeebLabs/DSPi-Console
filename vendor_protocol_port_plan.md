@@ -148,7 +148,12 @@ The BOOTSEL path also still works.
 - **Transport.** `DeviceTransport.enterLegacyBootloader()` sends the old `0xF0` request. Only `USBDevice` implements it, and only for a board classified as legacy on that connection, bound to the connection. The hub and the composite transport forward it. Remote transports refuse it.
 - **View model.** `DSPViewModel.legacyFirmwareVersion`, `deviceFirmwareVersion` and `canEnterBootloader` drive the banner, `firmwareMatch` and the update window. As a result, a 1.1.6 board shows the "device is older" banner and can be updated without ever counting as connected.
 - **Tests.** The unit tests use a fake transport to cover the legacy branch and the paged branch.
-- **Hardware check: still to do.** The app still bundles the 1.1.6 images, so an install now would be a downgrade, and none has been run.
+- **Hardware check (2026-11-17).** Run on the RP2350 bench board with an approved, uncommitted bench build: version set to `1.1.7-beta1`, bundling firmware build `33673ef`, the same build the board ran.
+  - **1.1.6 to 1.1.7, twice.** With the board on 1.1.6, the banner and the update window showed it as 1.1.6. Update Firmware sent the old `0xF0` request, wrote 1.1.7 beta 1, and verified it, both times.
+  - **What 1.1.6 does with the old request.** It answers `0xF0` with a STALL but still reboots into its bootloader, about 10 seconds later. The flow treats a STALL as "sent" and waits, so this works.
+  - **Same delay on 1.1.7.** A 1.1.7 board also takes about 11 seconds after `SYS.ENTER_BOOTLOADER`, so the delay is firmware behaviour, not the app's.
+  - **1.1.7 to 1.1.6, the committed app's Downgrade.** It wrote 1.1.6 correctly, but its verify step then waited for a *connected* board, and a 1.1.6 board never is one. Fixed: `ViewModelFirmwareVerifier` reads `deviceFirmwareVersion`, which includes a legacy board's probed version.
+  - **Still unexplained.** One earlier downgrade attempt reported "came back running 1.1.7 beta 1", and the user then flashed 1.1.6 by hand. It didn't happen again in a logged run.
 
 ## Phase 5: Refusals and the former write-as-reads
 

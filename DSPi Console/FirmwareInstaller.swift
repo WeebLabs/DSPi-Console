@@ -110,8 +110,10 @@ struct ViewModelFirmwareVerifier: FirmwareVerifying {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let version: FirmwareVersion? = DispatchQueue.main.sync {
-                guard vm.isDeviceConnected, let v = vm.firmwareVersion else { return nil }
-                return FirmwareVersion(v.major, v.minor, v.patch, v.beta)
+                // deviceFirmwareVersion, not only a connected board's: a board
+                // flashed back to 1.1.6 or older is never attached, and only its
+                // probed version can confirm the write.
+                return vm.deviceFirmwareVersion
             }
             if let version { return version }
             Thread.sleep(forTimeInterval: 0.25)
