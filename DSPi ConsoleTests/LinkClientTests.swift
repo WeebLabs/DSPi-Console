@@ -226,49 +226,47 @@ final class LinkClientTests: XCTestCase {
 
     // MARK: - Commands
 
-    // These tests tunnel 1.1.6-style page-0 traffic (0x50 GET_STATUS, 0xD2
-    // SET_MASTER_VOLUME): until phase 7 the hub refuses remote paged commands,
-    // and page 0 still exercises the frames, roles and sessions the same way.
-    private static let getStatus: UInt8 = 0x50
-    private static let setMasterVolume: UInt8 = 0xD2
+    private static let levels = VC.MEAS.LEVELS
+    private static let masterVolume = VC.ROUTE.MASTER_VOLUME
 
     func testCommandsTunnelGetsAndSetsAndHonourTheRole() throws {
         let (client, _) = try connectAndPair(name: "Command Test")
 
         let get = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                 bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
+                                                 bRequest: Self.levels.number, wValue: 0,
+                                                 wIndex: Self.levels.usbIndex, wLength: 4))
         XCTAssertEqual(get.status, .ok)
         XCTAssertEqual(get.payload, shortPayload)
 
         let set = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
-                                                 bRequest: Self.setMasterVolume, wValue: 0, wIndex: 0,
-                                                 payload: Data([0xEC])))
+                                                 bRequest: Self.masterVolume.number, wValue: 0,
+                                                 wIndex: Self.masterVolume.usbIndex, payload: Data([0, 0, 0xA0, 0xC1])))
         XCTAssertEqual(set.status, .ok)
 
         // A viewer may read but not write; the hub answers DENIED (spec 8.1).
         let (viewer, _) = try connectAndPair(name: "Viewer Test", role: .viewer)
         XCTAssertEqual(viewer.role, .viewer)
         let denied = try run(viewer, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
-                                                    bRequest: Self.setMasterVolume, wValue: 0, wIndex: 0,
-                                                    payload: Data([0xEC])))
+                                                    bRequest: Self.masterVolume.number, wValue: 0,
+                                                    wIndex: Self.masterVolume.usbIndex, payload: Data([0, 0, 0xA0, 0xC1])))
         XCTAssertEqual(denied.status, .denied)
 
         let viewerGet = try run(viewer, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                       bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
+                                                       bRequest: Self.levels.number, wValue: 0,
+                                                       wIndex: Self.levels.usbIndex, wLength: 4))
         XCTAssertEqual(viewerGet.status, .ok)
 
-        // A remote paged command is refused until phase 7 keys the policy on
-        // paged IDs.
-        let levels = VC.MEAS.LEVELS
-        let paged = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                   bRequest: levels.number, wIndex: levels.usbIndex, wLength: 4))
-        XCTAssertEqual(paged.status, .unsupported)
+        // A 1.1.6-style request lands on page 0, which the table does not
+        // list, so it is config: a viewer is denied it (spec 10 rule 7).
+        let pageZero = try run(viewer, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
+                                                      bRequest: 0x50, wValue: 9, wIndex: 2, wLength: 4))
+        XCTAssertEqual(pageZero.status, .denied)
     }
 
     func testCommandBeforeReadyAnswersNoDevice() throws {
         let client = makeClient()
         let response = try run(client, LinkCmdRequest(tag: 7, handle: 0, direction: .get,
-                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.levels.number, wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4))
         XCTAssertEqual(response.status, .noDevice)
         XCTAssertEqual(response.tag, 7)
     }
@@ -295,8 +293,8 @@ final class LinkClientTests: XCTestCase {
         }
 
         let set = try run(a, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .set,
-                                            bRequest: Self.setMasterVolume, wValue: 0, wIndex: 0,
-                                            payload: Data([0xEC])))
+                                            bRequest: Self.masterVolume.number, wValue: 0, wIndex: Self.masterVolume.usbIndex,
+                                            payload: Data([0, 0, 0xA0, 0xC1])))
         XCTAssertEqual(set.status, .ok)
 
         // Source 1 is PARAM_SRC_HOST_SET, which is what the hub attributes to
@@ -352,7 +350,7 @@ final class LinkClientTests: XCTestCase {
         waitForDevices(client) { $0.count == 1 }
 
         let response = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.levels.number, wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4))
         XCTAssertEqual(response.status, .ok)
         XCTAssertEqual(response.payload, shortPayload)
     }
@@ -372,7 +370,7 @@ final class LinkClientTests: XCTestCase {
         XCTAssertTrue(reason.lowercased().contains("revok"), "unexpected reason: \(reason)")
 
         let response = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.levels.number, wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4))
         XCTAssertNotEqual(response.status, .ok)
     }
 
@@ -389,7 +387,7 @@ final class LinkClientTests: XCTestCase {
         waitForDevices(client) { $0.count == 1 }
 
         let response = try run(client, LinkCmdRequest(tag: 0, handle: hub.currentHandle, direction: .get,
-                                                      bRequest: Self.getStatus, wValue: 9, wIndex: 2, wLength: 4))
+                                                      bRequest: Self.levels.number, wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4))
         XCTAssertEqual(response.status, .ok)
     }
 }

@@ -241,8 +241,14 @@ final class LinkFrameTests: XCTestCase {
     }
 
     func testUnknownStatusAndDirectionThrow() {
-        XCTAssertThrowsError(try LinkFrame.decode(bytes("81 00 01 00 7A 00 00 00"))) { error in
-            XCTAssertEqual(error as? LinkFrameError, .unknownStatus(0x7A))
+        // 0x08..0x7F belong to the firmware (spec 1.3, 8.1): one this build
+        // does not name is still a refusal, never a broken frame.
+        XCTAssertEqual(try LinkFrame.decode(bytes("81 00 01 00 7A 00 00 00")),
+                       .cmdResponse(LinkCmdResponse(tag: 1, status: .error)))
+        XCTAssertEqual(try LinkFrame.decode(bytes("81 00 01 00 17 00 00 00")),
+                       .cmdResponse(LinkCmdResponse(tag: 1, status: .vcBusy)))
+        XCTAssertThrowsError(try LinkFrame.decode(bytes("81 00 01 00 9A 00 00 00"))) { error in
+            XCTAssertEqual(error as? LinkFrameError, .unknownStatus(0x9A))
         }
         XCTAssertThrowsError(try LinkFrame.decode(bytes("01 00 01 00 00 09 42 00 00 00 02 00 00 00"))) { error in
             XCTAssertEqual(error as? LinkFrameError, .unknownDirection(0x09))

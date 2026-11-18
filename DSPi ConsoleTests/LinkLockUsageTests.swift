@@ -47,11 +47,11 @@ final class LinkLockUsageTests: XCTestCase {
 
     /// A master-volume SET from the remote session, answered synchronously
     /// when refused.  Safe to call from inside the fake device's responder.
-    /// Sent as 1.1.6-style page-0 traffic (0xD2), which the hub still routes
-    /// for remote sessions; only the lock decides its answer here.
+    /// A ROUTE.MASTER_VOLUME SET from the remote admin session; only the lock
+    /// decides its answer here.
     private func probe(_ rig: Rig) -> LinkStatus {
         let req = LinkCmdRequest(tag: 1, handle: rig.hub.currentHandle, direction: .set,
-                                 bRequest: 0xD2, wValue: 0, wIndex: 2, payload: Data([0, 0, 0, 0]))
+                                 bRequest: VC.ROUTE.MASTER_VOLUME.number, wValue: 0, wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0, 0, 0, 0]))
         let sem = DispatchSemaphore(value: 0)
         let box = StatusBox()
         rig.hub.submit(req, from: rig.remote.id) { box.set($0.status); sem.signal() }

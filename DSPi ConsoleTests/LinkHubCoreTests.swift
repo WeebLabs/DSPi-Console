@@ -47,6 +47,10 @@ private final class FakeDevice: HubDevice {
 }
 
 final class LinkHubCoreTests: XCTestCase {
+    /// The traffic these tests send: a control-class SET and a read.
+    private static let volume = VC.ROUTE.MASTER_VOLUME
+    private static let levels = VC.MEAS.LEVELS
+
 
     private func makePolicy() -> LinkPolicy {
         // The bundled table; every code the app uses is classified.
@@ -69,10 +73,10 @@ final class LinkHubCoreTests: XCTestCase {
         // order; the device is gated so all queue before any runs.
         let done = expectation(description: "all done")
         done.expectedFulfillmentCount = 3
-        let reqs: [(LinkSessionID, UInt8)] = [(10, 0xD2), (11, 0xD2), (10, 0xD2)]
+        let reqs: [(LinkSessionID, UInt8)] = [(10, Self.volume.number), (11, Self.volume.number), (10, Self.volume.number)]
         for (i, (sid, code)) in reqs.enumerated() {
             let r = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set,
-                                   bRequest: code, wValue: UInt16(i), wIndex: 2,
+                                   bRequest: code, wValue: UInt16(i), wIndex: Self.volume.usbIndex,
                                    payload: Data([0,0,0,0]))
             router.submit(r, session: control(sid)) { _ in done.fulfill() }
         }
@@ -88,8 +92,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice()
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let e = expectation(description: "denied")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                               wIndex: 2, payload: Data([0,0,0,0]))
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                               wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
         router.submit(r, session: viewer(5)) { result in
             XCTAssertEqual(result.response.status, .denied)
             XCTAssertEqual(result.attributedTo, 0)
@@ -103,8 +107,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice(); dev.responsePayload = Data([1,2,3,4])
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let e = expectation(description: "ok")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
-                               wValue: 9, wIndex: 2, wLength: 4)
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: Self.levels.number,
+                               wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4)
         router.submit(r, session: viewer(5)) { result in
             XCTAssertEqual(result.response.status, .ok)
             XCTAssertEqual(result.response.payload, Data([1,2,3,4]))
@@ -118,9 +122,9 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice()
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let e = expectation(description: "ok")
-        // 0xF0 bootloader entry is config, write-as-read (get direction).
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0xF0,
-                               wIndex: 2, wLength: 1)
+        // SYS.ENTER_BOOTLOADER is config, a zero-length SET.
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: VC.SYS.ENTER_BOOTLOADER.number,
+                               wIndex: VC.SYS.ENTER_BOOTLOADER.usbIndex)
         router.submit(r, session: admin(1)) { result in
             XCTAssertEqual(result.response.status, .ok); e.fulfill()
         }
@@ -133,8 +137,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice()
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let e = expectation(description: "done")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                               wIndex: 2, payload: Data([0,0,0,0]))
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                               wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
         router.submit(r, session: control(42)) { result in
             XCTAssertEqual(result.attributedTo, 42)
             e.fulfill()
@@ -146,8 +150,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice(); dev.status = .error
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let e = expectation(description: "done")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                               wIndex: 2, payload: Data([0,0,0,0]))
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                               wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
         router.submit(r, session: control(42)) { result in
             XCTAssertEqual(result.response.status, .error)
             XCTAssertEqual(result.attributedTo, 0)
@@ -165,8 +169,8 @@ final class LinkHubCoreTests: XCTestCase {
         XCTAssertEqual(router.currentLockHolder, 1)
 
         let e = expectation(description: "blocked")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                               wIndex: 2, payload: Data([0,0,0,0]))
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                               wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
         router.submit(r, session: control(2)) { result in
             XCTAssertEqual(result.response.status, .locked); e.fulfill()
         }
@@ -212,8 +216,8 @@ final class LinkHubCoreTests: XCTestCase {
         let done = expectation(description: "3 replies")
         done.expectedFulfillmentCount = 3
         for i in 0..<3 {
-            let r = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: 0xD2,
-                                   wIndex: 2, payload: Data([0,0,0,0]))
+            let r = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: Self.volume.number,
+                                   wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
             router.submit(r, session: control(1)) { result in
                 lock.lock(); statuses.append(result.response.status); lock.unlock()
                 done.fulfill()
@@ -235,8 +239,8 @@ final class LinkHubCoreTests: XCTestCase {
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         router.commandTimeout = 0.3
         let e = expectation(description: "timeout")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
-                               wValue: 9, wIndex: 2, wLength: 4)
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: Self.levels.number,
+                               wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4)
         router.submit(r, session: control(1)) { result in
             XCTAssertEqual(result.response.status, .timeout); e.fulfill()
         }
@@ -248,8 +252,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice(); dev.isConnected = false
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let e = expectation(description: "no device")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
-                               wValue: 9, wIndex: 2, wLength: 4)
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: Self.levels.number,
+                               wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4)
         router.submit(r, session: control(1)) { result in
             XCTAssertEqual(result.response.status, .noDevice); e.fulfill()
         }
@@ -266,8 +270,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice()
         let gate = DispatchSemaphore(value: 0); dev.gate = gate
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                               wIndex: 2, payload: Data([0,0,0,0]))
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                               wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
 
         // The first write is inside the device; the second queues behind it.
         let first = expectation(description: "first"), second = expectation(description: "second")
@@ -295,8 +299,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice()
         let gate = DispatchSemaphore(value: 0); dev.gate = gate
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
-                               wValue: 9, wIndex: 2, wLength: 4)
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: Self.levels.number,
+                               wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4)
 
         let first = expectation(description: "first"), second = expectation(description: "second")
         router.submit(r, session: control(1)) { result in
@@ -325,8 +329,8 @@ final class LinkHubCoreTests: XCTestCase {
         let dev = FakeDevice()
         let gate = DispatchSemaphore(value: 0); dev.gate = gate
         var router: CommandRouter? = CommandRouter(handle: 0, device: dev, policy: makePolicy())
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
-                               wValue: 9, wIndex: 2, wLength: 4)
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: Self.levels.number,
+                               wValue: 0, wIndex: Self.levels.usbIndex, wLength: 4)
 
         let done = expectation(description: "both answered"); done.expectedFulfillmentCount = 2
         router!.submit(r, session: control(1)) { _ in done.fulfill() }
@@ -462,8 +466,8 @@ extension LinkHubCoreTests {
         var limited = 0
         let lock = NSLock()
         for i in 0..<50 {
-            let r = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: 0xD2,
-                                   wIndex: 2, payload: Data([0,0,0,0]))
+            let r = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: Self.volume.number,
+                                   wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
             router.submit(r, session: local) { res in
                 if res.response.status == .rateLimited { lock.lock(); limited += 1; lock.unlock() }
                 done.fulfill()
@@ -480,8 +484,8 @@ extension LinkHubCoreTests {
         XCTAssertEqual(router.consumeAttribution(within: 1), 0)
         let done = expectation(description: "sets"); done.expectedFulfillmentCount = 2
         for sid: LinkSessionID in [7, 9] {
-            let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                                   wIndex: 2, payload: Data([0,0,0,0]))
+            let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                                   wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
             router.submit(r, session: control(sid)) { _ in done.fulfill() }
         }
         wait(for: [done], timeout: 3)
@@ -495,8 +499,8 @@ extension LinkHubCoreTests {
         let dev = FakeDevice()
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let done = expectation(description: "set")
-        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                               wIndex: 2, payload: Data([0,0,0,0]))
+        let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                               wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
         router.submit(r, session: control(7)) { _ in done.fulfill() }
         wait(for: [done], timeout: 3)
         XCTAssertEqual(router.consumeAttribution(within: 1, now: Date().addingTimeInterval(5)), 0,
@@ -511,8 +515,8 @@ extension LinkHubCoreTests {
         let router = CommandRouter(handle: 0, device: dev, policy: makePolicy())
         let done = expectation(description: "sweep"); done.expectedFulfillmentCount = 5
         for _ in 0..<5 {
-            let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                                   wIndex: 2, payload: Data([0,0,0,0]))
+            let r = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: Self.volume.number,
+                                   wIndex: Self.volume.usbIndex, payload: Data([0,0,0,0]))
             router.submit(r, session: control(7)) { _ in done.fulfill() }
         }
         wait(for: [done], timeout: 3)
@@ -568,7 +572,7 @@ extension LinkHubCoreTests {
         done.expectedFulfillmentCount = 3
         for (tag, sid): (UInt16, LinkSessionID) in [(1, 7), (2, 7), (3, 9)] {
             let request = LinkCmdRequest(tag: tag, handle: 0, direction: .set,
-                                         bRequest: 0xD2, wIndex: 2, payload: Data([0, 0, 0, 0]))
+                                         bRequest: Self.volume.number, wIndex: Self.volume.usbIndex, payload: Data([0, 0, 0, 0]))
             router.submit(request, session: control(sid)) { result in
                 XCTAssertEqual(result.response.status, tag == 2 ? .error : .ok)
                 done.fulfill()
@@ -630,8 +634,8 @@ extension LinkHubCoreTests {
         XCTAssertEqual(session.role, .control)
 
         let done = expectation(description: "set answered")
-        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
-                                 wIndex: 2, payload: Data([0, 0, 0, 0]))
+        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: Self.volume.number,
+                                 wIndex: Self.volume.usbIndex, payload: Data([0, 0, 0, 0]))
         hub.submit(req, from: session.id) { response in
             XCTAssertEqual(response.status, .ok, "a viewer promoted to control may set the volume")
             done.fulfill()

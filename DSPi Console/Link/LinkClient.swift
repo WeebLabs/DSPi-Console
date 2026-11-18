@@ -29,7 +29,6 @@ final class LinkClient: LinkClientProtocol {
     /// Bulk transfers get longer: the hub itself waits 5 s for the device and
     /// the blob is thousands of bytes on the wire behind that.
     private static let bulkTimeout: TimeInterval = 15
-    private static let bulkOpcodes: Set<UInt8> = [0xA0, 0xA1, 0xA2, 0xA3]
     private static let pingInterval: TimeInterval = 15
     /// A hub close frame and the receive failure it provokes race each other;
     /// when the failure wins, wait this long for the close code to land so the
@@ -203,7 +202,10 @@ final class LinkClient: LinkClientProtocol {
             generation = self.generation
             task = live
 
-            let isBulk = Self.bulkOpcodes.contains(request.bRequest)
+            // The registry's BULK flag, by command ID (STORE.ALL_PARAMS and its
+            // chunked form); every page reuses the same command numbers.
+            let isBulk = VendorCommandRegistry.info(for: VendorCommand(request.commandID))?
+                .flags.contains(.bulk) ?? false
             let work = DispatchWorkItem { [weak self] in
                 self?.timeOutCommand(tag: tag, generation: generation)
             }

@@ -201,8 +201,11 @@ final class LinkSessionHandler {
         self.session = s
         wireSessionCallbacks(s)
         if let id = reply {
+            // 1.3: denied_ids carries command IDs; denied ([bRequest, dir]) is
+            // always empty, since a bRequest cannot name a paged command.
             let descriptor = LinkPolicyDescriptor(
-                denied: policy.denied(for: role).map { [Int($0.code), Int($0.direction == .set ? 0 : 1)] })
+                denied: [],
+                deniedIDs: policy.denied(for: role).map { [Int($0.id), Int($0.direction == .set ? 0 : 1)] })
             let body = LinkAuthOkBody(session: Int(s.id), role: role, token: token, policy: descriptor)
             sendOk(id: id, body: body)
         }
@@ -283,6 +286,10 @@ final class LinkSessionHandler {
 
     private func handlePollSubscribe(_ m: LinkPollSubscribe) {
         guard let session = session else { return }
+        // A legacy board takes no paged command, polls included (spec 7.4).
+        guard !hub.isLegacy(handle: UInt8(truncatingIfNeeded: m.handle)) else {
+            return emit(err(m.id, LinkErrorCode.unsupported))
+        }
         let requests = m.polls.map { p in
             (slot: p.slot,
              spec: PollScheduler.PollSpec(handle: UInt8(truncatingIfNeeded: m.handle),
@@ -373,7 +380,8 @@ final class LinkSessionHandler {
                        fwBeta: d.info.firmwareBeta, outputs: d.info.outputs, inputs: d.info.inputs,
                        wireVersion: d.info.wireVersion,
                        state: d.state, link: d.info.link == .usb ? .usb : .uart,
-                       lockedBy: d.lockedBy.map { Int($0) })
+                       lockedBy: d.lockedBy.map { Int($0) },
+                       protocolVersion: d.info.protocolVersion)
     }
 
     private func send(_ message: LinkMessage) {

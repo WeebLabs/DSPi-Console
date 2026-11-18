@@ -281,10 +281,10 @@ final class DeviceProtocolTests: XCTestCase {
         let transport = NetworkTransport(client: client, hubID: "hub-1", hubName: "Studio",
                                          tokens: LinkTokenStore(service: "test-\(UUID().uuidString)"),
                                          clientName: "Tester")
-        transport.allowsPagedRequests = true
         client.responder = { LinkCmdResponse(tag: $0.tag, status: .ok) }
         transport.bind(serial: "AAAA")
-        client.setDevices([LinkDeviceInfo(handle: 1, serial: "AAAA", name: nil, state: .online)])
+        client.setDevices([LinkDeviceInfo(handle: 1, serial: "AAAA", name: nil, state: .online,
+                                           protocolVersion: LinkDeviceProtocol(major: 1, minor: 0))])
         client.setState(.ready)
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
 

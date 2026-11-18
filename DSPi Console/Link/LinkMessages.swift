@@ -141,8 +141,8 @@ struct LinkProtoVersion: Codable, Equatable {
     var major: Int
     var minor: Int
 
-    /// Defaults to the version this build speaks: spec 1.1.
-    init(major: Int = 1, minor: Int = 1) {
+    /// Defaults to the version this build speaks: spec 1.3.
+    init(major: Int = 1, minor: Int = 3) {
         self.major = major
         self.minor = minor
     }
@@ -211,26 +211,39 @@ struct LinkLimits: Codable, Equatable {
     }
 }
 
-/// The session's effective denial list: `[bRequest, dir]` pairs, so a client
-/// can grey out controls instead of guessing the hub's policy table.
+/// The session's effective denial list, so a client can grey out controls
+/// instead of guessing the hub's policy table.  `denied_ids` holds
+/// `[commandID, dir]` pairs (spec 1.3, dir 0 SET, 1 GET); `denied` is the 1.2
+/// field of `[bRequest, dir]` pairs, which a 1.3 hub always sends empty.
 struct LinkPolicyDescriptor: Codable, Equatable {
     var denied: [[Int]]?
+    var deniedIDs: [[Int]]?
 
-    init(denied: [[Int]]? = nil) { self.denied = denied }
+    init(denied: [[Int]]? = nil, deniedIDs: [[Int]]? = nil) {
+        self.denied = denied
+        self.deniedIDs = deniedIDs
+    }
 
     enum CodingKeys: String, CodingKey {
         case denied
+        case deniedIDs = "denied_ids"
     }
 
-    var deniedCommands: [(bRequest: UInt8, direction: LinkDirection)] {
-        (denied ?? []).compactMap { pair in
+    var deniedCommands: [(id: UInt16, direction: LinkDirection)] {
+        (deniedIDs ?? []).compactMap { pair in
             guard pair.count >= 2,
-                  let req = UInt8(exactly: pair[0]),
+                  let id = UInt16(exactly: pair[0]),
                   let dir = LinkDirection(rawValue: UInt8(truncatingIfNeeded: pair[1]))
             else { return nil }
-            return (req, dir)
+            return (id, dir)
         }
     }
+}
+
+/// A device's paged vendor protocol version (spec 7.4, added in 1.3).
+struct LinkDeviceProtocol: Codable, Equatable {
+    var major: Int
+    var minor: Int
 }
 
 struct LinkDeviceInfo: Codable, Equatable {
@@ -248,11 +261,16 @@ struct LinkDeviceInfo: Codable, Equatable {
     var link: LinkDeviceLinkKind?
     /// Session id holding the exclusive lock, absent or null when free.
     var lockedBy: Int?
+    /// Absent for a legacy device.  A client sends paged commands and polls
+    /// only to a device whose protocol major is 1.
+    var protocolVersion: LinkDeviceProtocol?
 
     init(handle: Int, serial: String, name: String? = nil, platform: Int? = nil,
          fw: String? = nil, fwBeta: Int? = nil, outputs: Int? = nil, inputs: Int? = nil,
          wireVersion: Int? = nil, state: LinkDeviceState? = nil,
-         link: LinkDeviceLinkKind? = nil, lockedBy: Int? = nil) {
+         link: LinkDeviceLinkKind? = nil, lockedBy: Int? = nil,
+         protocolVersion: LinkDeviceProtocol? = nil) {
+        self.protocolVersion = protocolVersion
         self.handle = handle
         self.serial = serial
         self.name = name
@@ -273,6 +291,7 @@ struct LinkDeviceInfo: Codable, Equatable {
         case wireVersion = "wire_version"
         case state, link
         case lockedBy = "locked_by"
+        case protocolVersion = "protocol"
     }
 }
 

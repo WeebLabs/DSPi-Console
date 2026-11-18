@@ -2,12 +2,12 @@ import XCTest
 @testable import DSPi_Console
 
 /// Coverage and behaviour tests for the DSPi Link command authorization table
-/// (Documentation/dspi_link_protocol_spec.md sections 6.3, 9.3 and 10 rule 7).
+/// (DSPi-Link spec 1.3, sections 6.3, 9.3 and 10 rule 7).
 ///
-/// The coverage tests read the app's own Constants.swift and the firmware's
-/// config.h at test time rather than duplicating the opcode lists here: the
-/// point is to fail when somebody adds an opcode and forgets the table, and a
-/// hand-copied list would just go stale alongside it.
+/// The coverage tests read the vendored firmware registry
+/// (Protocol/dspi_commands.json) at test time rather than duplicating the
+/// command list here: the point is to fail when the registry gains a command
+/// and the table does not, and a hand-copied list would go stale alongside it.
 final class LinkPolicyTests: XCTestCase {
 
     // MARK: - Loading
@@ -21,274 +21,98 @@ final class LinkPolicyTests: XCTestCase {
 
     func testBundledTableLoadsAndParses() throws {
         let policy = try loadPolicy()
-        XCTAssertEqual(policy.specVersion, "1.1")
+        XCTAssertEqual(policy.specVersion, "1.3")
         XCTAssertFalse(policy.generated.isEmpty)
-        XCTAssertGreaterThan(policy.entries.count, 200, "the table should cover the whole vendor surface")
 
-        // One entry per code, sorted, and no code carries an empty direction
-        // list (a row nobody can ever match is a silent hole).
-        var seen = Set<UInt8>()
-        var previous = -1
+        var seen = Set<UInt16>()
         for entry in policy.entries {
-            XCTAssertTrue(seen.insert(entry.code).inserted,
-                          "duplicate entry for 0x\(String(entry.code, radix: 16))")
-            XCTAssertGreaterThan(Int(entry.code), previous, "entries must be sorted by code")
-            previous = Int(entry.code)
-            XCTAssertFalse(entry.dirs.isEmpty, "\(entry.name) lists no direction")
-            XCTAssertFalse(entry.name.isEmpty)
+            XCTAssertTrue(seen.insert(entry.id).inserted, "duplicate row for \(entry.name)")
+            XCTAssertFalse(entry.directions.isEmpty, "\(entry.name) lists no direction")
+            XCTAssertEqual(VendorCommandRegistry.info(for: VendorCommand(entry.id))?.qualifiedName, entry.name,
+                           "row 0x\(String(entry.id, radix: 16)) is named for its command")
         }
-
-        // 0x01 and 0x02 are the MS OS 2.0 and WebUSB platform requests, not
-        // application commands.
-        XCTAssertNil(policy.entry(for: 0x01))
-        XCTAssertNil(policy.entry(for: 0x02))
     }
 
     // MARK: - Coverage
 
-    /// Path of a file in the repo, reached from this test source file.
-    private func repoFile(_ relative: String) -> URL {
-        URL(fileURLWithPath: #filePath)          // .../DSPi ConsoleTests/LinkPolicyTests.swift
-            .deletingLastPathComponent()         // .../DSPi ConsoleTests
-            .deletingLastPathComponent()         // repo root
-            .appendingPathComponent(relative)
-    }
-
-    func testEveryAppRequestConstantIsInTheTable() throws {
+    /// Every command of the firmware has a row, with exactly the directions the
+    /// firmware accepts, and the table names nothing the firmware lacks.
+    func testTableMatchesTheFirmwareRegistry() throws {
         let policy = try loadPolicy()
-        let url = repoFile("DSPi Console/Constants.swift")
-        let source = try String(contentsOf: url, encoding: .utf8)
-        // The app now addresses the paged VC.PAGE.NAME commands and keeps no
-        // 8-bit REQ_ constants. Phase 7 of vendor_protocol_port_plan.md
-        // re-keys the policy on paged command IDs and replaces this test.
-        guard source.contains("let REQ_") else {
-            throw XCTSkip("Constants.swift has no REQ_ opcodes since the paged-protocol port; phase 7 replaces this test")
+        XCTAssertEqual(policy.entries.count, VendorCommandRegistry.all.count)
+        for info in VendorCommandRegistry.all {
+            let entry = policy.entry(for: info.command.id)
+            XCTAssertNotNil(entry, "\(info.qualifiedName) has no policy row")
+            XCTAssertEqual(entry?.commandClass(for: .get) != nil, info.hasGet, "\(info.qualifiedName) GET")
+            XCTAssertEqual(entry?.commandClass(for: .set) != nil, info.hasSet, "\(info.qualifiedName) SET")
         }
-
-        let pattern = #"let\s+(REQ_[A-Za-z0-9_]+)\s*:\s*UInt8\s*=\s*(0x[0-9A-Fa-f]+|\d+)"#
-        let regex = try NSRegularExpression(pattern: pattern)
-        let range = NSRange(source.startIndex..., in: source)
-
-        var found = 0
-        var missing: [String] = []
-        regex.enumerateMatches(in: source, range: range) { match, _, _ in
-            guard let match = match,
-                  let nameRange = Range(match.range(at: 1), in: source),
-                  let valueRange = Range(match.range(at: 2), in: source) else { return }
-            let name = String(source[nameRange])
-            let text = String(source[valueRange])
-            let value = text.hasPrefix("0x")
-                ? UInt8(text.dropFirst(2), radix: 16)
-                : UInt8(text)
-            guard let code = value else { return }
-            found += 1
-            if policy.entry(for: code) == nil {
-                missing.append("\(name) (0x\(String(code, radix: 16, uppercase: true)))")
-            }
-        }
-
-        XCTAssertGreaterThan(found, 200, "failed to parse Constants.swift; the regex has drifted")
-        XCTAssertTrue(missing.isEmpty, "app REQ_ constants absent from commands.json: \(missing.joined(separator: ", "))")
-    }
-
-    func testEveryFirmwareRequestCodeIsInTheTable() throws {
-        let url = URL(fileURLWithPath: "/Users/weeblabs/DSPi/firmware/DSPi/config.h")
-        guard FileManager.default.fileExists(atPath: url.path),
-              let source = try? String(contentsOf: url, encoding: .utf8) else {
-            throw XCTSkip("firmware config.h not present on this machine")
-        }
-        // Firmware 1.1.7 dropped the flat REQ_ opcode table for the paged
-        // protocol. The policy is re-keyed on paged command IDs in phase 7 of
-        // vendor_protocol_port_plan.md, which replaces this test.
-        guard source.contains("#define REQ_") else {
-            throw XCTSkip("firmware checkout is on the paged protocol and defines no REQ_ opcodes")
-        }
-        let policy = try loadPolicy()
-
-        let pattern = #"#define\s+(REQ_[A-Z0-9_]+)\s+(0x[0-9A-Fa-f]+|\d+)"#
-        let regex = try NSRegularExpression(pattern: pattern)
-        let range = NSRange(source.startIndex..., in: source)
-
-        var found = 0
-        var missing: [String] = []
-        regex.enumerateMatches(in: source, range: range) { match, _, _ in
-            guard let match = match,
-                  let nameRange = Range(match.range(at: 1), in: source),
-                  let valueRange = Range(match.range(at: 2), in: source) else { return }
-            let name = String(source[nameRange])
-            let text = String(source[valueRange])
-            let value = text.hasPrefix("0x")
-                ? UInt8(text.dropFirst(2), radix: 16)
-                : UInt8(text)
-            guard let code = value else { return }
-            found += 1
-            if policy.entry(for: code) == nil {
-                missing.append("\(name) (0x\(String(code, radix: 16, uppercase: true)))")
-            }
-        }
-
-        XCTAssertGreaterThan(found, 200, "failed to parse config.h; the regex has drifted")
-        XCTAssertTrue(missing.isEmpty, "firmware REQ_ codes absent from commands.json: \(missing.joined(separator: ", "))")
     }
 
     // MARK: - Classification
 
-    func testUnknownCodeIsConfig() throws {
+    func testEveryGetIsARead() throws {
         let policy = try loadPolicy()
-        // 0x00 is unallocated in config.h and must stay admin-only.
-        XCTAssertNil(policy.entry(for: 0x00))
-        XCTAssertEqual(policy.classify(code: 0x00, direction: .set), .config)
-        XCTAssertEqual(policy.classify(code: 0x00, direction: .get), .config)
-    }
-
-    func testDirectionTheTableDoesNotListIsConfig() throws {
-        let policy = try loadPolicy()
-        // GET_STATUS is read on IN, but the firmware has no OUT handler for
-        // it; an unexpected direction must fail safe rather than inherit the
-        // entry's class.
-        XCTAssertEqual(policy.classify(code: 0x50, direction: .get), .read)
-        XCTAssertEqual(policy.classify(code: 0x50, direction: .set), .config)
-    }
-
-    func testSpotChecks() throws {
-        let policy = try loadPolicy()
-        // ENTER_BOOTLOADER and FACTORY_RESET are write-as-read: GET direction,
-        // but config by what they do.
-        XCTAssertEqual(policy.classify(code: 0xF0, direction: .get), .config)
-        XCTAssertEqual(policy.classify(code: 0x53, direction: .get), .config)
-        XCTAssertEqual(policy.classify(code: 0xD2, direction: .set), .control)
-        XCTAssertEqual(policy.classify(code: 0x50, direction: .get), .read)
-        XCTAssertEqual(policy.classify(code: 0xA0, direction: .get), .read)
-        XCTAssertEqual(policy.classify(code: 0xA1, direction: .set), .control)
-        XCTAssertEqual(policy.classify(code: 0x7C, direction: .get), .config)
-        XCTAssertEqual(policy.classify(code: 0x42, direction: .set), .control)
-        XCTAssertEqual(policy.classify(code: 0x43, direction: .get), .read)
-    }
-
-    func testSpecOneOneCommands() throws {
-        let policy = try loadPolicy()
-        XCTAssertEqual(policy.classify(code: 0x3E, direction: .set), .control)   // SET_TUBE_PARAM
-        XCTAssertEqual(policy.classify(code: 0x3F, direction: .get), .read)      // GET_TUBE_PARAM
-        XCTAssertEqual(policy.classify(code: 0x82, direction: .get), .read)      // GET_CLOCK_DIAG
-        XCTAssertEqual(policy.classify(code: 0x82, direction: .set), .config)
-    }
-
-    /// Selecting a latency option writes flash and restarts the outputs, so it
-    /// is config; reading the status or table is open to viewers.
-    func testOutputLatencyIsClassedPerDirection() throws {
-        let policy = try loadPolicy()
-        XCTAssertEqual(policy.classify(code: 0x03, direction: .set), .config)
-        XCTAssertEqual(policy.classify(code: 0x03, direction: .get), .read)
-        XCTAssertFalse(policy.isAllowed(role: .control, code: 0x03, direction: .set))
-        XCTAssertTrue(policy.isAllowed(role: .viewer, code: 0x03, direction: .get))
-    }
-
-    // MARK: - Per-direction classes (spec 9.3, 1.1)
-
-    /// REQ_LIMITER is one opcode both ways: a viewer may poll its meter but
-    /// not change a setting.
-    func testLimiterIsClassedPerDirection() throws {
-        let policy = try loadPolicy()
-        XCTAssertEqual(policy.classify(code: 0x81, direction: .set), .control)
-        XCTAssertEqual(policy.classify(code: 0x81, direction: .get), .read)
-        XCTAssertTrue(policy.isAllowed(role: .viewer, code: 0x81, direction: .get))
-        XCTAssertFalse(policy.isAllowed(role: .viewer, code: 0x81, direction: .set))
-        XCTAssertTrue(policy.isAllowed(role: .control, code: 0x81, direction: .set))
-
-        let viewerDenied = policy.denied(for: .viewer)
-        XCTAssertTrue(viewerDenied.contains { $0.code == 0x81 && $0.direction == .set })
-        XCTAssertFalse(viewerDenied.contains { $0.code == 0x81 && $0.direction == .get })
-    }
-
-    /// `class` must be the strictest of a row's `classes`, so a 1.0 hub that
-    /// ignores the key fails safe; and `classes` may only name listed directions.
-    func testPerDirectionRowsKeepTheStrictestClass() throws {
-        let rank: [LinkCommandClass: Int] = [.read: 0, .control: 1, .config: 2]
-        let policy = try loadPolicy()
-        for entry in policy.entries {
-            guard let classes = entry.classes else { continue }
-            XCTAssertEqual(Set(classes.keys), Set(entry.dirs.map(\.rawValue)), entry.name)
-            let strictest = entry.dirs.map { rank[entry.commandClass(for: $0)]! }.max()
-            XCTAssertEqual(rank[entry.commandClass], strictest, entry.name)
-        }
-        // A SET is never read, whatever the row says for its GET.
-        for entry in policy.entries where entry.dirs.contains(.set) {
-            XCTAssertNotEqual(entry.commandClass(for: .set), .read, entry.name)
+        for info in VendorCommandRegistry.all where info.hasGet {
+            XCTAssertEqual(policy.classify(id: info.command.id, direction: .get), .read, info.qualifiedName)
         }
     }
 
-    func testRowWithoutClassesAppliesClassToBothDirections() throws {
-        let json = #"""
-        {"spec_version": "1.1", "generated": "x", "commands": [
-          {"code": 129, "name": "LIMITER", "dirs": ["set", "get"], "class": "control"},
-          {"code": 130, "name": "SPLIT", "dirs": ["set", "get"], "class": "control",
-           "classes": {"set": "control", "get": "read"}}
-        ]}
-        """#
-        let policy = try LinkPolicy(data: Data(json.utf8))
-        XCTAssertEqual(policy.classify(code: 129, direction: .get), .control)
-        XCTAssertEqual(policy.classify(code: 130, direction: .get), .read)
-        XCTAssertEqual(policy.classify(code: 130, direction: .set), .control)
+    /// Unlisted IDs and directions fail safe to config.  Page 0 lists nothing,
+    /// so a 1.1.6-style request from an old client is admin only.
+    func testUnknownCommandsFailSafe() throws {
+        let policy = try loadPolicy()
+        XCTAssertEqual(policy.classify(id: 0x0050, direction: .get), .config, "old GET_STATUS on page 0")
+        XCTAssertEqual(policy.classify(id: 0x00D2, direction: .set), .config, "old SET_MASTER_VOLUME on page 0")
+        XCTAssertEqual(policy.classify(id: VC.SYS.PROTOCOL_INFO.id, direction: .set), .config, "a GET-only command's SET")
+        XCTAssertEqual(LinkPolicy.empty.classify(id: VC.MEAS.LEVELS.id, direction: .get), .config)
     }
 
-    /// Every write-as-read command must be classified by what it does, not by
-    /// its direction (spec section 6.3).  These are the ones commands.md
-    /// section 1.1 names; none of them may be `read`.
-    func testWriteAsReadCommandsAreNeverRead() throws {
+    /// The 15 SETs whose command number belonged to a control-class 1.1.6
+    /// opcode, so a table carried over by number would have let a control
+    /// session reboot the device or erase it (migration guide 13.3.8).
+    func testTheEscalationRowsAreConfig() throws {
         let policy = try loadPolicy()
-        let writeAsRead: [UInt8] = [0x51, 0x52, 0x53, 0x7C, 0x83, 0x90, 0x91, 0x92,
-                                    0xB1, 0xB3, 0xC0, 0xC2, 0xC4, 0xC6, 0xC8, 0xD6,
-                                    0xE4, 0xEC, 0xF0, 0xF1]
-        for code in writeAsRead {
-            XCTAssertNotEqual(policy.classify(code: code, direction: .get), .read,
-                              "0x\(String(code, radix: 16, uppercase: true)) mutates and must not be classed read")
+        let escalations: [VendorCommand] = [
+            VC.SYS.ENTER_BOOTLOADER, VC.STORE.FACTORY_RESET, VC.STORE.STARTUP, VC.INPUT.I2S_RX_PIN,
+            VC.INPUT.I2S_RX_RATE, VC.INPUT.ADAT_RX_CLOCK_MODE, VC.OUTPUT.TYPE, VC.OUTPUT.ADAT_TX_ENABLE,
+            VC.CS.SAVE, VC.CS.IR_CMD, VC.CS.IR_LEARN_ARM, VC.CS.DISPLAY_CONFIG, VC.XPORT.UART_CONFIG,
+            VC.CLOCK.I2S_BCK_PIN, VC.CLOCK.I2S_CLOCK_MODE,
+        ]
+        for cmd in escalations {
+            XCTAssertEqual(policy.classify(id: cmd.id, direction: .set), .config, "\(cmd)")
+            XCTAssertFalse(policy.isAllowed(role: .control, id: cmd.id, direction: .set), "\(cmd)")
         }
     }
 
-    // MARK: - Roles
-
-    func testRolePermissions() throws {
+    func testEverydayCommandsMatchTheirRoles() throws {
         let policy = try loadPolicy()
-
-        XCTAssertFalse(policy.isAllowed(role: .viewer, code: 0xD2, direction: .set))
-        XCTAssertTrue(policy.isAllowed(role: .viewer, code: 0xD3, direction: .get))
-
-        XCTAssertTrue(policy.isAllowed(role: .control, code: 0xD2, direction: .set))
-        XCTAssertFalse(policy.isAllowed(role: .control, code: 0xF0, direction: .get))
-
-        for entry in policy.entries {
-            for dir in entry.dirs {
-                XCTAssertTrue(policy.isAllowed(role: .admin, code: entry.code, direction: dir),
-                              "admin must be allowed \(entry.name)")
-            }
-        }
-        // Even an unlisted code is admin-allowed, since unlisted means config.
-        XCTAssertTrue(policy.isAllowed(role: .admin, code: 0x03, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .viewer, id: VC.MEAS.LEVELS.id, direction: .get))
+        XCTAssertTrue(policy.isAllowed(role: .viewer, id: VC.ROUTE.MASTER_VOLUME.id, direction: .get))
+        XCTAssertFalse(policy.isAllowed(role: .viewer, id: VC.ROUTE.MASTER_VOLUME.id, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .control, id: VC.ROUTE.MASTER_VOLUME.id, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .control, id: VC.FILTER.BAND.id, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .control, id: VC.SYS.DEVICE_NAME.id, direction: .set), "renames are control")
+        XCTAssertTrue(policy.isAllowed(role: .control, id: VC.STORE.ALL_PARAMS.id, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .control, id: VC.MEAS.RTA_STOP.id, direction: .set))
+        XCTAssertTrue(policy.isAllowed(role: .admin, id: VC.STORE.FACTORY_RESET.id, direction: .set))
     }
 
-    func testDeniedLists() throws {
+    // MARK: - Denied lists
+
+    func testDeniedListsMatchTheRoles() throws {
         let policy = try loadPolicy()
+        XCTAssertTrue(policy.denied(for: .admin).isEmpty)
 
         let viewerDenied = policy.denied(for: .viewer)
         XCTAssertFalse(viewerDenied.isEmpty)
         for pair in viewerDenied {
-            XCTAssertNotEqual(policy.classify(code: pair.code, direction: pair.direction), .read,
-                              "viewer's denial list must not contain read commands")
+            XCTAssertEqual(pair.direction, .set, "a viewer may read everything")
+            XCTAssertNotEqual(policy.classify(id: pair.id, direction: pair.direction), .read)
         }
-        // and everything not denied is readable by a viewer
-        let deniedSet = Set(viewerDenied.map { "\($0.code)-\($0.direction.rawValue)" })
-        for entry in policy.entries {
-            for dir in entry.dirs where entry.commandClass(for: dir) == .read {
-                XCTAssertFalse(deniedSet.contains("\(entry.code)-\(dir.rawValue)"))
-            }
-        }
-
-        XCTAssertTrue(policy.denied(for: .admin).isEmpty)
-
         let controlDenied = policy.denied(for: .control)
         for pair in controlDenied {
-            XCTAssertEqual(policy.classify(code: pair.code, direction: pair.direction), .config)
+            XCTAssertEqual(policy.classify(id: pair.id, direction: pair.direction), .config)
         }
-        XCTAssertTrue(controlDenied.contains { $0.code == 0xF0 })
+        XCTAssertTrue(controlDenied.contains { $0.id == VC.SYS.ENTER_BOOTLOADER.id && $0.direction == .set })
     }
 }

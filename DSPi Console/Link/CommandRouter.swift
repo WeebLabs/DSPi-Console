@@ -123,7 +123,7 @@ final class CommandRouter {
 
         // 1. Authorization: the role must permit this command.  Fails safe:
         // an unclassified command is config, admin-only.
-        guard policy.isAllowed(role: session.role, code: request.bRequest, direction: direction) else {
+        guard policy.isAllowed(role: session.role, id: request.commandID, direction: direction) else {
             return completion(reject(request, .denied))
         }
 
@@ -185,16 +185,11 @@ final class CommandRouter {
                                                attributedTo: 0))
             }
 
-            // Anything that can change device state is a write for attribution,
-            // whichever transfer direction carries it (write-as-read included).
+            // Every SET is a write for attribution and every GET a read
+            // (spec 1.3: firmware 1.1.7 has no write-as-reads).
             var writerToken: UInt64?
             var previousWriter: WriterEntry?
-            // In the paged protocol every GET is a read; 1.1.6 had
-            // write-as-reads, which only its policy table knows.
-            let isWrite = request.isPaged
-                ? direction == .set
-                : self.policy.classify(code: request.bRequest, direction: direction) != .read
-            if isWrite {
+            if direction == .set {
                 let param = Self.parameterKey(request)
                 self.stateLock.lock()
                 // A repeat of the same parameter by the same session is one entry,

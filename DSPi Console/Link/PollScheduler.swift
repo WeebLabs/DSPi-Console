@@ -149,7 +149,7 @@ final class PollScheduler {
             // Polls always travel as GET transfers; a command the table does
             // not class `read` for that direction must not be pollable, and
             // the role must permit it (spec 7.6).
-            let cls = policy.classify(code: req.spec.req, direction: .get)
+            let cls = policy.classify(id: req.spec.commandID, direction: .get)
             guard cls == .read, role.permits(cls) else { continue }
             guard req.slot >= 0, req.slot <= 15 else { continue }
 

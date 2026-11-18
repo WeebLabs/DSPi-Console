@@ -24,6 +24,8 @@ final class NetworkTransport: DeviceTransport {
     /// The address last dialled.  Main thread.
     private(set) var url: URL?
     private var boundHandle: UInt8?
+    /// The bound board's protocol, from its device object (spec 1.3, 7.4).
+    private let protocolSubject = CurrentValueSubject<DeviceProtocolState, Never>(.unknown)
     private var boundSerial: String?
     /// The hub's name for the bound device, kept so the placeholder shown
     /// while the hub is unreachable reads as the same device.
@@ -167,6 +169,7 @@ final class NetworkTransport: DeviceTransport {
         }
         guard let info = client.devices.first(where: { $0.serial == serial }) else {
             boundHandle = nil
+            publishProtocol(.unknown)
             selectedSubject.send(DSPiDevice(serial: serial, locationID: 0,
                                             hub: RemoteHubRef(hubID: hubID, hubName: hubName, handle: 255),
                                             remoteName: boundName))
@@ -174,7 +177,24 @@ final class NetworkTransport: DeviceTransport {
         }
         boundHandle = UInt8(truncatingIfNeeded: info.handle)
         boundName = info.name
+        publishProtocol(Self.protocolState(of: info))
         selectedSubject.send(Self.device(from: info, hubID: hubID, hubName: hubName))
+    }
+
+    /// A board whose object carries protocol major 1 is paged; no protocol at
+    /// all is a legacy board, or a hub older than spec 1.3 that does not say,
+    /// and either way it takes no paged command.  Not called legacy here: only
+    /// the computer the board is plugged into can update it.
+    static func protocolState(of info: LinkDeviceInfo) -> DeviceProtocolState {
+        guard let p = info.protocolVersion else { return .unknown }
+        guard p.major == Int(VendorProtocolVersion.major) else {
+            return .unsupported(major: UInt8(clamping: p.major))
+        }
+        return .paged(major: UInt8(clamping: p.major), minor: UInt8(clamping: p.minor))
+    }
+
+    private func publishProtocol(_ state: DeviceProtocolState) {
+        if protocolSubject.value != state { protocolSubject.send(state) }
     }
 
     private func clientStateChanged(_ state: LinkClientState) {
@@ -308,8 +328,8 @@ final class NetworkTransport: DeviceTransport {
     var errorMessagePublisher: AnyPublisher<String?, Never> { errorSubject.eraseToAnyPublisher() }
     /// A remote hub does not report its board's protocol yet; the Link
     /// protocol gains that field in phase 7 of the paged-protocol port.
-    var deviceProtocol: DeviceProtocolState { .unknown }
-    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { Just(.unknown).eraseToAnyPublisher() }
+    var deviceProtocol: DeviceProtocolState { protocolSubject.value }
+    var deviceProtocolPublisher: AnyPublisher<DeviceProtocolState, Never> { protocolSubject.eraseToAnyPublisher() }
 
     func selectDevice(_ device: DSPiDevice) { bind(serial: device.serial) }
     func reconnect() { if let url = url { connect(to: url) } }
@@ -335,15 +355,12 @@ final class NetworkTransport: DeviceTransport {
         }
     }
 
-    /// No hub reports its board's protocol until the Link protocol gains that
-    /// field (phase 7 of the paged-protocol port).  An older hub may front a
-    /// 1.1.6 board, which would run a paged request as an unrelated old
-    /// opcode, so paged requests are not sent to any hub until then.  Tests of
-    /// the transport's own behaviour turn this on.
-    var allowsPagedRequests = false
-
+    /// Paged requests go only to a board whose device object carries protocol
+    /// major 1 (spec 1.3, 7.4).  A legacy board, or one behind a hub older
+    /// than 1.3 that does not say, would run a paged request as an unrelated
+    /// 1.1.6 opcode, some of which reset the device or overwrite a preset.
     private func isRefusedUntilHubsReportProtocol(_ index: UInt16) -> Bool {
-        index >> 8 != 0 && !allowsPagedRequests
+        index >> 8 != 0 && !protocolSubject.value.isPaged
     }
 
     func sendControlRequest(request: UInt8, value: UInt16, index: UInt16, data: Data) {

@@ -192,7 +192,7 @@ enum LinkFrame: Equatable {
 
         case .cmdResponse:
             let rawStatus = try r.u8()
-            guard let status = LinkStatus(rawValue: rawStatus) else {
+            guard let status = LinkStatus(decoding: rawStatus) else {
                 throw LinkFrameError.unknownStatus(rawStatus)
             }
             _ = try r.u8()              // reserved
@@ -221,7 +221,7 @@ enum LinkFrame: Equatable {
         case .fwDataAck:
             let offset = try r.u32()
             let rawStatus = try r.u8()
-            guard let status = LinkStatus(rawValue: rawStatus) else {
+            guard let status = LinkStatus(decoding: rawStatus) else {
                 throw LinkFrameError.unknownStatus(rawStatus)
             }
             return .fwDataAck(LinkFwDataAck(tag: tag, offset: offset, status: status))

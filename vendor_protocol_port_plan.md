@@ -215,6 +215,21 @@ The BOOTSEL path also still works.
 - **Lift the fail-closed rule.** The phase 3 rule that rejects non-local sessions is lifted.
 - **Web app.** The bundled web app (`DSPi Console/Web/assets/index-*.js`) is rebuilt from the DSPi-Link web app against the new IDs.
 
+**Result (committed 2026-11-18).** It follows DSPi-Link spec 1.3, at DSPi-Link `4aec5ab`.
+
+- **Policy.** `Link/policy/commands.json` is DSPi-Link's ID-keyed table: 211 rows, which match the firmware registry exactly, with the 15 escalation SETs as config. `LinkPolicy`, the router and the poll scheduler classify by `(wIndex & 0xFF00) | bRequest`.
+  - Every SET counts as a write for attribution.
+  - The phase 3 remote shutout and the rename's old-row check are gone.
+- **Messages.**
+  - `hello` reports minor 3.
+  - The auth `ok` carries `policy.denied_ids`, with `denied` sent empty.
+  - The device object carries `protocol`.
+  - Status bytes `0x08` to `0x7F` decode, and an unnamed one counts as a refusal.
+- **Legacy boards.** A 1.1.6 board is listed with the version from its old `GET_PLATFORM` and no `protocol`. Every command for it answers `0x86 UNSUPPORTED`, and `poll.subscribe` answers `err unsupported`.
+- **Client.** `NetworkTransport` sends paged requests only to a board whose object carries protocol major 1, and publishes that as its protocol state. `LinkClient` takes its bulk timeout from the registry's `BULK` flag.
+- **Web app.** The bundled web app is rebuilt from DSPi-Link `js/apps/web` at `4aec5ab`: the index page, its script and the `wifi` chunk. The bridge's `setup.html` is not bundled.
+- **Tests.** The Link tests use command IDs. `LinkPolicyTests` now checks the table against the vendored registry, so it no longer reads `config.h` or `Constants.swift`.
+
 ## Phase 8: Tests, documentation and release readiness
 
 Each phase updates its own unit tests and fakes as it goes. This phase finishes off the rest.

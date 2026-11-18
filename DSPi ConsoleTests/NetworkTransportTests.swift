@@ -18,7 +18,33 @@ final class NetworkTransportTests: XCTestCase {
     }
 
     private func info(_ serial: String, handle: Int, state: LinkDeviceState = .online) -> LinkDeviceInfo {
-        LinkDeviceInfo(handle: handle, serial: serial, name: "Living room", state: state)
+        LinkDeviceInfo(handle: handle, serial: serial, name: "Living room", state: state,
+                       protocolVersion: LinkDeviceProtocol(major: 1, minor: 0))
+    }
+
+    /// A board whose device object carries no protocol (legacy firmware, or a
+    /// hub older than spec 1.3 that does not say) gets no paged request: it
+    /// would run an unrelated 1.1.6 opcode.
+    func testABoardWithoutProtocolGetsNoPagedRequest() {
+        let (t, client, _) = make()
+        client.responder = { LinkCmdResponse(tag: $0.tag, status: .ok, payload: Data(count: Int($0.wLength))) }
+        t.bind(serial: "OLD1")
+        client.setDevices([LinkDeviceInfo(handle: 0, serial: "OLD1", name: "Old", state: .online)])
+        client.setState(.ready)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(t.deviceProtocol, .unknown)
+        let e = expectation(description: "get")
+        DispatchQueue.global().async {
+            XCTAssertEqual(t.get(VC.MEAS.LEVELS, length: 21), .failure(.unsupported))
+            e.fulfill()
+        }
+        wait(for: [e], timeout: 3)
+        XCTAssertTrue(client.commands.isEmpty, "nothing reached the hub")
+
+        client.setDevices([LinkDeviceInfo(handle: 0, serial: "OLD1", name: "Old", state: .online,
+                                          protocolVersion: LinkDeviceProtocol(major: 1, minor: 0))])
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(t.deviceProtocol, .paged(major: 1, minor: 0))
     }
 
     func testBindResolvesHandleWhenDevicesArrive() {
@@ -162,7 +188,6 @@ final class NetworkTransportTests: XCTestCase {
     func testBulkReadUsesSnapshotWhenOffered() {
         let (t, client, _) = make()
         client.capabilities.append("snapshot")
-        t.allowsPagedRequests = true   // the shortcut, not the phase-3 refusal, is under test
         var blob = Data(count: Int(BULK_PARAMS_SIZE)); blob[0] = UInt8(WIRE_FORMAT_VERSION)
         client.snapshotBody = LinkSnapshotBody(handle: 0, wireVersion: WIRE_FORMAT_VERSION, ageMs: 5,
                                                bulkB64: blob.base64EncodedString(), statusB64: nil)

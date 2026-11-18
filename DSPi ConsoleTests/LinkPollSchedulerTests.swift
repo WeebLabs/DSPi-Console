@@ -57,8 +57,8 @@ final class LinkPollSchedulerTests: XCTestCase {
                       tickResolution: 0.05, driveWithTimer: false)
     }
 
-    // 0x50 GET_STATUS wValue 9 is a read poll; 0xD2 SET_MASTER_VOLUME is control.
-    private let statusSpec = PollScheduler.PollSpec(handle: 0, req: 0x50, wValue: 9, wIndex: 2, len: 27)
+    // MEAS.LEVELS is a read poll; ROUTE.MASTER_VOLUME's SET is control.
+    private let statusSpec = PollScheduler.PollSpec(handle: 0, req: VC.MEAS.LEVELS.number, wValue: 0, wIndex: VC.MEAS.LEVELS.usbIndex, len: 27)
 
     func testViewerReceivesPayloadsForReadPoll() {
         let dev = FakePollDevice()
@@ -86,15 +86,17 @@ final class LinkPollSchedulerTests: XCTestCase {
         let sched = scheduler(dev)
         defer { sched.stop() }
 
-        // 0xD2 SET_MASTER_VOLUME is class control, never read -> refused.
-        let setSpec = PollScheduler.PollSpec(handle: 0, req: 0xD2, wValue: 0, wIndex: 2, len: 4)
+        // Every GET of 1.1.7 is a read, so a poll is refused only for a command
+        // with no GET at all: SYS.ENTER_BOOTLOADER classifies as config.
+        let setSpec = PollScheduler.PollSpec(handle: 0, req: VC.SYS.ENTER_BOOTLOADER.number, wValue: 0,
+                                             wIndex: VC.SYS.ENTER_BOOTLOADER.usbIndex, len: 4)
         let granted = sched.subscribe(session: 1, role: .admin,
                                       requests: [(slot: 0, spec: setSpec, hz: 10)])
         XCTAssertEqual(granted.first?.grantedHz, 0, "a non-read command must be granted 0 hz")
         XCTAssertEqual(sched.activeSpecCount, 0, "a refused poll must not start a spec")
 
         for _ in 0..<10 { sched.tick() }
-        XCTAssertEqual(dev.executeCount(req: 0xD2), 0, "a refused poll must never be executed")
+        XCTAssertEqual(dev.executeCount(req: VC.SYS.ENTER_BOOTLOADER.number), 0, "a refused poll must never be executed")
     }
 
     func testGrantedRateIsCappedAtPollMaxHz() {
@@ -125,7 +127,7 @@ final class LinkPollSchedulerTests: XCTestCase {
         for _ in 0..<n { sched.tick() }
 
         // One execute per tick, not one per (session, tick).
-        XCTAssertEqual(dev.executeCount(req: 0x50), n)
+        XCTAssertEqual(dev.executeCount(req: VC.MEAS.LEVELS.number), n)
         // Each session still gets fanned every tick.
         XCTAssertEqual(s1, n)
         XCTAssertEqual(s2, n)
@@ -140,7 +142,7 @@ final class LinkPollSchedulerTests: XCTestCase {
         // 10 large polls at the cap: 10 * 2000 * 20 = 400000 bps, twice budget.
         var requests: [(slot: Int, spec: PollScheduler.PollSpec, hz: Double)] = []
         for i in 0..<10 {
-            let spec = PollScheduler.PollSpec(handle: 0, req: 0x50, wValue: UInt16(i), wIndex: 2, len: 2000)
+            let spec = PollScheduler.PollSpec(handle: 0, req: VC.MEAS.LEVELS.number, wValue: UInt16(i), wIndex: VC.MEAS.LEVELS.usbIndex, len: 2000)
             requests.append((slot: i, spec: spec, hz: 20))
         }
         let granted = sched.subscribe(session: 1, role: .viewer, requests: requests)
@@ -176,14 +178,14 @@ final class LinkPollSchedulerTests: XCTestCase {
 
         _ = sched.subscribe(session: 1, role: .viewer, requests: [(slot: 0, spec: statusSpec, hz: 20)])
         for _ in 0..<5 { sched.tick() }
-        let executedWhileSubscribed = dev.executeCount(req: 0x50)
+        let executedWhileSubscribed = dev.executeCount(req: VC.MEAS.LEVELS.number)
         XCTAssertGreaterThan(executedWhileSubscribed, 0)
 
         sched.unsubscribeAll(session: 1)
         XCTAssertEqual(sched.activeSpecCount, 0, "the spec must be dropped once unread")
 
         for _ in 0..<10 { sched.tick() }
-        XCTAssertEqual(dev.executeCount(req: 0x50), executedWhileSubscribed,
+        XCTAssertEqual(dev.executeCount(req: VC.MEAS.LEVELS.number), executedWhileSubscribed,
                        "execution must stop once no session subscribes")
     }
 
@@ -208,6 +210,6 @@ final class LinkPollSchedulerTests: XCTestCase {
         // The spec backed off to half rate (0.5 * 20 * 0.05 == 0.5 per tick),
         // so it executes on roughly every other tick after the trip, far fewer
         // than the ~20 a full-rate poll would have run over 20 ticks.
-        XCTAssertLessThan(dev.executeCount(req: 0x50), 18, "rate must drop after the failure episode")
+        XCTAssertLessThan(dev.executeCount(req: VC.MEAS.LEVELS.number), 18, "rate must drop after the failure episode")
     }
 }

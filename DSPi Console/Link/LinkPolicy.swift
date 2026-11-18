@@ -2,23 +2,23 @@
 //  LinkPolicy.swift
 //  DSPi Console
 //
-//  The hub's command authorization table: every vendor bRequest with the
-//  transfer directions the firmware accepts for it and the class that decides
-//  which roles may issue it.  The table itself lives in
-//  Link/policy/commands.json so that hubs and clients in other languages can
-//  embed the same copy rather than hand-transcribing it (spec section 9.3).
+//  The hub's command authorization table: every firmware 1.1.7 command, by
+//  its 16-bit command ID `(page << 8) | command`, with a class for each
+//  direction it has.  The table lives in Link/policy/commands.json, the same
+//  copy every DSPi Link hub and client embeds (spec section 9.3), taken from
+//  the DSPi-Link repository's policy/commands.json.
 //
-//  Rule 7 of spec section 10: a bRequest the table does not list is treated as
-//  config, which is admin-only.  A new firmware command is therefore locked
-//  down until somebody classifies it, never quietly exposed to viewers.
+//  Classified by command ID, never by bRequest alone: every page reuses the
+//  same command numbers.  Rule 7 of spec section 10: a command ID or a
+//  direction the table does not list is config, which is admin only, so a new
+//  firmware command is locked down until somebody classifies it.
 //
 
 import Foundation
 
 /// How much authority a command needs.  See spec section 6.3.
 enum LinkCommandClass: String, Codable {
-    /// Returns state and mutates nothing.  A write-as-read command (a GET
-    /// transfer that changes the device) is never `read`.
+    /// Returns state and mutates nothing.  Every GET of firmware 1.1.7.
     case read
     /// Changes listening state or runs a transient tool: EQ, routing, volume,
     /// presets, DSP features, test signals, the analyser.
@@ -34,45 +34,39 @@ enum LinkCommandClass: String, Codable {
 enum LinkCommandDirection: String, Codable {
     /// OUT, bmRequestType 0x41: payload travels in the data stage.
     case set
-    /// IN, bmRequestType 0xC1.  Also the direction of the write-as-read
-    /// commands, which mutate despite reading.
+    /// IN, bmRequestType 0xC1.
     case get
 }
 
 /// One row of the table.
 struct LinkCommandEntry: Codable, Equatable {
-    let code: UInt8
-    /// The 1.1.6 opcode name without its REQ_ prefix, for logs and UI.
+    /// `(page << 8) | command`.
+    let id: UInt16
+    /// `PAGE.NAME`, for logs and UI.
     let name: String
-    /// Directions the firmware accepts for this code.  Anything else STALLs.
-    let dirs: [LinkCommandDirection]
-    /// The strictest class of the row, and the class of every direction
-    /// `classes` does not name.
-    let commandClass: LinkCommandClass
-    /// Per-direction classes keyed by "set"/"get" (spec 9.3, added in 1.1).
+    /// The class of each direction the firmware accepts, keyed "get"/"set".
     /// String keys because an enum-keyed dictionary decodes from an array.
-    let classes: [String: LinkCommandClass]?
+    let classes: [String: LinkCommandClass]
     let note: String?
 
-    private enum CodingKeys: String, CodingKey {
-        case code, name, dirs, classes, note
-        case commandClass = "class"
+    func commandClass(for direction: LinkCommandDirection) -> LinkCommandClass? {
+        classes[direction.rawValue]
     }
 
-    func commandClass(for direction: LinkCommandDirection) -> LinkCommandClass {
-        classes?[direction.rawValue] ?? commandClass
+    var directions: [LinkCommandDirection] {
+        [.get, .set].filter { classes[$0.rawValue] != nil }
     }
 }
 
-/// The parsed table plus the two questions a hub asks of it.
+/// The parsed table plus the questions a hub asks of it.
 struct LinkPolicy {
     /// Spec version the table was taken from, recorded so a hub can report it.
     let specVersion: String
     let generated: String
     let entries: [LinkCommandEntry]
 
-    /// code -> entry, so classify() does not scan the array per command.
-    private let byCode: [UInt8: LinkCommandEntry]
+    /// id -> entry, so classify() does not scan the array per command.
+    private let byID: [UInt16: LinkCommandEntry]
 
     private struct Document: Codable {
         let spec_version: String
@@ -87,7 +81,7 @@ struct LinkPolicy {
         specVersion = doc.spec_version
         generated = doc.generated
         entries = doc.commands
-        byCode = Dictionary(doc.commands.map { ($0.code, $0) }, uniquingKeysWith: { first, _ in first })
+        byID = Dictionary(doc.commands.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// An empty table: every command classifies as config and only admin may
@@ -97,7 +91,7 @@ struct LinkPolicy {
         specVersion = "0"
         generated = ""
         entries = []
-        byCode = [:]
+        byID = [:]
     }
 
     static let empty = LinkPolicy()
@@ -122,30 +116,30 @@ struct LinkPolicy {
 
     // MARK: - Queries
 
-    func entry(for code: UInt8) -> LinkCommandEntry? { byCode[code] }
+    func entry(for id: UInt16) -> LinkCommandEntry? { byID[id] }
 
-    /// Fails safe: an unlisted code, or a direction the firmware does not
-    /// accept for a listed code, is config and therefore admin only.
-    func classify(code: UInt8, direction: LinkCommandDirection) -> LinkCommandClass {
-        guard let entry = byCode[code], entry.dirs.contains(direction) else { return .config }
-        return entry.commandClass(for: direction)
+    /// Fails safe: an unlisted command ID, or a direction the firmware does not
+    /// accept for a listed one, is config and therefore admin only.  Page 0,
+    /// where every 1.1.6-style request lands, lists nothing.
+    func classify(id: UInt16, direction: LinkCommandDirection) -> LinkCommandClass {
+        byID[id]?.commandClass(for: direction) ?? .config
     }
 
-    func isAllowed(role: LinkRole, code: UInt8, direction: LinkCommandDirection) -> Bool {
-        role.permits(classify(code: code, direction: direction))
+    func isAllowed(role: LinkRole, id: UInt16, direction: LinkCommandDirection) -> Bool {
+        role.permits(classify(id: id, direction: direction))
     }
 
-    /// Every (code, direction) pair in the table this role may not use, for
-    /// the `policy.denied` array in `hello` so clients can grey out controls
-    /// without replicating the classification.  Codes absent from the table
-    /// are not listed: the client cannot enumerate them either, and they are
-    /// already denied by the fail-safe rule.
-    func denied(for role: LinkRole) -> [(code: UInt8, direction: LinkCommandDirection)] {
+    /// Every (id, direction) pair in the table this role may not use, for the
+    /// `policy.denied_ids` array in the auth `ok` (spec 7.3), so clients can
+    /// grey out controls without replicating the classification.  IDs absent
+    /// from the table are not listed: they are already denied by the
+    /// fail-safe rule.
+    func denied(for role: LinkRole) -> [(id: UInt16, direction: LinkCommandDirection)] {
         entries
-            .sorted { $0.code < $1.code }
+            .sorted { $0.id < $1.id }
             .flatMap { entry in
-                entry.dirs.compactMap { dir in
-                    role.permits(entry.commandClass(for: dir)) ? nil : (code: entry.code, direction: dir)
+                entry.directions.compactMap { dir in
+                    role.permits(entry.commandClass(for: dir) ?? .config) ? nil : (id: entry.id, direction: dir)
                 }
             }
     }

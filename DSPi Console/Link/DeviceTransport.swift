@@ -70,6 +70,16 @@ enum LinkStatus: UInt8, Error, Equatable {
 
     /// A paged-protocol result code from the device.
     var isVendorResult: Bool { (0x10...0x1A).contains(rawValue) }
+
+    /// A status from a Link frame.  0x08..0x7F belong to the firmware and are
+    /// forwarded verbatim (spec 1.3, section 8.1); one this build does not
+    /// name is still a refusal, so it reads as `.error` (refused, reason
+    /// unknown) rather than failing the frame.  nil only outside that range.
+    init?(decoding raw: UInt8) {
+        if let known = LinkStatus(rawValue: raw) { self = known; return }
+        guard (0x08...0x7F).contains(raw) else { return nil }
+        self = .error
+    }
 }
 
 /// One notification packet from a device, as the transport delivered it.

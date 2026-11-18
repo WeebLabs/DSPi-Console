@@ -17,9 +17,6 @@ final class StatsViewModelThreadingTests: XCTestCase {
         let tokens = LinkTokenStore(service: "test-\(UUID().uuidString)")
         let transport = NetworkTransport(client: client, hubID: "hub-1", hubName: "Studio",
                                          tokens: tokens, clientName: "Tester")
-        // The Stats reads are paged; this tests where they run, not the
-        // phase-3 refusal of paged requests to remote hubs.
-        transport.allowsPagedRequests = true
         let lock = NSLock()
         var onMain: [UInt8] = []
         var count = 0
@@ -31,7 +28,8 @@ final class StatsViewModelThreadingTests: XCTestCase {
             return LinkCmdResponse(tag: req.tag, status: .ok, payload: Data(count: Int(req.wLength)))
         }
         transport.bind(serial: "AAAA")
-        client.setDevices([LinkDeviceInfo(handle: 1, serial: "AAAA", name: nil, state: .online)])
+        client.setDevices([LinkDeviceInfo(handle: 1, serial: "AAAA", name: nil, state: .online,
+                                           protocolVersion: LinkDeviceProtocol(major: 1, minor: 0))])
 
         let stats = StatsViewModel(transport: transport)
         client.setState(.ready)

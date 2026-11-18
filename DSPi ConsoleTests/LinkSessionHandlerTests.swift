@@ -152,9 +152,11 @@ final class LinkSessionHandlerTests: XCTestCase {
         let h = handler(hub, auth, policy, sink)
         h.receiveText(text(.authPair(LinkAuthPair(id: 1, pin: pin, name: "TV", role: .viewer))))
         let body = try? sink.lastOk()?.decodeBody(LinkAuthOkBody.self)
-        let denied = body?.policy?.denied ?? []
-        // 0xD2 (SET_MASTER_VOLUME) set-direction must be in a viewer's denied list.
-        XCTAssertTrue(denied.contains([0xD2, 0]), "viewer is denied master volume")
+        // ROUTE.MASTER_VOLUME's SET must be in a viewer's denied_ids (dir 0 = SET);
+        // the 1.2 denied field goes out empty.
+        let deniedIDs = body?.policy?.deniedIDs ?? []
+        XCTAssertTrue(deniedIDs.contains([Int(VC.ROUTE.MASTER_VOLUME.id), 0]), "viewer is denied master volume")
+        XCTAssertEqual(body?.policy?.denied, [])
     }
 
     // MARK: - Device list and rename

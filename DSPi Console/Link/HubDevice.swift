@@ -25,6 +25,9 @@ struct HubDeviceInfo: Equatable {
     /// The board's own name (SYS.DEVICE_NAME): nil when the firmware cannot
     /// store one, empty when it can but is unnamed (device_name_spec.md 5).
     var boardName: String? = nil
+    /// The paged vendor protocol version from SYS.PROTOCOL_INFO; nil for a
+    /// legacy (1.1.6 or older) board, which takes no paged command (spec 7.4).
+    var protocolVersion: LinkDeviceProtocol? = nil
 }
 
 enum LinkDeviceLink: String, Codable, Equatable { case usb, uart }

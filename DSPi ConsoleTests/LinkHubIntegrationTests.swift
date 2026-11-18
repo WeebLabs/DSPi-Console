@@ -62,8 +62,8 @@ final class LinkHubIntegrationTests: XCTestCase {
         let lock = NSLock()
         let done = expectation(description: "20 replies"); done.expectedFulfillmentCount = 20
         for i in 0..<20 {
-            let req = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: 0xD2,
-                                     wIndex: 2, payload: Data([0,0,0,0]))
+            let req = LinkCmdRequest(tag: UInt16(i), handle: 0, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                     wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0,0,0,0]))
             hub.submit(req, from: remote.id) { r in
                 lock.lock(); statuses.append(r.status); lock.unlock(); done.fulfill()
             }
@@ -88,8 +88,8 @@ final class LinkHubIntegrationTests: XCTestCase {
         b.onNotify = { f in originSeenByB = f.origin; gotB.fulfill() }
 
         let wrote = expectation(description: "set done")
-        let req = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: 0xD2,
-                                 wIndex: 2, payload: Data([0,0,0,0]))
+        let req = LinkCmdRequest(tag: 1, handle: 0, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                 wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0,0,0,0]))
         hub.submit(req, from: a.id) { r in XCTAssertEqual(r.status, .ok); wrote.fulfill() }
         wait(for: [wrote], timeout: 3)
 
@@ -119,8 +119,8 @@ final class LinkHubIntegrationTests: XCTestCase {
         hub.attachDevice(device)
         let a = hub.openSession(role: .control)
         let done = expectation(description: "get done")
-        let get = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: 0x50,
-                                 wValue: 9, wIndex: 2, wLength: 4)
+        let get = LinkCmdRequest(tag: 1, handle: 0, direction: .get, bRequest: VC.MEAS.LEVELS.number,
+                                 wValue: 0, wIndex: VC.MEAS.LEVELS.usbIndex, wLength: 4)
         hub.submit(get, from: a.id) { _ in done.fulfill() }
         wait(for: [done], timeout: 3)
         var origin: LinkSessionID = 99
@@ -212,8 +212,8 @@ final class LinkHubIntegrationTests: XCTestCase {
         XCTAssertTrue(closedByHub, "the session learns it was closed so the socket can go")
         XCTAssertEqual(hub.sessionCount, before - 1)
         let e = expectation(description: "refused")
-        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
-                                 wIndex: 2, payload: Data([0,0,0,0]))
+        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                 wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0,0,0,0]))
         hub.submit(req, from: s.id) { r in XCTAssertEqual(r.status, .noDevice); e.fulfill() }
         wait(for: [e], timeout: 3)
     }
@@ -228,8 +228,8 @@ final class LinkHubIntegrationTests: XCTestCase {
             return XCTFail("pair")
         }
         let s = hub.openSession(role: .viewer, clientID: paired.client.id)
-        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
-                                 wIndex: 2, payload: Data([0,0,0,0]))
+        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                 wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0,0,0,0]))
 
         let denied = expectation(description: "denied")
         hub.submit(req, from: s.id) { r in XCTAssertEqual(r.status, .denied); denied.fulfill() }
@@ -256,16 +256,16 @@ final class LinkHubIntegrationTests: XCTestCase {
 
         let s = hub.openSession(role: .control)
         let onB = expectation(description: "B answers on 1"), onOld = expectation(description: "0 is dead")
-        hub.submit(LinkCmdRequest(tag: 1, handle: 1, direction: .get, bRequest: 0x50, wValue: 9,
-                                  wIndex: 2, wLength: 4), from: s.id) { r in
+        hub.submit(LinkCmdRequest(tag: 1, handle: 1, direction: .get, bRequest: VC.MEAS.LEVELS.number, wValue: 0,
+                                  wIndex: VC.MEAS.LEVELS.usbIndex, wLength: 4), from: s.id) { r in
             XCTAssertEqual(r.status, .ok); onB.fulfill()
         }
-        hub.submit(LinkCmdRequest(tag: 2, handle: 0, direction: .get, bRequest: 0x50, wValue: 9,
-                                  wIndex: 2, wLength: 4), from: s.id) { r in
+        hub.submit(LinkCmdRequest(tag: 2, handle: 0, direction: .get, bRequest: VC.MEAS.LEVELS.number, wValue: 0,
+                                  wIndex: VC.MEAS.LEVELS.usbIndex, wLength: 4), from: s.id) { r in
             XCTAssertEqual(r.status, .noDevice); onOld.fulfill()
         }
         wait(for: [onB, onOld], timeout: 3)
-        XCTAssertEqual(b.executedCodes.filter { $0 == 0x50 }.count, 1)
+        XCTAssertEqual(b.executedCodes.filter { $0 == VC.MEAS.LEVELS.id }.count, 1)
     }
 
     /// P1: switching boards is a new USB generation with no `false` between
@@ -306,8 +306,8 @@ final class LinkHubIntegrationTests: XCTestCase {
         a.onNotify = { f in origins.append(f.origin); got.fulfill() }
 
         let wrote = expectation(description: "both wrote"); wrote.expectedFulfillmentCount = 2
-        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
-                                 wIndex: 2, payload: Data([0,0,0,0]))
+        let req = LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                 wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0,0,0,0]))
         hub.submit(req, from: a.id) { _ in wrote.fulfill() }
         hub.submit(req, from: b.id) { _ in wrote.fulfill() }
         wait(for: [wrote], timeout: 3)
@@ -337,12 +337,12 @@ final class LinkHubIntegrationTests: XCTestCase {
         nine.onNotify = { f in origin = f.origin; got.fulfill() }
 
         let wrote = expectation(description: "both"); wrote.expectedFulfillmentCount = 2
-        hub.submit(LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
-                                  wIndex: 2, payload: Data([0xFF, 0, 0, 0])), from: seven.id) { r in
+        hub.submit(LinkCmdRequest(tag: 1, handle: hub.currentHandle, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                  wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0xFF, 0, 0, 0])), from: seven.id) { r in
             XCTAssertEqual(r.status, .error); wrote.fulfill()
         }
-        hub.submit(LinkCmdRequest(tag: 2, handle: hub.currentHandle, direction: .set, bRequest: 0xD2,
-                                  wIndex: 2, payload: Data([0, 0, 0, 0])), from: nine.id) { r in
+        hub.submit(LinkCmdRequest(tag: 2, handle: hub.currentHandle, direction: .set, bRequest: VC.ROUTE.MASTER_VOLUME.number,
+                                  wIndex: VC.ROUTE.MASTER_VOLUME.usbIndex, payload: Data([0, 0, 0, 0])), from: nine.id) { r in
             XCTAssertEqual(r.status, .ok); wrote.fulfill()
         }
         wait(for: [wrote], timeout: 3)

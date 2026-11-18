@@ -245,7 +245,7 @@ final class LinkMessageTests: XCTestCase {
     func testSpecExampleAuthReply() throws {
         let json = """
         {"t": "ok", "id": 1, "session": 12, "role": "control",
-         "policy": {"denied": [[240, 1], [83, 1]]}}
+         "policy": {"denied": [], "denied_ids": [[304, 0], [560, 0]]}}
         """
         guard case .ok(let ok) = try decode(json) else { return XCTFail("expected ok") }
         XCTAssertEqual(ok.id, 1)
@@ -253,10 +253,12 @@ final class LinkMessageTests: XCTestCase {
         XCTAssertEqual(body.session, 12)
         XCTAssertEqual(body.role, .control)
         XCTAssertNil(body.token)
+        // Spec 1.3 example: SYS.ENTER_BOOTLOADER and STORE.FACTORY_RESET, SETs.
         let denied = body.policy?.deniedCommands ?? []
         XCTAssertEqual(denied.count, 2)
-        XCTAssertEqual(denied.first?.bRequest, 0xF0)
-        XCTAssertEqual(denied.first?.direction, .get)
+        XCTAssertEqual(denied.first?.id, VC.SYS.ENTER_BOOTLOADER.id)
+        XCTAssertEqual(denied.first?.direction, .set)
+        XCTAssertEqual(body.policy?.denied, [], "the 1.2 field is sent empty")
     }
 
     func testSpecExampleDeviceList() throws {

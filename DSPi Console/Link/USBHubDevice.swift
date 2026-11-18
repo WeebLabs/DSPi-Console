@@ -69,16 +69,32 @@ final class USBHubDevice: HubDevice {
     static func readInfo(from usb: USBDevice, serialFallback: String) -> HubDeviceInfo? {
         let outcome = usb.probeProtocol()
         guard attaches(outcome) else { return nil }
+        let protocolVersion: LinkDeviceProtocol? = {
+            if case .paged(let major, let minor) = outcome { return LinkDeviceProtocol(major: Int(major), minor: Int(minor)) }
+            return nil
+        }()
         switch outcome {
         case .paged:
-            return readIdentity(serialFallback: serialFallback,
-                                serial: usb.getData(VC.SYS.SERIAL, length: 16),
-                                platform: usb.getData(VC.SYS.PLATFORM, length: 7)) {
+            var info = readIdentity(serialFallback: serialFallback,
+                                    serial: usb.getData(VC.SYS.SERIAL, length: 16),
+                                    platform: usb.getData(VC.SYS.PLATFORM, length: 7)) {
                 usb.getData(VC.SYS.DEVICE_NAME, length: UInt16(DEVICE_NAME_LEN))
             }
+            info?.protocolVersion = protocolVersion
+            return info
         case .legacy, .unsupported, .notReady:
             return nil
         }
+    }
+
+    /// Identity of a legacy board for the hub's device list, from the one read
+    /// it may still receive, the old GET_PLATFORM.  Its serial is the USB
+    /// descriptor's, its name unknown, and it carries no protocol.
+    static func readLegacyInfo(from usb: USBDevice, serialFallback: String) -> HubDeviceInfo? {
+        guard usb.protocolState.isLegacy,
+              case .success(let p) = usb.getControlResult(request: LegacyOpcode.getPlatform, value: 0,
+                                                          index: 2, length: 7) else { return nil }
+        return readIdentity(serialFallback: serialFallback, serial: nil, platform: p) { nil }
     }
 
     /// Only a paged board is attached.  A legacy board may receive nothing but

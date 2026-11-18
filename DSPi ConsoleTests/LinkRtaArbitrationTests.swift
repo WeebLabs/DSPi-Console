@@ -26,10 +26,7 @@ final class LinkRtaArbitrationTests: XCTestCase {
         return router
     }
 
-    /// Admin, because the router still checks rights in the 8-bit policy table,
-    /// which misclassifies paged RTA commands until phase 7 re-keys it.  These
-    /// tests are about arbitration, not rights.
-    private func session(_ id: LinkSessionID) -> RouterSession { RouterSession(id: id, role: .admin) }
+    private func session(_ id: LinkSessionID) -> RouterSession { RouterSession(id: id, role: .control) }
 
     private func get(_ command: VendorCommand, _ value: UInt16 = 0, tag: UInt16 = 1, length: UInt16 = 82) -> LinkCmdRequest {
         LinkCmdRequest(tag: tag, handle: 0, direction: .get, bRequest: command.number,
@@ -120,7 +117,7 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let router = makeRouter(dev, scheduler: scheduler)
         let spec = PollScheduler.PollSpec(handle: 0, req: VC.MEAS.RTA_BANDS.number, wValue: 0,
                                           wIndex: VC.MEAS.RTA_BANDS.usbIndex, len: 82)
-        let granted = scheduler.subscribe(session: 11, role: .admin, requests: [(slot: 0, spec: spec, hz: 10)])
+        let granted = scheduler.subscribe(session: 11, role: .control, requests: [(slot: 0, spec: spec, hz: 10)])
         XCTAssertGreaterThan(granted.first?.grantedHz ?? 0, 0)
 
         run(router, control(VC.MEAS.RTA_STOP), from: 10)
@@ -128,7 +125,7 @@ final class LinkRtaArbitrationTests: XCTestCase {
 
         // The stopping session's own subscription does not hold it.
         scheduler.unsubscribeAll(session: 11)
-        _ = scheduler.subscribe(session: 10, role: .admin, requests: [(slot: 0, spec: spec, hz: 10)])
+        _ = scheduler.subscribe(session: 10, role: .control, requests: [(slot: 0, spec: spec, hz: 10)])
         run(router, control(VC.MEAS.RTA_STOP), from: 10)
         XCTAssertEqual(stopsReachingDevice(dev), 1)
         scheduler.stop()
@@ -162,9 +159,6 @@ final class LinkRtaArbitrationTests: XCTestCase {
         let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("rta-arb-\(UUID().uuidString).json"))
         let hub = LinkHub(usb: usb, policy: LinkPolicy.bundled ?? LinkPolicy.empty, auth: auth)
-        // A remote session's paged poll is refused until phase 7; this
-        // exercises the arbitration that goes live then.
-        hub.allowsRemotePagedCommands = true
         let dev = LinkFakeDevice()
         hub.attachDevice(dev)
         let local = hub.openSession(role: .admin, id: LinkHub.localSessionID)
@@ -190,27 +184,27 @@ final class LinkRtaArbitrationTests: XCTestCase {
         XCTAssertEqual(stopsReachingDevice(dev), 1)
     }
 
-    /// Until phase 7 a remote session's paged band poll is refused (0 Hz), so
-    /// it neither reaches the device nor holds the local session's STOP.
-    func testRemotePagedPollIsRefusedBeforePhaseSeven() {
+    /// A legacy board is listed for remote clients but takes nothing paged:
+    /// every command answers UNSUPPORTED and no poll is granted (spec 7.4).
+    func testALegacyBoardIsListedButTakesNothing() {
         let usb = USBDevice(startMonitoring: false)
         let auth = LinkAuthStore(storeURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("rta-arb-\(UUID().uuidString).json"))
         let hub = LinkHub(usb: usb, policy: LinkPolicy.bundled ?? LinkPolicy.empty, auth: auth)
-        let dev = LinkFakeDevice()
-        hub.attachDevice(dev)
-        let local = hub.openSession(role: .admin, id: LinkHub.localSessionID)
-        let remote = hub.openSession(role: .admin)
-        let spec = PollScheduler.PollSpec(handle: hub.currentHandle, req: VC.MEAS.RTA_BANDS.number,
-                                          wValue: 0, wIndex: VC.MEAS.RTA_BANDS.usbIndex, len: 82)
-        let granted = hub.subscribePolls(session: remote.id, requests: [(slot: 0, spec: spec, hz: 10)])
-        XCTAssertEqual(granted.first?.grantedHz, 0)
+        let info = HubDeviceInfo(serial: "OLD1", platform: 1, firmware: "1.1.6", firmwareBeta: 0,
+                                 outputs: 9, inputs: nil, wireVersion: nil, link: .usb)
+        hub.listLegacy(info)
+        let listed = hub.registry.device(serial: "OLD1")
+        XCTAssertNotNil(listed)
+        XCTAssertNil(listed?.info.protocolVersion, "a legacy board carries no protocol")
+        let handle = listed!.handle
+        XCTAssertTrue(hub.isLegacy(handle: handle))
 
-        let e = expectation(description: "stop")
-        let req = LinkCmdRequest(tag: 7, handle: hub.currentHandle, direction: .set,
-                                 bRequest: VC.MEAS.RTA_STOP.number, wIndex: VC.MEAS.RTA_STOP.usbIndex)
-        hub.submit(req, from: local.id) { r in XCTAssertEqual(r.status, .ok); e.fulfill() }
+        let remote = hub.openSession(role: .admin)
+        let e = expectation(description: "cmd")
+        let req = LinkCmdRequest(tag: 3, handle: handle, direction: .get,
+                                 bRequest: VC.SYS.PLATFORM.number, wIndex: VC.SYS.PLATFORM.usbIndex, wLength: 7)
+        hub.submit(req, from: remote.id) { r in XCTAssertEqual(r.status, .unsupported); e.fulfill() }
         wait(for: [e], timeout: 2)
-        XCTAssertEqual(stopsReachingDevice(dev), 1, "a refused poll does not count as watching")
     }
 }

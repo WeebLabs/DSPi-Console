@@ -194,10 +194,12 @@ final class LinkHub {
             // and snapshot would otherwise keep sending to the new board while
             // it is probed, before its protocol is known.
             detachDevice()
+            unlistLegacy()
             usbDidConnect(generation: generation)
         } else if usbGeneration != nil {
             usbGeneration = nil
             detachDevice()
+            unlistLegacy()
         }
     }
 
@@ -221,8 +223,19 @@ final class LinkHub {
                 guard let self = self, self.usbGeneration == generation else { return }
                 guard let device = probe(usb) else {
                     // A legacy or newer-protocol board is never attached; it
-                    // only publishes its protocol, so stop probing it.
-                    if self.stopsProbing(usb) { return }
+                    // only publishes its protocol, so stop probing it.  A
+                    // legacy board is still listed for remote clients.
+                    if self.stopsProbing(usb) {
+                        if self.usbDeviceFactory == nil,
+                           let info = USBHubDevice.readLegacyInfo(from: usb,
+                                                                  serialFallback: usb.selectedDevice?.serial ?? "unknown") {
+                            DispatchQueue.main.async {
+                                guard self.usbGeneration == generation else { return }
+                                self.listLegacy(info)
+                            }
+                        }
+                        return
+                    }
                     continue
                 }
                 DispatchQueue.main.async {
@@ -370,13 +383,8 @@ final class LinkHub {
                                  wIndex: VC.SYS.DEVICE_NAME.usbIndex,
                                  wLength: UInt16(payload.count), payload: payload)
         if let sessionID {
-            // The 8-bit policy would read SYS.DEVICE_NAME (0x24) as an unrelated
-            // 1.1.6 opcode, so check the rename's rights against the row it has
-            // always had, the old SET_DEVICE_NAME (0x56), then route it as the
-            // hub.  Phase 7 re-keys the policy and drops this.
-            guard let role = session(sessionID)?.role else { return completion(.noDevice) }
-            guard policy.isAllowed(role: role, code: 0x56, direction: .set) else { return completion(.denied) }
-            route(req, from: sessionID, roleOverride: .admin) { completion($0.status) }
+            // As the requesting session, so its role and locks apply (spec 7.4).
+            submit(req, from: sessionID) { completion($0.status) }
             return
         }
         guard let router = currentRouter else { return completion(.noDevice) }
@@ -494,37 +502,53 @@ final class LinkHub {
     /// no device is attached, answers NO_DEVICE.
     func submit(_ request: LinkCmdRequest, from sessionID: LinkSessionID,
                 completion: @escaping (LinkCmdResponse) -> Void) {
-        guard !refusesRemotePaged(session: sessionID, wIndex: request.wIndex) else {
+        // A legacy board takes nothing paged, and nothing is forwarded to it
+        // (spec 7.4): it would run an unrelated 1.1.6 opcode.
+        if isLegacy(handle: request.handle) {
             return completion(LinkCmdResponse(tag: request.tag, status: .unsupported))
         }
-        route(request, from: sessionID, completion: completion)
-    }
-
-    /// Hand a request to the router as the given session.
-    private func route(_ request: LinkCmdRequest, from sessionID: LinkSessionID,
-                       roleOverride: LinkRole? = nil,
-                       completion: @escaping (LinkCmdResponse) -> Void) {
         guard let session = session(sessionID),
               request.handle == currentHandle,
               let router = currentRouter else {
             return completion(LinkCmdResponse(tag: request.tag, status: .noDevice))
         }
-        let routerSession = RouterSession(id: session.id, role: roleOverride ?? session.role,
+        let routerSession = RouterSession(id: session.id, role: session.role,
                                           exemptFromInflightCap: session.id == Self.localSessionID)
         router.submit(request, session: routerSession) { result in
             completion(result.response)
         }
     }
 
-    /// Until the Link policy is keyed on paged command IDs (phase 7 of the
-    /// paged-protocol port), its 8-bit table would give remote sessions the
-    /// wrong rights for paged commands: SYS.ENTER_BOOTLOADER would pass as
-    /// SET_PSYBASS.  Page-0 traffic keeps its 1.1.6 handling, which a 1.1.7
-    /// board refuses harmlessly.  Tests of multi-session behaviour turn this on.
-    var allowsRemotePagedCommands = false
+    /// The handle of a listed legacy board, which the hub never attaches.
+    /// Written on the main queue, read from any.
+    private var legacyHandleStore: UInt8?
+    private var legacySerial: String?
+    private let legacyLock = NSLock()
 
-    private func refusesRemotePaged(session: LinkSessionID, wIndex: UInt16) -> Bool {
-        session != Self.localSessionID && wIndex >> 8 != 0 && !allowsRemotePagedCommands
+    func isLegacy(handle: UInt8) -> Bool {
+        legacyLock.lock(); defer { legacyLock.unlock() }
+        return legacyHandleStore == handle
+    }
+
+    /// List a legacy board, with the version from its old GET_PLATFORM, so a
+    /// client sees it and why it cannot be driven (spec 7.4).  Main queue.
+    /// Internal so tests can list one without USB.
+    func listLegacy(_ info: HubDeviceInfo) {
+        let registered = registry.deviceOnline(info)
+        legacyLock.lock()
+        legacyHandleStore = registered.handle
+        legacySerial = info.serial
+        legacyLock.unlock()
+    }
+
+    /// Main queue.
+    private func unlistLegacy() {
+        legacyLock.lock()
+        let serial = legacySerial
+        legacyHandleStore = nil
+        legacySerial = nil
+        legacyLock.unlock()
+        if let serial { registry.deviceOffline(serial: serial) }
     }
 
     // MARK: - Polls and locks
@@ -535,11 +559,7 @@ final class LinkHub {
         guard let s = self.session(session), let scheduler = currentScheduler else {
             return requests.map { ($0.slot, 0) }
         }
-        // Polls bypass `submit`, so the same remote shutout applies here.
-        let refused = Set(requests.filter { refusesRemotePaged(session: session, wIndex: $0.spec.wIndex) }.map(\.slot))
-        let granted = scheduler.subscribe(session: session, role: s.role,
-                                          requests: requests.filter { !refused.contains($0.slot) })
-        return granted + refused.sorted().map { ($0, 0) }
+        return scheduler.subscribe(session: session, role: s.role, requests: requests)
     }
 
     func unsubscribePolls(session: LinkSessionID, slots: [Int]) {
