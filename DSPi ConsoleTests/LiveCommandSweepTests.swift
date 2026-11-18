@@ -172,7 +172,7 @@ final class LiveCommandSweepTests: XCTestCase {
     /// else means the address was not the problem.
     private func walk(_ info: VendorCommandInfo) {
         var n = 0
-        while n < 64 {
+        while n < 256 {
             switch read(info.command, UInt16(n)) {
             case .success: n += 1; continue
             case .failure(let s):
@@ -1386,6 +1386,299 @@ final class LiveCommandSweepTests: XCTestCase {
         let path = ProcessInfo.processInfo.environment["DSPI_SWEEP_REPORT"]
             ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("dspi-flash-sweep.txt")
         try? text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - Reply decoding
+
+    private var decodeChecks = 0
+
+    private func expect<T: Equatable>(_ label: String, _ app: T?, _ raw: T?) {
+        decodeChecks += 1
+        if app != raw || raw == nil {
+            XCTFail("\(label): app decoded \(String(describing: app)), raw says \(String(describing: raw))")
+            log("  \(label): MISMATCH app \(String(describing: app)) raw \(String(describing: raw))")
+        }
+    }
+
+    private func plausible(_ label: String, _ ok: Bool, _ detail: String) {
+        decodeChecks += 1
+        if !ok { XCTFail("\(label): \(detail)"); log("  \(label): IMPLAUSIBLE \(detail)") }
+    }
+
+    /// Lets the main-queue assignments of the fetch functions land.
+    private func land() {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.25))
+    }
+
+    private func u16le(_ d: Data?, _ o: Int) -> UInt16? {
+        guard let d, d.count >= o + 2 else { return nil }
+        return UInt16(d[d.startIndex + o]) | (UInt16(d[d.startIndex + o + 1]) << 8)
+    }
+    private func u32le(_ d: Data?, _ o: Int) -> UInt32? {
+        guard let d, d.count >= o + 4 else { return nil }
+        return (0..<4).reduce(UInt32(0)) { $0 | (UInt32(d[d.startIndex + o + $1]) << (8 * UInt32($1))) }
+    }
+    private func f32le(_ d: Data?, _ o: Int = 0) -> Float? { u32le(d, o).map(Float.init(bitPattern:)) }
+    private func str(_ d: Data?) -> String? { d.map { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } }
+
+    /// Every reply the app decodes: call the app's own fetch, then compare
+    /// what it published with a decode of the raw reply written here from the
+    /// client guide.  Replies only the Stats window decodes (its readers are
+    /// private) are checked against the guide's offsets by cross-reading the
+    /// same value from another command and by plausibility.  Read-only.
+    func testReplyDecoding() throws {
+        guard ProcessInfo.processInfo.environment["DSPI_COMMAND_SWEEP"] == "1" else {
+            throw XCTSkip("Opt-in: run with TEST_RUNNER_DSPI_COMMAND_SWEEP=1.")
+        }
+        _ = try HardwareTest.requireDevice()
+        let vm = self.vm
+        let ready = Date().addingTimeInterval(10)
+        while !vm.deviceNameSupported, Date() < ready {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        log("== Reply decoding")
+        if let bulk = readData(VC.STORE.ALL_PARAMS), bulk.count > 4 {
+            shape = Shape(channels: Int(bulk[2]), inputs: Int(bulk[4]), outputs: Int(bulk[3]))
+        }
+        let walkKinds: Set<VendorAddressKind> = [.slot, .pinOutput, .source, .i2sPair, .csNoun, .index]
+        for info in VendorCommandRegistry.all where info.hasGet && walkKinds.contains(info.address) && implemented(info.command, set: false) {
+            walk(info)
+        }
+        walked[VC.OUTPUT.TYPE.id] = walked[VC.OUTPUT.TYPE.id] ?? walked[VC.OUTPUT.PIN.id]
+        let outputs = vm.numOutputChannels
+
+        // SYS
+        let plat = readData(VC.SYS.PLATFORM)
+        vm.fetchPlatform(); land()
+        expect("PLATFORM platform", vm.platformName, plat.map { $0[0] == 1 ? "RP2350" : ($0[0] == 2 ? "STM32H723" : "RP2040") })
+        expect("PLATFORM minor", vm.firmwareVersion?.minor, plat.map { Int($0[4]) })
+        expect("PLATFORM patch", vm.firmwareVersion?.patch, plat.map { Int($0[5]) })
+        expect("PLATFORM beta", vm.firmwareVersion?.beta, plat.map { Int($0[6]) })
+        expect("CORE1_MODE", { vm.fetchCore1Mode(); land(); return vm.core1Mode }(), readData(VC.SYS.CORE1_MODE).map { Int($0[0]) })
+        let sys = readData(VC.SYS.SYSTEM_STATUS)
+        vm.fetchSampleRate(); land()
+        expect("SYSTEM_STATUS rate (u32 @4)", vm.telemetry.sampleRateHz, u32le(sys, 4))
+        plausible("SYSTEM_STATUS rate", [44100, 48000, 88200, 96000].contains(u32le(sys, 4) ?? 0), "\(String(describing: u32le(sys, 4)))")
+        plausible("SYSTEM_STATUS clk_sys (u32 @0)", (100_000_000...400_000_000).contains(u32le(sys, 0) ?? 0), "\(String(describing: u32le(sys, 0)))")
+        plausible("SYSTEM_STATUS core mV (u16 @8)", (900...1400).contains(u16le(sys, 8) ?? 0), "\(String(describing: u16le(sys, 8)))")
+        let centi = u16le(sys, 10).map { Int16(bitPattern: $0) } ?? 0
+        plausible("SYSTEM_STATUS temperature (i16 @10)", (500...9500).contains(Int(centi)), "\(centi) centi-degrees")
+        plausible("SYSTEM_STATUS CPU loads (@12, @13)", (sys?[12] ?? 255) <= 100 && (sys?[13] ?? 255) <= 100, hex(sys))
+
+        // MEAS.LEVELS: peaks[channels] u16, cpu0, cpu1, clip u32, active inputs
+        let levels = readData(VC.MEAS.LEVELS), input = readData(VC.INPUT.STATUS)
+        expect("LEVELS length", levels?.count, vm.numChannels * 2 + 7)
+        vm.fetchStatus(); land()
+        let off = vm.numChannels * 2
+        expect("LEVELS active inputs vs INPUT.STATUS @1", levels.map { Int($0[off + 6]) }, input.map { Int($0[1]) })
+        expect("LEVELS active inputs (app)", vm.activeInputChannels, levels.map { max(BASE_MATRIX_INPUTS, Int($0[off + 6])) })
+        expect("LEVELS clip flags vs MEAS.CLIP_FLAGS", u32le(levels, off + 2), u32le(readData(VC.MEAS.CLIP_FLAGS), 0))
+        plausible("LEVELS peaks <= full scale", (0..<vm.numChannels).allSatisfy { (u16le(levels, $0 * 2) ?? 0) <= 32767 }, hex(levels))
+
+        // Stats structs (decoded privately by the Stats window).
+        let usb = readData(VC.SYS.USB_AUDIO_STATUS)
+        plausible("USB_AUDIO_STATUS alt (u8 @12)", (usb?[12] ?? 255) < 8, hex(usb))
+        plausible("USB_AUDIO_STATUS mounted (u8 @13) is a flag", (usb?[13] ?? 255) <= 1, hex(usb))
+        let pipe = readData(VC.SYS.PIPELINE_STATS)
+        let lowest = u32le(pipe, 8) ?? 0
+        plausible("PIPELINE_STATS lowest prewrite (u32 @8)", lowest == UInt32.max || lowest < 100_000, "\(lowest)")
+        let pdm1 = readData(VC.SYS.PDM_STATS), tx1 = readData(VC.SYS.SPDIF_TX_STATS)
+        let buf1 = readData(VC.SYS.BUFFER_STATS)
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
+        let pdm2 = readData(VC.SYS.PDM_STATS), tx2 = readData(VC.SYS.SPDIF_TX_STATS)
+        let buf2 = readData(VC.SYS.BUFFER_STATS)
+        plausible("USB_AUDIO_STATUS packets (u32 @0) only grow", (u32le(readData(VC.SYS.USB_AUDIO_STATUS), 0) ?? 0) >= (u32le(usb, 0) ?? 0), hex(usb))
+        plausible("PDM_STATS counters only grow", (0..<4).allSatisfy { (u32le(pdm2, $0 * 4) ?? 0) >= (u32le(pdm1, $0 * 4) ?? 0) }, "\(hex(pdm1)) / \(hex(pdm2))")
+        plausible("SPDIF_TX_STATS counters only grow", (0..<6).allSatisfy { (u32le(tx2, $0 * 4) ?? 0) >= (u32le(tx1, $0 * 4) ?? 0) }, "\(hex(tx1)) / \(hex(tx2))")
+        plausible("SPDIF_TX_STATS total >= each slot", (0..<4).allSatisfy { (u32le(tx2, 4) ?? 0) >= (u32le(tx2, 8 + $0 * 4) ?? 0) }, hex(tx2))
+        plausible("BUFFER_STATS output count (u8 @0)", (buf1?[0] ?? 9) <= 4, hex(buf1))
+        plausible("BUFFER_STATS sequence advances (u16 @2)", u16le(buf2, 2) != u16le(buf1, 2), "\(String(describing: u16le(buf1, 2))) then \(String(describing: u16le(buf2, 2)))")
+
+        // DYN
+        let lstat = readData(VC.DYN.LIMITER_STATUS)
+        expect("LIMITER_STATUS output count (@3)", lstat.map { Int($0[3]) }, outputs)
+        expect("LIMITER_STATUS lookahead and block (@1, @2)", lstat.map { [$0[1], $0[2]] }, [32, 16])
+        expect("LIMITER_METERS length (u16 per output)", readData(VC.DYN.LIMITER_METERS)?.count, outputs * 2)
+        expect("USER_VOLUME", { vm.fetchUserVolume(); land(); return vm.userVolumeDB }(), f32le(readData(VC.ROUTE.USER_VOLUME)))
+
+        // FX
+        vm.fetchUpmixConfig(); land()
+        let up = readData(VC.FX.UPMIX_CONFIG)
+        expect("UPMIX_CONFIG enable vs UPMIX_ENABLE", vm.upmixEnabled, f32le(readData(VC.FX.UPMIX_ENABLE)).map { $0 != 0 })
+        expect("UPMIX_CONFIG centre mode vs UPMIX_CENTER_MODE", Float(vm.upmix.centerMode), f32le(readData(VC.FX.UPMIX_CENTER_MODE)))
+        expect("UPMIX_CONFIG surround mode vs UPMIX_SURROUND_MODE", Float(vm.upmix.surroundMode), f32le(readData(VC.FX.UPMIX_SURROUND_MODE)))
+        expect("UPMIX_CONFIG presence vs UPMIX_PRESENCE", vm.upmix.presenceDB, f32le(readData(VC.FX.UPMIX_PRESENCE)))
+        for (label, value, cmd) in [("strength", vm.upmix.strengthPct, VC.FX.UPMIX_STRENGTH),
+                                    ("width", vm.upmix.centerWidthPct, VC.FX.UPMIX_CENTER_WIDTH),
+                                    ("threshold", vm.upmix.thresholdPct, VC.FX.UPMIX_THRESHOLD),
+                                    ("attack", vm.upmix.attackMs, VC.FX.UPMIX_ATTACK),
+                                    ("release", vm.upmix.releaseMs, VC.FX.UPMIX_RELEASE),
+                                    ("detector HPF", vm.upmix.detectorHpfHz, VC.FX.UPMIX_DET_HPF),
+                                    ("surround delay", vm.upmix.surroundDelayMs, VC.FX.UPMIX_SUR_DELAY),
+                                    ("surround HPF", vm.upmix.surroundHpfHz, VC.FX.UPMIX_SUR_HPF),
+                                    ("surround LPF", vm.upmix.surroundLpfHz, VC.FX.UPMIX_SUR_LPF),
+                                    ("decorrelation", vm.upmix.decorrPct, VC.FX.UPMIX_DECORR)] {
+            expect("UPMIX_CONFIG \(label) vs its own command", value, f32le(readData(cmd)))
+        }
+        _ = up
+        expect("SUBHARM_HEADROOM", { vm.fetchSubharmHeadroom(); land(); return vm.subharm.headroomDB }(), f32le(readData(VC.FX.SUBHARM_HEADROOM)))
+        expect("SUBHARM_SOLO", { vm.fetchSubharmSolo(); land(); return vm.subharm.solo }(), readData(VC.FX.SUBHARM_SOLO).map { $0[0] != 0 })
+        expect("SUBHARM_METER length", readData(VC.FX.SUBHARM_METER)?.count, outputs * 2)
+
+        // OUTPUT / ROUTE
+        for o in 0..<outputs {
+            vm.fetchOutputEnable(output: o)
+        }
+        land()
+        for o in 0..<outputs {
+            expect("OUTPUT_ENABLE[\(o)]", vm.outputEnabled[o], readData(VC.ROUTE.OUTPUT_ENABLE, UInt16(o)).map { $0[0] != 0 })
+        }
+        for i in 0..<(walked[VC.OUTPUT.PIN.id] ?? 5) { vm.fetchOutputPin(output: i) }
+        for sl in 0..<(walked[VC.OUTPUT.TYPE.id] ?? 4) { vm.fetchOutputSlotType(slot: sl) }
+        land()
+        for i in 0..<(walked[VC.OUTPUT.PIN.id] ?? 5) {
+            expect("OUTPUT.PIN[\(i)]", vm.outputPins[i], readData(VC.OUTPUT.PIN, UInt16(i))?.first)
+        }
+        for sl in 0..<(walked[VC.OUTPUT.TYPE.id] ?? 4) {
+            expect("OUTPUT.TYPE[\(sl)]", vm.outputSlotTypes[sl], readData(VC.OUTPUT.TYPE, UInt16(sl))?.first)
+        }
+        vm.fetchOutputLatency(); land()
+        let lat = readData(VC.OUTPUT.LATENCY_STATUS)
+        expect("LATENCY_STATUS requested id (@0)", vm.outputLatencyStatus.requestedId, lat?.first)
+        expect("LATENCY_STATUS requested id vs OUTPUT.LATENCY", lat?.first, readData(VC.OUTPUT.LATENCY)?.first)
+        expect("LATENCY_STATUS effective us (u16 @2)", vm.outputLatencyStatus.effectiveUs, u16le(lat, 2))
+        expect("LATENCY_OPTIONS count (status @9)", vm.outputLatencyOptions.count, lat.map { Int($0[9]) })
+        expect("LATENCY_OPTIONS ids", vm.outputLatencyOptions.map(\.id),
+               readData(VC.OUTPUT.LATENCY_OPTIONS).map { d in stride(from: 0, to: d.count, by: 8).map { d[$0] } })
+        vm.fetchDacHwMuteConfig(); land()
+        let dac = readData(VC.OUTPUT.DAC_MUTE_CONFIG)
+        expect("DAC_MUTE_CONFIG enabled/pin/hold", [vm.dacHwMuteConfig.enabled ? 1 : 0, Int(vm.dacHwMuteConfig.pin), Int(vm.dacHwMuteConfig.holdMs)],
+               dac.map { [Int($0[0]), Int($0[2]), Int(u16le($0, 4) ?? 0)] })
+        vm.fetchAdatStatus(); land()
+        expect("ADAT_TX_STATUS enabled vs ADAT_TX_ENABLE", vm.adatEnabled, readData(VC.OUTPUT.ADAT_TX_ENABLE).map { $0[0] != 0 })
+        expect("ADAT_TX_STATUS pin vs ADAT_TX_PIN", vm.adatPin, readData(VC.OUTPUT.ADAT_TX_PIN)?.first)
+
+        // INPUT
+        vm.fetchInputSource(); vm.fetchInputSourceNames(); vm.fetchDeviceName(); vm.fetchSpdifInputConfig()
+        vm.fetchI2SInputConfig(); vm.fetchI2SInputChannels(); vm.fetchInputRate(); vm.fetchLgSoundSyncEnabled()
+        vm.fetchAdatInputConfig()
+        land()
+        expect("SOURCE", vm.inputSource, readData(VC.INPUT.SOURCE).map { Int($0[0]) })
+        for i in 0..<min(vm.inputSourceNames.count, walked[VC.INPUT.SOURCE_NAME.id] ?? 0) {
+            expect("SOURCE_NAME[\(i)]", vm.inputSourceNames[i], str(readData(VC.INPUT.SOURCE_NAME, UInt16(i))))
+        }
+        expect("DEVICE_NAME", vm.deviceName, str(readData(VC.SYS.DEVICE_NAME)))
+        let spcfg = readData(VC.INPUT.SPDIF_RX_CONFIG)
+        expect("SPDIF_RX_CONFIG count (@0)", vm.spdifInputCount, spcfg.map { Int($0[0]) })
+        expect("SPDIF_RX_CONFIG pin 0 vs SPDIF_RX_PIN[0]", vm.spdifRxPin, readData(VC.INPUT.SPDIF_RX_PIN, 0)?.first)
+        for i in 1..<vm.spdifInputCount {
+            expect("SPDIF_RX_CONFIG pin \(i) vs SPDIF_RX_PIN[\(i)]", vm.spdifRxPinsExt[i - 1], readData(VC.INPUT.SPDIF_RX_PIN, UInt16(i))?.first)
+            expect("SPDIF_RX_CONFIG enable \(i) vs SPDIF_RX_ENABLE[\(i)]", vm.spdifExtEnabled[i - 1], readData(VC.INPUT.SPDIF_RX_ENABLE, UInt16(i)).map { $0[0] != 0 })
+        }
+        for pair in 0..<(walked[VC.INPUT.I2S_RX_PIN.id] ?? 1) {
+            expect("I2S_RX_PIN[\(pair)]", vm.i2sRxPins[pair], readData(VC.INPUT.I2S_RX_PIN, UInt16(pair))?.first)
+        }
+        expect("I2S_RX_CHANNELS", vm.i2sInputChannels, readData(VC.INPUT.I2S_RX_CHANNELS).map { Int($0[0]) })
+        expect("I2S_RX_RATE", vm.i2sInputRateHz, u32le(readData(VC.INPUT.I2S_RX_RATE), 0))
+        expect("LG_SOUND_SYNC_ENABLE", vm.lgSoundSyncEnabled, readData(VC.INPUT.LG_SOUND_SYNC_ENABLE).map { $0[0] != 0 })
+        expect("LG_SOUND_SYNC_STATUS enabled (@0) vs LG_SOUND_SYNC_ENABLE", readData(VC.INPUT.LG_SOUND_SYNC_STATUS)?.first.map { $0 != 0 },
+               readData(VC.INPUT.LG_SOUND_SYNC_ENABLE).map { $0[0] != 0 })
+        expect("ADAT_RX_STATUS enabled vs ADAT_RX_ENABLE", vm.adatInputEnabled, readData(VC.INPUT.ADAT_RX_ENABLE).map { $0[0] != 0 })
+        expect("ADAT_RX_STATUS pin vs ADAT_RX_PIN", vm.adatInputPin, readData(VC.INPUT.ADAT_RX_PIN)?.first)
+        expect("ADAT_RX_STATUS clock mode vs ADAT_RX_CLOCK_MODE", vm.adatInputClockMode, readData(VC.INPUT.ADAT_RX_CLOCK_MODE)?.first)
+
+        // CLOCK
+        vm.fetchI2SBckPin(role: 0); vm.fetchI2SBckPin(role: 1); vm.fetchMckEnable(); vm.fetchMckPin(); vm.fetchMckMultiplier()
+        vm.fetchI2SClockMode(); vm.fetchI2SClockPinMode()
+        land()
+        expect("I2S_BCK_PIN[0]", vm.i2sBckPin, readData(VC.CLOCK.I2S_BCK_PIN, 0)?.first)
+        expect("I2S_BCK_PIN[1]", vm.i2sBckPinSlave, readData(VC.CLOCK.I2S_BCK_PIN, 1)?.first)
+        expect("MCK_ENABLE", vm.mckEnabled, readData(VC.CLOCK.MCK_ENABLE).map { $0[0] != 0 })
+        expect("MCK_PIN", vm.mckPin, readData(VC.CLOCK.MCK_PIN)?.first)
+        expect("MCK_MULTIPLIER", vm.mckMultiplier, readData(VC.CLOCK.MCK_MULTIPLIER).map { $0[0] == 1 ? 256 : 128 })
+        expect("I2S_CLOCK_MODE", vm.i2sClockMode, readData(VC.CLOCK.I2S_CLOCK_MODE)?.first)
+        expect("I2S_CLOCK_PIN_MODE", vm.i2sClockPinMode, readData(VC.CLOCK.I2S_CLOCK_PIN_MODE)?.first)
+
+        // XPORT
+        vm.fetchUartCtrlConfig(); vm.fetchI2cCtrlConfig(); land()
+        let uart = readData(VC.XPORT.UART_CONFIG)
+        expect("UART_CONFIG enabled/tx/rx/baud", [vm.uartCtrlConfig.enabled ? 1 : 0, Int(vm.uartCtrlConfig.txPin), Int(vm.uartCtrlConfig.rxPin), Int(vm.uartCtrlConfig.baud)],
+               uart.map { [Int($0[0]), Int($0[1]), Int($0[2]), Int(u32le($0, 4) ?? 0)] })
+        expect("I2C_CONFIG bytes", vm.i2cCtrlConfig.toData(), readData(VC.XPORT.I2C_CONFIG))
+
+        // STORE
+        vm.fetchPresetDirectory(); land()
+        let dir = readData(VC.STORE.DIRECTORY), startup = readData(VC.STORE.STARTUP)
+        expect("DIRECTORY occupied (u16 @0)", vm.presetOccupied, u16le(dir, 0))
+        expect("DIRECTORY startup mode vs STORE.STARTUP @0", vm.presetStartupMode, startup.map { Int($0[0]) })
+        expect("DIRECTORY default slot vs STORE.STARTUP @1", vm.presetDefaultSlot, startup.map { Int($0[1]) })
+        expect("DIRECTORY output config mode vs OUTPUT_CONFIG_MODE", vm.presetOutputConfigMode, readData(VC.STORE.OUTPUT_CONFIG_MODE).map { Int($0[0]) })
+        expect("DIRECTORY master volume mode vs MASTER_VOLUME_MODE", vm.presetMasterVolumeMode, readData(VC.ROUTE.MASTER_VOLUME_MODE).map { Int($0[0]) })
+        expect("PRESET_ACTIVE", { vm.fetchPresetActive(); land(); return vm.activePresetSlot }(), readData(VC.STORE.PRESET_ACTIVE).map { Int($0[0]) })
+        for slot in 0..<10 { vm.fetchPresetName(slot: slot) }
+        for ch in 0..<vm.numChannels { vm.fetchChannelName(channel: ch) }
+        land()
+        for slot in 0..<10 { expect("PRESET_NAME[\(slot)]", vm.presetNames[slot], str(readData(VC.STORE.PRESET_NAME, UInt16(slot)))) }
+        for ch in 0..<vm.numChannels { expect("CHANNEL_NAME[\(ch)]", vm.channelNames[ch] ?? "", str(readData(VC.ROUTE.CHANNEL_NAME, UInt16(ch)))) }
+
+        // MEAS: RTA caps and centres, generator caps and status
+        vm.rta.fetchCaps(); land()
+        let caps = readData(VC.MEAS.RTA_CAPS)
+        var centres: [Double] = []
+        for chunk in 0..<(walked[VC.MEAS.RTA_BAND_CENTRES.id] ?? 2) {
+            if let c = readData(VC.MEAS.RTA_BAND_CENTRES, UInt16(chunk)) {
+                centres += stride(from: 0, to: c.count - 1, by: 2).map { Double(UInt16(c[$0]) | (UInt16(c[$0 + 1]) << 8)) }
+            }
+        }
+        expect("RTA band centres (chunked from 0)", vm.rta.bandCentresHz, Array(centres.prefix(Int(vm.rta.caps.maxBands))))
+        plausible("RTA band centres rise", zip(centres, centres.dropFirst()).allSatisfy { $0 < $1 }, "\(centres)")
+        plausible("RTA caps max bands matches the table", Int(vm.rta.caps.maxBands) == centres.count, "\(vm.rta.caps.maxBands) vs \(centres.count), caps \(hex(caps))")
+        vm.fetchSiggen(); vm.fetchSiggenStatus(); land()
+        expect("SIGGEN_CAPS type count vs TYPE_DESC addresses", Int(vm.siggenCaps.typeCount), walked[VC.MEAS.SIGGEN_TYPE_DESC.id])
+        expect("SIGGEN_STATUS state (@1)", vm.siggenStatus.state, readData(VC.MEAS.SIGGEN_STATUS).map { $0[1] })
+
+        // CS
+        vm.fetchControlSurfaces(); land()
+        expect("CS.CAPS noun count vs NOUN_DESC addresses", Int(vm.csCaps.nounCount), walked[VC.CS.NOUN_DESC.id])
+        expect("CS noun descriptors read", vm.csNounDescs.count, Int(vm.csCaps.nounCount))
+        let cst = readData(VC.CS.STATUS)
+        expect("CS.STATUS max bindings (@2)", vm.csStatus.maxBindings, cst.map { $0[2] })
+        expect("CS.STATUS dirty (@3)", vm.csStatus.dirty, cst.map { $0[3] != 0 })
+        for slot in 0..<CS_MAX_BINDINGS {
+            let b = readData(VC.CS.BINDING, UInt16(slot))
+            expect("CS.BINDING[\(slot)] type/gpio", [vm.csBindings[slot].type, vm.csBindings[slot].gpio0], b.map { [$0[0], $0[4]] })
+            expect("CS.SLOT_NAME[\(slot)]", vm.csNames[slot], str(readData(VC.CS.SLOT_NAME, UInt16(slot))))
+        }
+        for sub in 0..<CS_MAX_IR_COMMANDS {
+            expect("CS.IR_CMD[\(sub)] proto/code", [UInt32(vm.csIrCommands[sub].proto), vm.csIrCommands[sub].code],
+                   readData(VC.CS.IR_CMD, UInt16(sub)).map { [UInt32($0[5]), u32le($0, 12) ?? 0] })
+        }
+        for i in 0..<CS_MAX_MACROS { vm.fetchCsGroup(i); vm.fetchCsMacro(i) }
+        let maxPages = vm.fetchCsDisplayCfg()
+        for i in 0..<Int(maxPages) { vm.fetchCsDisplayPage(i) }
+        vm.fetchCsAuxValues()
+        land()
+        for i in 0..<CS_MAX_MACROS {
+            expect("CS.GROUP[\(i)] kind/mask", [UInt32(vm.csGroups[i].targetKind), vm.csGroups[i].memberMask],
+                   readData(VC.CS.GROUP, UInt16(i)).map { [UInt32($0[0]), u32le($0, 4) ?? 0] })
+            expect("CS.MACRO[\(i)] step count (@32)", Int(vm.csMacros[i].stepCount), readData(VC.CS.MACRO, UInt16(i)).map { Int($0[32]) })
+        }
+        let dcaps = readData(VC.CS.DISPLAY_CAPS), dcfg = readData(VC.CS.DISPLAY_CONFIG)
+        expect("DISPLAY_CAPS page slots (@0)", vm.csDisplayMaxPages, dcaps?.first)
+        expect("DISPLAY_CAPS model count (@1)", vm.csDisplayModelCount, dcaps.map { $0[1] })
+        expect("DISPLAY_CONFIG mode/dwell", [Int(vm.csDisplayCfg.mode), Int(vm.csDisplayCfg.dwell)], dcfg.map { [Int($0[0]), Int(u16le($0, 2) ?? 0)] })
+        for i in 0..<Int(maxPages) {
+            expect("DISPLAY_PAGE[\(i)]", vm.csDisplayPages[i].toData(), readData(VC.CS.DISPLAY_PAGE, UInt16(i)))
+        }
+        let aux = readData(VC.CS.AUX_ALL)
+        expect("AUX_ALL states (16 bytes)", vm.csAuxState, aux.map { d in (0..<16).map { d[$0] != 0 } })
+        expect("AUX_ALL levels (16 x u16 @16)", vm.csAuxLevel, aux.map { d in (0..<16).map { u16le(d, 16 + 2 * $0) ?? 0 } })
+        expect("IR_LEARN_STATUS state (@0)", { var r: CsIrLearnResult?; offMain { r = vm.csIrLearnRead() }; return r?.state }(),
+               readData(VC.CS.IR_LEARN_STATUS)?.first)
+
+        log("  \(decodeChecks) decode checks")
+        let text = report.joined(separator: "\n")
+        print("\n----- DSPi reply decoding -----\n\(text)\n-------------------------------")
     }
 
     // MARK: - Report
