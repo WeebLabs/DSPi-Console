@@ -614,6 +614,8 @@ final class LiveCommandSweepTests: XCTestCase {
         for c in cases { run(c) }
         auxPass()
         adatInputEnablePass()
+        irLearnPass()
+        macroFirePass()
         log("  \(appSetOK.count) commands verified through the app's setters (\(cases.count) cases)")
     }
 
@@ -800,6 +802,65 @@ final class LiveCommandSweepTests: XCTestCase {
         return cases
     }
 
+    /// IR learn needs a live receiver: bind one on a free GPIO (it only
+    /// listens), arm through the app, read the armed state, cancel, unbind.
+    private func irLearnPass() {
+        guard implemented(VC.CS.IR_LEARN_ARM, set: true),
+              let slot = (0..<UInt16(CS_MAX_BINDINGS)).reversed().first(where: { i in
+                  readData(VC.CS.BINDING, i).map { $0.allSatisfy { $0 == 0 } } ?? false }),
+              let pin = freePins().first, let empty = readData(VC.CS.BINDING, slot) else {
+            log("  IR learn: no free slot or GPIO"); return
+        }
+        let vm = self.vm
+        var status: UInt8 = 0xFF
+        offMain { status = vm.setCsBinding(slot: Int(slot), binding: CsBinding(type: UInt8(CS_TYPE_IR), gpio0: pin, gpio1: CS_GPIO_UNUSED)) }
+        guard status == PIN_CONFIG_SUCCESS else { XCTFail("IR receiver on GPIO \(pin): status \(status)"); return }
+        var arm = CsIrLearnArmResult.locked
+        offMain { arm = vm.csIrLearnArm() }
+        var learn: CsIrLearnResult?
+        offMain { learn = vm.csIrLearnRead() }
+        if arm == .armed, learn?.state == CS_IR_LEARN_STATE_ARMED {
+            actionOK.insert(VC.CS.IR_LEARN_ARM.id); getOK.insert(VC.CS.IR_LEARN_STATUS.id)
+            log("  IR learn: armed on a receiver at GPIO \(pin), status read ARMED, cancelled")
+        } else {
+            XCTFail("IR learn with a receiver: arm \(arm), state \(String(describing: learn?.state))")
+        }
+        offMain { vm.csIrLearnCancel() }
+        let idle = readData(VC.CS.IR_LEARN_STATUS).map { $0.first != CS_IR_LEARN_STATE_ARMED } ?? false
+        if idle { actionOK.insert(VC.CS.IR_LEARN_CANCEL.id) } else { XCTFail("IR learn still armed after cancel") }
+        restore(VC.CS.BINDING, slot, empty, "IR receiver binding")
+    }
+
+    /// Fire a one-step macro that toggles EQ bypass, check the bypass moved,
+    /// then put the bypass and the macro back.
+    private func macroFirePass() {
+        guard implemented(VC.CS.MACRO_FIRE, set: true),
+              let index = (0..<UInt16(CS_MAX_MACROS)).reversed().first(where: { i in
+                  readData(VC.CS.MACRO, i).flatMap(CsMacro.fromData).map { !$0.isConfigured } ?? false }),
+              let before = readData(VC.CS.MACRO, index), let bypass0 = readData(VC.FILTER.EQ_BYPASS) else {
+            log("  macro fire: no empty macro"); return
+        }
+        let vm = self.vm
+        var macro = CsMacro()
+        macro.name = "Sweep"
+        macro.stepCount = 1
+        macro.steps[0] = CsMacroStep(noun: UInt8(CS_NOUN_EQ_BYPASS), action: UInt8(CS_ACT_TOGGLE))
+        var status: UInt8 = 0xFF
+        offMain { status = vm.setCsMacro(Int(index), macro: macro) }
+        guard status == PIN_CONFIG_SUCCESS else { XCTFail("setCsMacro: status \(status)"); return }
+        offMain { status = vm.csMacroFire(index) }
+        let flipped = u8(bypass0.first == 0 ? 1 : 0)
+        if status == PIN_CONFIG_SUCCESS, readUntil(VC.FILTER.EQ_BYPASS, 0, equals: flipped) == flipped {
+            actionOK.insert(VC.CS.MACRO_FIRE.id)
+            log("  macro fire: macro \(index) toggled EQ bypass \(hex(bypass0)) -> \(hex(flipped))")
+        } else {
+            XCTFail("csMacroFire: status \(status), EQ bypass \(hex(readData(VC.FILTER.EQ_BYPASS)))")
+        }
+        restore(VC.FILTER.EQ_BYPASS, 0, bypass0, "EQ bypass")
+        if let m = CsMacro.fromData(before) { offMain { _ = vm.setCsMacro(Int(index), macro: m) } }
+        if readUntil(VC.CS.MACRO, index, equals: before) != before { XCTFail("macro \(index) not cleared again") }
+    }
+
     /// ADAT input enable is refused while the input has no pin, so give it a
     /// free one first, then undo both.
     private func adatInputEnablePass() {
@@ -925,6 +986,87 @@ final class LiveCommandSweepTests: XCTestCase {
         return true
     }
 
+    /// Every live Control Surfaces record the app can write back.
+    private func csRecords() -> [(VendorCommand, UInt16, Data?)] {
+        var keys: [(VendorCommand, UInt16)] = [(VC.CS.DISPLAY_CONFIG, 0)]
+        for i in 0..<UInt16(CS_MAX_MACROS) { keys += [(VC.CS.GROUP, i), (VC.CS.MACRO, i)] }
+        for i in 0..<UInt16(CS_MAX_BINDINGS) { keys += [(VC.CS.BINDING, i), (VC.CS.SLOT_NAME, i)] }
+        for i in 0..<UInt16(CS_MAX_IR_COMMANDS) { keys.append((VC.CS.IR_CMD, i)) }
+        for i in 0..<UInt16(CS_MAX_DISPLAY_PAGES) { keys.append((VC.CS.DISPLAY_PAGE, i)) }
+        return keys.map { ($0.0, $0.1, readData($0.0, $0.1)) }
+    }
+
+    private func csDirty() -> Bool? { readData(VC.CS.STATUS).map { $0.count > 3 && $0[3] != 0 } }
+
+    /// Revert and save while Control Surfaces holds unsaved live edits: take
+    /// the live records, revert (the stored config comes back, dirty clears),
+    /// save (rewrites what is already stored), then put every live record
+    /// back through the app's own setters so the edits survive.
+    private func csRevertSaveKeepingLiveEdits() {
+        let vm = self.vm
+        let live = csRecords()
+        var status: UInt8 = 0xFF
+        offMain { status = vm.csRevert() }
+        let stored = csRecords()
+        let differing = zip(live, stored).filter { $0.0.2 != $0.1.2 }.map { $0.0 }
+        if status == PIN_CONFIG_SUCCESS, csDirty() == false {
+            flashOK.insert(VC.CS.REVERT.id)
+            log("  CS.REVERT: dirty cleared, \(differing.count) live records differed from the stored ones")
+        } else {
+            XCTFail("csRevert: status \(status), dirty \(String(describing: csDirty()))")
+        }
+        offMain { status = vm.csSave() }
+        if status == PIN_CONFIG_SUCCESS, csDirty() == false, csRecords().map({ $0.2 }) == stored.map({ $0.2 }) {
+            flashOK.insert(VC.CS.SAVE.id)
+        } else {
+            XCTFail("csSave of the stored config: status \(status)")
+        }
+        // Groups and macros first: bindings may refer to them.
+        let order: [VendorCommand] = [VC.CS.GROUP, VC.CS.MACRO, VC.CS.DISPLAY_CONFIG, VC.CS.DISPLAY_PAGE,
+                                      VC.CS.BINDING, VC.CS.SLOT_NAME, VC.CS.IR_CMD]
+        for cmd in order {
+            for rec in differing where rec.0 == cmd {
+                guard let d = rec.2 else { continue }
+                let i = Int(rec.1)
+                offMain {
+                    switch cmd {
+                    case VC.CS.GROUP: if let g = CsGroup.fromData(d) { _ = vm.setCsGroup(i, group: g) }
+                    case VC.CS.MACRO: if let m = CsMacro.fromData(d) { _ = vm.setCsMacro(i, macro: m) }
+                    case VC.CS.DISPLAY_CONFIG: if let c = CsDisplayCfg.fromData(d, offset: 0) { _ = vm.setCsDisplayCfg(c) }
+                    case VC.CS.DISPLAY_PAGE: if let pg = CsDisplayPage.fromData(d) { _ = vm.setCsDisplayPage(i, page: pg) }
+                    case VC.CS.BINDING: if let b = CsBinding.fromData(d) { _ = vm.setCsBinding(slot: i, binding: b) }
+                    case VC.CS.SLOT_NAME: _ = vm.setCsName(slot: i, name: String(decoding: d.prefix { $0 != 0 }, as: UTF8.self))
+                    case VC.CS.IR_CMD: if let c = IrCommand.fromData(d) { _ = vm.setCsIrCommand(sub: i, command: c) }
+                    default: break
+                    }
+                }
+            }
+        }
+        var back: [String] = []
+        for rec in differing {
+            let now = readUntil(rec.0, rec.1, equals: rec.2 ?? Data(), timeout: 2)
+            if now == rec.2 { appSetOK.insert(rec.0.id) }
+            else { back.append("\(name(rec.0))@\(rec.1): \(hex(now)) want \(hex(rec.2))") }
+        }
+        // Safety net: whatever the app failed to put back is written raw, so
+        // the live edits survive even when the test has found a bug.
+        for rec in differing {
+            guard let d = rec.2, readData(rec.0, rec.1) != d else { continue }
+            if rec.0 == VC.CS.MACRO, let m = CsMacro.fromData(d) {
+                for (step, value) in m.steps.enumerated() {
+                    _ = transport.setAndWait(VC.CS.MACRO_STEP, value: UInt16(step << 8) | rec.1, data: value.toData())
+                }
+                _ = transport.setAndWait(VC.CS.MACRO_HEADER, value: rec.1, data: m.headerData())
+            } else {
+                _ = transport.setAndWait(rec.0, value: rec.1, data: d)
+            }
+        }
+        XCTAssertTrue(back.isEmpty, "live CS records not restored by the app: \(back)")
+        if !differing.isEmpty { XCTAssertEqual(csDirty(), true, "the restored live edits read as unsaved again") }
+        log("  CS live edits restored through the app: \(differing.count - back.count) of \(differing.count)"
+            + (back.isEmpty ? "" : "; NOT restored: \(back)"))
+    }
+
     private func directory() -> Data? { readData(VC.STORE.DIRECTORY) }
     private func occupied(_ dir: Data?) -> UInt16 {
         guard let d = dir, d.count >= 2 else { return 0 }
@@ -1037,6 +1179,34 @@ final class LiveCommandSweepTests: XCTestCase {
             _ = flashCheck("setDacHwMuteConfig (own value)", VC.OUTPUT.DAC_MUTE_CONFIG, want: raw, blocking: true,
                            { vm.setDacHwMuteConfig(cfg) })
         }
+        if let raw = readData(VC.XPORT.UART_CONFIG), raw.first == 0, var cfg = UartCtrlConfig.fromData(raw) {
+            // Off, so a new baud rate drives nothing.
+            let baud: UInt32 = cfg.baud == 57600 ? 38400 : 57600
+            cfg.baud = baud
+            let c = cfg
+            var st: UInt8 = 0xFF
+            if flashCheck("setUartCtrlConfig (baud)", VC.XPORT.UART_CONFIG, want: edited(raw, at: 4, u32(baud)), blocking: true,
+                          { st = vm.setUartCtrlConfig(c) }) {
+                restore(VC.XPORT.UART_CONFIG, 0, raw, "UART_CONFIG")
+            }
+            _ = st
+        }
+        // A disabled config is zeroed by the firmware, so the timing fields
+        // only stick while enabled.  Enabled with no pin drives nothing.
+        if let raw = readData(VC.OUTPUT.DAC_MUTE_CONFIG), raw.first == 0 {
+            let cfg = DacHwMuteConfig(enabled: true, activeLow: true, pin: DAC_HW_MUTE_PIN_NONE, holdMs: 150, releaseMs: 50)
+            let want = Data([1, 1, DAC_HW_MUTE_PIN_NONE, 0]) + u16(150) + u16(50) + Data(count: 8)
+            if flashCheck("setDacHwMuteConfig (enabled, no pin)", VC.OUTPUT.DAC_MUTE_CONFIG, want: want, blocking: true,
+                          { vm.setDacHwMuteConfig(cfg) }) {
+                // Enabled, the test pulse is accepted (it has no pin to drive).
+                var pulse: UInt8 = 0xFF
+                offMain { pulse = vm.testDacHwMute() }
+                if pulse == PIN_CONFIG_SUCCESS { flashOK.insert(VC.OUTPUT.DAC_MUTE_TEST.id); log("  OUTPUT.DAC_MUTE_TEST: accepted while enabled") }
+                else { XCTFail("testDacHwMute while enabled: status \(pulse)") }
+                Thread.sleep(forTimeInterval: 1.2)
+                restore(VC.OUTPUT.DAC_MUTE_CONFIG, 0, raw, "DAC_MUTE_CONFIG")
+            }
+        }
         if let raw = readData(VC.XPORT.UART_CONFIG), let cfg = UartCtrlConfig.fromData(raw) {
             _ = flashCheck("setUartCtrlConfig (own value)", VC.XPORT.UART_CONFIG, want: raw, blocking: true,
                            { _ = vm.setUartCtrlConfig(cfg) })
@@ -1084,7 +1254,7 @@ final class LiveCommandSweepTests: XCTestCase {
                 XCTFail("csSave of an unchanged config: status \(status)")
             }
         } else {
-            log("  CS.REVERT, CS.SAVE: Control Surfaces has unsaved changes, so neither was sent")
+            csRevertSaveKeepingLiveEdits()
         }
         var arm = CsIrLearnArmResult.locked
         offMain { arm = vm.csIrLearnArm() }
