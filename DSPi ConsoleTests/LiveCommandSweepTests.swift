@@ -1395,6 +1395,138 @@ final class LiveCommandSweepTests: XCTestCase {
         try? text.write(toFile: path, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - Audio behaviour
+
+    /// Peak of one channel from MEAS.LEVELS, in dBFS, as the max over a
+    /// short window (the meter is a decaying peak).
+    private func peakDB(channel: Int, channels: Int, window: TimeInterval = 0.4) -> Double {
+        var best: UInt16 = 0
+        let end = Date().addingTimeInterval(window)
+        repeat {
+            if let d = readData(VC.MEAS.LEVELS), d.count >= channels * 2 {
+                best = max(best, u16le(d, channel * 2) ?? 0)
+            }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.03))
+        } while Date() < end
+        return best == 0 ? -200 : 20 * log10(Double(best) / 32767)
+    }
+
+    /// Settings must change what the board actually outputs, read on its
+    /// own output meter: the generator plays a quiet 1 kHz sine into one
+    /// enabled output, then output gain, mute, an EQ peak and the limiter are
+    /// changed through the app.  Plays sound at -50 dBFS for a few seconds.
+    func testAudioFollowsSettings() throws {
+        guard ProcessInfo.processInfo.environment["DSPI_AUDIO_SWEEP"] == "1" else {
+            throw XCTSkip("Opt-in: run with TEST_RUNNER_DSPI_AUDIO_SWEEP=1 (plays a quiet test tone).")
+        }
+        _ = try HardwareTest.requireDevice()
+        let vm = self.vm
+        let ready = Date().addingTimeInterval(10)
+        while !vm.deviceNameSupported, Date() < ready {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        guard let bulk0 = readData(VC.STORE.ALL_PARAMS), let siggen0 = readData(VC.MEAS.SIGGEN_CONFIG),
+              var cfg = SiggenConfig.fromData(siggen0) else { return XCTFail("snapshot failed") }
+        let channels = vm.numChannels, firstOut = vm.chOut1
+        guard let o = (0..<vm.numOutputChannels).first(where: { readData(VC.ROUTE.OUTPUT_ENABLE, UInt16($0)) == u8(1) }) else {
+            return XCTFail("no enabled output")
+        }
+        let ch = firstOut + o
+        var descs: [(UInt8, String)] = []
+        for t in 0..<(readData(VC.MEAS.SIGGEN_CAPS).map { Int($0[1]) } ?? 0) {
+            if let d = readData(VC.MEAS.SIGGEN_TYPE_DESC, UInt16(t)) {
+                descs.append((d[0], String(decoding: d[1..<9].prefix { $0 != 0 }, as: UTF8.self)))
+            }
+        }
+        guard let sine = descs.first(where: { $0.1.lowercased().contains("sine") }) else {
+            return XCTFail("no sine type in \(descs)")
+        }
+        log("== Audio: output \(o) (meter channel \(ch)), generator types \(descs.map { $0.1 })")
+
+        let gain0 = readData(VC.ROUTE.OUTPUT_GAIN, UInt16(o)), mute0 = readData(VC.ROUTE.OUTPUT_MUTE, UInt16(o))
+        let band0 = readData(VC.FILTER.BAND, UInt16(ch << 8 | 9))
+        let lim: [(VendorCommand, UInt16)] = [(VC.DYN.LIMITER_ENABLE, UInt16(o)), (VC.DYN.LIMITER_THRESHOLD, UInt16(o)), (VC.DYN.LIMITER_RELEASE, UInt16(o))]
+        let lim0 = lim.map { readData($0.0, $0.1) }
+        defer {
+            offMain { _ = vm.siggenControl(SIGGEN_CTL_STOP_NOW) }
+            _ = transport.setAndWait(VC.MEAS.SIGGEN_CONFIG, data: siggen0)
+            for (k, v) in zip(lim, lim0) { if let v { _ = transport.setAndWait(k.0, value: k.1, data: v) } }
+            if let gain0 { _ = transport.setAndWait(VC.ROUTE.OUTPUT_GAIN, value: UInt16(o), data: gain0) }
+            if let mute0 { _ = transport.setAndWait(VC.ROUTE.OUTPUT_MUTE, value: UInt16(o), data: mute0) }
+            if let band0 { _ = transport.setAndWait(VC.FILTER.BAND, value: UInt16(ch << 8 | 9), data: band0) }
+            let end = readUntil(VC.STORE.ALL_PARAMS, 0, equals: bulk0, timeout: 3)
+            XCTAssertEqual(end, bulk0, "ALL_PARAMS back to the start")
+            vm.fetchAll()
+            print("\n----- DSPi audio check -----\n\(report.joined(separator: "\n"))\n----------------------------")
+        }
+
+        // Start from 0 dB output gain, unmuted, band 9 flat, limiter off.
+        vm.setOutputGain(output: o, db: 0)
+        vm.setOutputMute(output: o, muted: false)
+        vm.setLimiterEnabled(output: o, false)
+        vm.setFilter(ch: ch, band: 9, p: FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
+        HardwareTest.settle()
+        cfg.signalType = sine.0
+        cfg.channelMask = UInt16(1 << o)
+        cfg.invertMask = 0
+        cfg.flags = 0
+        cfg.levelDB = -50
+        cfg.durationMS = 0
+        cfg.repeatCount = 0
+        cfg.p1 = 1000
+        let c = cfg
+        offMain { vm.siggenStart(with: c) }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.5))
+        let base = peakDB(channel: ch, channels: channels)
+        log("  generator at -50 dBFS: output meter \(String(format: "%.1f", base)) dBFS")
+        // The tone passes the master and user volumes on its way out.
+        let master = Double(f32le(readData(VC.ROUTE.MASTER_VOLUME)) ?? 0), user = Double(f32le(readData(VC.ROUTE.USER_VOLUME)) ?? 0)
+        let expected = -50 + master + user
+        log("  expected \(String(format: "%.1f", expected)) dBFS (-50 with master \(master) dB and user \(user) dB)")
+        plausible("generator reaches the output meter through the volumes", abs(base - expected) < 3, "\(base) dBFS, expected \(expected)")
+
+        vm.setOutputGain(output: o, db: -10)
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.6))
+        let lower = peakDB(channel: ch, channels: channels)
+        log("  output gain -10 dB: \(String(format: "%.1f", lower)) dBFS (change \(String(format: "%.1f", lower - base)) dB)")
+        plausible("output gain -10 dB lowers the output by 10 dB", abs((lower - base) + 10) < 1.5, "change \(lower - base) dB")
+        vm.setOutputGain(output: o, db: 0)
+
+        vm.setOutputMute(output: o, muted: true)
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.8))
+        let muted = peakDB(channel: ch, channels: channels)
+        log("  output muted: \(String(format: "%.1f", muted)) dBFS")
+        plausible("mute silences the output", muted < base - 30, "\(muted) dBFS")
+        vm.setOutputMute(output: o, muted: false)
+
+        vm.setFilter(ch: ch, band: 9, p: FilterParams(type: .peaking, freq: 1000, q: 1, gain: 6))
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.8))
+        let boosted = peakDB(channel: ch, channels: channels)
+        log("  EQ peak +6 dB at 1 kHz: \(String(format: "%.1f", boosted)) dBFS (change \(String(format: "%.1f", boosted - base)) dB)")
+        plausible("a +6 dB EQ peak at the tone raises the output by 6 dB", abs((boosted - base) - 6) < 1.5, "change \(boosted - base) dB")
+        vm.setFilter(ch: ch, band: 9, p: FilterParams(type: .flat, freq: 1000, q: 0.707, gain: 0))
+
+        // The threshold cannot go below -30 dB, so for this step the output
+        // must cross -30 dBFS: raise the generator for under a second.
+        vm.setLimiterThreshold(output: o, -30)
+        let pushed = -30 + 10 - (master + user)            // pre-limiter output -20 dBFS
+        var loud = c
+        loud.levelDB = Float(min(-20, pushed - 10))
+        let gainForLimit = Float(pushed) - loud.levelDB
+        offMain { vm.siggenSetConfig(loud) }
+        vm.setOutputGain(output: o, db: gainForLimit)
+        vm.setLimiterEnabled(output: o, true)
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.8))
+        let limited = peakDB(channel: ch, channels: channels)
+        let reduction = readData(VC.DYN.LIMITER_METERS).flatMap { u16le($0, o * 2) }.map { Double($0) / 100 } ?? 0
+        log("  generator \(loud.levelDB) dBFS with +\(gainForLimit) dB gain into a -30 dB limiter: \(String(format: "%.1f", limited)) dBFS, gain reduction \(String(format: "%.1f", reduction)) dB")
+        plausible("the limiter holds the output at its threshold", limited < -28 && limited > -33, "\(limited) dBFS")
+        plausible("the limiter meter shows the reduction", reduction > 3, "\(reduction) dB")
+        offMain { _ = vm.siggenControl(SIGGEN_CTL_STOP_NOW) }
+        vm.setLimiterEnabled(output: o, false)
+        vm.setOutputGain(output: o, db: 0)
+    }
+
     // MARK: - DSPi Link
 
     /// The same sweep from a networked client: a second hub server on the
@@ -1782,6 +1914,13 @@ final class LiveCommandSweepTests: XCTestCase {
         log("  not reached at all: \(missed.map { name(VendorCommand($0)) }.joined(separator: ", "))")
         log("  SET never sent: \(setNotProven.map { name(VendorCommand($0)) }.joined(separator: ", "))")
         log("  verified through app setters: \(appSetOK.count)")
+        // Settable commands the app names whose app code path was not run
+        // with a changed value here (the flash pass covers the FLASH ones).
+        let identityOnly = usedBuilt.filter { id in
+            guard let info = VendorCommandRegistry.info(for: VendorCommand(id)), info.hasSet else { return false }
+            return !appSetOK.contains(id) && !actionOK.contains(id) && !info.flags.contains(.flash)
+        }.sorted()
+        log("  SETs the app names but did not change here (non-flash): \(identityOnly.map { name(VendorCommand($0)) }.joined(separator: ", "))")
 
         let text = report.joined(separator: "\n")
         print("\n----- DSPi command sweep -----\n\(text)\n------------------------------")
