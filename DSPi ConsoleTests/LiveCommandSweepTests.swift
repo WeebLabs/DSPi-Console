@@ -478,6 +478,9 @@ final class LiveCommandSweepTests: XCTestCase {
                     candidates: xoParams.map { band($0.0.rawValue, 0, $0.1, 0.707, 0) },
                     act: { vm, i in let b = xoParams[i]
                         vm.setCrossoverBand(ch: outCh, localBand: 1, p: FilterParams(type: b.0, freq: b.1, q: 0.707, gain: 0)) }),
+            AppCase(label: "setChannelName", command: VC.ROUTE.CHANNEL_NAME, address: UInt16(outCh), neighbour: 0,
+                    candidates: [name32("Sweep Ch A"), name32("Sweep Ch B")],
+                    act: { vm, i in vm.setChannelName(channel: outCh, name: ["Sweep Ch A", "Sweep Ch B"][i]) }),
             AppCase(label: "setBypass", command: VC.FILTER.EQ_BYPASS, candidates: [u8(1), u8(0)],
                     act: { vm, i in vm.setBypass(i == 0) }),
             // DYN
@@ -631,6 +634,15 @@ final class LiveCommandSweepTests: XCTestCase {
     /// Free GPIOs by the app's own pin map, so a pin move never lands on
     /// something in use.
     private func freePins() -> [UInt8] {
+        // Restores are raw writes the view model never sees, so re-read every
+        // pin owner from the board before trusting the app's map.
+        let vm = self.vm
+        for i in 0..<(walked[VC.OUTPUT.PIN.id] ?? 5) { vm.fetchOutputPin(output: i) }
+        vm.fetchSpdifInputConfig(); vm.fetchI2SInputConfig(); vm.fetchAdatStatus(); vm.fetchAdatInputConfig()
+        vm.fetchMckPin(); vm.fetchMckEnable(); vm.fetchI2SBckPin(role: 0); vm.fetchI2SBckPin(role: 1); vm.fetchI2SClockPinMode()
+        vm.fetchDacHwMuteConfig(); vm.fetchUartCtrlConfig(); vm.fetchI2cCtrlConfig()
+        for slot in 0..<CS_MAX_BINDINGS { vm.fetchCsBinding(slot: slot) }
+        land()
         let taken = Set(vm.activePinAssignments(from: HardwareSettingsTab.validPins).map(\.pin))
         return HardwareSettingsTab.validPins.filter { !taken.contains($0) }
     }
@@ -855,6 +867,10 @@ final class LiveCommandSweepTests: XCTestCase {
         var status: UInt8 = 0xFF
         offMain { status = vm.setCsMacro(Int(index), macro: macro) }
         guard status == PIN_CONFIG_SUCCESS else { XCTFail("setCsMacro: status \(status)"); return }
+        // setCsMacro writes the steps, then CS.MACRO_HEADER with name and count.
+        if readData(VC.CS.MACRO, index).map({ $0[32] == 1 && str($0.prefix(32)) == "Sweep" }) == true {
+            appSetOK.insert(VC.CS.MACRO_HEADER.id); appSetOK.insert(VC.CS.MACRO_STEP.id)
+        } else { XCTFail("setCsMacro: header not stored") }
         offMain { status = vm.csMacroFire(index) }
         let flipped = u8(bypass0.first == 0 ? 1 : 0)
         if status == PIN_CONFIG_SUCCESS, readUntil(VC.FILTER.EQ_BYPASS, 0, equals: flipped) == flipped {
