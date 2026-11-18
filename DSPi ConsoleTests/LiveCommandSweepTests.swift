@@ -102,8 +102,10 @@ final class LiveCommandSweepTests: XCTestCase {
         }
     }
 
+    /// A network transport cannot know the board's command set, so a Link
+    /// run asks the local USB connection to the same board.
     private func implemented(_ c: VendorCommand, set: Bool) -> Bool {
-        transport.implements(c, set: set) != false
+        (transportOverride == nil ? transport : AppState.shared.usb).implements(c, set: set) != false
     }
 
     // Payload builders, written from the registry descriptions.
@@ -193,9 +195,14 @@ final class LiveCommandSweepTests: XCTestCase {
             throw XCTSkip("Opt-in: run with TEST_RUNNER_DSPI_COMMAND_SWEEP=1 (writes to the board).")
         }
         _ = try HardwareTest.requireDevice()
+        runSweep()
+    }
+
+    /// The four passes and the final image check, through `transport`.
+    private func runSweep() {
         // The pin map and the setters' guards come from the app's first full
         // read, which lands a few seconds after the link is up.
-        let ready = Date().addingTimeInterval(10)
+        let ready = Date().addingTimeInterval(15)
         while !vm.deviceNameSupported, Date() < ready {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
@@ -1386,6 +1393,62 @@ final class LiveCommandSweepTests: XCTestCase {
         let path = ProcessInfo.processInfo.environment["DSPI_SWEEP_REPORT"]
             ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("dspi-flash-sweep.txt")
         try? text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - DSPi Link
+
+    /// The same sweep from a networked client: a second hub server on the
+    /// app's own hub (throwaway pairing store, test keychain namespace), an
+    /// admin client paired over localhost, a NetworkTransport bound to the
+    /// board and a view model on top of it.
+    func testEveryCommandOverLink() throws {
+        guard ProcessInfo.processInfo.environment["DSPI_COMMAND_SWEEP"] == "1" else {
+            throw XCTSkip("Opt-in: run with TEST_RUNNER_DSPI_COMMAND_SWEEP=1 (writes to the board).")
+        }
+        _ = try HardwareTest.requireDevice()
+        let storeURL = FileManager.default.temporaryDirectory.appendingPathComponent("sweep-link-\(UUID().uuidString).json")
+        let auth = LinkAuthStore(storeURL: storeURL)
+        let server = LinkServer(hub: AppState.shared.linkHub, auth: auth, policy: LinkPolicy.bundled ?? LinkPolicy.empty)
+        try server.start(port: 0)
+        let port = try XCTUnwrap(server.boundPort)
+        let url = URL(string: "ws://127.0.0.1:\(port)/dspi/v1")!
+        let tokens = LinkTokenStore(service: "com.weeblabs.dspi-console.link.sweep-test")
+        let hubID = "sweep-hub"
+        defer {
+            transportOverride = nil
+            vmOverride = nil
+            server.stop()
+            tokens.removeToken(forHub: hubID)
+            try? FileManager.default.removeItem(at: storeURL)
+        }
+        func spin(until done: () -> Bool, _ timeout: TimeInterval) -> Bool {
+            let end = Date().addingTimeInterval(timeout)
+            while !done(), Date() < end { RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) }
+            return done()
+        }
+
+        // Pair once for an admin token.
+        let pairer = LinkClient()
+        pairer.connect(to: url, clientName: "Sweep", token: nil)
+        XCTAssertTrue(spin(until: { pairer.state == .awaitingAuth(needsPairing: true) }, 5), "pairing prompt")
+        var token: String?
+        pairer.pair(pin: auth.beginPairing(), clientName: "Sweep", role: .admin) { token = try? $0.get() }
+        XCTAssertTrue(spin(until: { token != nil }, 5), "pairing")
+        pairer.disconnect()
+        tokens.setToken(try XCTUnwrap(token), forHub: hubID)
+
+        let client = LinkClient()
+        let net = NetworkTransport(client: client, hubID: hubID, hubName: "Sweep hub", tokens: tokens, clientName: "Sweep")
+        net.connect(to: url)
+        XCTAssertTrue(spin(until: { !client.devices.isEmpty }, 10), "the hub lists the board")
+        let serial = try XCTUnwrap(client.devices.first?.serial)
+        net.bind(serial: serial)
+        XCTAssertTrue(spin(until: { net.isConnected && net.deviceProtocol.isPaged }, 10), "bound to the paged board over Link")
+        log("Over DSPi Link: hub at \(url), board \(serial), protocol \(net.deviceProtocol)")
+
+        transportOverride = net
+        vmOverride = DSPViewModel(transport: net)
+        runSweep()
     }
 
     // MARK: - Reply decoding
