@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.1.7-beta1",
+    "headline": "A new way of talking to the board",
+    "items": [
+      "Firmware 1.1.7 changes how Console and the board talk to each other. Update Console on every Mac that controls the board before installing the 1.1.7 firmware: an older Console cannot see a 1.1.7 board, and a DSPi Link hub running an older Console will not list it.",
+      "Console still recognises a board running 1.1.6 and can update it to 1.1.7. A 1.1.6 board shared over DSPi Link appears in the device menu with its version, but it must be plugged into this Mac to be updated.",
+      "When the board refuses a change, for example a pin that is already in use, the status bar says why and the controls return to the board's actual settings."
+    ]
+  },
+  {
     "version": "1.1.6",
     "headline": "Choose your latency, and name your board and its inputs",
     "items": [

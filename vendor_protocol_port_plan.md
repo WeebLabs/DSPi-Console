@@ -240,6 +240,14 @@ Each phase updates its own unit tests and fakes as it goes. This phase finishes 
 - **Release steps.** Add a step to the CLAUDE.md release process: "refresh the vendored `Protocol/` registry from the same firmware tag as the UF2s, and regenerate `VendorCommands.swift`".
 - **Release notes.** Add a `WhatsNew.json` note that users on 1.1.6 must update the Console before the firmware. A 1.1.6-era Console cannot see a 1.1.7 board, and it would downgrade the board through BOOTSEL.
 
+**Result (committed 2026-11-18).**
+
+- **Policy tests.** Already replaced in phase 7: `LinkPolicyTests` checks the copied Link table against the vendored registry.
+- **Documentation.** The `CLAUDE.md` "USB Protocol" section now describes the paged protocol, refusals, the 1.1.6 gate and the Link policy. The versioning paragraph names `SYS.PLATFORM` alongside 0x7F.
+- **Release steps.** Step 4 of the release process refreshes `Protocol/` from the firmware tag and regenerates `VendorCommands.swift`. Later steps are renumbered.
+- **Release notes.** A `1.1.7-beta1` entry in `WhatsNew.json`. It stays hidden until `MARKETING_VERSION` reaches that version.
+- **Not done.** The full live suite against the 1.1.7 board waits for the user's go-ahead, because it writes to the board.
+
 ---
 
 ## Decisions (agreed 2026-11-17)
