@@ -1926,16 +1926,17 @@ extension DSPViewModel {
         return 0xFF
     }
 
-    /// Set the ADAT data GPIO.  `wValue = 0` resets to the platform default
-    /// (ADAT_PIN_DEFAULT).  May be issued while enabled; the firmware re-routes
-    /// under a muted restart.  Returns the firmware status byte.
+    /// Set the ADAT data GPIO.  0xFF resets to the platform default
+    /// (ADAT_PIN_DEFAULT); every other value, GPIO 0 included, is that pin.
+    /// May be issued while enabled; the firmware re-routes under a muted
+    /// restart.  Returns the firmware status byte.
     @discardableResult
     func setAdatPin(_ pin: UInt8) -> UInt8 {
-        if let d = transport.legacyAction(VC.OUTPUT.ADAT_TX_PIN, payload: Data([pin == 0 ? 0xFF : pin]), family: .pin),
+        if let d = transport.legacyAction(VC.OUTPUT.ADAT_TX_PIN, payload: Data([pin]), family: .pin),
            d.count >= 1 {
             let status = d[0]
             if status == PIN_CONFIG_SUCCESS {
-                let applied = pin == 0 ? ADAT_PIN_DEFAULT : pin
+                let applied = pin == 0xFF ? ADAT_PIN_DEFAULT : pin
                 DispatchQueue.main.async {
                     self.adatPin = applied
                     self.adatStatus.pin = applied

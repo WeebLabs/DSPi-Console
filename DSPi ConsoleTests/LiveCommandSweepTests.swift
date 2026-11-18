@@ -34,8 +34,11 @@ final class LiveCommandSweepTests: XCTestCase {
 
     // MARK: - Plumbing
 
-    private var transport: DeviceTransport { AppState.shared.transport }
-    private var vm: DSPViewModel { AppState.shared.viewModel }
+    /// The Link test swaps in a network transport and a view model on it.
+    private var transportOverride: DeviceTransport?
+    private var vmOverride: DSPViewModel?
+    private var transport: DeviceTransport { transportOverride ?? AppState.shared.transport }
+    private var vm: DSPViewModel { vmOverride ?? AppState.shared.viewModel }
 
     private var report: [String] = []
     private var getOK = Set<UInt16>()
@@ -120,25 +123,67 @@ final class LiveCommandSweepTests: XCTestCase {
     /// The first Control Surfaces slot holding an aux output, or nil.
     private var auxSlot: UInt16?
 
+    private var boardPages: [UInt16] = []
+
+    /// Address counts found by walking a one-index kind until VC_ERR_ADDRESS.
+    private var walked: [UInt16: Int] = [:]
+
+    /// Every valid address of the command.  Kinds whose size the board shape
+    /// gives are enumerated; the rest are walked once (see `walk`).
     private func addresses(for info: VendorCommandInfo) -> [UInt16] {
         // Only optional inputs 1-3 have an enable; input 0 is always on.
-        if info.command == VC.INPUT.SPDIF_RX_ENABLE { return [1, 3] }
+        if info.command == VC.INPUT.SPDIF_RX_ENABLE { return [1, 2, 3] }
         if info.command == VC.CS.AUX_STATE || info.command == VC.CS.AUX_LEVEL { return auxSlot.map { [$0] } ?? [] }
-        let lastCh = UInt16(shape.channels - 1), lastIn = UInt16(shape.inputs - 1)
-        let lastOut = UInt16(shape.outputs - 1)
+        let firstOutCh = shape.channels - shape.outputs
+        func range(_ n: Int) -> [UInt16] { (0..<n).map(UInt16.init) }
         switch info.address {
-        case .none: return [0]
-        case .page: return [UInt16(VC.SYS.PROTOCOL_INFO.page), UInt16(VC.CS.CAPS.page)]
-        case .pageCommand: return [VC.SYS.PROTOCOL_INFO.id, VC.CS.CAPS.id]
-        case .channel: return [0, lastCh]
-        case .input: return [0, lastIn]
-        case .output, .outputAll: return [0, lastOut]
-        case .inputOutput: return [0, (lastIn << 8) | lastOut]
-        // Band 9 is the last PEQ band of every channel; band 20 the first
-        // crossover band, which only output channels have.
-        case .channelBand: return [0, (lastCh << 8) | 9, (lastCh << 8) | 20]
-        default: return [0]
+        case .none, .offset: return [0]
+        // The pages the board lists (page, revision pairs), not the registry's:
+        // a page with no command in this build is not listed and is refused.
+        case .page: return boardPages
+        case .pageCommand:
+            return VendorCommandRegistry.all.filter { implemented($0.command, set: $0.hasSet && !$0.hasGet) }.map { $0.command.id }
+        case .channel: return range(shape.channels)
+        case .input: return range(shape.inputs)
+        case .output, .outputAll: return range(shape.outputs)
+        case .preset: return range(10)
+        case .csSlot: return range(CS_MAX_BINDINGS)
+        case .csSub: return range(CS_MAX_IR_COMMANDS)
+        case .csGroup, .csMacro: return range(CS_MAX_MACROS)
+        case .csPage: return range(CS_MAX_DISPLAY_PAGES)
+        case .inputOutput:
+            return (0..<shape.inputs).flatMap { i in (0..<shape.outputs).map { UInt16(i << 8 | $0) } }
+        case .csMacroStep:
+            return (0..<CS_MAX_MACROS).flatMap { m in (0..<CS_MAX_MACRO_STEPS).map { UInt16($0 << 8 | m) } }
+        case .channelBand:
+            // PEQ bands 0-9 on every channel; crossover bands 20-23 on outputs.
+            return (0..<shape.channels).flatMap { ch -> [UInt16] in
+                let bands = Array(0..<10) + (ch >= firstOutCh ? Array(20..<24) : [])
+                return bands.map { UInt16(ch << 8 | $0) }
+            }
+        default:
+            return range(walked[info.command.id] ?? 1)
         }
+    }
+
+    /// For one-index kinds the board shape does not size (output slots, pin
+    /// outputs, sources, I2S pairs, roles, nouns, chunk indexes), read upward
+    /// until the board refuses.  The refusal must be VC_ERR_ADDRESS: anything
+    /// else means the address was not the problem.
+    private func walk(_ info: VendorCommandInfo) {
+        var n = 0
+        while n < 64 {
+            switch read(info.command, UInt16(n)) {
+            case .success: n += 1; continue
+            case .failure(let s):
+                if s != .vcAddress {
+                    XCTFail("\(name(info.command)) @\(n): first refusal is \(s), expected vcAddress")
+                }
+            }
+            break
+        }
+        walked[info.command.id] = n
+        log("  \(name(info.command)): \(n) addresses")
     }
 
     // MARK: - The test
@@ -148,6 +193,12 @@ final class LiveCommandSweepTests: XCTestCase {
             throw XCTSkip("Opt-in: run with TEST_RUNNER_DSPI_COMMAND_SWEEP=1 (writes to the board).")
         }
         _ = try HardwareTest.requireDevice()
+        // The pin map and the setters' guards come from the app's first full
+        // read, which lands a few seconds after the link is up.
+        let ready = Date().addingTimeInterval(10)
+        while !vm.deviceNameSupported, Date() < ready {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
 
         guard let bulkBefore = readData(VC.STORE.ALL_PARAMS), bulkBefore.count >= 5 else {
             return XCTFail("STORE.ALL_PARAMS did not answer")
@@ -205,6 +256,17 @@ final class LiveCommandSweepTests: XCTestCase {
 
     private func getSweep() {
         log("\n== GET sweep")
+        if let list = readData(VC.SYS.PAGE_LIST) {
+            boardPages = stride(from: 0, to: list.count - 1, by: 2).map { UInt16(list[$0]) }
+            log("  board lists pages \(boardPages.map { String(format: "0x%02X", $0) })")
+        }
+        let walkKinds: Set<VendorAddressKind> = [.slot, .pinOutput, .source, .spdifRx, .i2sPair, .role, .csNoun, .index]
+        for info in VendorCommandRegistry.all where info.hasGet && walkKinds.contains(info.address)
+            && info.command != VC.INPUT.SPDIF_RX_ENABLE && implemented(info.command, set: false) {
+            walk(info)
+        }
+        // A SET-only command of a walked kind uses its GET sibling's count.
+        walked[VC.OUTPUT.TYPE.id] = walked[VC.OUTPUT.TYPE.id] ?? walked[VC.OUTPUT.PIN.id]
         for info in VendorCommandRegistry.all where info.hasGet {
             let c = info.command
             guard implemented(c, set: false) else {
@@ -296,8 +358,18 @@ final class LiveCommandSweepTests: XCTestCase {
         /// current value is used, so the write is a real change.
         let candidates: [Data]
         var blocking = false
+        /// Other settings the write can disturb, put back after the main one
+        /// in this order (the tube's type must come last).
+        var restoreAfter: [(VendorCommand, UInt16)] = []
         let act: (DSPViewModel, Int) -> Void
+        /// For setters that answer a PIN_CONFIG_* style status: the status of
+        /// the last act.  A documented refusal is recorded, not failed.
+        var status: ((DSPViewModel, Int) -> UInt8)? = nil
     }
+
+    /// Setters whose refusal is a documented answer rather than a fault,
+    /// with the reason, so the report can list them for review.
+    private var refusedAsDocumented: [String] = []
 
     private func run(_ c: AppCase) {
         let cmd = c.command
@@ -310,7 +382,23 @@ final class LiveCommandSweepTests: XCTestCase {
             return XCTFail("\(c.label): every candidate equals the current value")
         }
         let want = c.candidates[pick]
-        if c.blocking { offMain { c.act(self.vm, pick) } } else { c.act(vm, pick) }
+        let after = c.restoreAfter.map { readData($0.0, $0.1) }
+        if let statusOf = c.status {
+            var status: UInt8 = 0xFF
+            if c.blocking { offMain { status = statusOf(self.vm, pick) } } else { status = statusOf(vm, pick) }
+            if status != PIN_CONFIG_SUCCESS {
+                // Nothing changed, so nothing to restore; the status is the
+                // board's own reason, mapped back by the app.
+                let unchanged = readData(cmd, c.address) == before
+                if status == 0xFF || !unchanged {
+                    XCTFail("\(c.label): status \(status), value \(unchanged ? "unchanged" : "CHANGED")")
+                } else {
+                    refusedAsDocumented.append("\(c.label): status \(status)")
+                    log("  \(c.label): refused with status \(status), value unchanged")
+                }
+                return
+            }
+        } else if c.blocking { offMain { c.act(self.vm, pick) } } else { c.act(vm, pick) }
         let got = readUntil(cmd, c.address, equals: want)
         var ok = got == want
         if !ok {
@@ -329,6 +417,15 @@ final class LiveCommandSweepTests: XCTestCase {
         let restored = readUntil(cmd, c.address, equals: before)
         if status != .ok || restored != before {
             XCTFail("\(c.label): restore failed (\(status)), reads \(hex(restored)), was \(hex(before))")
+        }
+        for (i, extra) in c.restoreAfter.enumerated() {
+            guard let value = after[i] else { continue }
+            _ = transport.setAndWait(extra.0, value: extra.1, data: value)
+        }
+        for (i, extra) in c.restoreAfter.enumerated() {
+            guard let value = after[i] else { continue }
+            let back = readUntil(extra.0, extra.1, equals: value)
+            if back != value { XCTFail("\(c.label): \(name(extra.0))@\(extra.1) not restored: \(hex(back)), was \(hex(value))") }
         }
         if ok { appSetOK.insert(cmd.id) }
     }
@@ -513,8 +610,243 @@ final class LiveCommandSweepTests: XCTestCase {
                                  act: { vm, i in _ = vm.setCsMacroStep(macro: 3, step: 2, value: variants[i]) }))
         }
 
+        cases += moreCases(outCh: outCh, o: o)
         for c in cases { run(c) }
+        auxPass()
+        adatInputEnablePass()
         log("  \(appSetOK.count) commands verified through the app's setters (\(cases.count) cases)")
+    }
+
+    // MARK: - Pass 3b: the setters the first version left to identity writes
+
+    /// Free GPIOs by the app's own pin map, so a pin move never lands on
+    /// something in use.
+    private func freePins() -> [UInt8] {
+        let taken = Set(vm.activePinAssignments(from: HardwareSettingsTab.validPins).map(\.pin))
+        return HardwareSettingsTab.validPins.filter { !taken.contains($0) }
+    }
+
+    private func edited(_ base: Data, at offset: Int, _ bytes: Data) -> Data {
+        var d = base; d.replaceSubrange(offset..<offset + bytes.count, with: bytes); return d
+    }
+
+    private func moreCases(outCh: Int, o: UInt16) -> [AppCase] {
+        var cases: [AppCase] = []
+        let gpios = freePins()
+        let pairs = gpios.filter { gpios.contains($0 + 1) }
+        log("  free GPIOs: \(gpios)")
+        func pinCase(_ label: String, _ cmd: VendorCommand, _ addr: UInt16 = 0, neighbour: UInt16? = nil,
+                     pins: [UInt8], _ set: @escaping (DSPViewModel, UInt8) -> UInt8) {
+            let use = Array(pins.prefix(2))
+            guard !use.isEmpty else { log("  \(label): no free GPIO to move to"); return }
+            cases.append(AppCase(label: label, command: cmd, address: addr, neighbour: neighbour,
+                                 candidates: use.map { Data([$0]) }, blocking: true,
+                                 act: { _, _ in }, status: { vm, i in set(vm, use[i]) }))
+        }
+        pinCase("setOutputPin", VC.OUTPUT.PIN, 1, neighbour: 0, pins: gpios) { vm, p in vm.setOutputPin(output: 1, pin: p) }
+        pinCase("setSpdifRxPin(0)", VC.INPUT.SPDIF_RX_PIN, 0, pins: gpios) { vm, p in vm.setSpdifRxPin(index: 0, p) }
+        pinCase("setSpdifRxPin(2)", VC.INPUT.SPDIF_RX_PIN, 2, neighbour: 1, pins: gpios) { vm, p in vm.setSpdifRxPin(index: 2, p) }
+        pinCase("setI2SRxPin(1)", VC.INPUT.I2S_RX_PIN, 1, neighbour: 0, pins: gpios) { vm, p in vm.setI2SRxPin(pair: 1, p) }
+        pinCase("setAdatPin", VC.OUTPUT.ADAT_TX_PIN, pins: gpios) { vm, p in vm.setAdatPin(p) }
+        pinCase("setAdatInputPin", VC.INPUT.ADAT_RX_PIN, pins: gpios) { vm, p in vm.setAdatInputPin(p) }
+        // MCK must sit on a clock-output pin.
+        pinCase("setMckPin", VC.CLOCK.MCK_PIN, pins: gpios.filter { [13, 15, 21, 23, 24, 25].contains($0) }) { vm, p in vm.setMckPin(p) }
+        pinCase("setI2SBckPin(slave)", VC.CLOCK.I2S_BCK_PIN, UInt16(I2S_BCK_ROLE_SLAVE), neighbour: 0, pins: pairs) { vm, p in
+            vm.setI2SBckPin(p, role: I2S_BCK_ROLE_SLAVE)
+        }
+
+        func statusCase(_ label: String, _ cmd: VendorCommand, _ addr: UInt16 = 0, neighbour: UInt16? = nil,
+                        values: [UInt8], _ set: @escaping (DSPViewModel, UInt8) -> UInt8) {
+            cases.append(AppCase(label: label, command: cmd, address: addr, neighbour: neighbour,
+                                 candidates: values.map { Data([$0]) }, blocking: true,
+                                 act: { _, _ in }, status: { vm, i in set(vm, values[i]) }))
+        }
+        statusCase("setAdatEnable", VC.OUTPUT.ADAT_TX_ENABLE, values: [1, 0]) { vm, v in vm.setAdatEnable(v == 1) }
+        statusCase("setAdatInputEnable", VC.INPUT.ADAT_RX_ENABLE, values: [1, 0]) { vm, v in vm.setAdatInputEnable(v == 1) }
+        statusCase("setAdatInputClockMode", VC.INPUT.ADAT_RX_CLOCK_MODE, values: [1, 0]) { vm, v in vm.setAdatInputClockMode(v) }
+        statusCase("setMckEnable", VC.CLOCK.MCK_ENABLE, values: [1, 0]) { vm, v in vm.setMckEnable(v == 1) }
+        statusCase("setSpdifInputEnable(3)", VC.INPUT.SPDIF_RX_ENABLE, 3, neighbour: 1, values: [1, 0]) { vm, v in
+            vm.setSpdifInputEnable(index: 3, v == 1)
+        }
+        statusCase("setI2SInputChannels", VC.INPUT.I2S_RX_CHANNELS, values: [4, 2]) { vm, v in vm.setI2SInputChannels(Int(v)) }
+        statusCase("setI2SClockPinMode", VC.CLOCK.I2S_CLOCK_PIN_MODE, values: [1, 0]) { vm, v in vm.setI2SClockPinMode(v) }
+        statusCase("setOutputSlotType(3)", VC.OUTPUT.TYPE, 3, neighbour: 0, values: [1, 0]) { vm, v in vm.setOutputSlotType(slot: 3, type: v) }
+
+        let tubeKnobs: [(VendorCommand, UInt16)] = [(VC.FX.TUBE_BIAS, 0), (VC.FX.TUBE_ASYM, 0),
+                                                    (VC.FX.TUBE_HARDNESS, 0), (VC.FX.TUBE_SAG, 0)]
+        let tubeTail: [(VendorCommand, UInt16)] = tubeKnobs + [(VC.FX.TUBE_TYPE, UInt16(0))]
+        func others(_ c: VendorCommand) -> [(VendorCommand, UInt16)] { tubeTail.filter { $0.0 != c } }
+
+        cases += [
+            AppCase(label: "setI2SClockMode", command: VC.CLOCK.I2S_CLOCK_MODE, candidates: [u8(1), u8(0)],
+                    act: { vm, i in vm.setI2SClockMode([1, 0][i]) }),
+            AppCase(label: "setInputSource", command: VC.INPUT.SOURCE, candidates: [u8(1), u8(0)],
+                    act: { vm, i in vm.setInputSource([1, 0][i]) }),
+            AppCase(label: "setOutputEnable", command: VC.ROUTE.OUTPUT_ENABLE, address: o, candidates: [u8(0), u8(1)],
+                    act: { vm, i in vm.setOutputEnable(output: Int(o), enabled: i == 1) }),
+            AppCase(label: "setLimiterEnabled", command: VC.DYN.LIMITER_ENABLE, address: o, candidates: [f32(1), f32(0)],
+                    act: { vm, i in vm.setLimiterEnabled(output: Int(o), i == 0) }),
+            // Joining a group copies the group's settings onto the output.
+            AppCase(label: "setLimiterLinkGroup", command: VC.DYN.LIMITER_LINK_GROUP, address: o, candidates: [f32(4), f32(3)],
+                    restoreAfter: [(VC.DYN.LIMITER_ENABLE, o), (VC.DYN.LIMITER_THRESHOLD, o), (VC.DYN.LIMITER_RELEASE, o)],
+                    act: { vm, i in vm.setLimiterLinkGroup(output: Int(o), [4, 3][i]) }),
+            AppCase(label: "setBandBypass", command: VC.FILTER.BAND_BYPASS, address: UInt16(outCh << 8 | 3),
+                    neighbour: UInt16(outCh << 8 | 2), candidates: [u8(1), u8(0)],
+                    act: { vm, i in vm.setBandBypass(ch: outCh, band: 3, bypass: i == 0) }),
+            AppCase(label: "setCrossoverBandBypass", command: VC.FILTER.BAND_BYPASS, address: UInt16(outCh << 8 | 22),
+                    neighbour: UInt16(outCh << 8 | 21), candidates: [u8(1), u8(0)],
+                    act: { vm, i in vm.setCrossoverBandBypass(ch: outCh, localBand: 2, bypass: i == 0) }),
+            // A stock type rewrites bias, asymmetry, hardness and sag, and
+            // writing any of those four makes the type custom, so those come
+            // back too and the type is restored last.
+            AppCase(label: "setTubeType", command: VC.FX.TUBE_TYPE, candidates: [f32(1), f32(2)],
+                    restoreAfter: tubeTail, act: { vm, i in vm.setTubeType(i + 1) }),
+            AppCase(label: "setTubeDrive", command: VC.FX.TUBE_DRIVE, candidates: [f32(6), f32(9)],
+                    act: { vm, i in vm.setTubeDrive([6, 9][i]) }),
+            AppCase(label: "setTubeBias", command: VC.FX.TUBE_BIAS, candidates: [f32(20), f32(40)],
+                    restoreAfter: others(VC.FX.TUBE_BIAS), act: { vm, i in vm.setTubeBias([20, 40][i]) }),
+            AppCase(label: "setTubeAsym", command: VC.FX.TUBE_ASYM, candidates: [f32(1), f32(2)],
+                    restoreAfter: others(VC.FX.TUBE_ASYM), act: { vm, i in vm.setTubeAsym([1, 2][i]) }),
+            AppCase(label: "setTubeHardness", command: VC.FX.TUBE_HARDNESS, candidates: [f32(30), f32(50)],
+                    restoreAfter: others(VC.FX.TUBE_HARDNESS), act: { vm, i in vm.setTubeHardness([30, 50][i]) }),
+            AppCase(label: "setTubeSag", command: VC.FX.TUBE_SAG, candidates: [f32(10), f32(20)],
+                    restoreAfter: others(VC.FX.TUBE_SAG), act: { vm, i in vm.setTubeSag([10, 20][i]) }),
+            AppCase(label: "setTubeXfmrDamping", command: VC.FX.TUBE_XFMR_DAMPING, candidates: [f32(2), f32(8)],
+                    act: { vm, i in vm.setTubeXfmrDamping([2, 8][i]) }),
+            AppCase(label: "setTubeXfmrRes", command: VC.FX.TUBE_XFMR_RES, candidates: [f32(40), f32(60)],
+                    act: { vm, i in vm.setTubeXfmrRes([40, 60][i]) }),
+            AppCase(label: "setUpmixEnabled", command: VC.FX.UPMIX_ENABLE, candidates: [f32(1), f32(0)],
+                    act: { vm, i in vm.setUpmixEnabled(i == 0) }),
+            AppCase(label: "setUpmixThreshold", command: VC.FX.UPMIX_THRESHOLD, candidates: [f32(30), f32(50)],
+                    act: { vm, i in vm.setUpmixThreshold([30, 50][i]) }),
+            AppCase(label: "setUpmixDetectorHpf", command: VC.FX.UPMIX_DET_HPF, candidates: [f32(100), f32(150)],
+                    act: { vm, i in vm.setUpmixDetectorHpf([100, 150][i]) }),
+            AppCase(label: "setUpmixSurroundHpf", command: VC.FX.UPMIX_SUR_HPF, candidates: [f32(100), f32(150)],
+                    act: { vm, i in vm.setUpmixSurroundHpf([100, 150][i]) }),
+            AppCase(label: "setUpmixSurroundLpf", command: VC.FX.UPMIX_SUR_LPF, candidates: [f32(7000), f32(9000)],
+                    act: { vm, i in vm.setUpmixSurroundLpf([7000, 9000][i]) }),
+            AppCase(label: "setUpmixDecorr", command: VC.FX.UPMIX_DECORR, candidates: [f32(30), f32(60)],
+                    act: { vm, i in vm.setUpmixDecorr([30, 60][i]) }),
+            AppCase(label: "setUpmixPresence", command: VC.FX.UPMIX_PRESENCE, candidates: [f32(1), f32(2)],
+                    act: { vm, i in vm.setUpmixPresence([1, 2][i]) }),
+        ]
+
+        // Struct-valued writes: the expected bytes are the board's own record
+        // with one field edited here by offset, and the app decodes, edits
+        // and re-encodes the record itself.
+        if let raw = readData(VC.MEAS.SIGGEN_CONFIG), let cfg = SiggenConfig.fromData(raw) {
+            let levels: [Float] = [-33, -36]
+            cases.append(AppCase(label: "siggenSetConfig", command: VC.MEAS.SIGGEN_CONFIG,
+                                 candidates: levels.map { edited(raw, at: 8, f32($0)) },
+                                 act: { vm, i in var c = cfg; c.levelDB = levels[i]; vm.siggenSetConfig(c) }))
+        }
+        if let raw = readData(VC.MEAS.RTA_CONFIG), let cfg = RtaConfig.fromData(raw) {
+            let avgs: [UInt16] = [200, 400]
+            cases.append(AppCase(label: "RtaConfig.toData", command: VC.MEAS.RTA_CONFIG,
+                                 candidates: avgs.map { edited(raw, at: 6, u16($0)) },
+                                 act: { _, i in var c = cfg; c.avgMs = avgs[i]
+                                     self.transport.send(VC.MEAS.RTA_CONFIG, data: c.toData()) }))
+        }
+        if let raw = readData(VC.CS.DISPLAY_CONFIG), raw.first == 0, let cfg = CsDisplayCfg.fromData(raw, offset: 0) {
+            let dwells: [UInt16] = [40, 50]
+            cases.append(AppCase(label: "setCsDisplayCfg", command: VC.CS.DISPLAY_CONFIG,
+                                 candidates: dwells.map { edited(raw, at: 2, u16($0)) }, blocking: true,
+                                 act: { vm, i in var c = cfg; c.dwell = dwells[i]; _ = vm.setCsDisplayCfg(c) }))
+        }
+        func emptySlot(_ c: VendorCommand, _ n: Int) -> UInt16? {
+            (0..<UInt16(n)).reversed().first { i in readData(c, i).map { $0.allSatisfy { $0 == 0 } } ?? false }
+        }
+        if let g = emptySlot(VC.CS.GROUP, CS_MAX_MACROS) {
+            let masks: [UInt32] = [0x03, 0x05]
+            cases.append(AppCase(label: "setCsGroup", command: VC.CS.GROUP, address: g,
+                                 candidates: masks.map { Data([CS_TARGET_OUTPUT_CH, 0, 0, 0]) + u32($0) + name32("Sweep G") },
+                                 blocking: true,
+                                 act: { vm, i in _ = vm.setCsGroup(Int(g), group: CsGroup(targetKind: CS_TARGET_OUTPUT_CH,
+                                                                                         memberMask: masks[i], name: "Sweep G")) }))
+        }
+        if let p = emptySlot(VC.CS.DISPLAY_PAGE, CS_MAX_DISPLAY_PAGES) {
+            let flags: [UInt8] = [CS_DPAGE_ACTIVE, CS_DPAGE_ACTIVE | CS_DPAGE_LARGE]
+            cases.append(AppCase(label: "setCsDisplayPage", command: VC.CS.DISPLAY_PAGE, address: p,
+                                 candidates: flags.map { Data([UInt8(CS_NOUN_MASTER_VOLUME), 0, 0, $0]) }, blocking: true,
+                                 act: { vm, i in _ = vm.setCsDisplayPage(Int(p), page: CsDisplayPage(
+                                     noun: UInt8(CS_NOUN_MASTER_VOLUME), target: 0, index: 0, flags: flags[i])) }))
+        }
+        if let sub = emptySlot(VC.CS.IR_CMD, CS_MAX_IR_COMMANDS) {
+            let codes: [UInt32] = [0x00FF_12ED, 0x00FF_34CB]
+            func record(_ code: UInt32) -> Data {
+                Data([UInt8(CS_NOUN_MASTER_VOLUME), UInt8(CS_ACT_SET), 0, 0, 0, CS_IR_PROTO_NEC])
+                    + withUnsafeBytes(of: Int16(-20).littleEndian) { Data($0) } + Data([0, 0, 0, 0]) + u32(code)
+            }
+            cases.append(AppCase(label: "setCsIrCommand", command: VC.CS.IR_CMD, address: sub,
+                                 candidates: codes.map(record), blocking: true,
+                                 act: { vm, i in _ = vm.setCsIrCommand(sub: Int(sub), command: IrCommand(
+                                     noun: UInt8(CS_NOUN_MASTER_VOLUME), action: UInt8(CS_ACT_SET), proto: CS_IR_PROTO_NEC,
+                                     value: -20, code: codes[i])) }))
+        }
+        // A button only reads its GPIO, so a free pin is safe to bind.
+        if let b = emptySlot(VC.CS.BINDING, CS_MAX_BINDINGS), let pin = gpios.last {
+            let nouns: [UInt8] = [UInt8(CS_NOUN_EQ_BYPASS), UInt8(CS_NOUN_LOUDNESS)]
+            func record(_ noun: UInt8) -> Data {
+                var d = Data(count: 24)
+                d[0] = UInt8(CS_TYPE_BUTTON); d[1] = noun; d[2] = UInt8(CS_ACT_TOGGLE); d[4] = pin; d[5] = CS_GPIO_UNUSED
+                return d
+            }
+            cases.append(AppCase(label: "setCsBinding", command: VC.CS.BINDING, address: b,
+                                 candidates: nouns.map(record), blocking: true,
+                                 act: { vm, i in _ = vm.setCsBinding(slot: Int(b), binding: CsBinding(
+                                     type: UInt8(CS_TYPE_BUTTON), noun: nouns[i], action: UInt8(CS_ACT_TOGGLE),
+                                     gpio0: pin, gpio1: CS_GPIO_UNUSED)) }))
+        }
+        return cases
+    }
+
+    /// ADAT input enable is refused while the input has no pin, so give it a
+    /// free one first, then undo both.
+    private func adatInputEnablePass() {
+        guard implemented(VC.INPUT.ADAT_RX_ENABLE, set: true), readData(VC.INPUT.ADAT_RX_ENABLE) == u8(0),
+              let pin0 = readData(VC.INPUT.ADAT_RX_PIN), let pin = freePins().first else { return }
+        var status: UInt8 = 0xFF
+        offMain { status = self.vm.setAdatInputPin(pin) }
+        guard status == PIN_CONFIG_SUCCESS else { XCTFail("ADAT input pin \(pin): status \(status)"); return }
+        offMain { status = self.vm.setAdatInputEnable(true) }
+        if status == PIN_CONFIG_SUCCESS, readUntil(VC.INPUT.ADAT_RX_ENABLE, 0, equals: u8(1)) == u8(1) {
+            appSetOK.insert(VC.INPUT.ADAT_RX_ENABLE.id)
+            log("  setAdatInputEnable: enabled on GPIO \(pin), then disabled")
+        } else {
+            XCTFail("setAdatInputEnable with GPIO \(pin): status \(status), reads \(hex(readData(VC.INPUT.ADAT_RX_ENABLE)))")
+        }
+        offMain { _ = self.vm.setAdatInputEnable(false) }
+        _ = readUntil(VC.INPUT.ADAT_RX_ENABLE, 0, equals: u8(0))
+        restore(VC.INPUT.ADAT_RX_PIN, 0, pin0, "ADAT input pin")
+    }
+
+    /// Aux outputs need a slot that holds one, and this board has none: bind
+    /// a dimmable aux output on a free GPIO, drive it briefly through the
+    /// app, then clear the slot again.
+    private func auxPass() {
+        guard implemented(VC.CS.AUX_STATE, set: true), auxSlot == nil,
+              let slot = (0..<UInt16(CS_MAX_BINDINGS)).reversed().first(where: { i in
+                  readData(VC.CS.BINDING, i).map { $0.allSatisfy { $0 == 0 } } ?? false }),
+              let pin = freePins().first, let empty = readData(VC.CS.BINDING, slot) else {
+            log("  aux: no free slot or GPIO"); return
+        }
+        var status: UInt8 = 0xFF
+        offMain { status = self.vm.setCsBinding(slot: Int(slot), binding: CsBinding(
+            type: UInt8(CS_TYPE_AUX_PWM), gpio0: pin, gpio1: CS_GPIO_UNUSED)) }
+        guard status == PIN_CONFIG_SUCCESS else {
+            XCTFail("aux: binding an aux output on GPIO \(pin) was refused (\(status))"); return
+        }
+        vm.setCsAuxState(Int(slot), on: true)
+        if readUntil(VC.CS.AUX_STATE, slot, equals: u8(1)) == u8(1) { appSetOK.insert(VC.CS.AUX_STATE.id) }
+        else { XCTFail("setCsAuxState: AUX_STATE did not read 1") }
+        vm.setCsAuxLevel(Int(slot), percent: 50)
+        let half = u16(50 * 256)
+        if readUntil(VC.CS.AUX_LEVEL, slot, equals: half) == half { appSetOK.insert(VC.CS.AUX_LEVEL.id) }
+        else { XCTFail("setCsAuxLevel: AUX_LEVEL reads \(hex(readData(VC.CS.AUX_LEVEL, slot))), expected \(hex(half))") }
+        vm.setCsAuxState(Int(slot), on: false)
+        _ = readUntil(VC.CS.AUX_STATE, slot, equals: u8(0))
+        restore(VC.CS.BINDING, slot, empty, "aux binding")
+        log("  aux: slot \(slot) on GPIO \(pin) switched on, set to 50 %, switched off and cleared")
     }
 
     // MARK: - Pass 4: action SETs
