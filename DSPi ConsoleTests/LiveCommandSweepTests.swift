@@ -549,6 +549,343 @@ final class LiveCommandSweepTests: XCTestCase {
         log("  \(actionOK.count) action SETs accepted")
     }
 
+    // MARK: - Flash pass
+
+    private var flashOK = Set<UInt16>()
+
+    /// Raw blocking SET that skips the app's local length check: the registry
+    /// gives STORE.ALL_PARAMS no SET length, but the firmware takes exactly
+    /// the whole 6136-byte image (client guide, SET_ALL_PARAMS).
+    private func rawSet(_ c: VendorCommand, value: UInt16 = 0, data: Data) -> LinkStatus {
+        let done = DispatchSemaphore(value: 0)
+        var result = LinkStatus.timeout
+        transport.sendControlResult(request: c.number, value: value, index: c.usbIndex, data: data) { s in
+            result = s; done.signal()
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while done.wait(timeout: .now()) == .timedOut, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return result
+    }
+
+    /// Writes `before` back and checks it stuck.
+    private func restore(_ c: VendorCommand, _ addr: UInt16 = 0, _ before: Data, _ label: String) {
+        let status = transport.setAndWait(c, value: addr, data: before)
+        let back = readUntil(c, addr, equals: before, timeout: 3)
+        if status != .ok || back != before {
+            XCTFail("\(label): restore failed (\(status)), reads \(hex(back)), was \(hex(before))")
+            log("  \(label): RESTORE FAILED, reads \(hex(back)), was \(hex(before))")
+        }
+    }
+
+    /// A flash write through an app call, then a raw readback.
+    private func flashCheck(_ label: String, _ c: VendorCommand, _ addr: UInt16 = 0, want: Data,
+                            blocking: Bool = false, _ act: @escaping () -> Void) -> Bool {
+        if blocking { offMain(act) } else { act() }
+        let got = readUntil(c, addr, equals: want, timeout: 3)
+        if got != want {
+            XCTFail("\(label): \(name(c)) reads \(hex(got)), expected \(hex(want))")
+            log("  \(label): MISMATCH want \(hex(want)) got \(hex(got))")
+            return false
+        }
+        flashOK.insert(c.id)
+        return true
+    }
+
+    private func directory() -> Data? { readData(VC.STORE.DIRECTORY) }
+    private func occupied(_ dir: Data?) -> UInt16 {
+        guard let d = dir, d.count >= 2 else { return 0 }
+        return UInt16(d[0]) | (UInt16(d[1]) << 8)
+    }
+
+    /// Waits for a deferred preset save or delete to show in the directory.
+    private func waitForSlot(_ slot: Int, occupied want: Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if (occupied(directory()) & (1 << slot) != 0) == want { return true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        return false
+    }
+
+    /// The commands the plain sweep never sends: flash writes, presets,
+    /// factory reset, the generator and the CS save/revert/learn/fire actions.
+    /// Opt-in on its own (TEST_RUNNER_DSPI_FLASH_SWEEP=1).  Each change is
+    /// undone, the live image is put back with STORE.ALL_PARAMS, and the
+    /// directory, names and image must all match the start.  It persists two
+    /// things that were already live: the IO config (OUTPUT_CONFIG_SAVE) and,
+    /// when Control Surfaces had no unsaved changes, the CS config (CS.SAVE).
+    func testFlashCommands() throws {
+        guard ProcessInfo.processInfo.environment["DSPI_FLASH_SWEEP"] == "1" else {
+            throw XCTSkip("Opt-in: run with TEST_RUNNER_DSPI_FLASH_SWEEP=1 (writes flash on the board).")
+        }
+        _ = try HardwareTest.requireDevice()
+        let vm = self.vm
+        // The app's first full read lands a few seconds after the link is up;
+        // until then the view model does not know the board takes a name, and
+        // setDeviceName does nothing.
+        let ready = Date().addingTimeInterval(10)
+        while !vm.deviceNameSupported, Date() < ready {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        guard let bulk0 = readData(VC.STORE.ALL_PARAMS), Int(bulk0.count) == Int(BULK_PARAMS_SIZE),
+              let dir0 = directory(), let active0 = readData(VC.STORE.PRESET_ACTIVE)?.first else {
+            return XCTFail("could not snapshot the board")
+        }
+        shape = Shape(channels: Int(bulk0[2]), inputs: Int(bulk0[4]), outputs: Int(bulk0[3]))
+        let name0 = readData(VC.SYS.DEVICE_NAME), source0 = readData(VC.INPUT.SOURCE_NAME, 1)
+        let startup0 = readData(VC.STORE.STARTUP), ocm0 = readData(VC.STORE.OUTPUT_CONFIG_MODE)
+        let mvm0 = readData(VC.ROUTE.MASTER_VOLUME_MODE), latency0 = readData(VC.OUTPUT.LATENCY)
+        let mv0 = readData(VC.ROUTE.MASTER_VOLUME), mvSaved0 = readData(VC.ROUTE.MASTER_VOLUME_SAVED)
+        let siggen0 = readData(VC.MEAS.SIGGEN_CONFIG)
+        // Settings outside the bulk image that a factory reset or preset load
+        // could touch; all must read the same at the end.
+        var watched: [(VendorCommand, UInt16)] = [(VC.CS.DISPLAY_CONFIG, 0), (VC.MEAS.RTA_CONFIG, 0),
+            (VC.OUTPUT.DAC_MUTE_CONFIG, 0), (VC.XPORT.UART_CONFIG, 0), (VC.XPORT.I2C_CONFIG, 0)]
+        for i in 0..<UInt16(CS_MAX_BINDINGS) { watched += [(VC.CS.BINDING, i), (VC.CS.SLOT_NAME, i)] }
+        for i in 0..<UInt16(CS_MAX_IR_COMMANDS) { watched.append((VC.CS.IR_CMD, i)) }
+        for i in 0..<UInt16(CS_MAX_MACROS) { watched += [(VC.CS.MACRO, i), (VC.CS.GROUP, i)] }
+        for i in 0..<UInt16(16) { watched.append((VC.CS.DISPLAY_PAGE, i)) }
+        for i in 0..<UInt16(shape.channels) { watched.append((VC.ROUTE.CHANNEL_NAME, i)) }
+        for i in 0..<UInt16(10) { watched.append((VC.STORE.PRESET_NAME, i)) }
+        for i in 0..<UInt16(7) { watched.append((VC.INPUT.SOURCE_NAME, i)) }
+        let watched0 = watched.map { readData($0.0, $0.1) }
+        // Keep a copy outside the board in case the run dies half way.
+        let backup = (NSTemporaryDirectory() as NSString).appendingPathComponent("dspi-flash-sweep-backup.bin")
+        try? bulk0.write(to: URL(fileURLWithPath: backup))
+        log("Flash pass: active preset \(active0), directory \(hex(dir0)); image backed up to \(backup)")
+
+        // --- Names and directory settings, each changed then put back ---
+        log("\n== Flash settings")
+        if let name0, flashCheck("setDeviceName", VC.SYS.DEVICE_NAME, want: name32("Sweep Bench"), { vm.setDeviceName("Sweep Bench") }) {
+            restore(VC.SYS.DEVICE_NAME, 0, name0, "DEVICE_NAME")
+        }
+        if let source0, flashCheck("setInputSourceName", VC.INPUT.SOURCE_NAME, 1, want: name32("Sweep Source"),
+                                   { vm.setInputSourceName(source: 1, name: "Sweep Source") }) {
+            restore(VC.INPUT.SOURCE_NAME, 1, source0, "SOURCE_NAME")
+        }
+        if let s = startup0, s.count == 2 {
+            let mode = s[0] == 0 ? 1 : 0
+            if flashCheck("setPresetStartup", VC.STORE.STARTUP, want: Data([UInt8(mode), s[1]]),
+                          { vm.setPresetStartup(mode: mode, defaultSlot: Int(s[1])) }) {
+                restore(VC.STORE.STARTUP, 0, s, "STARTUP")
+            }
+        }
+        if let m = ocm0?.first {
+            let other = m == 1 ? 0 : 1
+            if flashCheck("setOutputConfigMode", VC.STORE.OUTPUT_CONFIG_MODE, want: u8(UInt8(other)),
+                          { vm.setOutputConfigMode(other) }) {
+                restore(VC.STORE.OUTPUT_CONFIG_MODE, 0, Data([m]), "OUTPUT_CONFIG_MODE")
+            }
+        }
+        if let m = mvm0?.first {
+            let other = m == 1 ? 0 : 1
+            if flashCheck("setMasterVolumeMode", VC.ROUTE.MASTER_VOLUME_MODE, want: u8(UInt8(other)),
+                          { vm.setMasterVolumeMode(other) }) {
+                restore(VC.ROUTE.MASTER_VOLUME_MODE, 0, Data([m]), "MASTER_VOLUME_MODE")
+            }
+        }
+        if let l = latency0?.first,
+           let st = readData(VC.OUTPUT.LATENCY_STATUS).flatMap(OutputLatencyStatus.fromData),
+           let table = readData(VC.OUTPUT.LATENCY_OPTIONS).map(OutputLatencyOption.tableFromData),
+           let other = table.prefix(Int(st.optionCount)).first(where: { $0.available && $0.id != l }) {
+            if flashCheck("setOutputLatency", VC.OUTPUT.LATENCY, want: u8(other.id), blocking: true,
+                          { vm.setOutputLatency(other.id) }) {
+                offMain { vm.setOutputLatency(l) }
+                XCTAssertEqual(readUntil(VC.OUTPUT.LATENCY, 0, equals: Data([l]), timeout: 4), Data([l]), "LATENCY restore")
+            }
+        } else {
+            log("  setOutputLatency: no second option to switch to")
+        }
+        // DAC mute and the control interfaces drive GPIOs, so they get their
+        // own value back, decoded and re-encoded by the app.
+        if let raw = readData(VC.OUTPUT.DAC_MUTE_CONFIG), let cfg = DacHwMuteConfig.fromData(raw) {
+            _ = flashCheck("setDacHwMuteConfig (own value)", VC.OUTPUT.DAC_MUTE_CONFIG, want: raw, blocking: true,
+                           { vm.setDacHwMuteConfig(cfg) })
+        }
+        if let raw = readData(VC.XPORT.UART_CONFIG), let cfg = UartCtrlConfig.fromData(raw) {
+            _ = flashCheck("setUartCtrlConfig (own value)", VC.XPORT.UART_CONFIG, want: raw, blocking: true,
+                           { _ = vm.setUartCtrlConfig(cfg) })
+        }
+        if let raw = readData(VC.XPORT.I2C_CONFIG), let cfg = I2cCtrlConfig.fromData(raw) {
+            _ = flashCheck("setI2cCtrlConfig (own value)", VC.XPORT.I2C_CONFIG, want: raw, blocking: true,
+                           { _ = vm.setI2cCtrlConfig(cfg) })
+        }
+        // Master volume save: save a different live value, then put both back.
+        if let mv0, let mvSaved0 {
+            let probe: Float = mvSaved0 == f32(-27) ? -33 : -27
+            vm.setMasterVolume(probe)
+            _ = readUntil(VC.ROUTE.MASTER_VOLUME, 0, equals: f32(probe))
+            var ok = false
+            offMain { ok = vm.saveMasterVolume() }
+            XCTAssertTrue(ok, "saveMasterVolume")
+            if ok, readUntil(VC.ROUTE.MASTER_VOLUME_SAVED, 0, equals: f32(probe), timeout: 3) == f32(probe) {
+                flashOK.insert(VC.ROUTE.MASTER_VOLUME_SAVE.id)
+            } else {
+                XCTFail("MASTER_VOLUME_SAVED did not follow the save")
+            }
+            _ = transport.setAndWait(VC.ROUTE.MASTER_VOLUME, data: mvSaved0)
+            _ = readUntil(VC.ROUTE.MASTER_VOLUME, 0, equals: mvSaved0)
+            _ = transport.setAndWait(VC.ROUTE.MASTER_VOLUME_SAVE)
+            XCTAssertEqual(readUntil(VC.ROUTE.MASTER_VOLUME_SAVED, 0, equals: mvSaved0, timeout: 3), mvSaved0, "saved master volume restore")
+            restore(VC.ROUTE.MASTER_VOLUME, 0, mv0, "MASTER_VOLUME")
+        }
+
+        // --- Control Surfaces: revert, save, IR learn, macro fire ---
+        log("\n== Control Surfaces actions")
+        let csClean = readData(VC.CS.STATUS).map { $0.count > 3 && $0[3] == 0 } ?? false
+        if csClean, let slotName = readData(VC.CS.SLOT_NAME, 3) {
+            _ = transport.setAndWait(VC.CS.SLOT_NAME, value: 3, data: name32("Sweep Preview"))
+            _ = readUntil(VC.CS.SLOT_NAME, 3, equals: name32("Sweep Preview"))
+            var status: UInt8 = 0xFF
+            offMain { status = vm.csRevert() }
+            let back = readUntil(VC.CS.SLOT_NAME, 3, equals: slotName, timeout: 3)
+            let clean = readData(VC.CS.STATUS).map { $0[3] == 0 } ?? false
+            if status == PIN_CONFIG_SUCCESS, back == slotName, clean { flashOK.insert(VC.CS.REVERT.id) }
+            else { XCTFail("csRevert: status \(status), name \(hex(back)), clean \(clean)") }
+            offMain { status = vm.csSave() }
+            if status == PIN_CONFIG_SUCCESS, readData(VC.CS.STATUS).map({ $0[3] == 0 }) == true {
+                flashOK.insert(VC.CS.SAVE.id)
+            } else {
+                XCTFail("csSave of an unchanged config: status \(status)")
+            }
+        } else {
+            log("  CS.REVERT, CS.SAVE: Control Surfaces has unsaved changes, so neither was sent")
+        }
+        var arm = CsIrLearnArmResult.locked
+        offMain { arm = vm.csIrLearnArm() }
+        switch arm {
+        case .armed:
+            flashOK.insert(VC.CS.IR_LEARN_ARM.id)
+            XCTAssertEqual(transport.setAndWait(VC.CS.IR_LEARN_CANCEL), .ok, "IR learn cancel")
+        case .noReceiver:
+            // The documented refusal without a live receiver: command and
+            // address reached the firmware.
+            flashOK.insert(VC.CS.IR_LEARN_ARM.id)
+            log("  CS.IR_LEARN_ARM: no IR receiver configured, refused as documented")
+        case .locked:
+            XCTFail("csIrLearnArm: device lock held")
+        }
+        if let empty = (0..<UInt16(CS_MAX_MACROS)).first(where: { i in
+            readData(VC.CS.MACRO, i).flatMap(CsMacro.fromData).map { !$0.isConfigured } ?? false
+        }) {
+            var status: UInt8 = 0xFF
+            offMain { status = vm.csMacroFire(empty) }
+            if status == PIN_CONFIG_SUCCESS { flashOK.insert(VC.CS.MACRO_FIRE.id) }
+            else { XCTFail("csMacroFire on empty macro \(empty): status \(status)") }
+        } else {
+            log("  CS.MACRO_FIRE: every macro is configured, none fired")
+        }
+
+        // --- DAC mute test and the signal generator ---
+        log("\n== Output actions")
+        var dacStatus: UInt8 = 0xFF
+        offMain { dacStatus = vm.testDacHwMute() }
+        if dacStatus == PIN_CONFIG_SUCCESS || dacStatus == 3 {
+            flashOK.insert(VC.OUTPUT.DAC_MUTE_TEST.id)
+            if dacStatus == 3 { log("  OUTPUT.DAC_MUTE_TEST: no DAC mute pin configured, refused as documented") }
+        } else {
+            XCTFail("testDacHwMute: status \(dacStatus)")
+        }
+        if let siggen0, var cfg = SiggenConfig.fromData(siggen0) {
+            // Inaudible: one output at -120 dBFS.
+            cfg.levelDB = -120
+            cfg.channelMask = 0x0001
+            cfg.invertMask = 0
+            offMain { vm.siggenStart(with: cfg) }
+            HardwareTest.settle()
+            let running = readData(VC.MEAS.SIGGEN_STATUS).flatMap(SiggenStatus.fromData)?.isRunning ?? false
+            var stopped = false
+            offMain { stopped = vm.siggenControl(SIGGEN_CTL_STOP_NOW) }
+            if running && stopped { flashOK.insert(VC.MEAS.SIGGEN_START.id) }
+            else { XCTFail("siggenStart: running \(running), stopped \(stopped)") }
+            restore(VC.MEAS.SIGGEN_CONFIG, 0, siggen0, "SIGGEN_CONFIG")
+        }
+
+        // --- Presets and factory reset, on an empty scratch slot ---
+        log("\n== Presets")
+        // An empty slot can still hold a name, and a delete clears it, so
+        // prefer an unnamed one and put the name back otherwise.
+        let empties = (0..<10).filter { occupied(dir0) & (1 << $0) == 0 }
+        let unnamed = empties.first { readData(VC.STORE.PRESET_NAME, UInt16($0)).map { $0.first == 0 } ?? false }
+        if let scratch = unnamed ?? empties.first {
+            let scratchName0 = readData(VC.STORE.PRESET_NAME, UInt16(scratch))
+            var status: UInt8 = 0xFF
+            offMain { status = vm.savePreset(slot: scratch) }
+            let saved = status == PRESET_OK && waitForSlot(scratch, occupied: true)
+            XCTAssertTrue(saved, "savePreset(\(scratch)): status \(status)")
+            if saved {
+                flashOK.insert(VC.STORE.PRESET_SAVE.id)
+                XCTAssertEqual(readData(VC.STORE.PRESET_ACTIVE)?.first, UInt8(scratch), "a save makes the slot active")
+                if flashCheck("setPresetName", VC.STORE.PRESET_NAME, UInt16(scratch), want: name32("Sweep Scratch"),
+                              { vm.setPresetName(slot: scratch, name: "Sweep Scratch") }) {}
+                offMain { status = vm.factoryReset() }
+                let reset = readData(VC.STORE.ALL_PARAMS)
+                if status == FLASH_OK {
+                    flashOK.insert(VC.STORE.FACTORY_RESET.id)
+                    log("  factory reset changed \(zip(bulk0, reset ?? Data()).filter { $0 != $1 }.count) bytes of the image")
+                } else {
+                    XCTFail("factoryReset: status \(status)")
+                }
+                offMain { status = vm.loadPreset(slot: scratch) }
+                if status == PRESET_OK, let loaded = readData(VC.STORE.ALL_PARAMS) {
+                    flashOK.insert(VC.STORE.PRESET_LOAD.id)
+                    let diffs = zip(bulk0, loaded).filter { $0 != $1 }.count
+                    log("  loading the scratch preset left \(diffs) bytes different from the start (the IO block when it is kept apart from presets)")
+                } else {
+                    XCTFail("loadPreset(\(scratch)): status \(status)")
+                }
+                offMain { status = vm.deletePreset(slot: scratch) }
+                if status == PRESET_OK, waitForSlot(scratch, occupied: false) { flashOK.insert(VC.STORE.PRESET_DELETE.id) }
+                else { XCTFail("deletePreset(\(scratch)): status \(status)") }
+                if let scratchName0, readData(VC.STORE.PRESET_NAME, UInt16(scratch)) != scratchName0 {
+                    restore(VC.STORE.PRESET_NAME, UInt16(scratch), scratchName0, "PRESET_NAME of the scratch slot")
+                }
+            }
+            // Back to the original slot, then the exact live image.
+            if occupied(dir0) & (1 << Int(active0)) != 0 {
+                offMain { status = vm.loadPreset(slot: Int(active0)) }
+                XCTAssertEqual(status, PRESET_OK, "reload the original preset \(active0)")
+            }
+        } else {
+            log("  no empty preset slot; preset save/load/delete and factory reset not sent")
+        }
+        let put = rawSet(VC.STORE.ALL_PARAMS, data: bulk0)
+        XCTAssertEqual(put, .ok, "STORE.ALL_PARAMS SET of the starting image")
+        if put == .ok { flashOK.insert(VC.STORE.ALL_PARAMS.id) }
+        // The live IO block now equals the starting one, so saving it stores
+        // what was live when the run began.
+        if case .success = vm.saveOutputConfigResult() { flashOK.insert(VC.STORE.OUTPUT_CONFIG_SAVE.id) }
+        else { XCTFail("saveOutputConfigResult failed") }
+
+        // --- Everything must be back ---
+        let bulkEnd = readUntil(VC.STORE.ALL_PARAMS, 0, equals: bulk0, timeout: 3)
+        let diffs = zip(bulk0.indices, zip(bulk0, bulkEnd ?? Data())).filter { $0.1.0 != $0.1.1 }.map { $0.0 }
+        XCTAssertTrue(bulkEnd?.count == bulk0.count && diffs.isEmpty, "ALL_PARAMS differs at \(diffs.prefix(40))")
+        XCTAssertEqual(directory(), dir0, "STORE.DIRECTORY")
+        XCTAssertEqual(readData(VC.STORE.PRESET_ACTIVE)?.first, active0, "active preset")
+        XCTAssertEqual(readData(VC.SYS.DEVICE_NAME), name0, "device name")
+        XCTAssertEqual(readData(VC.INPUT.SOURCE_NAME, 1), source0, "source name 1")
+        var changed: [String] = []
+        for (i, w) in watched.enumerated() {
+            let now = readData(w.0, w.1)
+            if now != watched0[i] { changed.append("\(name(w.0))@\(w.1): \(hex(watched0[i])) -> \(hex(now))") }
+        }
+        XCTAssertTrue(changed.isEmpty, "settings outside the image changed: \(changed)")
+        log("Settings outside the image: \(changed.isEmpty ? "all \(watched.count) unchanged" : "CHANGED \(changed)")")
+        log("\nFinal: image \(diffs.isEmpty ? "identical" : "DIFFERS at \(diffs.prefix(40))"), directory \(directory() == dir0 ? "identical" : "DIFFERS"), active \(readData(VC.STORE.PRESET_ACTIVE)?.first.map(String.init) ?? "?")")
+        log("Flash pass reached: \(flashOK.map { name(VendorCommand($0)) }.sorted().joined(separator: ", "))")
+
+        vm.fetchAll()
+        let text = report.joined(separator: "\n")
+        print("\n----- DSPi flash sweep -----\n\(text)\n----------------------------")
+        let path = ProcessInfo.processInfo.environment["DSPI_SWEEP_REPORT"]
+            ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("dspi-flash-sweep.txt")
+        try? text.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - Report
 
     /// Every command the app's source names, so the report can say what the
