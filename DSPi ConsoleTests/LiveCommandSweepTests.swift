@@ -150,6 +150,12 @@ final class LiveCommandSweepTests: XCTestCase {
         case .output, .outputAll: return range(shape.outputs)
         case .preset: return range(10)
         case .csSlot: return range(CS_MAX_BINDINGS)
+        // Every binding type in the first and last slot; the slot does not
+        // change which types a build has.
+        case .csSlotType:
+            return [0, CS_MAX_BINDINGS - 1].flatMap { slot in
+                (CS_TYPE_BUTTON...CS_TYPE_AUX_PWM).map { UInt16($0 << 8 | slot) }
+            }
         case .csSub: return range(CS_MAX_IR_COMMANDS)
         case .csGroup, .csMacro: return range(CS_MAX_MACROS)
         case .csPage: return range(CS_MAX_DISPLAY_PAGES)
@@ -631,20 +637,15 @@ final class LiveCommandSweepTests: XCTestCase {
 
     // MARK: - Pass 3b: the setters the first version left to identity writes
 
-    /// Free GPIOs by the app's own pin map, so a pin move never lands on
-    /// something in use.
+    /// GPIOs no function claims, by the device's own claim list, stored
+    /// claims included, so a pin move never lands on something in use or on
+    /// a pin a switched-off function will want back.
     private func freePins() -> [UInt8] {
-        // Restores are raw writes the view model never sees, so re-read every
-        // pin owner from the board before trusting the app's map.
-        let vm = self.vm
-        for i in 0..<(walked[VC.OUTPUT.PIN.id] ?? 5) { vm.fetchOutputPin(output: i) }
-        vm.fetchSpdifInputConfig(); vm.fetchI2SInputConfig(); vm.fetchAdatStatus(); vm.fetchAdatInputConfig()
-        vm.fetchMckPin(); vm.fetchMckEnable(); vm.fetchI2SBckPin(role: 0); vm.fetchI2SBckPin(role: 1); vm.fetchI2SClockPinMode()
-        vm.fetchDacHwMuteConfig(); vm.fetchUartCtrlConfig(); vm.fetchI2cCtrlConfig()
-        for slot in 0..<CS_MAX_BINDINGS { vm.fetchCsBinding(slot: slot) }
-        land()
-        let taken = Set(vm.activePinAssignments(from: HardwareSettingsTab.validPins).map(\.pin))
-        return HardwareSettingsTab.validPins.filter { !taken.contains($0) }
+        guard let state = readData(VC.SYS.PIN_STATE).flatMap(PinStateReply.decode),
+              let claims = transport.getData(VC.SYS.PIN_CLAIMS, length: PinClaimsReply.requestSize)
+                .flatMap(PinClaimsReply.decode) else { return [] }
+        let taken = Set(claims.claims.map(\.gpio))
+        return state.gpios.filter { !taken.contains($0) }
     }
 
     private func edited(_ base: Data, at offset: Int, _ bytes: Data) -> Data {

@@ -105,6 +105,8 @@ let NOTIFY_EVT_INPUT_SOURCE_NAME: UInt8 = 0x0F
 let NOTIFY_INPUT_SOURCE_NAME_SIZE: Int = 40
 // Board name stored; same 40-byte layout as NOTIFY_EVT_INPUT_SOURCE_NAME.
 let NOTIFY_EVT_DEVICE_NAME: UInt8 = 0x10
+/// Pin map generation changed (pin_availability_query_spec.md 9.2); payload u32 at bytes 4-7.
+let NOTIFY_EVT_PIN_MAP_CHANGED: UInt8 = 0x11
 
 /// Levels ride the wire as one byte in 0.5 dB steps, with 243 meaning 0 dBFS -
 /// six decibels of headroom above it, because upmix-derived rows and hot EQ can
@@ -1045,7 +1047,6 @@ func csDecodeStepDelay(_ raw: UInt16) -> Float { Float(raw) / 100 }
 let CS_MACRO_STEP_ACTIONS: [Int] = [CS_ACT_SET, CS_ACT_TOGGLE, CS_ACT_INC, CS_ACT_DEC, CS_ACT_TRIGGER]
 /// ADC-capable GPIOs (ADC0..2 on both platforms) - the only pins a
 /// potentiometer may occupy.  GPIO 29 (VSYS/3 monitor) is excluded.
-let CS_ADC_PINS: [UInt8]      = [26, 27, 28]
 
 // CsType (component wired up).  Append-only; index into the caps type table.
 let CS_TYPE_NONE: Int     = 0

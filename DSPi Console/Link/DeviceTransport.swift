@@ -270,14 +270,29 @@ final class DeviceRefusalNotice: ObservableObject {
         }
         print("[VENDOR] \(refusal.command) wValue \(refusal.value) refused: \(refusal.reason)")
         DispatchQueue.main.async {
-            self.message = "Device refused a change: \(refusal.reason)"
-            self.detail = "\(refusal.command) (wValue \(refusal.value)): \(refusal.reason)"
+            self.setMessage("Device refused a change: \(refusal.reason)",
+                            detail: "\(refusal.command) (wValue \(refusal.value)): \(refusal.reason)", seconds: 5)
             self.refusals.send(refusal)
-            self.clearWork?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.message = nil; self?.detail = nil }
-            self.clearWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
         }
+    }
+
+    /// Main thread.
+    fileprivate func setMessage(_ message: String, detail: String?, seconds: TimeInterval) {
+        self.message = message
+        self.detail = detail
+        clearWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.message = nil; self?.detail = nil }
+        clearWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+}
+
+extension DeviceRefusalNotice {
+    /// Show `message` in the same place, for an outcome that is not one
+    /// refused write: a revert that could not restore everything, pins a
+    /// restore replaced.  `detail` is the hover text.  Main thread or not.
+    func show(_ message: String, detail: String? = nil, seconds: TimeInterval = 8) {
+        DispatchQueue.main.async { self.setMessage(message, detail: detail, seconds: seconds) }
     }
 }
 

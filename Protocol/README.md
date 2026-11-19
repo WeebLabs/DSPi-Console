@@ -10,7 +10,7 @@ for every vendor command the Console sends.
 - `legacy_map.json` maps each 1.1.6 opcode to its 1.1.7 command, and carries
   the result-code to `PIN_CONFIG_*` status mapping.
 
-Copied from firmware commit `4b0db4e` on `release/v1.1.7`. A release must
+Copied from firmware commit `103ba37` on `release/v1.1.7`. A release must
 replace both files with the copies from the firmware tag whose UF2 images it
 bundles, then regenerate:
 

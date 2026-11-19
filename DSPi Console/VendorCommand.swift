@@ -41,6 +41,8 @@ enum VendorAddressKind: String, Sendable, CaseIterable {
     case i2sPair = "I2S_PAIR"
     case role = "ROLE"
     case csSlot = "CS_SLOT"
+    /// `(type << 8) | slot`: one Control Surfaces binding slot asked about one type.
+    case csSlotType = "CS_SLOT_TYPE"
     case csSub = "CS_SUB"
     case csGroup = "CS_GROUP"
     case csMacro = "CS_MACRO"

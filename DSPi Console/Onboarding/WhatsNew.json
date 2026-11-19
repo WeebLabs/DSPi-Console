@@ -5,7 +5,11 @@
     "items": [
       "Firmware 1.1.7 changes how Console and the board talk to each other. Update Console on every Mac that controls the board before installing the 1.1.7 firmware: an older Console cannot see a 1.1.7 board, and a DSPi Link hub running an older Console will not list it.",
       "Console still recognises a board running 1.1.6 and can update it to 1.1.7. A 1.1.6 board shared over DSPi Link appears in the device menu with its version, but it must be plugged into this Mac to be updated.",
-      "When the board refuses a change, for example a pin that is already in use, the status bar says why and the controls return to the board's actual settings."
+      "When the board refuses a change, for example a pin that is already in use, the status bar says why and the controls return to the board's actual settings.",
+      "Pin menus now come from the board itself, so they offer exactly the pins it will accept. A pin another function holds is shown greyed out with that function's name, and the Pin Overview lists stored pins as well as the ones in use.",
+      "A function that is switched off, such as MCK, ADAT or an extra S/PDIF input, keeps its pin without holding it, so another function can use that pin meanwhile. Switching it back on is refused while the pin is taken, and Console names what holds it.",
+      "Switching an output or the input to I2S, or turning on the subwoofer output, now checks the pins it needs first and says which function is in the way.",
+      "Importing a configuration, Revert in Settings and Reset Pins apply pins in an order the board accepts, and swap two pins through a free one when needed. If the board replaces a pin or switches a function off while loading a preset or starting up, Console tells you which."
     ]
   },
   {

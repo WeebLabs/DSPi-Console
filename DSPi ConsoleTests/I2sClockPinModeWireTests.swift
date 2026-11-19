@@ -57,32 +57,6 @@ final class I2sClockPinModeWireTests: XCTestCase {
         XCTAssertEqual(UInt8(2) - 1, I2S_CLOCK_PIN_MODE_SPLIT)
     }
 
-    // MARK: - Pin-conflict rule (spec §1: slave pair reserved only in SPLIT)
-
-    /// In UNIFIED mode the dormant slave pair constrains nothing; in SPLIT both
-    /// GPIOs (BCK and LRCLK = BCK+1) are reserved.  Mirrors the firmware
-    /// i2s_clock_pin_claimed helper.
-    @MainActor
-    func testSlavePairReservedOnlyInSplit() {
-        let vm = DSPViewModel(transport: AppState.shared.usb)
-        vm.platformName = "RP2350"
-        vm.i2sInputSupported = true
-        vm.i2sBckPinSlave = 26
-
-        // UNIFIED: the slave pair is free for other consumers.
-        vm.i2sClockPinMode = I2S_CLOCK_PIN_MODE_UNIFIED
-        XCTAssertNil(vm.pinInUseBy(26, excluding: .output(0)))
-        XCTAssertNil(vm.pinInUseBy(27, excluding: .output(0)))
-
-        // SPLIT: both the slave BCK and its LRCLK (BCK+1) are claimed.
-        vm.i2sClockPinMode = I2S_CLOCK_PIN_MODE_SPLIT
-        XCTAssertEqual(vm.pinInUseBy(26, excluding: .output(0)), "I2S Slave BCK")
-        XCTAssertEqual(vm.pinInUseBy(27, excluding: .output(0)), "I2S Slave LRCLK")
-        // The slave picker itself is excluded from its own reservation.
-        XCTAssertNil(vm.pinInUseBy(26, excluding: .i2sBckSlave))
-        XCTAssertNil(vm.pinInUseBy(27, excluding: .i2sBckSlave))
-    }
-
     // MARK: - Live-device round-trips (skip when no DSPi attached)
 
     /// CLOCK.I2S_CLOCK_PIN_MODE returns a valid 0/1 byte; the slave pair GPIO

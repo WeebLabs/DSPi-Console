@@ -52,6 +52,10 @@ enum VC {
         static let SPDIF_TX_STATS = VendorCommand(0x0145)
         /// Bitmask; bit 0 resets buffer watermarks and worst-gap fields. SET.
         static let STATS_RESET = VendorCommand(0x014F)
+        /// Pin map generation, GPIO count, claim count, last restore substitutions, GPIO mask. GET.
+        static let PIN_STATE = VendorCommand(0x0150)
+        /// Generation, entry count, then one 4-byte claim per pin use, sorted by GPIO. GET.
+        static let PIN_CLAIMS = VendorCommand(0x0151)
     }
 
     /// Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters.
@@ -102,12 +106,16 @@ enum VC {
         static let SPDIF_RX_ENABLE = VendorCommand(0x0323)
         /// Input count, enable mask over all inputs, then one GPIO per input. GET.
         static let SPDIF_RX_CONFIG = VendorCommand(0x0324)
+        /// Pins one S/PDIF input could take: status, flags, generation, valid and free masks. GET.
+        static let SPDIF_RX_PIN_AVAIL = VendorCommand(0x0325)
         /// Data GPIO of one I2S RX stereo pair; 0xFF restores its default. GET and SET.
         static let I2S_RX_PIN = VendorCommand(0x0330)
         /// I2S input channel count, 2, 4, 6 or 8. GET and SET.
         static let I2S_RX_CHANNELS = VendorCommand(0x0331)
         /// Selected I2S and ADAT master rate in Hz: 44100, 48000 or 96000. GET and SET.
         static let I2S_RX_RATE = VendorCommand(0x0332)
+        /// Pins one I2S RX pair could take: status, flags, generation, valid and free masks. GET.
+        static let I2S_RX_PIN_AVAIL = VendorCommand(0x0333)
         /// ADAT input enable. GET and SET, PICO_RP2350 builds only.
         static let ADAT_RX_ENABLE = VendorCommand(0x0340)
         /// ADAT input GPIO; 0xFF clears it while the input is disabled. GET and SET, PICO_RP2350 builds only.
@@ -116,6 +124,8 @@ enum VC {
         static let ADAT_RX_CLOCK_MODE = VendorCommand(0x0342)
         /// ADAT input status packet. GET, PICO_RP2350 builds only.
         static let ADAT_RX_STATUS = VendorCommand(0x0343)
+        /// Pins the ADAT input could take: status, flags, generation, valid and free masks. GET, PICO_RP2350 builds only.
+        static let ADAT_RX_PIN_AVAIL = VendorCommand(0x0344)
         /// LG Sound Sync decoding enable. GET and SET.
         static let LG_SOUND_SYNC_ENABLE = VendorCommand(0x0350)
         /// LG Sound Sync status packet. GET.
@@ -129,6 +139,8 @@ enum VC {
         static let TYPE = VendorCommand(0x0410)
         /// GPIO of one pin output; 0xFF restores its default. GET and SET.
         static let PIN = VendorCommand(0x0411)
+        /// Pins one pin output could take: status, flags, generation, valid and free masks. GET.
+        static let PIN_AVAIL = VendorCommand(0x0412)
         /// Requested output latency option ID. GET and SET.
         static let LATENCY = VendorCommand(0x0420)
         /// Requested and effective latency, ring target, batch, pending flag, option count. GET.
@@ -141,10 +153,14 @@ enum VC {
         static let ADAT_TX_PIN = VendorCommand(0x0431)
         /// ADAT output status packet. GET, PICO_RP2350 builds only.
         static let ADAT_TX_STATUS = VendorCommand(0x0432)
+        /// Pins the ADAT output could take: status, flags, generation, valid and free masks. GET, PICO_RP2350 builds only.
+        static let ADAT_TX_PIN_AVAIL = VendorCommand(0x0433)
         /// DAC hardware mute pin, polarity and timing. GET and SET.
         static let DAC_MUTE_CONFIG = VendorCommand(0x0440)
         /// Pulse the DAC hardware mute pin for about one second. SET.
         static let DAC_MUTE_TEST = VendorCommand(0x0441)
+        /// Pins the DAC hardware mute could take: status, flags, generation, valid and free masks. GET.
+        static let DAC_MUTE_PIN_AVAIL = VendorCommand(0x0442)
     }
 
     /// Matrix, per-output controls, delays, channel names, preamp, master and user volume.
@@ -415,6 +431,8 @@ enum VC {
         static let BINDING = VendorCommand(0x0A20)
         /// Slot name, NUL padded; a single NUL clears it. GET and SET.
         static let SLOT_NAME = VendorCommand(0x0A21)
+        /// Pins a binding of one type in one slot could take: status, flags, generation, masks, shareable. GET.
+        static let BINDING_PIN_AVAIL = VendorCommand(0x0A22)
         /// One IR command, live preview. GET and SET.
         static let IR_CMD = VendorCommand(0x0A30)
         /// Learn state, protocol and the last learned code. GET.
@@ -460,6 +478,10 @@ enum VC {
         static let I2C_CONFIG = VendorCommand(0x0B11)
         /// Last apply result and live state of each control transport. GET.
         static let STATUS = VendorCommand(0x0B12)
+        /// UART TX and RX pins by instance: status, flags, generation, valid and free masks. GET.
+        static let UART_PIN_AVAIL = VendorCommand(0x0B13)
+        /// I2C SDA and SCL pins by instance: status, flags, generation, valid and free masks. GET.
+        static let I2C_PIN_AVAIL = VendorCommand(0x0B14)
     }
 
     /// I2S clock pins and modes, MCK.
@@ -473,12 +495,16 @@ enum VC {
         static let I2S_CLOCK_MODE = VendorCommand(0x0C12)
         /// I2S slave clock lock state and measured rate. GET.
         static let I2S_SLAVE_STATUS = VendorCommand(0x0C13)
+        /// BCK pins one clock pair could take (LRCLK is BCK + 1): status, flags, generation, valid and free masks. GET.
+        static let I2S_BCK_PIN_AVAIL = VendorCommand(0x0C14)
         /// MCK output enable. GET and SET.
         static let MCK_ENABLE = VendorCommand(0x0C20)
         /// MCK GPIO, a clk_gpout pin; 0xFF restores the default. GET and SET.
         static let MCK_PIN = VendorCommand(0x0C21)
         /// MCK multiplier, 0 for 128x or 1 for 256x. GET and SET.
         static let MCK_MULTIPLIER = VendorCommand(0x0C22)
+        /// Pins MCK could take: status, flags, generation, valid and free masks. GET.
+        static let MCK_PIN_AVAIL = VendorCommand(0x0C23)
     }
 
     /// Bench and diagnostic commands with no stability promise.
@@ -592,6 +618,14 @@ extension VendorCommandRegistry {
                           hasGet: false, hasSet: true, address: .none,
                           getLength: .none, setMin: 1, setMax: 1,
                           flags: [], build: nil),
+        VendorCommandInfo(command: VC.SYS.PIN_STATE, pageName: "SYS", name: "PIN_STATE",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
+        VendorCommandInfo(command: VC.SYS.PIN_CLAIMS, pageName: "SYS", name: "PIN_CLAIMS",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .variable, setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.STORE.PRESET_SAVE, pageName: "STORE", name: "PRESET_SAVE",
                           hasGet: false, hasSet: true, address: .preset,
                           getLength: .none, setMin: 0, setMax: 0,
@@ -672,6 +706,10 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: false, address: .none,
                           getLength: .fixed(6), setMin: 0, setMax: 0,
                           flags: [], build: nil),
+        VendorCommandInfo(command: VC.INPUT.SPDIF_RX_PIN_AVAIL, pageName: "INPUT", name: "SPDIF_RX_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .spdifRx,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.INPUT.I2S_RX_PIN, pageName: "INPUT", name: "I2S_RX_PIN",
                           hasGet: true, hasSet: true, address: .i2sPair,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
@@ -684,6 +722,10 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: true, address: .none,
                           getLength: .fixed(4), setMin: 4, setMax: 4,
                           flags: [.deferred, .restart], build: nil),
+        VendorCommandInfo(command: VC.INPUT.I2S_RX_PIN_AVAIL, pageName: "INPUT", name: "I2S_RX_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .i2sPair,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.INPUT.ADAT_RX_ENABLE, pageName: "INPUT", name: "ADAT_RX_ENABLE",
                           hasGet: true, hasSet: true, address: .none,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
@@ -699,6 +741,10 @@ extension VendorCommandRegistry {
         VendorCommandInfo(command: VC.INPUT.ADAT_RX_STATUS, pageName: "INPUT", name: "ADAT_RX_STATUS",
                           hasGet: true, hasSet: false, address: .none,
                           getLength: .fixed(20), setMin: 0, setMax: 0,
+                          flags: [], build: "PICO_RP2350"),
+        VendorCommandInfo(command: VC.INPUT.ADAT_RX_PIN_AVAIL, pageName: "INPUT", name: "ADAT_RX_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
                           flags: [], build: "PICO_RP2350"),
         VendorCommandInfo(command: VC.INPUT.LG_SOUND_SYNC_ENABLE, pageName: "INPUT", name: "LG_SOUND_SYNC_ENABLE",
                           hasGet: true, hasSet: true, address: .none,
@@ -716,6 +762,10 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: true, address: .pinOutput,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
                           flags: [.deferred, .restart], build: nil),
+        VendorCommandInfo(command: VC.OUTPUT.PIN_AVAIL, pageName: "OUTPUT", name: "PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .pinOutput,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.OUTPUT.LATENCY, pageName: "OUTPUT", name: "LATENCY",
                           hasGet: true, hasSet: true, address: .none,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
@@ -740,6 +790,10 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: false, address: .none,
                           getLength: .fixed(8), setMin: 0, setMax: 0,
                           flags: [], build: "PICO_RP2350"),
+        VendorCommandInfo(command: VC.OUTPUT.ADAT_TX_PIN_AVAIL, pageName: "OUTPUT", name: "ADAT_TX_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: "PICO_RP2350"),
         VendorCommandInfo(command: VC.OUTPUT.DAC_MUTE_CONFIG, pageName: "OUTPUT", name: "DAC_MUTE_CONFIG",
                           hasGet: true, hasSet: true, address: .none,
                           getLength: .fixed(16), setMin: 16, setMax: 16,
@@ -748,6 +802,10 @@ extension VendorCommandRegistry {
                           hasGet: false, hasSet: true, address: .none,
                           getLength: .none, setMin: 0, setMax: 0,
                           flags: [.deferred, .restart], build: nil),
+        VendorCommandInfo(command: VC.OUTPUT.DAC_MUTE_PIN_AVAIL, pageName: "OUTPUT", name: "DAC_MUTE_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.ROUTE.MATRIX_ROUTE, pageName: "ROUTE", name: "MATRIX_ROUTE",
                           hasGet: true, hasSet: true, address: .inputOutput,
                           getLength: .fixed(8), setMin: 8, setMax: 8,
@@ -1228,6 +1286,10 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: true, address: .csSlot,
                           getLength: .fixed(32), setMin: 1, setMax: 32,
                           flags: [.deferred], build: nil),
+        VendorCommandInfo(command: VC.CS.BINDING_PIN_AVAIL, pageName: "CS", name: "BINDING_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .csSlotType,
+                          getLength: .fixed(80), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.CS.IR_CMD, pageName: "CS", name: "IR_CMD",
                           hasGet: true, hasSet: true, address: .csSub,
                           getLength: .fixed(16), setMin: 16, setMax: 16,
@@ -1308,6 +1370,14 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: false, address: .none,
                           getLength: .fixed(8), setMin: 0, setMax: 0,
                           flags: [], build: nil),
+        VendorCommandInfo(command: VC.XPORT.UART_PIN_AVAIL, pageName: "XPORT", name: "UART_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(72), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
+        VendorCommandInfo(command: VC.XPORT.I2C_PIN_AVAIL, pageName: "XPORT", name: "I2C_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(72), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.CLOCK.I2S_BCK_PIN, pageName: "CLOCK", name: "I2S_BCK_PIN",
                           hasGet: true, hasSet: true, address: .role,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
@@ -1324,6 +1394,10 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: false, address: .none,
                           getLength: .fixed(16), setMin: 0, setMax: 0,
                           flags: [], build: nil),
+        VendorCommandInfo(command: VC.CLOCK.I2S_BCK_PIN_AVAIL, pageName: "CLOCK", name: "I2S_BCK_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .role,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
         VendorCommandInfo(command: VC.CLOCK.MCK_ENABLE, pageName: "CLOCK", name: "MCK_ENABLE",
                           hasGet: true, hasSet: true, address: .none,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
@@ -1335,6 +1409,10 @@ extension VendorCommandRegistry {
         VendorCommandInfo(command: VC.CLOCK.MCK_MULTIPLIER, pageName: "CLOCK", name: "MCK_MULTIPLIER",
                           hasGet: true, hasSet: true, address: .none,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
+                          flags: [], build: nil),
+        VendorCommandInfo(command: VC.CLOCK.MCK_PIN_AVAIL, pageName: "CLOCK", name: "MCK_PIN_AVAIL",
+                          hasGet: true, hasSet: false, address: .none,
+                          getLength: .fixed(24), setMin: 0, setMax: 0,
                           flags: [], build: nil),
         VendorCommandInfo(command: VC.DIAG.CLOCK_DIAG, pageName: "DIAG", name: "CLOCK_DIAG",
                           hasGet: true, hasSet: false, address: .none,

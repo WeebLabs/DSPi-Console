@@ -317,14 +317,20 @@ enum PresetDocumentApply {
 
         var steps: [Step] = []
 
+        // With hardware IO applied, the input source and the PDM enable go
+        // with the pins: both are pin-checked starts, so they come after the
+        // pins they need (see PinIOApply).
+        let ioOwnsStarts = options.hardwareIO
         if options.audioProcessing {
-            steps += audioSteps(doc, vm: vm, byRef: byRef, report: report)
+            steps += audioSteps(doc, vm: vm, byRef: byRef, report: report, ioOwnsStarts: ioOwnsStarts)
         }
         if options.volumeLevels {
             steps.append(Step(blocking: false) { applyVolumes(doc, vm: vm, report: report) })
         }
         if options.hardwareIO {
-            steps.append(Step(blocking: true) { applyIO(doc, vm: vm, report: report) })
+            let pdmEnabled = options.audioProcessing ? byRef[.output(vm.pdmOutputIndex)]?.enabled : nil
+            steps.append(Step(blocking: true) { applyIO(doc, vm: vm, pdmEnabled: pdmEnabled,
+                                                                applySource: options.audioProcessing, report: report) })
             steps.append(Step(blocking: false) { applyLimiters(byRef, vm: vm, report: report) })
         }
 
@@ -383,7 +389,7 @@ enum PresetDocumentApply {
 
     private static func audioSteps(_ doc: PresetDocument, vm: DSPViewModel,
                                    byRef: [PresetChannelRef: PresetDocument.ChannelBlock],
-                                   report: PresetApplyReport) -> [Step] {
+                                   report: PresetApplyReport, ioOwnsStarts: Bool) -> [Step] {
         var steps: [Step] = []
 
         // PEQ link state first: a linked input pair mirrors every filter and
@@ -404,6 +410,8 @@ enum PresetDocumentApply {
                 for output in 0..<vm.numOutputChannels {
                     guard let block = byRef[.output(output)], block.enabled == enabling else { continue }
                     guard vm.outputEnabled[output] != block.enabled else { continue }
+                    // PDM's start is pin-checked; the hardware IO step owns it.
+                    if ioOwnsStarts && output == vm.pdmOutputIndex && block.enabled { continue }
                     if block.enabled && vm.outputEnableWouldConflict(output) {
                         report.skip("\(block.name) could not be enabled (conflicts with another output)")
                         continue
@@ -437,7 +445,7 @@ enum PresetDocumentApply {
         }
 
         steps.append(Step(blocking: false) { applyMatrix(doc, vm: vm, report: report) })
-        steps.append(Step(blocking: false) { applyFeatureBlocks(doc, vm: vm, report: report) })
+        steps.append(Step(blocking: false) { applyFeatureBlocks(doc, vm: vm, report: report, setSource: !ioOwnsStarts) })
         return steps
     }
 
@@ -557,12 +565,14 @@ enum PresetDocumentApply {
     }
 
     private static func applyFeatureBlocks(_ doc: PresetDocument, vm: DSPViewModel,
-                                           report: PresetApplyReport) {
+                                           report: PresetApplyReport, setSource: Bool) {
         // Master EQ bypass and input source.  (The per-input preamps are applied
         // with their channels, and the PEQ links earlier still - see audioSteps.)
         vm.setBypass(doc.global.bypass)
 
-        if vm.inputSourceSupported {
+        if !setSource {
+            // Applied with the pins, by the hardware IO step.
+        } else if vm.inputSourceSupported {
             if vm.inputSource != doc.global.inputSource {
                 vm.setInputSource(doc.global.inputSource)
             }
@@ -707,142 +717,73 @@ enum PresetDocumentApply {
     /// runs on a background queue.  Refusals are collected rather than thrown:
     /// the setters answer with a PIN_CONFIG_* status, and a GPIO that is already
     /// in use is otherwise refused silently, which surfaces later as no audio.
-    private static func applyIO(_ doc: PresetDocument, vm: DSPViewModel,
-                                report: PresetApplyReport) {
+    private static func applyIO(_ doc: PresetDocument, vm: DSPViewModel, pdmEnabled: Bool?,
+                                applySource: Bool, report: PresetApplyReport) {
         let io = doc.io
         let generation = vm.transport.generation
-        func stillCurrent() -> Bool { vm.transport.generation == generation }
+        let current = DispatchQueue.main.sync { vm.currentPinIOConfig() }
 
-        func attempt(_ what: String, _ set: () -> UInt8) {
-            let status = set()
-            guard status != PIN_CONFIG_SUCCESS else { return }
-            report.skip("\(what) rejected by the device (\(describe(status)))")
+        // The document as a target, for what this board has.  Unsupported
+        // features are reported and left out, so the routine never sends them.
+        var target = PinIOConfig()
+        let slots = vm.numOutputSlots
+        target.slotTypes = (0..<slots).map { $0 < io.outputSlotTypes.count ? io.outputSlotTypes[$0] : 0 }
+        if let cur = current.outputPins {
+            let pdm = vm.pdmPinIndex
+            target.outputPins = (0..<slots).map { $0 < io.outputPins.count ? io.outputPins[$0] : cur[$0] }
+                + [pdm < io.outputPins.count ? io.outputPins[pdm] : cur[slots]]
         }
-
-        // Slot types before pins: a slot switching to I2S changes what its pin
-        // assignment means, and the app regenerates auto channel names from it.
-        for slot in 0..<min(vm.numOutputSlots, io.outputSlotTypes.count)
-        where vm.outputSlotTypes[slot] != io.outputSlotTypes[slot] {
-            attempt("Output \(slot + 1) type") { vm.setOutputSlotType(slot: slot, type: io.outputSlotTypes[slot]) }
+        target.pdmEnabled = pdmEnabled
+        if current.bckPins != nil {
+            target.bckPins = [io.i2sBckPin, vm.i2sClockPinModeSupported ? io.i2sBckPinSlave : vm.i2sBckPinSlave]
+            target.mckEnabled = io.mckEnabled
+            target.mckPin = io.mckPin
+            target.mckMultiplier = io.mckMultiplier
         }
-        guard stillCurrent() else { return }
-
-        // Only the pin outputs this board has: the slots plus PDM, which sits at
-        // a different index per platform (2 on RP2040, 4 on RP2350).
-        var pinIndices = Array(0..<vm.numOutputSlots)
-        pinIndices.append(vm.platformName == "RP2040" ? 2 : 4)
-        for index in pinIndices where index < min(vm.outputPins.count, io.outputPins.count) {
-            let want = io.outputPins[index]
-            guard vm.outputPins[index] != want else { continue }
-            var status = vm.setOutputPin(output: index, pin: want)
-
-            // The firmware refuses to move the PDM pin while PDM is enabled.
-            // Cycle it the way the Hardware settings page does, then put the
-            // enable state back to whatever the output is supposed to be in.
-            if status == PIN_CONFIG_OUTPUT_ACTIVE && index == pinIndices.last {
-                let pdm = vm.pdmOutputIndex
-                let wasEnabled = vm.outputEnabled[pdm]
-                DispatchQueue.main.sync { vm.setOutputEnable(output: pdm, enabled: false) }
-                status = vm.setOutputPin(output: index, pin: want)
-                DispatchQueue.main.sync { vm.setOutputEnable(output: pdm, enabled: wasEnabled) }
-            }
-
-            if status != PIN_CONFIG_SUCCESS {
-                report.skip("Output \(index + 1) GPIO rejected by the device (\(describe(status)))")
-            }
-        }
-        guard stillCurrent() else { return }
-
-        if vm.i2sBckPin != io.i2sBckPin { attempt("I2S BCK pin") { vm.setI2SBckPin(io.i2sBckPin) } }
-        if vm.mckEnabled != io.mckEnabled { attempt("MCK enable") { vm.setMckEnable(io.mckEnabled) } }
-        if vm.mckPin != io.mckPin { attempt("MCK pin") { vm.setMckPin(io.mckPin) } }
-        if vm.mckMultiplier != io.mckMultiplier {
-            attempt("MCK multiplier") { vm.setMckMultiplier(io.mckMultiplier) }
-        }
-        guard stillCurrent() else { return }
-
-        // S/PDIF inputs.  Drop an enable before repinning so a move can't clash
-        // with the pin it is leaving, and apply each pin before switching its
-        // input on so the enable validates against the pin it will use.
-        if vm.spdifRxPin != io.spdifRxPins.first ?? vm.spdifRxPin {
-            attempt("S/PDIF RX pin") { vm.setSpdifRxPin(index: 0, io.spdifRxPins[0]) }
-        }
-        if vm.multiSpdifSupported {
-            for index in 1..<vm.spdifInputCount {
-                let want = documentSpdifPin(io, index: index)
-                let wantEnabled = io.spdifEnabledExt & (UInt8(1) << (index - 1)) != 0
-                let isEnabled = vm.spdifInputEnabled(index: index)
-
-                if isEnabled && !wantEnabled {
-                    attempt("S/PDIF input \(index + 1)") { vm.setSpdifInputEnable(index: index, false) }
-                }
-                if let want, vm.spdifPin(index: index) != want {
-                    attempt("S/PDIF \(index + 1) RX pin") { vm.setSpdifRxPin(index: index, want) }
-                }
-                if !isEnabled && wantEnabled {
-                    attempt("S/PDIF input \(index + 1)") { vm.setSpdifInputEnable(index: index, true) }
-                }
-            }
-        } else if io.spdifEnabledExt != 0 {
-            report.skip("Additional S/PDIF inputs (not supported by this firmware)")
-        }
-        guard stillCurrent() else { return }
-
-        // I2S input: the channel count first (lowering it frees pairs and never
-        // fails), then each pair's data pin, then the rate.
-        if vm.i2sInputSupported {
-            let channels = min(io.i2sInputChannels, vm.i2sMaxInputChannels)
-            if [2, 4, 6, 8].contains(channels) && vm.i2sInputChannels != channels {
-                attempt("I2S input channels") { vm.setI2SInputChannels(channels) }
-            }
-            for pair in 0..<min(vm.i2sMaxPairs, io.i2sRxPins.count)
-            where vm.i2sRxPins[pair] != io.i2sRxPins[pair] {
-                attempt("I2S serial data \(pair + 1) pin") { vm.setI2SRxPin(pair: pair, io.i2sRxPins[pair]) }
-            }
-            if vm.i2sInputRateHz != io.i2sInputRateHz { vm.setInputRate(io.i2sInputRateHz) }
-        }
+        if vm.i2sClockPinModeSupported { target.clockPinMode = io.i2sClockPinMode }
         if vm.i2sClockModeSupported {
-            if vm.i2sClockMode != io.i2sClockMode { vm.setI2SClockMode(io.i2sClockMode) }
+            target.clockMode = io.i2sClockMode
         } else if io.i2sClockMode != 0 {
             report.skip("I2S clock-slave mode (not supported by this firmware)")
         }
-        // Clock-pin mode: store the slave pair first (a dormant store, accepted
-        // any time) so entering SPLIT finds it already valid.
-        if vm.i2sClockPinModeSupported {
-            if vm.i2sBckPinSlave != io.i2sBckPinSlave {
-                attempt("I2S slave BCK pin") { vm.setI2SBckPin(io.i2sBckPinSlave, role: I2S_BCK_ROLE_SLAVE) }
+        if let pins = current.spdifPins {
+            target.spdifPins = pins.indices.map { i in
+                i == 0 ? (io.spdifRxPins.first ?? pins[0]) : (documentSpdifPin(io, index: i) ?? pins[i])
             }
-            if vm.i2sClockPinMode != io.i2sClockPinMode {
-                attempt("I2S clock pin mode") { vm.setI2SClockPinMode(io.i2sClockPinMode) }
+            target.spdifEnabled = pins.indices.map { $0 == 0 || io.spdifEnabledExt & (UInt8(1) << ($0 - 1)) != 0 }
+            if pins.count == 1 && io.spdifEnabledExt != 0 {
+                report.skip("Additional S/PDIF inputs (not supported by this firmware)")
             }
+            // The source belongs to the audio processing option; with it
+            // ticked it is applied here, after the pins it needs.
+            if applySource { target.inputSource = doc.global.inputSource }
+        } else if applySource && doc.global.inputSource != INPUT_SOURCE_USB {
+            report.skip("Input source (not supported by this firmware)")
         }
-        guard stillCurrent() else { return }
-
-        // ADAT output: the data pin first (it re-routes under a muted restart
-        // when enabled), then the enable state.
-        if vm.adatSupported {
-            if vm.adatPin != io.adatPin { attempt("ADAT output pin") { vm.setAdatPin(io.adatPin) } }
-            if vm.adatEnabled != io.adatEnabled {
-                attempt("ADAT output enable") { vm.setAdatEnable(io.adatEnabled) }
-            }
+        if let pins = current.i2sRxPins {
+            let channels = min(io.i2sInputChannels, vm.i2sMaxInputChannels)
+            if [2, 4, 6, 8].contains(channels) { target.i2sChannels = channels }
+            target.i2sRxPins = pins.indices.map { $0 < io.i2sRxPins.count ? io.i2sRxPins[$0] : pins[$0] }
+            target.i2sRate = io.i2sInputRateHz
+        }
+        if current.adatPin != nil {
+            target.adatPin = io.adatPin
+            target.adatEnabled = io.adatEnabled
         } else if io.adatEnabled {
             report.skip("ADAT output (not supported by this device)")
         }
-
-        if vm.adatInputSupported {
-            if io.adatInputPin != ADAT_INPUT_PIN_UNSET && vm.adatInputPin != io.adatInputPin {
-                attempt("ADAT input pin") { vm.setAdatInputPin(io.adatInputPin) }
-            }
-            if vm.adatInputClockMode != io.adatInputClockMode {
-                attempt("ADAT input clock mode") { vm.setAdatInputClockMode(io.adatInputClockMode) }
-            }
-            if vm.adatInputEnabled != io.adatInputEnabled {
-                attempt("ADAT input enable") { vm.setAdatInputEnable(io.adatInputEnabled) }
-            }
+        if current.adatInPin != nil {
+            if io.adatInputPin != ADAT_INPUT_PIN_UNSET { target.adatInPin = io.adatInputPin }
+            target.adatInClockMode = io.adatInputClockMode
+            target.adatInEnabled = io.adatInputEnabled
         } else if io.adatInputEnabled {
             report.skip("ADAT input (not supported by this device)")
         }
-        guard stillCurrent() else { return }
+
+        let routine = vm.applyPinIO(current: current, target: target)
+        for problem in routine.problems { report.skip(problem) }
+        for note in routine.notes { report.skip(note) }
+        guard vm.transport.generation == generation else { return }
 
         if let mute = io.dacHwMute {
             if vm.dacHwMuteSupported {
@@ -858,15 +799,5 @@ enum PresetDocumentApply {
     private static func documentSpdifPin(_ io: PresetDocument.IoBlock, index: Int) -> UInt8? {
         if index == 3 { return io.spdifRxPin4 }
         return index < io.spdifRxPins.count ? io.spdifRxPins[index] : nil
-    }
-
-    private static func describe(_ status: UInt8) -> String {
-        switch status {
-        case PIN_CONFIG_INVALID_PIN:    return "invalid pin"
-        case PIN_CONFIG_PIN_IN_USE:     return "pin already in use"
-        case PIN_CONFIG_INVALID_OUTPUT: return "invalid output"
-        case PIN_CONFIG_OUTPUT_ACTIVE:  return "output is active"
-        default:                        return String(format: "status 0x%02X", status)
-        }
     }
 }

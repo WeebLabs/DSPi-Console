@@ -94,6 +94,13 @@ extension DSPViewModel {
         fetchAdatInputConfig()
         guard transport.generation == generation else { return }
 
+        // Generation, GPIO set and owners; the per-function sweep waits for a
+        // pin view to open.  After the fetches above so the board shape the
+        // store captures is the connected device's.
+        DispatchQueue.main.async { self.refreshPinMap(force: true) }
+        // Boot validates the stored pins and may have replaced some.
+        reportPinSubstitutions()
+
         // All fetches above have enqueued their main-thread state updates, so
         // this runs after the published values reflect the connected device.
         // Re-seeds the Settings global draft (no-op if the user has staged
@@ -531,7 +538,20 @@ extension DSPViewModel {
         DispatchQueue.main.async { self.dacHwMuteConfig = config }
         transport.send(VC.OUTPUT.DAC_MUTE_CONFIG, data: config.toData())
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15) {
+            // The device applies the config on its main loop and claims the
+            // pin there, so an enable on a held pin is refused only now: the
+            // readback comes back disabled.  Say who holds the pin.
+            // A refused config leaves the old one in place, so a refused pin
+            // move on an enabled mute reads back enabled on the old pin.
+            if config.enabled,
+               let d = self.transport.getData(VC.OUTPUT.DAC_MUTE_CONFIG, length: 16),
+               let cfg = DacHwMuteConfig.fromData(d), !cfg.enabled || cfg.pin != config.pin {
+                let who = self.describePinConflict(for: .dacMute, pins: [config.pin])
+                DeviceRefusal.notice.show(cfg.enabled ? "DAC mute kept its old pin" : "DAC mute was not enabled",
+                                          detail: who ?? "GPIO \(config.pin) could not be claimed")
+            }
             self.fetchDacHwMuteConfig()
+            DispatchQueue.main.async { self.refreshPinMap() }
         }
     }
 
@@ -1648,6 +1668,20 @@ extension DSPViewModel {
         transport.send(VC.ROUTE.OUTPUT_ENABLE, value: UInt16(output), data: data)
     }
 
+    /// `setOutputEnable` that waits for the verdict, for flows that must know
+    /// whether a start was refused (the PDM start is pin-checked).  Returns a
+    /// PIN_CONFIG_* byte; 0xFF on no answer.  Blocking: call off main.
+    func setOutputEnableAndWait(output: Int, enabled: Bool) -> UInt8 {
+        let status = transport.setAndWait(VC.ROUTE.OUTPUT_ENABLE, value: UInt16(output), data: Data([enabled ? 1 : 0]))
+        if status == .ok {
+            DispatchQueue.main.async {
+                self.outputEnabled[output] = enabled
+                if self.isOverviewMode { self.channelVisibility[self.eqChannel(forOutput: output)] = enabled }
+            }
+        }
+        return LegacyStatusFamily.pin.byte(for: status) ?? 0xFF
+    }
+
     func fetchOutputEnable(output: Int) {
         if let d = transport.getData(VC.ROUTE.OUTPUT_ENABLE, value: UInt16(output), length: 1) {
             let val = d[0] != 0
@@ -1701,7 +1735,14 @@ extension DSPViewModel {
         for i in eqWorkerRange {
             setOutputEnable(output: i, enabled: false)
         }
-        setOutputEnable(output: pdmOutputIndex, enabled: true)
+        // The PDM start is pin-checked: a refusal names who holds its pin.
+        outputEnabled[pdmOutputIndex] = true
+        if isOverviewMode { channelVisibility[eqChannel(forOutput: pdmOutputIndex)] = true }
+        sendStart(VC.ROUTE.OUTPUT_ENABLE, value: UInt16(pdmOutputIndex), data: Data([1]),
+                  what: "enable the subwoofer output", function: .pdm) { [weak self] in
+            guard let self, self.outputPins.indices.contains(self.pdmPinIndex) else { return [] }
+            return [self.outputPins[self.pdmPinIndex]]
+        }
         // Read back to confirm
         for i in eqWorkerRange {
             fetchOutputEnable(output: i)
@@ -1745,21 +1786,6 @@ extension DSPViewModel {
             return status
         }
         return 0xFF
-    }
-
-    /// Sets an output's GPIO pin, transparently cycling the PDM output off and
-    /// back on when the firmware refuses because it is active.  The one shared
-    /// path for pin assignment, used by Settings and the Getting Started
-    /// wizard, so the retry rule cannot drift between the two.
-    @discardableResult
-    func assignOutputPin(output: Int, pin: UInt8) -> UInt8 {
-        var status = setOutputPin(output: output, pin: pin)
-        if status == PIN_CONFIG_OUTPUT_ACTIVE && output == pdmPinIndex {
-            setOutputEnable(output: pdmOutputIndex, enabled: false)
-            status = setOutputPin(output: output, pin: pin)
-            setOutputEnable(output: pdmOutputIndex, enabled: true)
-        }
-        return status
     }
 
     // MARK: - I2S Configuration
@@ -2177,6 +2203,14 @@ extension DSPViewModel {
         }
     }
 
+    /// `setInputSource` that waits for the verdict: a switch to I2S is
+    /// pin-checked and can be refused.  Blocking: call off main.
+    func setInputSourceAndWait(_ source: Int) -> UInt8 {
+        let status = transport.setAndWait(VC.INPUT.SOURCE, data: Data([UInt8(source)]))
+        if status == .ok { DispatchQueue.main.async { self.inputSource = source } }
+        return LegacyStatusFamily.pin.byte(for: status) ?? 0xFF
+    }
+
     func setInputSource(_ source: Int) {
         let byte = Data([UInt8(source)])
 
@@ -2184,7 +2218,12 @@ extension DSPViewModel {
             self.inputSource = source
         }
 
-        transport.send(VC.INPUT.SOURCE, data: byte)
+        // A switch to I2S starts its clock pair and data pins, and is refused
+        // when another function holds one.
+        sendStart(VC.INPUT.SOURCE, data: byte, what: "switch to the I2S input", function: .i2sRx) { [weak self] in
+            guard let self else { return [] }
+            return self.activeI2SClockPins + Array(self.i2sRxPins.prefix(max(1, self.i2sInputChannels / 2)))
+        }
 
         // No follow-up fetch here — the firmware emits an
         // `input_config.input_source` notification at the end of its
@@ -2322,6 +2361,15 @@ extension DSPViewModel {
     /// the preset in with-preset mode - callers in Settings must mark the
     /// output config dirty (beginOutputEdit) so the save flow picks it up.
     /// Invalid rates are silently ignored by the firmware (no SET response).
+    /// `setInputRate` that waits for the verdict.  Blocking: call off main.
+    func setInputRateAndWait(_ hz: UInt32) -> UInt8 {
+        guard I2S_INPUT_RATES_HZ.contains(hz) else { return PIN_CONFIG_INVALID_PARAM }
+        var le = hz.littleEndian
+        let status = transport.setAndWait(VC.INPUT.I2S_RX_RATE, data: withUnsafeBytes(of: &le) { Data($0) })
+        if status == .ok { DispatchQueue.main.async { self.i2sInputRateHz = hz } }
+        return LegacyStatusFamily.pin.byte(for: status) ?? 0xFF
+    }
+
     func setInputRate(_ hz: UInt32) {
         guard I2S_INPUT_RATES_HZ.contains(hz) else { return }
         DispatchQueue.main.async { self.i2sInputRateHz = hz }
@@ -2379,10 +2427,26 @@ extension DSPViewModel {
     /// the first NOTIFY 0x09) - we optimistically mirror it here for a snappy UI.
     /// Part of the output-config block, so callers in Settings must mark it dirty
     /// (beginOutputEdit) for the save flow to pick it up.
+    /// `setI2SClockMode` that waits for the verdict: moving running clocks to
+    /// the other pair is pin-checked.  Blocking: call off main.
+    func setI2SClockModeAndWait(_ mode: UInt8) -> UInt8 {
+        let clamped: UInt8 = mode == I2S_CLOCK_MODE_SLAVE ? I2S_CLOCK_MODE_SLAVE : I2S_CLOCK_MODE_MASTER
+        let status = transport.setAndWait(VC.CLOCK.I2S_CLOCK_MODE, data: Data([clamped]))
+        if status == .ok { DispatchQueue.main.async { self.i2sClockMode = clamped } }
+        return LegacyStatusFamily.pin.byte(for: status) ?? 0xFF
+    }
+
     func setI2SClockMode(_ mode: UInt8) {
         let clamped: UInt8 = mode == I2S_CLOCK_MODE_SLAVE ? I2S_CLOCK_MODE_SLAVE : I2S_CLOCK_MODE_MASTER
         DispatchQueue.main.async { self.i2sClockMode = clamped }
-        transport.send(VC.CLOCK.I2S_CLOCK_MODE, data: Data([clamped]))
+        // Moving running clocks to the other pair is pin-checked.
+        sendStart(VC.CLOCK.I2S_CLOCK_MODE, data: Data([clamped]), what: "change the I2S clock mode",
+                  function: .i2sClock, index: clamped == I2S_CLOCK_MODE_SLAVE ? 1 : 0) { [weak self] in
+            guard let self else { return [] }
+            let slave = self.i2sClockPinMode == I2S_CLOCK_PIN_MODE_SPLIT && clamped == I2S_CLOCK_MODE_SLAVE
+            let bck = slave ? self.i2sBckPinSlave : self.i2sBckPin
+            return [bck, bck &+ 1]
+        }
     }
 
     /// Reads the 16-byte I2sSlaveStatusPacket via CLOCK.I2S_SLAVE_STATUS
@@ -2694,6 +2758,9 @@ extension DSPViewModel {
         // on/off flag and level (a same-type edit keeps them; aux spec 4).
         fetchCsAuxValues()
         fetchCsStatus()
+        // Forced: a Control Surfaces busy state is not part of the pin
+        // generation, so an answer that was BUSY could look current.
+        DispatchQueue.main.async { self.refreshPinMap(force: true) }
         return result
     }
 
@@ -2781,6 +2848,7 @@ extension DSPViewModel {
         // its boot value, so the live picture has to be re-read (aux spec 4).
         fetchCsAuxValues()
         fetchCsStatus()
+        DispatchQueue.main.async { self.refreshPinMap(force: true) }
         // Live now mirrors flash again; rebase the clean baseline after the
         // re-fetches above land (FIFO on main).
         DispatchQueue.main.async { self.captureCsCleanSnapshot() }

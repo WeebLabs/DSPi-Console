@@ -35,7 +35,7 @@ let knownAddr = ["NONE": "none", "CHANNEL": "channel", "INPUT": "input", "OUTPUT
                  "OUTPUT_ALL": "outputAll", "SLOT": "slot", "PIN_OUTPUT": "pinOutput",
                  "PRESET": "preset", "CH_BAND": "channelBand", "IN_OUT": "inputOutput",
                  "SOURCE": "source", "SPDIF_RX": "spdifRx", "I2S_PAIR": "i2sPair", "ROLE": "role",
-                 "CS_SLOT": "csSlot", "CS_SUB": "csSub", "CS_GROUP": "csGroup",
+                 "CS_SLOT": "csSlot", "CS_SLOT_TYPE": "csSlotType", "CS_SUB": "csSub", "CS_GROUP": "csGroup",
                  "CS_MACRO": "csMacro", "CS_MACRO_STEP": "csMacroStep", "CS_PAGE": "csPage",
                  "CS_NOUN": "csNoun", "PAGE": "page", "PAGE_CMD": "pageCommand",
                  "OFFSET": "offset", "INDEX": "index"]

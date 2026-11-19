@@ -654,28 +654,44 @@ struct SettingsView: View {
 
 /// A read-only map of every GPIO the device is currently holding.
 ///
-/// The pin pickers scattered across the other pages each answer "is this one
-/// free?" one pin at a time; nothing answered "what does the whole header look
-/// like right now".  Rows come from `vm.activePinAssignments`, which asks the
-/// same authority (`pinAssignment`) those pickers ask, so this page cannot
-/// claim a pin is free that a picker will refuse, or vice versa.
+/// Rows come from the device's own claim list (SYS.PIN_CLAIMS), the same
+/// source the pin pickers' owner labels use, so this page cannot disagree with
+/// what a picker will let you choose.
 ///
-/// Only *held* pins are listed.  A feature that is configured but switched off
-/// reserves nothing on the device and so appears nowhere here - a disabled
-/// optional S/PDIF input, ADAT while stopped, a control interface that is down,
-/// a control-surface binding the device rejected at boot.
+/// A function holds its pins only while it is in use.  The stored pin of a
+/// function that is switched off holds nothing; those are listed apart, muted,
+/// so a clash waiting for the moment it is switched on can be seen.
 struct PinOverviewTab: View {
     @ObservedObject private var vm = AppState.shared.viewModel
 
-    /// Every claimed pin, in pin order.
-    private var assignments: [PinAssignment] {
-        vm.activePinAssignments(from: HardwareSettingsTab.validPins)
+    /// Every GPIO the board has that some function can use.
+    private var gpios: [UInt8] { vm.pinMap.snapshot.state?.gpios ?? [] }
+
+    /// Claims of one kind as rows, one per pin; several owners of one pin
+    /// (shared buttons, the ADAT loopback) are joined.
+    private func rows(active: Bool) -> [PinAssignment] {
+        var byPin: [UInt8: PinAssignment] = [:]
+        for claim in vm.pinMap.snapshot.claims where claim.active == active {
+            let name = vm.ownerName(claim)
+            let role = claim.function?.role ?? .utility
+            if let row = byPin[claim.gpio] {
+                if !row.label.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }).contains(name) {
+                    byPin[claim.gpio] = PinAssignment(pin: claim.gpio, label: row.label + ", " + name, role: row.role)
+                }
+            } else {
+                byPin[claim.gpio] = PinAssignment(pin: claim.gpio, label: name, role: role)
+            }
+        }
+        return byPin.values.sorted { $0.pin < $1.pin }
     }
+
+    /// Every claimed pin, in pin order.
+    private var assignments: [PinAssignment] { rows(active: true) }
 
     /// Valid GPIOs with nothing on them.
     private var freePins: [UInt8] {
         let taken = Set(assignments.map(\.pin))
-        return HardwareSettingsTab.validPins.filter { !taken.contains($0) }
+        return gpios.filter { !taken.contains($0) }
     }
 
     /// Claimed pins bucketed by role, empty roles dropped, each list in pin order.
@@ -688,6 +704,14 @@ struct PinOverviewTab: View {
         Form {
             if !vm.isDeviceConnected {
                 disconnectedSection
+            } else if let reason = vm.pinMapUnavailableReason {
+                Section {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                }
             } else if assignments.isEmpty {
                 Section {
                     Text("No GPIOs are currently claimed.")
@@ -708,9 +732,27 @@ struct PinOverviewTab: View {
                         .padding(.vertical, 1)
                     }
                 }
+                let stored = rows(active: false)
+                if !stored.isEmpty {
+                    Section {
+                        LazyVGrid(columns: Self.assignmentColumns, alignment: .leading, spacing: 5) {
+                            ForEach(stored, id: \.pin) { row in
+                                assignmentCell(row, stored: true)
+                            }
+                        }
+                        .padding(.vertical, 1)
+                    } header: {
+                        Text("Stored, Not in Use")
+                    } footer: {
+                        Text("Pins kept for functions that are switched off. They hold nothing until the function is switched on.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
+        .watchesPinMap(vm)
     }
 
     // MARK: Rows
@@ -724,19 +766,20 @@ struct PinOverviewTab: View {
     /// chip is fixed-width so names line up down both columns.  No role glyph
     /// here - the section header names the role and the chip is already
     /// coloured by it, so a third indicator would just cost width.
-    private func assignmentCell(_ row: PinAssignment) -> some View {
+    private func assignmentCell(_ row: PinAssignment, stored: Bool = false) -> some View {
         HStack(spacing: 7) {
             Text("GP\(row.pin)")
                 .font(.system(.caption2, design: .monospaced).weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(stored ? Color.secondary : Color.white)
                 .frame(width: 34)
                 .padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(roleTint(row.role).gradient)
+                        .fill(stored ? Color.secondary.opacity(0.12).gradient : roleTint(row.role).gradient)
                 )
             Text(row.label)
                 .font(.caption)
+                .foregroundColor(stored ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .help(row.label)
@@ -758,7 +801,7 @@ struct PinOverviewTab: View {
                     Image(systemName: "cpu")
                         .font(.system(size: 15))
                         .foregroundColor(.accentColor)
-                    Text("\(assignments.count) of \(HardwareSettingsTab.validPins.count) GPIOs in use")
+                    Text("\(assignments.count) of \(gpios.count) GPIOs in use")
                         .font(.callout.weight(.medium))
                     Spacer()
                     Text(freePins.isEmpty ? "none free" : "\(freePins.count) free")
@@ -767,7 +810,7 @@ struct PinOverviewTab: View {
                 }
                 let claims = claimsByPin(assignments)
                 LazyVGrid(columns: Self.mapColumns, alignment: .leading, spacing: 4) {
-                    ForEach(HardwareSettingsTab.validPins, id: \.self) { pin in
+                    ForEach(gpios, id: \.self) { pin in
                         mapChip(pin, claim: claims[pin])
                     }
                 }
@@ -798,9 +841,7 @@ struct PinOverviewTab: View {
     }
 
     /// Claims keyed by pin.  Built once per render by the caller and handed to
-    /// each chip: as a computed property read inside `mapChip` it rebuilt the
-    /// whole table, and re-queried every pin's owner, once for each of the 25
-    /// chips.
+    /// each chip, rather than rebuilt inside `mapChip` for every chip.
     private func claimsByPin(_ rows: [PinAssignment]) -> [UInt8: PinAssignment] {
         Dictionary(uniqueKeysWithValues: rows.map { ($0.pin, $0) })
     }
@@ -1424,69 +1465,53 @@ final class SettingsSaveCoordinator: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 func stillCurrent() -> Bool { vm.transport.generation == generation }
                 guard stillCurrent() else { return }
-                // Best-effort restore of the live config to the baseline.
-                for slot in 0..<min(vm.numOutputSlots, base.outputSlotTypes.count)
-                where vm.outputSlotTypes[slot] != base.outputSlotTypes[slot] {
-                    _ = vm.setOutputSlotType(slot: slot, type: base.outputSlotTypes[slot])
+                // Restore the live config to the baseline through the shared
+                // routine: releases, stores, moves and starts in the order the
+                // pin rules need, and swaps pins through a free one if needed.
+                let current = DispatchQueue.main.sync { vm.currentPinIOConfig() }
+                var target = current
+                if current.slotTypes != nil { target.slotTypes = Array(base.outputSlotTypes.prefix(vm.numOutputSlots)) }
+                if current.outputPins != nil, base.outputPins.count > vm.pdmPinIndex {
+                    target.outputPins = Array(base.outputPins.prefix(vm.numOutputSlots)) + [base.outputPins[vm.pdmPinIndex]]
                 }
-                for i in 0..<min(vm.outputPins.count, base.outputPins.count)
-                where vm.outputPins[i] != base.outputPins[i] {
-                    _ = vm.setOutputPin(output: i, pin: base.outputPins[i])
+                target.pdmEnabled = nil
+                target.inputSource = nil
+                if current.bckPins != nil {
+                    target.bckPins = [base.i2sBckPin, base.i2sBckPinSlave]
+                    target.mckEnabled = base.mckEnabled
+                    target.mckPin = base.mckPin
+                    target.mckMultiplier = base.mckMultiplier
                 }
-                guard stillCurrent() else { return }
-                if vm.i2sBckPin != base.i2sBckPin { _ = vm.setI2SBckPin(base.i2sBckPin) }
-                if vm.mckEnabled != base.mckEnabled { _ = vm.setMckEnable(base.mckEnabled) }
-                if vm.mckPin != base.mckPin { _ = vm.setMckPin(base.mckPin) }
-                if vm.mckMultiplier != base.mckMultiplier { _ = vm.setMckMultiplier(base.mckMultiplier) }
-                if vm.spdifRxPin != base.spdifRxPin { _ = vm.setSpdifRxPin(index: 0, base.spdifRxPin) }
-                guard stillCurrent() else { return }
-                // Optional S/PDIF 2/3: restore each pin, then the enable state.
-                // Apply the pin before re-enabling so an enable validates against
-                // the restored pin; disable before repinning frees any conflict.
-                if vm.multiSpdifSupported {
-                    for i in 0..<min(vm.spdifRxPinsExt.count, base.spdifRxPinsExt.count) {
-                        let idx = i + 1
-                        // Drop the enable if we're turning it off (so a repin can't clash).
-                        if vm.spdifExtEnabled[i] && !base.spdifExtEnabled[i] {
-                            _ = vm.setSpdifInputEnable(index: idx, false)
-                        }
-                        if vm.spdifRxPinsExt[i] != base.spdifRxPinsExt[i] {
-                            _ = vm.setSpdifRxPin(index: idx, base.spdifRxPinsExt[i])
-                        }
-                        if !vm.spdifExtEnabled[i] && base.spdifExtEnabled[i] {
-                            _ = vm.setSpdifInputEnable(index: idx, true)
-                        }
+                if current.clockPinMode != nil { target.clockPinMode = base.i2sClockPinMode }
+                if current.clockMode != nil { target.clockMode = base.i2sClockMode }
+                if let pins = current.spdifPins {
+                    target.spdifPins = pins.indices.map { i in
+                        i == 0 ? base.spdifRxPin : (i - 1 < base.spdifRxPinsExt.count ? base.spdifRxPinsExt[i - 1] : pins[i])
+                    }
+                    target.spdifEnabled = pins.indices.map { i in
+                        i == 0 || (i - 1 < base.spdifExtEnabled.count && base.spdifExtEnabled[i - 1])
                     }
                 }
-                guard stillCurrent() else { return }
-                // I2S input: a lowered count goes first (it frees pairs and never
-                // fails); a raised count goes last, because the firmware checks the
-                // newly active pairs' parked pins, which must be restored first.
-                let i2sRaising = base.i2sInputChannels > vm.i2sInputChannels
-                if !i2sRaising && vm.i2sInputChannels != base.i2sInputChannels { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
-                for pair in 0..<min(vm.i2sRxPins.count, base.i2sRxPins.count)
-                where vm.i2sRxPins[pair] != base.i2sRxPins[pair] {
-                    _ = vm.setI2SRxPin(pair: pair, base.i2sRxPins[pair])
+                if let pins = current.i2sRxPins {
+                    target.i2sChannels = base.i2sInputChannels
+                    target.i2sRxPins = pins.indices.map { $0 < base.i2sRxPins.count ? base.i2sRxPins[$0] : pins[$0] }
+                    target.i2sRate = base.i2sInputRateHz
                 }
-                if i2sRaising { _ = vm.setI2SInputChannels(base.i2sInputChannels) }
-                if vm.i2sInputRateHz != base.i2sInputRateHz { vm.setInputRate(base.i2sInputRateHz) }
-                if vm.i2sClockMode != base.i2sClockMode { vm.setI2SClockMode(base.i2sClockMode) }
-                // Clock-pin mode: restore the slave pair first (a dormant store,
-                // accepted any time) so re-entering SPLIT finds it valid.
-                if vm.i2sClockPinModeSupported {
-                    if vm.i2sBckPinSlave != base.i2sBckPinSlave {
-                        _ = vm.setI2SBckPin(base.i2sBckPinSlave, role: I2S_BCK_ROLE_SLAVE)
-                    }
-                    if vm.i2sClockPinMode != base.i2sClockPinMode {
-                        _ = vm.setI2SClockPinMode(base.i2sClockPinMode)
-                    }
+                if current.adatPin != nil {
+                    target.adatPin = base.adatPin
+                    target.adatEnabled = base.adatEnabled
                 }
+                // Not part of the baseline: leave as they are.
+                target.adatInPin = nil
+                target.adatInClockMode = nil
+                target.adatInEnabled = nil
+                let routine = vm.applyPinIO(current: current, target: target)
                 guard stillCurrent() else { return }
-                // ADAT: restore the data pin first (re-routes under a muted
-                // restart if enabled), then the enable state to match baseline.
-                if vm.adatSupported {
-                    if vm.adatPin != base.adatPin { _ = vm.setAdatPin(base.adatPin) }
-                    if vm.adatEnabled != base.adatEnabled { _ = vm.setAdatEnable(base.adatEnabled) }
+                if !routine.problems.isEmpty {
+                    DeviceRefusal.notice.show("Revert could not restore everything",
+                                              detail: (routine.problems + routine.notes).joined(separator: "\n"))
+                } else if !routine.notes.isEmpty {
+                    DeviceRefusal.notice.show(routine.notes[0], detail: routine.notes.joined(separator: "\n"))
                 }
                 DispatchQueue.main.async {
                     guard stillCurrent() else { return }
@@ -1682,13 +1707,17 @@ struct GlobalSettingsTab: View {
                         get: { draft.dacHwMuteConfig.enabled },
                         set: { newVal in
                             coordinator.globalDraft.dacHwMuteConfig.enabled = newVal
+                            // A board that never stored a mute config reads back
+                            // a hold of 0, which the device refuses on enable
+                            // (1-500 ms): start from the firmware default.
+                            if newVal && coordinator.globalDraft.dacHwMuteConfig.holdMs < DAC_HW_MUTE_HOLD_MIN_MS {
+                                coordinator.globalDraft.dacHwMuteConfig.holdMs = 5
+                            }
                             // Enabling with no pin is nonsensical - auto-assign
                             // the first available GPIO so the user doesn't see an
                             // empty picker the moment they flip the switch on.
                             if newVal && coordinator.globalDraft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE {
-                                if let firstFree = HardwareSettingsTab.validPins.first(where: {
-                                    vm.pinInUseBy($0, excluding: .dacMute) == nil
-                                }) {
+                                if let firstFree = vm.pinMap.snapshot.avail[.dacMute]?.freePins().first {
                                     coordinator.globalDraft.dacHwMuteConfig.pin = firstFree
                                 }
                             }
@@ -1704,6 +1733,7 @@ struct GlobalSettingsTab: View {
                         }
                     }
                     .toggleStyle(.switch)
+                    .watchesPinMap(vm)
 
                     if draft.dacHwMuteConfig.enabled {
                         HStack {
@@ -1728,20 +1758,23 @@ struct GlobalSettingsTab: View {
                                 .frame(width: 16)
                             Text("Mute Pin")
                             Spacer()
-                            Picker("", selection: coordinator.draftBinding(\.dacHwMuteConfig.pin)) {
-                                // No "None" entry - the enable toggle is the
-                                // master switch.  Filter pins through
-                                // vm.pinInUseBy so claims in the Hardware
-                                // tab (output pins, I2S BCK/MCK, S/PDIF RX)
-                                // don't appear as free here.
-                                ForEach(HardwareSettingsTab.validPins.filter {
-                                    vm.pinInUseBy($0, excluding: .dacMute) == nil
-                                }, id: \.self) { pin in
-                                    Text("GPIO \(pin)").tag(pin)
-                                }
+                            // No "None" entry - the enable toggle is the
+                            // master switch.  The picker only shows while the
+                            // draft is enabled, and the apply claims the pin,
+                            // so held pins are shown but cannot be picked.
+                            PinPopUpButton(
+                                choices: vm.pinChoices(vm.pinMap.snapshot.avail[.dacMute], mode: .claim,
+                                                       function: .dacMute,
+                                                       current: draft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE
+                                                           ? nil : draft.dacHwMuteConfig.pin),
+                                selection: draft.dacHwMuteConfig.pin == DAC_HW_MUTE_PIN_NONE ? nil : draft.dacHwMuteConfig.pin,
+                                enabled: vm.pinMapUnavailableReason == nil
+                            ) { pin in
+                                coordinator.globalDraft.dacHwMuteConfig.pin = pin
+                                coordinator.globalUserEdited = true
                             }
-                            .labelsHidden()
-                            .fixedSize()
+                            .help(vm.pinMapUnavailableReason ?? "")
+                            .frame(width: 92)
                         }
 
                         // Hold / release timing, staged in the draft.
@@ -2456,6 +2489,7 @@ struct ControlInterfacesSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        .watchesPinMap(vm)
         .onAppear {
             uartDraft = vm.uartCtrlConfig
             i2cDraft = vm.i2cCtrlConfig
@@ -2498,14 +2532,14 @@ struct ControlInterfacesSettingsTab: View {
                 pinRow(title: "TX Pin",
                        detail: "GPIO transmitting to the controller's RX.",
                        icon: "arrow.up.right",
-                       selection: $uartDraft.txPin,
-                       candidates: uartTxPins())
+                       key: .uart, function: .uartCtrl, role: 0,
+                       selection: $uartDraft.txPin, partner: $uartDraft.rxPin)
 
                 pinRow(title: "RX Pin",
                        detail: "GPIO receiving from the controller's TX.",
                        icon: "arrow.down.left",
-                       selection: $uartDraft.rxPin,
-                       candidates: uartRxPins())
+                       key: .uart, function: .uartCtrl, role: 1,
+                       selection: $uartDraft.rxPin, partner: $uartDraft.txPin)
 
                 settingRow(title: "Baud Rate",
                            detail: "9600 - 1000000. Must match the controller.",
@@ -2553,14 +2587,14 @@ struct ControlInterfacesSettingsTab: View {
                 pinRow(title: "SDA Pin",
                        detail: "Serial data line (even GPIO).",
                        icon: "arrow.left.arrow.right",
-                       selection: $i2cDraft.sdaPin,
-                       candidates: i2cSdaPins())
+                       key: .i2c, function: .i2cCtrl, role: 0,
+                       selection: $i2cDraft.sdaPin, partner: $i2cDraft.sclPin)
 
                 pinRow(title: "SCL Pin",
-                       detail: "Serial clock line (next odd GPIO, same instance).",
+                       detail: "Serial clock line (odd GPIO, same instance as SDA).",
                        icon: "clock",
-                       selection: $i2cDraft.sclPin,
-                       candidates: i2cSclPins())
+                       key: .i2c, function: .i2cCtrl, role: 1,
+                       selection: $i2cDraft.sclPin, partner: $i2cDraft.sdaPin)
 
                 settingRow(title: "Target Address",
                            detail: "7-bit address, 0x08 - 0x77.",
@@ -2662,20 +2696,32 @@ struct ControlInterfacesSettingsTab: View {
     }
 
     @ViewBuilder
+    /// A pin row for one role of a two-pin interface.  The draft is enabled
+    /// whenever this shows and the apply claims the pins, so held pins are
+    /// listed but cannot be picked.  Both pins must come from one hardware
+    /// instance (a group in the device's reply): picking a pin of the other
+    /// instance moves the partner to that instance's first free pin.
     private func pinRow(title: String, detail: String, icon: String,
-                        selection: Binding<UInt8>, candidates: [UInt8]) -> some View {
-        settingRow(title: title, detail: detail, icon: icon) {
-            Picker("", selection: selection) {
-                // Keep the current pin visible even if it's not in the free set.
-                if !candidates.contains(selection.wrappedValue) {
-                    Text("GPIO \(selection.wrappedValue)").tag(selection.wrappedValue)
-                }
-                ForEach(candidates, id: \.self) { pin in
-                    Text("GPIO \(pin)").tag(pin)
+                        key: PinAvailKey, function: PinFunction, role: Int,
+                        selection: Binding<UInt8>, partner: Binding<UInt8>) -> some View {
+        let avail = vm.pinMap.snapshot.avail[key]
+        return settingRow(title: title, detail: detail, icon: icon) {
+            PinPopUpButton(
+                choices: vm.pinChoices(avail, mode: .claim, function: function, role: role,
+                                       current: selection.wrappedValue),
+                selection: selection.wrappedValue,
+                enabled: vm.pinMapUnavailableReason == nil
+            ) { pin in
+                selection.wrappedValue = pin
+                guard let avail, let group = avail.group(of: pin, role: role) else { return }
+                let other = 1 - role
+                if avail.group(of: partner.wrappedValue, role: other) != group,
+                   let seat = avail.freePins(role: other, group: group).first {
+                    partner.wrappedValue = seat
                 }
             }
-            .labelsHidden()
-            .fixedSize()
+            .help(vm.pinMapUnavailableReason ?? "")
+            .frame(width: 92)
         }
     }
 
@@ -2710,41 +2756,6 @@ struct ControlInterfacesSettingsTab: View {
         }
     }
 
-    // MARK: Pin candidate sets
-    //
-    // Filter the platform's valid GPIOs to those carrying the required
-    // peripheral mux function (UART TX = pin % 4 == 0, RX = pin % 4 == 1;
-    // I2C SDA even, SCL odd) and not already claimed by another consumer.
-    // The device does the authoritative same-instance mux validation on apply.
-
-    private func uartTxPins() -> [UInt8] {
-        HardwareSettingsTab.validPins.filter { p in
-            p % 4 == 0 && p != uartDraft.rxPin &&
-            (p == uartDraft.txPin || vm.pinInUseBy(p, excluding: .uartCtrl) == nil)
-        }
-    }
-
-    private func uartRxPins() -> [UInt8] {
-        HardwareSettingsTab.validPins.filter { p in
-            p % 4 == 1 && p != uartDraft.txPin &&
-            (p == uartDraft.rxPin || vm.pinInUseBy(p, excluding: .uartCtrl) == nil)
-        }
-    }
-
-    private func i2cSdaPins() -> [UInt8] {
-        HardwareSettingsTab.validPins.filter { p in
-            p % 2 == 0 && p != i2cDraft.sclPin &&
-            (p == i2cDraft.sdaPin || vm.pinInUseBy(p, excluding: .i2cCtrl) == nil)
-        }
-    }
-
-    private func i2cSclPins() -> [UInt8] {
-        HardwareSettingsTab.validPins.filter { p in
-            p % 2 == 1 && p != i2cDraft.sdaPin &&
-            (p == i2cDraft.sclPin || vm.pinInUseBy(p, excluding: .i2cCtrl) == nil)
-        }
-    }
-
     private func baudLabel(_ b: UInt32) -> String {
         b >= 1000 && b % 1000 == 0 ? "\(b / 1000)k" : "\(b)"
     }
@@ -2757,10 +2768,13 @@ struct ControlInterfacesSettingsTab: View {
         uartStatus = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let status = vm.setUartCtrlConfig(cfg)
+            let who = status == PIN_CONFIG_PIN_IN_USE
+                ? vm.describePinConflict(for: .uartCtrl, pins: [cfg.txPin, cfg.rxPin]) : nil
             DispatchQueue.main.async {
                 uartApplying = false
                 uartDraft = vm.uartCtrlConfig
-                uartStatus = statusMessage(status, iface: "UART")
+                uartStatus = statusMessage(status, iface: "UART", conflict: who)
+                vm.refreshPinMap()
             }
         }
     }
@@ -2771,20 +2785,24 @@ struct ControlInterfacesSettingsTab: View {
         i2cStatus = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let status = vm.setI2cCtrlConfig(cfg)
+            let who = status == PIN_CONFIG_PIN_IN_USE
+                ? vm.describePinConflict(for: .i2cCtrl, pins: [cfg.sdaPin, cfg.sclPin]) : nil
             DispatchQueue.main.async {
                 i2cApplying = false
                 i2cDraft = vm.i2cCtrlConfig
-                i2cStatus = statusMessage(status, iface: "I2C")
+                i2cStatus = statusMessage(status, iface: "I2C", conflict: who)
+                vm.refreshPinMap()
             }
         }
     }
 
     /// Map a PIN_CONFIG_* apply outcome into inline feedback.
-    private func statusMessage(_ status: UInt8, iface: String) -> (String, Bool) {
+    private func statusMessage(_ status: UInt8, iface: String, conflict: String? = nil) -> (String, Bool) {
         switch status {
         case PIN_CONFIG_SUCCESS:        return ("\(iface) configuration applied and saved", false)
         case PIN_CONFIG_INVALID_PIN:    return ("A pin is out of range or lacks the required \(iface) mux function", true)
-        case PIN_CONFIG_PIN_IN_USE:     return ("A pin is already claimed by another output or interface", true)
+        case PIN_CONFIG_PIN_IN_USE:
+            return (conflict ?? "A pin is already claimed by another output or interface", true)
         case PIN_CONFIG_INVALID_PARAM:
             return (iface == "UART"
                     ? "Baud rate is out of range (9600 - 1000000)"
@@ -3017,6 +3035,8 @@ struct ControlSurfacesSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+        // Pin answers for every open card, and for the slot a new control lands in.
+        .watchesCsSlots(vm, expandedSlots.union(firstFreeSlot.map { [$0] } ?? []))
         // No save bar here: the unsaved-changes bar is the Settings window's
         // shared one (SettingsSaveBar), which folds `csDirty` in with the global
         // and output-config edits so only ever one bar is stacked at the bottom.
@@ -3155,7 +3175,7 @@ struct ControlSurfacesSettingsTab: View {
             }
 
             Section {
-                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, indicator LEDs, and an IR remote receiver to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC pin (GPIO 26, 27, or 28) between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default. An IR receiver module's OUT pin connects to any GPIO, and its remote buttons are learned by pressing them at the device.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes take effect immediately as a live preview; use Save to Device to keep them across a reboot, or Revert to discard them.")
+                Text("Wire push buttons, toggle switches, potentiometers, rotary encoders, indicator LEDs, and an IR remote receiver to spare GPIOs and bind each to a device function. Buttons and switches wire between the GPIO and GND (internal pull-up); pots use an ADC-capable pin between 3V3 and GND; encoders use two GPIOs with the common wired to GND. LEDs drive active-high by default. An IR receiver module's OUT pin connects to any GPIO, and its remote buttons are learned by pressing them at the device.\n\nThis wiring is a board-level setting: it is stored on the device, survives preset changes, and survives a factory reset. Changes take effect immediately as a live preview; use Save to Device to keep them across a reboot, or Revert to discard them.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             } footer: {
@@ -4668,12 +4688,19 @@ struct ControlSurfacesSettingsTab: View {
     /// the moment it's added; only later edits are staged and pushed with Apply.
     private func addControl(type: Int) {
         guard let slot = firstFreeSlot else { return }
+        // Seeded from the device's answer for this slot when it has arrived;
+        // otherwise the pin is a guess, so leave it for the user to check and apply.
+        let answered = csAvail(slot, type) != nil
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
             drafts[slot] = makeBinding(type: type, slot: slot)
             expandedSlots.insert(slot)   // open the new card for editing
         }
         slotMessages[slot] = nil
-        applySlot(slot)
+        if answered {
+            applySlot(slot)
+        } else {
+            slotMessages[slot] = ("Check the pin, then Apply", false)
+        }
     }
 
     /// Remove a control.  If it was applied to the device, clear the slot there
@@ -4827,7 +4854,8 @@ struct ControlSurfacesSettingsTab: View {
                     Button { typeBinding(slot).wrappedValue = t } label: {
                         Label(typeName(t), systemImage: typeIcon(t))
                     }
-                    .disabled(t == CS_TYPE_IR && !irTypeAvailable(forSlot: slot))
+                    .disabled((t == CS_TYPE_IR && !irTypeAvailable(forSlot: slot))
+                              || (t == CS_TYPE_DISPLAY && csAvail(slot, CS_TYPE_DISPLAY)?.status == CS_STATUS_DISPLAY_IN_USE))
                 }
             } label: {
                 csTypeBadge(type, size: 32)
@@ -5198,23 +5226,18 @@ struct ControlSurfacesSettingsTab: View {
     @ViewBuilder
     private func csPinRow(_ slot: Int, title: String, detail: String,
                           icon: String, isSecond: Bool, adc: Bool) -> some View {
-        let candidates = pinCandidates(slot: slot, type: Int(drafts[slot].type), isSecond: isSecond)
+        let type = Int(drafts[slot].type)
+        let current = isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0
         settingRow(title: title, detail: detail, icon: icon) {
-            Picker("", selection: Binding(
-                get: { isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0 },
-                set: { newPin in
-                    var nb = drafts[slot]
-                    if isSecond { nb.gpio1 = newPin } else { nb.gpio0 = newPin }
-                    drafts[slot] = nb
-                })) {
-                let current = isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0
-                if !candidates.contains(current) {
-                    Text(current == CS_GPIO_UNUSED ? "None" : "GPIO \(current)").tag(current)
-                }
-                ForEach(candidates, id: \.self) { p in Text("GPIO \(p)").tag(p) }
+            PinPopUpButton(choices: pinCandidates(slot: slot, type: type, isSecond: isSecond),
+                           selection: current == CS_GPIO_UNUSED ? nil : current,
+                           enabled: vm.pinMapUnavailableReason == nil) { newPin in
+                var nb = drafts[slot]
+                if isSecond { nb.gpio1 = newPin } else { nb.gpio0 = newPin }
+                drafts[slot] = nb
             }
-            .labelsHidden()
-            .fixedSize()
+            .help(vm.pinMapUnavailableReason ?? "")
+            .frame(width: 92)
         }
     }
 
@@ -6600,7 +6623,7 @@ struct ControlSurfacesSettingsTab: View {
         if type == CS_TYPE_IR {
             var ir = CsBinding()
             ir.type = UInt8(CS_TYPE_IR)
-            ir.gpio0 = freePins(slot: slot, adcOnly: false).first ?? (HardwareSettingsTab.validPins.first ?? 0)
+            ir.gpio0 = freePins(slot: slot, type: CS_TYPE_IR).first ?? fallbackPin
             ir.gpio1 = CS_GPIO_UNUSED
             return ir
         }
@@ -6624,7 +6647,7 @@ struct ControlSurfacesSettingsTab: View {
         if isAuxType(type) {
             var aux = CsBinding()
             aux.type = UInt8(type)
-            aux.gpio0 = freePins(slot: slot, adcOnly: false).first ?? (HardwareSettingsTab.validPins.first ?? 0)
+            aux.gpio0 = freePins(slot: slot, type: type).first ?? fallbackPin
             aux.gpio1 = CS_GPIO_UNUSED
             return aux
         }
@@ -6633,12 +6656,11 @@ struct ControlSurfacesSettingsTab: View {
         let noun = validNouns(forType: type).first ?? CS_NOUN_MASTER_VOLUME
         b.noun = UInt8(noun)
         b.action = UInt8(defaultAction(type: type, noun: noun))
-        let adc = (typeDesc(type)?.pinClass ?? 0) == CS_PINCLASS_ADC
         let twoPin = (typeDesc(type)?.pinCount ?? 1) >= 2
-        let free = freePins(slot: slot, adcOnly: adc)
-        b.gpio0 = free.first ?? (adc ? (CS_ADC_PINS.first ?? 26) : (HardwareSettingsTab.validPins.first ?? 0))
+        b.gpio0 = freePins(slot: slot, type: type).first
+            ?? csAvail(slot, type)?.validPins().first ?? fallbackPin
         if twoPin {
-            b.gpio1 = free.dropFirst().first ?? (b.gpio0 == 0 ? 1 : 0)
+            b.gpio1 = freePins(slot: slot, type: type, role: 1).first { $0 != b.gpio0 } ?? (b.gpio0 == 0 ? 1 : 0)
         } else {
             b.gpio1 = CS_GPIO_UNUSED
         }
@@ -6754,24 +6776,9 @@ struct ControlSurfacesSettingsTab: View {
             .fixedSize()
         }
 
-        settingRow(title: "SDA/SCL Pins",
-                   detail: "Clock and data pins are chosen in fixed pairs.",
-                   icon: "cable.connector") {
-            Picker("", selection: Binding(
-                get: { drafts[slot].gpio0 },
-                set: { sda in
-                    var nb = drafts[slot]
-                    nb.gpio0 = sda
-                    nb.gpio1 = sda &+ 1
-                    drafts[slot] = nb
-                })) {
-                ForEach(i2cSdaCandidates(slot: slot), id: \.self) { pin in
-                    Text("GPIO \(pin) / \(pin + 1)").tag(pin)
-                }
-            }
-            .labelsHidden()
-            .fixedSize()
-        }
+        csDisplayPinRow(slot, title: "SDA Pin", detail: "Serial data line.", icon: "arrow.left.arrow.right", role: 0)
+        csDisplayPinRow(slot, title: "SCL Pin", detail: "Serial clock line, on the same I2C bus as SDA.",
+                        icon: "clock", role: 1)
 
         settingRow(title: "Address",
                    detail: "7-bit I2C address. Default is the model's usual one (0x\(String(csDisplayDefaultAddress(Int(b.index)), radix: 16, uppercase: true))).",
@@ -7323,37 +7330,59 @@ struct ControlSurfacesSettingsTab: View {
         vm.queueDisplayPage(index, page)
     }
 
-    // MARK: I2C display wiring helpers
+    // MARK: Pin answers
+    //
+    // Every pin rule (mux pairs, ADC pins, PWM slices, button sharing, the I2C
+    // bus the control interface holds) is the device's: the rows come from
+    // CS.BINDING_PIN_AVAIL for the slot and type.
 
-    /// Legal SDA pins: the RP2040/RP2350 mux pairs GPIOs so that bit 0 picks
-    /// SDA (even) or SCL (odd) and bit 1 picks the bus instance, so SDA is
-    /// always an even GPIO whose odd neighbour is its SCL.
-    private func i2cSdaCandidates(slot: Int) -> [UInt8] {
-        let valid = Set(HardwareSettingsTab.validPins)
-        // The display masters one I2C instance; the external I2C control
-        // interface occupies the other while it is live.  The firmware rejects
-        // an overlap outright, so drop those pins here rather than letting the
-        // user build a pair that can only fail on apply.
-        let blockedInstance: UInt8? = vm.ctrlIfaceStatus.i2cLive
-            ? (vm.i2cCtrlConfig.sdaPin >> 1) & 1 : nil
-        return HardwareSettingsTab.validPins.filter { sda in
-            if let blocked = blockedInstance, (sda >> 1) & 1 == blocked { return false }
-            guard sda % 2 == 0, valid.contains(sda + 1) else { return false }
-            // Keep whatever this display already uses selectable, but only when
-            // it really is a display: makeBinding asks before it assigns the
-            // draft, when gpio0 still reads 0, which would otherwise hand back
-            // GPIO 0/1 however occupied they are.
-            if Int(drafts[slot].type) == CS_TYPE_DISPLAY && sda == drafts[slot].gpio0 { return true }
-            return vm.pinInUseBy(sda, excluding: .controlSurface(slot)) == nil
-                && vm.pinInUseBy(sda + 1, excluding: .controlSurface(slot)) == nil
-        }
+    private func csAvail(_ slot: Int, _ type: Int) -> PinAvailability? {
+        vm.pinMap.snapshot.cs[CsAvailKey(slot: slot, type: type)]
     }
 
-    /// The first free legal SDA/SCL pair, falling back to the lowest legal pair.
+    /// A pin to seed with when the device has not answered yet.
+    private var fallbackPin: UInt8 { vm.pinMap.snapshot.state?.gpios.first ?? 0 }
+
+    /// Free pins for a new binding of `type` in `slot`, in pin order.
+    private func freePins(slot: Int, type: Int, role: Int = 0) -> [UInt8] {
+        csAvail(slot, type)?.freePins(role: role) ?? []
+    }
+
+    /// The first free SDA/SCL pair on one I2C bus.
     private func freeI2CPair(slot: Int) -> (sda: UInt8, scl: UInt8) {
-        if let sda = i2cSdaCandidates(slot: slot).first { return (sda, sda + 1) }
-        let sda = HardwareSettingsTab.validPins.first { $0 % 2 == 0 } ?? 0
-        return (sda, sda + 1)
+        if let a = csAvail(slot, CS_TYPE_DISPLAY) {
+            for g in 0..<a.groupCount {
+                if let sda = a.freePins(role: 0, group: g).first, let scl = a.freePins(role: 1, group: g).first {
+                    return (sda, scl)
+                }
+            }
+        }
+        return (fallbackPin, fallbackPin &+ 1)
+    }
+
+    /// One display bus pin.  Picking a pin on the other bus moves its partner there.
+    private func csDisplayPinRow(_ slot: Int, title: String, detail: String, icon: String, role: Int) -> some View {
+        let avail = csAvail(slot, CS_TYPE_DISPLAY)
+        let current = role == 0 ? drafts[slot].gpio0 : drafts[slot].gpio1
+        return settingRow(title: title, detail: detail, icon: icon) {
+            PinPopUpButton(choices: vm.pinChoices(avail, mode: .claim, function: .controlSurface, index: slot,
+                                                  role: role, current: current),
+                           selection: current,
+                           enabled: vm.pinMapUnavailableReason == nil) { pin in
+                var nb = drafts[slot]
+                if role == 0 { nb.gpio0 = pin } else { nb.gpio1 = pin }
+                if let avail, let group = avail.group(of: pin, role: role) {
+                    let partner = role == 0 ? nb.gpio1 : nb.gpio0
+                    if avail.group(of: partner, role: 1 - role) != group,
+                       let seat = avail.freePins(role: 1 - role, group: group).first {
+                        if role == 0 { nb.gpio1 = seat } else { nb.gpio0 = seat }
+                    }
+                }
+                drafts[slot] = nb
+            }
+            .help(vm.pinMapUnavailableReason ?? "")
+            .frame(width: 92)
+        }
     }
 
     /// The address the panel actually answers on: the model default when the
@@ -7362,45 +7391,18 @@ struct ControlSurfacesSettingsTab: View {
         b.value == 0 ? csDisplayDefaultAddress(Int(b.index)) : UInt8(truncatingIfNeeded: b.value)
     }
 
-    private func freePins(slot: Int, adcOnly: Bool) -> [UInt8] {
-        let base = adcOnly ? CS_ADC_PINS : HardwareSettingsTab.validPins
-        return base.filter { vm.pinInUseBy($0, excluding: .controlSurface(slot)) == nil }
-    }
-
-    /// GPIO options for a pin picker: mux-free pins (ADC-only for pots), the
-    /// currently-selected pin always kept visible, and the sibling encoder pin
-    /// excluded so the two channels can't collide.  A button may additionally
-    /// share a GPIO already held by other button bindings (one binding per
-    /// gesture; spec §6.1), so those pins stay selectable for a button.
-    private func pinCandidates(slot: Int, type: Int, isSecond: Bool) -> [UInt8] {
-        let adc = (typeDesc(type)?.pinClass ?? 0) == CS_PINCLASS_ADC
-        let base = adc ? CS_ADC_PINS : HardwareSettingsTab.validPins
+    /// Pin rows for one role of a binding: the device's answer for this slot
+    /// and type, with the sibling encoder pin left out so the two channels
+    /// cannot collide.  A button may also share a pin other buttons hold.
+    private func pinCandidates(slot: Int, type: Int, isSecond: Bool) -> [PinChoice] {
         let twoPin = (typeDesc(type)?.pinCount ?? 1) >= 2
         let sibling: UInt8? = twoPin ? (isSecond ? drafts[slot].gpio0 : drafts[slot].gpio1) : nil
         let current = isSecond ? drafts[slot].gpio1 : drafts[slot].gpio0
-        let isButton = type == CS_TYPE_BUTTON
-        return base.filter { p in
-            if p == sibling { return false }
-            if p == current { return true }
-            if vm.pinInUseBy(p, excluding: .controlSurface(slot)) == nil { return true }
-            // A button can share a pin whose only other owners are buttons.
-            return isButton && csPinButtonShareable(p, excludingSlot: slot)
-        }
-    }
-
-    /// True when every live Control Surface binding on `pin` (other than
-    /// `excludingSlot`) is a button, so another button may share the GPIO.
-    /// Returns false if any non-button binding, or a non-CS peripheral, holds it.
-    private func csPinButtonShareable(_ pin: UInt8, excludingSlot: Int) -> Bool {
-        var sawButton = false
-        for s in 0..<min(vm.csBindings.count, CS_MAX_BINDINGS)
-        where s != excludingSlot && vm.csStatus.isSlotActive(s) {
-            let bind = vm.csBindings[s]
-            guard bind.gpio0 == pin || (bind.gpio1 != CS_GPIO_UNUSED && bind.gpio1 == pin) else { continue }
-            if Int(bind.type) != CS_TYPE_BUTTON { return false }
-            sawButton = true
-        }
-        return sawButton
+        let avail = csAvail(slot, type)
+        return vm.pinChoices(avail, mode: .claim, function: .controlSurface, index: slot,
+                             role: isSecond ? 1 : 0, current: current == CS_GPIO_UNUSED ? nil : current,
+                             extraFree: type == CS_TYPE_BUTTON ? (avail?.shareable ?? 0) : 0)
+            .filter { $0.pin != sibling }
     }
 
     // MARK: Bindings that re-default on structural changes
@@ -7917,7 +7919,7 @@ struct ControlSurfacesSettingsTab: View {
 
     private func pinDetail(_ type: Int) -> String {
         switch type {
-        case CS_TYPE_POT:                    return "ADC pin (GPIO 26, 27, or 28), wiper to the pin."
+        case CS_TYPE_POT:                    return "ADC-capable pin, wiper to the pin."
         case CS_TYPE_LED, CS_TYPE_LED_PWM:   return "Output pin driving the LED."
         case CS_TYPE_IR:                     return "GPIO wired to the receiver module's OUT (VCC to 3V3, GND to GND)."
         case CS_TYPE_AUX_OUT:                return "Output pin driving the relay or MOSFET input."
@@ -8016,7 +8018,7 @@ struct ControlSurfacesSettingsTab: View {
         case CS_STATUS_INVALID_NOUN:    return ("Unsupported function", true)
         case CS_STATUS_INVALID_ACTION:  return ("That action isn't allowed for this component and function", true)
         case CS_STATUS_INVALID_VALUE:   return ("A value, step, range, or flag is out of bounds", true)
-        case CS_STATUS_PIN_NOT_ADC:     return ("A potentiometer must use an ADC pin (GPIO 26, 27, or 28)", true)
+        case CS_STATUS_PIN_NOT_ADC:     return ("A potentiometer must use an ADC-capable pin", true)
         case CS_STATUS_INVALID_SLOT:    return ("Invalid slot", true)
         case CS_STATUS_PENDING:         return ("Still applying, please retry", true)
         case CS_STATUS_INVALID_TARGET:  return ("The selected channel or band isn't valid for this function", true)
@@ -8230,17 +8232,6 @@ struct HardwareSettingsTab: View {
         return outputs
     }
 
-    // Valid GPIO pins - mirrors firmware is_valid_gpio_pin(): 0-22 and 26-28.
-    // Excludes 23-25 (power/LED).  GPIO 16/17 are general-purpose again since
-    // the debug UART was removed, and GPIO 12 (the ADAT default) is likewise
-    // free.  RP2350 additionally allows GPIO 29, but this list is shared with
-    // RP2040 (max GPIO 28), so 29 is not offered.
-    static let validPins: [UInt8] = [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-        13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-        26, 27, 28
-    ]
-
     /// Whether the connected device's hardware allows slot `slot` to be
     /// I2S given the current state of its dependency parents.  Per
     /// `runtime_output_type_switch_spec.md` §2 (STM32H723 build):
@@ -8263,35 +8254,42 @@ struct HardwareSettingsTab: View {
         vm.platformName == "STM32H723"
     }
 
-    /// CLK_GPOUTn-capable GPIOs per master_clock_spec.md §2.2.  MCK is
-    /// driven directly from one of the chip's hardware clock outputs, so
-    /// only pins that map to CLK_GPOUTn are accepted by the firmware:
-    ///
-    ///   • RP2040 — GPIO 21 only (other GPOUTn pins 23/24/25 are board-reserved)
-    ///   • RP2350 — GPIO 13, 15, 21
-    ///
-    /// On RP2350, GPIO 15 is `clk_gpout1` but is also the I2S LRCLK pin
-    /// (BCK + 1) when any output slot is configured for I2S, so it's
-    /// hidden from the picker in that case.  Choosing it would always
-    /// fail the firmware's `is_pin_in_use()` check.
-    private var mckValidPins: [UInt8] {
-        if vm.platformName == "RP2040" {
-            return [21]
-        }
-        // RP2350: filter out 15 when an I2S slot is active (LRCLK conflict).
-        var pins: [UInt8] = [13, 15, 21]
-        if vm.anySlotIsI2S {
-            pins.removeAll { $0 == 15 }
-        }
-        return pins
+    /// Who holds `pin`, other than `function` at `index`, from the device's claim list.
+    private func owner(_ pin: UInt8, _ function: PinFunction? = nil, _ index: Int = 0) -> String? {
+        vm.pinOwner(pin, excluding: function, index: index)
     }
 
-    /// Thin pass-through to `vm.pinInUseBy` so existing call sites in
-    /// this struct keep their concise signature.  `PinConsumer` lives
-    /// on the view-model so other tabs can share the same conflict
-    /// matrix.
-    private func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
-        vm.pinInUseBy(pin, excluding: consumer)
+    /// A device-driven pin menu.  The mode follows the function's in-use flag
+    /// unless the caller knows better; `blocked` adds a local, non-pin reason
+    /// to the device's own function status.
+    private func pinMenu(_ key: PinAvailKey, function: PinFunction, index: Int = 0, current: UInt8?,
+                         mode: PinPickerMode? = nil, blocked: Bool = false,
+                         onSelect: @escaping (UInt8) -> Void) -> some View {
+        let avail = vm.pinMap.snapshot.avail[key]
+        let m = mode ?? ((avail?.flags.contains(.inUse) ?? true) ? .claim : .store)
+        let stateBlocked = avail?.status == VC_ERR_STATE_STATUS
+        return PinPopUpButton(choices: vm.pinChoices(avail, mode: m, function: function, index: index, current: current),
+                              selection: current,
+                              enabled: !blocked && !stateBlocked && vm.pinMapUnavailableReason == nil,
+                              onSelect: onSelect)
+            .help(vm.pinMapUnavailableReason ?? "")
+            .frame(width: 92)
+    }
+
+    /// Appended to a pin SET's success text: a function that is off stores a
+    /// pin another function holds, and cannot be switched on there.
+    private func storedPinNote(_ pin: UInt8, _ function: PinFunction, _ index: Int = 0) -> String {
+        guard let who = owner(pin, function, index) else { return "" }
+        return ". Held by \(who); free it before enabling"
+    }
+
+    /// For a function that is off: why switching it on would be refused.
+    private func startWarning(_ key: PinAvailKey, function: PinFunction, index: Int = 0, pin: UInt8?) -> String? {
+        guard let avail = vm.pinMap.snapshot.avail[key], let pin,
+              !avail.flags.contains(.inUse), !avail.flags.contains(.unassigned),
+              !avail.flags.contains(.startOK) else { return nil }
+        let who = vm.pinBlockReason(pin, avail: avail, function: function, index: index)
+        return "GPIO \(pin) is held by \(who). Free it before enabling."
     }
 
     /// Apply an I2S input channel-count change (already on the main actor; the
@@ -8311,8 +8309,7 @@ struct HardwareSettingsTab: View {
                     statusIsError = false
                 case PIN_CONFIG_PIN_IN_USE where count > oldCount:
                     // The firmware only returns a status byte, so name the
-                    // offending pin(s)/owner(s) ourselves: pinInUseBy mirrors the
-                    // firmware's per-pair activation check.
+                    // offending pin(s)/owner(s) from the claim list.
                     let conflicts = i2sRaiseConflicts(from: oldCount, to: count)
                     if conflicts.isEmpty {
                         statusMessage = "Can't switch to \(count) channels: a required data pin is already in use. Reassign the new pairs' pins, then try again."
@@ -8347,25 +8344,16 @@ struct HardwareSettingsTab: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Picker("", selection: Binding(
-                get: { vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : 0 },
-                set: { newPin in
-                    SettingsSaveCoordinator.shared.beginOutputEdit()
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let status = vm.setI2SRxPin(pair: pair, newPin)
-                        DispatchQueue.main.async {
-                            handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin)
-                        }
+            pinMenu(.i2sRx(pair), function: .i2sRx, index: pair,
+                    current: vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : nil) { newPin in
+                SettingsSaveCoordinator.shared.beginOutputEdit()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let status = vm.setI2SRxPin(pair: pair, newPin)
+                    DispatchQueue.main.async {
+                        handleI2SInputStatus(status, label: "Serial Data \(pair + 1)", gpio: newPin, pair: pair)
                     }
                 }
-            )) {
-                let current = vm.i2sRxPins.indices.contains(pair) ? vm.i2sRxPins[pair] : UInt8(255)
-                ForEach(Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .i2sRx(pair)) == nil }, id: \.self) { pin in
-                    Text("GPIO \(pin)").tag(pin)
-                }
             }
-            .labelsHidden()
-            .fixedSize()
         }
     }
 
@@ -8374,12 +8362,15 @@ struct HardwareSettingsTab: View {
     /// whose data pin clashes.  Mirrors the firmware's check_i2s_rx_pin with the
     /// new pair count, so newly-activated pairs are also checked against each other.
     private func i2sRaiseConflicts(from oldCount: Int, to newCount: Int) -> [String] {
+        // Owners come from the device's claim list, which lists active claims
+        // only, so two of the I2S family's own stored pins colliding (the
+        // start checks them as one unit) are found by comparing the pins.
         let oldPairs = max(1, oldCount / 2)
         let newPairs = newCount / 2
         var out: [String] = []
         for pair in oldPairs..<newPairs where vm.i2sRxPins.indices.contains(pair) {
             let pin = vm.i2sRxPins[pair]
-            if let owner = vm.pinInUseBy(pin, excluding: .i2sRx(pair)) {
+            if let owner = owner(pin, .i2sRx, pair) {
                 out.append("GPIO \(pin) (pair \(pair + 1)) is used by \(owner)")
             } else if let other = (oldPairs..<pair).first(where: { vm.i2sRxPins[$0] == pin }) {
                 out.append("GPIO \(pin) is set on both Serial Data \(other + 1) and \(pair + 1)")
@@ -8391,13 +8382,13 @@ struct HardwareSettingsTab: View {
     /// Map a PIN_CONFIG_* status from an I2S input SET into the shared status row,
     /// and resync the UI from the device on any rejection (the device kept its
     /// previous state, so a GET realigns our pickers).  Main-actor only.
-    private func handleI2SInputStatus(_ status: UInt8, label: String, gpio: UInt8?) {
+    private func handleI2SInputStatus(_ status: UInt8, label: String, gpio: UInt8?, pair: Int? = nil) {
         switch status {
         case PIN_CONFIG_SUCCESS:
-            statusMessage = gpio.map { "\(label) set to GPIO \($0)" } ?? "\(label) updated"
+            statusMessage = gpio.map { "\(label) set to GPIO \($0)" + storedPinNote($0, .i2sRx, pair ?? 0) } ?? "\(label) updated"
             statusIsError = false
         case PIN_CONFIG_PIN_IN_USE:
-            if let g = gpio, let owner = pinInUseBy(g, excluding: nil) {
+            if let g = gpio, let owner = owner(g, .i2sRx, pair ?? 0) {
                 statusMessage = "GPIO \(g) is already assigned to \(owner)"
             } else {
                 statusMessage = "That pin is already in use"
@@ -8486,18 +8477,6 @@ struct HardwareSettingsTab: View {
         }
     }
 
-    /// GPIO options for the ADAT data pin: the standard valid pins plus the
-    /// platform default (GPIO 12, which the shared list omits), de-duplicated
-    /// and sorted.  Pins owned by another consumer are filtered out, but the
-    /// current selection is always kept so the picker renders it.
-    private var adatPinOptions: [UInt8] {
-        let current = vm.adatPin
-        var seen = Set<UInt8>()
-        return ([ADAT_PIN_DEFAULT] + Self.validPins)
-            .filter { seen.insert($0).inserted }
-            .sorted()
-            .filter { $0 == current || pinInUseBy($0, excluding: .adatOut) == nil }
-    }
 
     /// Map an ADAT SET status byte (enable or pin change) onto the inline
     /// status row, re-syncing local state from the device on any rejection.
@@ -8506,13 +8485,13 @@ struct HardwareSettingsTab: View {
         switch status {
         case PIN_CONFIG_SUCCESS:
             if label == "pin", let g = gpio {
-                statusMessage = "ADAT data pin set to GPIO \(g)"
+                statusMessage = "ADAT data pin set to GPIO \(g)" + (vm.adatEnabled ? "" : storedPinNote(g, .adatTx))
             } else {
                 statusMessage = "ADAT output \(label)"
             }
             statusIsError = false
         case PIN_CONFIG_PIN_IN_USE:
-            if let g = gpio, let owner = pinInUseBy(g, excluding: .adatOut) {
+            if let g = gpio ?? (label == "enabled" ? vm.adatPin : nil), let owner = owner(g, .adatTx) {
                 statusMessage = "GPIO \(g) is already assigned to \(owner)"
             } else {
                 statusMessage = "That pin is already in use"
@@ -8534,14 +8513,6 @@ struct HardwareSettingsTab: View {
         }
     }
 
-    /// GPIO options for the ADAT input RX pin.  No default pin is free, so the
-    /// list is just the standard valid pins minus those owned by another
-    /// consumer (the loopback exception lets it keep the ADAT output pin).  The
-    /// current selection is always kept so the picker renders it.
-    private var adatInputPinOptions: [UInt8] {
-        let current = vm.adatInputPin
-        return Self.validPins.filter { $0 == current || pinInUseBy($0, excluding: .adatIn) == nil }
-    }
 
     /// Map an ADAT input SET status byte (enable / pin / clock mode) onto the
     /// inline status row, re-syncing local state from the device on any rejection.
@@ -8551,7 +8522,9 @@ struct HardwareSettingsTab: View {
         switch status {
         case PIN_CONFIG_SUCCESS:
             switch label {
-            case "pin":     statusMessage = gpio.map { "ADAT input pin set to GPIO \($0)" } ?? "ADAT input pin cleared"
+            case "pin":
+                statusMessage = gpio.map { "ADAT input pin set to GPIO \($0)" + (vm.adatInputEnabled ? "" : storedPinNote($0, .adatRx)) }
+                    ?? "ADAT input pin cleared"
             case "enabled": statusMessage = "ADAT input enabled"
             case "disabled": statusMessage = "ADAT input disabled"
             default:        statusMessage = "ADAT input \(label) updated"
@@ -8560,7 +8533,7 @@ struct HardwareSettingsTab: View {
         case PIN_CONFIG_PIN_IN_USE:
             if label == "disabled" {
                 statusMessage = "Switch to another input source before disabling ADAT input"
-            } else if let g = gpio, let owner = pinInUseBy(g, excluding: .adatIn) {
+            } else if let g = gpio ?? (label == "enabled" ? vm.adatInputPin : nil), let owner = owner(g, .adatRx) {
                 statusMessage = "GPIO \(g) is already assigned to \(owner)"
             } else {
                 statusMessage = "That pin is already in use"
@@ -8587,63 +8560,54 @@ struct HardwareSettingsTab: View {
     }
 
     private func setPinForOutput(_ outputIndex: Int, pin: UInt8) {
-        guard vm.isDeviceConnected else {
-            statusMessage = "Device not connected"
-            statusIsError = true
-            return
-        }
-
-        // assignOutputPin handles the PDM disable/enable cycle when the
-        // firmware refuses because the output is active.
-        let status = vm.assignOutputPin(output: outputIndex, pin: pin)
-
-        let outputName = visiblePinOutputs.first(where: { $0.id == outputIndex })?.name ?? "Output \(outputIndex)"
-        switch status {
-        case PIN_CONFIG_SUCCESS:
-            statusMessage = "\(outputName) reassigned to GPIO \(pin)"
-            statusIsError = false
-        case PIN_CONFIG_INVALID_PIN:
-            statusMessage = "GPIO \(pin) is not available on this platform"
-            statusIsError = true
-            vm.fetchOutputPin(output: outputIndex)
-        case PIN_CONFIG_PIN_IN_USE:
-            if let owner = pinInUseBy(pin, excluding: .output(outputIndex)) {
-                statusMessage = "GPIO \(pin) is already assigned to \(owner)"
+        let outputName = visiblePinOutputs.first(where: { $0.id == outputIndex })?.name ?? "Output \(outputIndex + 1)"
+        movePins([outputIndex: pin]) { routine in
+            if routine.problems.isEmpty {
+                statusMessage = routine.notes.first ?? "\(outputName) reassigned to GPIO \(pin)"
+                statusIsError = false
             } else {
-                statusMessage = "GPIO \(pin) is already in use by another output"
+                statusMessage = routine.problems.joined(separator: ". ")
+                statusIsError = true
             }
-            statusIsError = true
-            vm.fetchOutputPin(output: outputIndex)
-        case PIN_CONFIG_INVALID_OUTPUT:
-            statusMessage = "Invalid output index"
-            statusIsError = true
-        case PIN_CONFIG_OUTPUT_ACTIVE:
-            statusMessage = "PDM output must be disabled before changing its pin"
-            statusIsError = true
-            vm.fetchOutputPin(output: outputIndex)
-        default:
-            statusMessage = "USB communication error"
-            statusIsError = true
         }
     }
 
     private func resetToDefaults() {
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        var pins: [Int: UInt8] = [:]
+        for output in visiblePinOutputs { pins[output.id] = output.defaultPin }
+        movePins(pins) { routine in
+            if routine.problems.isEmpty {
+                statusMessage = "All pins reset to defaults"
+                statusIsError = false
+            } else {
+                statusMessage = "Could not reset every pin: " + routine.problems.joined(separator: ". ")
+                statusIsError = true
+            }
+        }
+    }
+
+    /// Move output pins (by OUTPUT.PIN index) through the shared routine, which
+    /// stops and restarts a running PDM and swaps pins through a free one.
+    /// Interactive: a refused PDM restart puts its old pin back.
+    private func movePins(_ pins: [Int: UInt8], done: @escaping (PinIOApply) -> Void) {
         guard vm.isDeviceConnected else {
             statusMessage = "Device not connected"
             statusIsError = true
             return
         }
-
-        for output in visiblePinOutputs {
-            let status = vm.assignOutputPin(output: output.id, pin: output.defaultPin)
-            if status != PIN_CONFIG_SUCCESS {
-                statusMessage = "Failed to reset \(output.name)"
-                statusIsError = true
-                return
-            }
+        let vm = self.vm
+        let current = vm.currentPinIOConfig()
+        guard var outputPins = current.outputPins else { return }
+        for (index, pin) in pins where index < outputPins.count { outputPins[index] = pin }
+        var target = PinIOConfig()
+        target.outputPins = outputPins
+        DispatchQueue.global(qos: .userInitiated).async {
+            let routine = vm.applyPinIO(current: current, target: target, interactive: true)
+            for index in pins.keys { vm.fetchOutputPin(output: index) }
+            vm.fetchOutputEnable(output: vm.pdmOutputIndex)
+            DispatchQueue.main.async { done(routine) }
         }
-        statusMessage = "All pins reset to defaults"
-        statusIsError = false
     }
 
     var body: some View {
@@ -8654,6 +8618,7 @@ struct HardwareSettingsTab: View {
                 formContent
             }
         }
+        .watchesPinMap(vm)
         .onAppear {
             if vm.isDeviceConnected {
                 // Each read blocks until its transfer completes (up to a second
@@ -8710,47 +8675,38 @@ struct HardwareSettingsTab: View {
                         Text("LRCK: GPIO \(vm.i2sBckPin &+ 1) (BCK + 1)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                        if let reason = vm.pinStateReason(vm.pinMap.snapshot.avail[.bck(0)],
+                                                          whenBlocked: "The I2S outputs run on these pins. Switch them to S/PDIF to move the pair.") {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     Spacer()
-                    Picker("", selection: Binding(
-                        get: { vm.i2sBckPin },
-                        set: { newPin in
-                            SettingsSaveCoordinator.shared.beginOutputEdit()
-                            DispatchQueue.global(qos: .userInitiated).async {
-                                let status = vm.setI2SBckPin(newPin)
-                                DispatchQueue.main.async {
-                                    switch status {
-                                    case PIN_CONFIG_SUCCESS:
-                                        statusMessage = "BCK pin set to GPIO \(newPin), LRCLK = GPIO \(newPin &+ 1)"
-                                        statusIsError = false
-                                    case PIN_CONFIG_OUTPUT_ACTIVE:
-                                        statusMessage = "All outputs must be S/PDIF before changing BCK pin"
-                                        statusIsError = true
-                                    case PIN_CONFIG_PIN_IN_USE:
-                                        statusMessage = "GPIO \(newPin) or \(newPin &+ 1) is already in use"
-                                        statusIsError = true
-                                    default:
-                                        statusMessage = "Failed to set BCK pin"
-                                        statusIsError = true
-                                    }
+                    pinMenu(.bck(0), function: .i2sClock, index: 0, current: vm.i2sBckPin) { newPin in
+                        SettingsSaveCoordinator.shared.beginOutputEdit()
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let status = vm.setI2SBckPin(newPin)
+                            DispatchQueue.main.async {
+                                switch status {
+                                case PIN_CONFIG_SUCCESS:
+                                    statusMessage = "BCK pin set to GPIO \(newPin), LRCLK = GPIO \(newPin &+ 1)"
+                                        + storedPinNote(newPin, .i2sClock, 0)
+                                    statusIsError = false
+                                case PIN_CONFIG_OUTPUT_ACTIVE:
+                                    statusMessage = "Switch the I2S outputs to S/PDIF before moving their clock pins"
+                                    statusIsError = true
+                                case PIN_CONFIG_PIN_IN_USE:
+                                    let who = [newPin, newPin &+ 1].compactMap { p in owner(p, .i2sClock, 0).map { "GPIO \(p) is held by \($0)" } }
+                                    statusMessage = who.isEmpty ? "GPIO \(newPin) or \(newPin &+ 1) is already in use" : who.joined(separator: "; ")
+                                    statusIsError = true
+                                default:
+                                    statusMessage = "Failed to set BCK pin"
+                                    statusIsError = true
                                 }
                             }
                         }
-                    )) {
-                        // BCK occupies the pin; LRCLK lands on pin+1 - so a
-                        // candidate is only valid when BOTH are free (otherwise,
-                        // e.g., BCK 15 would put LRCLK on a pin already used by
-                        // S/PDIF RX 16).
-                        ForEach(Self.validPins.filter { p in
-                            pinInUseBy(p, excluding: .i2sBck) == nil
-                                && pinInUseBy(p &+ 1, excluding: .i2sBck) == nil
-                        }, id: \.self) { pin in
-                            Text("GPIO \(pin)").tag(pin)
-                        }
                     }
-                    .labelsHidden()
-                    .fixedSize()
-                    .disabled(vm.anySlotIsI2S)
                 }
 
                 // Clock-pin mode (unified/split) - clock_pins_spec.md.  Shared
@@ -8806,21 +8762,8 @@ struct HardwareSettingsTab: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Picker("", selection: Binding(
-                            get: { vm.i2sBckPinSlave },
-                            set: { setI2SSlaveBckPin($0) }
-                        )) {
-                            ForEach(Self.validPins.filter { p in
-                                p == vm.i2sBckPinSlave ||
-                                (pinInUseBy(p, excluding: .i2sBckSlave) == nil
-                                 && pinInUseBy(p &+ 1, excluding: .i2sBckSlave) == nil)
-                            }, id: \.self) { pin in
-                                Text("GPIO \(pin)").tag(pin)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        .disabled(vm.i2sClockPinMode != I2S_CLOCK_PIN_MODE_SPLIT)
+                        // A pair that clocks nothing stores any valid pin.
+                        pinMenu(.bck(1), function: .i2sClock, index: 1, current: vm.i2sBckPinSlave) { setI2SSlaveBckPin($0) }
                     }
                 }
 
@@ -8836,6 +8779,9 @@ struct HardwareSettingsTab: View {
                                 if status == PIN_CONFIG_SUCCESS {
                                     statusMessage = "Master clock \(newVal ? "enabled" : "disabled")"
                                     statusIsError = false
+                                } else if status == PIN_CONFIG_PIN_IN_USE, let who = owner(vm.mckPin, .mck) {
+                                    statusMessage = "Can't enable the master clock: GPIO \(vm.mckPin) is held by \(who)"
+                                    statusIsError = true
                                 } else {
                                     statusMessage = "Failed to \(newVal ? "enable" : "disable") master clock"
                                     statusIsError = true
@@ -8856,6 +8802,11 @@ struct HardwareSettingsTab: View {
                                  : "Clock reference for external DACs")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
+                            if let warning = startWarning(.mck, function: .mck, pin: vm.mckPin) {
+                                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
                         }
                     }
                 }
@@ -8867,40 +8818,38 @@ struct HardwareSettingsTab: View {
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                         .frame(width: 16)
-                    Text("MCK Pin")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("MCK Pin")
+                        if let reason = vm.pinStateReason(vm.pinMap.snapshot.avail[.mck],
+                                                          whenBlocked: "Switch the master clock off to change its pin.") {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     Spacer()
-                    Picker("", selection: Binding(
-                        get: { vm.mckPin },
-                        set: { newPin in
-                            SettingsSaveCoordinator.shared.beginOutputEdit()
-                            DispatchQueue.global(qos: .userInitiated).async {
-                                let status = vm.setMckPin(newPin)
-                                DispatchQueue.main.async {
-                                    switch status {
-                                    case PIN_CONFIG_SUCCESS:
-                                        statusMessage = "MCK pin set to GPIO \(newPin)"
-                                        statusIsError = false
-                                    case PIN_CONFIG_OUTPUT_ACTIVE:
-                                        statusMessage = "Disable MCK before changing its pin"
-                                        statusIsError = true
-                                    case PIN_CONFIG_PIN_IN_USE:
-                                        statusMessage = "GPIO \(newPin) is already in use"
-                                        statusIsError = true
-                                    default:
-                                        statusMessage = "Failed to set MCK pin"
-                                        statusIsError = true
-                                    }
+                    pinMenu(.mck, function: .mck, current: vm.mckPin, blocked: vm.i2sSlaveActive) { newPin in
+                        SettingsSaveCoordinator.shared.beginOutputEdit()
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let status = vm.setMckPin(newPin)
+                            DispatchQueue.main.async {
+                                switch status {
+                                case PIN_CONFIG_SUCCESS:
+                                    statusMessage = "MCK pin set to GPIO \(newPin)" + storedPinNote(newPin, .mck)
+                                    statusIsError = false
+                                case PIN_CONFIG_OUTPUT_ACTIVE:
+                                    statusMessage = "Disable MCK before changing its pin"
+                                    statusIsError = true
+                                case PIN_CONFIG_INVALID_PIN:
+                                    statusMessage = "GPIO \(newPin) has no clock output"
+                                    statusIsError = true
+                                default:
+                                    statusMessage = "Failed to set MCK pin"
+                                    statusIsError = true
                                 }
                             }
                         }
-                    )) {
-                        ForEach(mckValidPins.filter { pinInUseBy($0, excluding: .mck) == nil }, id: \.self) { pin in
-                            Text("GPIO \(pin)").tag(pin)
-                        }
                     }
-                    .labelsHidden()
-                    .fixedSize()
-                    .disabled(vm.mckEnabled || vm.i2sSlaveActive)
                 }
 
                 HStack {
@@ -9260,6 +9209,11 @@ struct HardwareSettingsTab: View {
                                 Text("Receive 8 channels of 24-bit audio (44.1/48 kHz) from one TOSLINK optical input into input channels 1-8. Assign a data pin below, then select ADAT as the input source.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+                                if let warning = startWarning(.adatRx, function: .adatRx, pin: vm.adatInputPin == ADAT_INPUT_PIN_UNSET ? nil : vm.adatInputPin) {
+                                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                }
                             }
                         }
                     }
@@ -9285,28 +9239,16 @@ struct HardwareSettingsTab: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Picker("", selection: Binding(
-                            get: { vm.adatInputPin },
-                            set: { newPin in
-                                SettingsSaveCoordinator.shared.beginOutputEdit()
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    let status = vm.setAdatInputPin(newPin)
-                                    DispatchQueue.main.async {
-                                        handleAdatInputStatus(status, label: "pin", gpio: newPin)
-                                    }
+                        pinMenu(.adatRx, function: .adatRx,
+                                current: vm.adatInputPin == ADAT_INPUT_PIN_UNSET ? nil : vm.adatInputPin) { newPin in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setAdatInputPin(newPin)
+                                DispatchQueue.main.async {
+                                    handleAdatInputStatus(status, label: "pin", gpio: newPin)
                                 }
                             }
-                        )) {
-                            // Placeholder while unset so the picker has a valid tag.
-                            if vm.adatInputPin == ADAT_INPUT_PIN_UNSET {
-                                Text("Not set").tag(ADAT_INPUT_PIN_UNSET)
-                            }
-                            ForEach(adatInputPinOptions, id: \.self) { pin in
-                                Text("GPIO \(pin)").tag(pin)
-                            }
                         }
-                        .labelsHidden()
-                        .fixedSize()
                     }
 
                     // Clock mode — MASTER (DSPi owns the rate, the returning
@@ -9512,6 +9454,11 @@ struct HardwareSettingsTab: View {
                                 Text("Stream all 8 output channels as one optical ADAT lightpipe (44.1/48 kHz, 24-bit). Runs alongside the existing outputs; drive a TOSLINK transmitter from the data pin.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+                                if let warning = startWarning(.adatTx, function: .adatTx, pin: vm.adatPin) {
+                                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                }
                             }
                         }
                     }
@@ -9533,24 +9480,15 @@ struct HardwareSettingsTab: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Picker("", selection: Binding(
-                            get: { vm.adatPin },
-                            set: { newPin in
-                                SettingsSaveCoordinator.shared.beginOutputEdit()
-                                DispatchQueue.global(qos: .userInitiated).async {
-                                    let status = vm.setAdatPin(newPin)
-                                    DispatchQueue.main.async {
-                                        handleAdatStatus(status, label: "pin", gpio: newPin)
-                                    }
+                        pinMenu(.adatTx, function: .adatTx, current: vm.adatPin) { newPin in
+                            SettingsSaveCoordinator.shared.beginOutputEdit()
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                let status = vm.setAdatPin(newPin)
+                                DispatchQueue.main.async {
+                                    handleAdatStatus(status, label: "pin", gpio: newPin)
                                 }
                             }
-                        )) {
-                            ForEach(adatPinOptions, id: \.self) { pin in
-                                Text("GPIO \(pin)").tag(pin)
-                            }
                         }
-                        .labelsHidden()
-                        .fixedSize()
                     }
                 } header: {
                     Label("Bulk Output", systemImage: "fibrechannel")
@@ -9658,6 +9596,11 @@ struct HardwareSettingsTab: View {
                      : "GPIO pin for incoming S/PDIF signal from a TOSLINK RX module or comparator.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                if let warning = startWarning(.spdifRx(index), function: .spdifRx, index: index, pin: vm.spdifPin(index: index)) {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
             }
             Spacer()
             spdifPinPicker(index: index)
@@ -9667,46 +9610,37 @@ struct HardwareSettingsTab: View {
     /// GPIO pin picker for a S/PDIF input index, with inline status feedback.
     @ViewBuilder
     private func spdifPinPicker(index: Int) -> some View {
-        Picker("", selection: Binding(
-            get: { vm.spdifPin(index: index) },
-            set: { newPin in
-                SettingsSaveCoordinator.shared.beginOutputEdit()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let status = vm.setSpdifRxPin(index: index, newPin)
-                    DispatchQueue.main.async {
-                        switch status {
-                        case PIN_CONFIG_SUCCESS:
-                            statusMessage = "S/PDIF \(index + 1) RX pin set to GPIO \(newPin)"
-                            statusIsError = false
-                        case PIN_CONFIG_PIN_IN_USE:
-                            if let owner = pinInUseBy(newPin, excluding: .spdifRx(index)) {
-                                statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
-                            } else {
-                                statusMessage = "GPIO \(newPin) is already in use"
-                            }
-                            statusIsError = true
-                            vm.fetchSpdifRxPin(index: index)
-                        case PIN_CONFIG_INVALID_PIN:
-                            statusMessage = "GPIO \(newPin) is not available on this platform"
-                            statusIsError = true
-                            vm.fetchSpdifRxPin(index: index)
-                        default:
-                            statusMessage = "Failed to set S/PDIF \(index + 1) RX pin"
-                            statusIsError = true
-                            vm.fetchSpdifRxPin(index: index)
+        pinMenu(.spdifRx(index), function: .spdifRx, index: index, current: vm.spdifPin(index: index)) { newPin in
+            SettingsSaveCoordinator.shared.beginOutputEdit()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let status = vm.setSpdifRxPin(index: index, newPin)
+                DispatchQueue.main.async {
+                    switch status {
+                    case PIN_CONFIG_SUCCESS:
+                        let off = index > 0 && !vm.spdifInputEnabled(index: index)
+                        statusMessage = "S/PDIF \(index + 1) RX pin set to GPIO \(newPin)"
+                            + (off ? storedPinNote(newPin, .spdifRx, index) : "")
+                        statusIsError = false
+                    case PIN_CONFIG_PIN_IN_USE:
+                        if let owner = owner(newPin, .spdifRx, index) {
+                            statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
+                        } else {
+                            statusMessage = "GPIO \(newPin) is already in use"
                         }
+                        statusIsError = true
+                        vm.fetchSpdifRxPin(index: index)
+                    case PIN_CONFIG_INVALID_PIN:
+                        statusMessage = "GPIO \(newPin) is not available on this platform"
+                        statusIsError = true
+                        vm.fetchSpdifRxPin(index: index)
+                    default:
+                        statusMessage = "Failed to set S/PDIF \(index + 1) RX pin"
+                        statusIsError = true
+                        vm.fetchSpdifRxPin(index: index)
                     }
                 }
             }
-        )) {
-            // Always keep the current pin selectable even if another consumer
-            // would otherwise filter it out (e.g. a disabled input's stored pin).
-            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .spdifRx(index)) == nil || $0 == vm.spdifPin(index: index) }, id: \.self) { pin in
-                Text("GPIO \(pin)").tag(pin)
-            }
         }
-        .labelsHidden()
-        .fixedSize()
     }
 
     /// Set how many S/PDIF inputs are active (1..N): enables inputs 1..target
@@ -9726,7 +9660,7 @@ struct HardwareSettingsTab: View {
                     let s = vm.setSpdifInputEnable(index: idx, true)
                     if s != PIN_CONFIG_SUCCESS {
                         let pin = vm.spdifPin(index: idx)
-                        if let owner = pinInUseBy(pin, excluding: .spdifRx(idx)) {
+                        if let owner = owner(pin, .spdifRx, idx) {
                             failure = "Can't enable S/PDIF \(idx + 1): GPIO \(pin) is assigned to \(owner)"
                         } else {
                             failure = "Can't enable S/PDIF \(idx + 1): GPIO \(pin) is unavailable"
@@ -9763,61 +9697,6 @@ struct HardwareSettingsTab: View {
         }
     }
 
-    ///
-    /// NOTE: Not currently wired into the Inputs page (which uses the per-input
-    /// "SPDIF RX" rows above) — kept here for later use.
-    @ViewBuilder
-    private func inputRow() -> some View {
-        assignmentRow(color: Channel.masterRight.color, title: "IN 1/2", isDefault: false) {
-            // Type — S/PDIF is the only option (enabled, but it's the sole choice).
-            Picker("", selection: .constant(UInt8(0))) {
-                Text("S/PDIF").tag(UInt8(0))
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .fixedSize()
-        } pin: {
-            Picker("", selection: Binding(
-                get: { vm.spdifRxPin },
-                set: { newPin in
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let status = vm.setSpdifRxPin(newPin)
-                        DispatchQueue.main.async {
-                            switch status {
-                            case PIN_CONFIG_SUCCESS:
-                                statusMessage = "S/PDIF RX pin set to GPIO \(newPin)"
-                                statusIsError = false
-                            case PIN_CONFIG_PIN_IN_USE:
-                                if let owner = pinInUseBy(newPin, excluding: .spdifRx(0)) {
-                                    statusMessage = "GPIO \(newPin) is already assigned to \(owner)"
-                                } else {
-                                    statusMessage = "GPIO \(newPin) is already in use"
-                                }
-                                statusIsError = true
-                                vm.fetchSpdifRxPin()
-                            case PIN_CONFIG_INVALID_PIN:
-                                statusMessage = "GPIO \(newPin) is not available on this platform"
-                                statusIsError = true
-                                vm.fetchSpdifRxPin()
-                            default:
-                                statusMessage = "Failed to set S/PDIF RX pin"
-                                statusIsError = true
-                                vm.fetchSpdifRxPin()
-                            }
-                        }
-                    }
-                }
-            )) {
-                ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .spdifRx(0)) == nil }, id: \.self) { pin in
-                    Text("GPIO \(pin)").tag(pin)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(width: 92, alignment: .trailing)
-        }
-    }
-
     @ViewBuilder
     private func typeControl(_ output: PinOutput) -> some View {
         if output.id < vm.numOutputSlots {
@@ -9845,13 +9724,21 @@ struct HardwareSettingsTab: View {
 
     @ViewBuilder
     private func pinControl(_ output: PinOutput) -> some View {
-        Picker("", selection: outputPinBinding(output)) {
-            ForEach(Self.validPins.filter { pinInUseBy($0, excluding: .output(output.id)) == nil }, id: \.self) { pin in
-                Text("GPIO \(pin)").tag(pin)
-            }
+        // Slots always hold their pin.  PDM holds it only while it runs; off,
+        // any valid pin can be stored.  While it runs the move goes through
+        // the stop / move / start cycle, so the picker stays enabled.
+        let isPdm = output.id == vm.pdmPinIndex
+        let pdmOn = isPdm && vm.outputEnabled.indices.contains(vm.pdmOutputIndex) && vm.outputEnabled[vm.pdmOutputIndex]
+        let avail = vm.pinMap.snapshot.avail[.output(output.id)]
+        let choices = vm.pinChoices(avail, mode: isPdm && !pdmOn ? .store : .claim,
+                                    function: isPdm ? .pdm : .output, index: isPdm ? 0 : output.id,
+                                    current: vm.outputPins[output.id])
+        return PinPopUpButton(choices: choices, selection: vm.outputPins[output.id],
+                              enabled: vm.pinMapUnavailableReason == nil) { pin in
+            SettingsSaveCoordinator.shared.beginOutputEdit()
+            setPinForOutput(output.id, pin: pin)
         }
-        .pickerStyle(.menu)
-        .labelsHidden()
+        .help(vm.pinMapUnavailableReason ?? "")
         // Fixed width sized for the longest label ("GPIO 28") so every pin
         // selector is the same width, right-aligned to the row edge.
         .frame(width: 92, alignment: .trailing)
@@ -9865,6 +9752,13 @@ struct HardwareSettingsTab: View {
                 let slotID = output.id
                 DispatchQueue.global(qos: .userInitiated).async {
                     let status = vm.setOutputSlotType(slot: slotID, type: newType)
+                    // Starting the clocks is pin-checked: name who holds the pair.
+                    var conflict: String?
+                    if status == PIN_CONFIG_PIN_IN_USE {
+                        let slave = vm.i2sClockPinMode == I2S_CLOCK_PIN_MODE_SPLIT && vm.i2sClockMode == I2S_CLOCK_MODE_SLAVE
+                        let bck = slave ? vm.i2sBckPinSlave : vm.i2sBckPin
+                        conflict = vm.describePinConflict(for: .i2sClock, index: slave ? 1 : 0, pins: [bck, bck &+ 1])
+                    }
                     // STM32 firmware coerces dependent I2S slots down to S/PDIF
                     // when their parent goes S/PDIF; refetch so the UI reflects it.
                     if status == PIN_CONFIG_SUCCESS && self.isSTM32 {
@@ -9873,7 +9767,10 @@ struct HardwareSettingsTab: View {
                         }
                     }
                     DispatchQueue.main.async {
-                        if status != PIN_CONFIG_SUCCESS {
+                        if status == PIN_CONFIG_PIN_IN_USE {
+                            statusMessage = "Can't switch \(output.name) to I2S: " + (conflict ?? "its clock pins are in use")
+                            statusIsError = true
+                        } else if status != PIN_CONFIG_SUCCESS {
                             statusMessage = "Failed to change \(output.name) type"
                             statusIsError = true
                         } else {
@@ -9886,15 +9783,6 @@ struct HardwareSettingsTab: View {
         )
     }
 
-    private func outputPinBinding(_ output: PinOutput) -> Binding<UInt8> {
-        Binding(
-            get: { vm.outputPins[output.id] },
-            set: {
-                SettingsSaveCoordinator.shared.beginOutputEdit()
-                setPinForOutput(output.id, pin: $0)
-            }
-        )
-    }
 }
 
 // MARK: - Matrix Mixer Window Controller

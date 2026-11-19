@@ -1,12 +1,10 @@
 import SwiftUI
 import Combine
 
-// MARK: - GPIO Pin Conflict Resolution
+// MARK: - GPIO pin display
 //
-// Top-level enum + view-model method so any tab that needs to filter
-// pin pickers shares one source of truth.  Without this, each tab that
-// owns a pin assignment maintains its own conflict list and a pin set
-// in one tab would silently appear "available" in another.
+// The device owns every pin rule (pin_availability_query_spec.md); the app
+// only names what it reports.  See PinAvailability.swift and PinMap.swift.
 /// What a claimed GPIO is doing, for grouping on the Overview page.  Kept
 /// beside the claim itself so display code never has to infer a category by
 /// matching on the owner's name.
@@ -23,20 +21,6 @@ struct PinAssignment: Equatable {
     let role: PinRole
 }
 
-enum PinConsumer: Equatable {
-    case output(Int)    // slot or PDM index — indexes vm.outputPins[]
-    case i2sBck         // also covers LRCLK (BCK + 1)
-    case i2sBckSlave    // slave-mode BCK pair (LRCLK = BCK + 1); reserved only in SPLIT clock-pin mode
-    case mck
-    case spdifRx(Int)   // S/PDIF RX data pin, per input index (0..3)
-    case i2sRx(Int)     // I2S input data pin, per stereo pair (0..3)
-    case dacMute
-    case uartCtrl       // UART control interface (covers both TX and RX pins)
-    case i2cCtrl        // I2C control interface (covers both SDA and SCL pins)
-    case controlSurface(Int)  // one Control Surfaces binding slot (covers both its GPIOs)
-    case adatOut        // ADAT bulk output data pin
-    case adatIn         // ADAT input RX data pin
-}
 
 // MARK: - DAC Hardware Mute Config
 //
@@ -2380,6 +2364,10 @@ class DSPViewModel: ObservableObject {
     /// subscribes; see `RtaEngine`.
     let rta: RtaEngine
 
+    /// The device's pin map: which GPIOs each function may use and who holds
+    /// each one.  The Console keeps no pin rules of its own.
+    let pinMap: PinMap
+
     /// The spectrum channels on the open channel page.  Read through
     /// `rtaSelection`, which also covers the dashboard's stored choice.
     @Published var rtaPageSelection = RtaChannelSelection.none
@@ -2393,131 +2381,6 @@ class DSPViewModel: ObservableObject {
     }
 
     func isPresetOccupied(_ slot: Int) -> Bool { presetOccupied & (1 << slot) != 0 }
-
-    /// Returns the name of the feature currently claiming `pin`, or nil
-    /// if free.  `excluding` lets the caller skip its own claim — e.g.
-    /// the DAC-mute picker passes `.dacMute` so its own pin isn't
-    /// reported as a conflict against itself.
-    ///
-    /// Single source of truth: HardwareSettingsTab AND GlobalSettingsTab
-    /// both call this so a pin assigned in one tab can't quietly appear
-    /// as "available" in the other.  It is a thin read of `pinAssignment`,
-    /// which carries the same answer plus the role the Overview page groups by.
-    func pinInUseBy(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> String? {
-        pinAssignment(pin, excluding: consumer)?.label
-    }
-
-    /// The claim on `pin`, or nil if free: the same decision `pinInUseBy`
-    /// reports, carrying the owner's display name and its role so callers can
-    /// group by function without re-deriving anything from the label text.
-    ///
-    /// Reservations follow the firmware's rules, so a feature that is merely
-    /// configured does not hold a pin: an optional S/PDIF input, ADAT in or
-    /// out, a control interface, and a control-surface binding all reserve
-    /// only while actually enabled or live.
-    func pinAssignment(_ pin: UInt8, excluding consumer: PinConsumer? = nil) -> PinAssignment? {
-        // SPDIF / I2S output slot pins.
-        for slot in 0..<numOutputSlots {
-            if consumer != .output(slot) && outputPins[slot] == pin {
-                return PinAssignment(pin: pin, label: "Output \(slot + 1)", role: .output)
-            }
-        }
-        // PDM (Subwoofer) — its outputPins index is numOutputSlots.
-        let pdmIdx = numOutputSlots
-        if pdmIdx < outputPins.count,
-           consumer != .output(pdmIdx),
-           outputPins[pdmIdx] == pin {
-            return PinAssignment(pin: pin, label: "Subwoofer", role: .output)
-        }
-        if consumer != .i2sBck {
-            if pin == i2sBckPin { return PinAssignment(pin: pin, label: "I2S BCK", role: .clock) }
-            if pin == i2sBckPin &+ 1 { return PinAssignment(pin: pin, label: "I2S LRCLK", role: .clock) }
-        }
-        // Slave-mode clock pair: reserved only in SPLIT clock-pin mode.  In
-        // UNIFIED the pair is dormant and constrains nothing (mirrors the
-        // firmware i2s_clock_pin_claimed helper - clock_pins_spec.md §1).
-        if consumer != .i2sBckSlave && i2sClockPinMode == I2S_CLOCK_PIN_MODE_SPLIT {
-            if pin == i2sBckPinSlave { return PinAssignment(pin: pin, label: "I2S Slave BCK", role: .clock) }
-            if pin == i2sBckPinSlave &+ 1 { return PinAssignment(pin: pin, label: "I2S Slave LRCLK", role: .clock) }
-        }
-        if consumer != .mck && pin == mckPin { return PinAssignment(pin: pin, label: "I2S MCK", role: .clock) }
-        // S/PDIF RX pins.  Input 1 is always reserved; the optional inputs 2/3/4
-        // are reserved only while enabled (a disabled input's pin is invisible
-        // to conflict checks, mirroring the firmware's per-input reservation).
-        if inputSourceSupported {
-            if consumer != .spdifRx(0) && pin == spdifRxPin {
-                return PinAssignment(pin: pin, label: multiSpdifSupported && anyOptionalSpdifEnabled ? "S/PDIF 1 RX" : "S/PDIF RX", role: .input)
-            }
-            if multiSpdifSupported {
-                for idx in 1..<spdifInputCount where spdifInputEnabled(index: idx) {
-                    if consumer != .spdifRx(idx) && pin == spdifPin(index: idx) {
-                        return PinAssignment(pin: pin, label: "S/PDIF \(idx + 1) RX", role: .input)
-                    }
-                }
-            }
-        }
-        // I2S RX data pins: only the active pairs reserve theirs, for every
-        // consumer including another pair (firmware is_pin_in_use and
-        // check_i2s_rx_pin).  A channel-count raise re-checks the parked pins.
-        if i2sInputSupported {
-            for pair in 0..<min(i2sActivePairs, i2sRxPins.count) where consumer != .i2sRx(pair) && i2sRxPins[pair] == pin {
-                return PinAssignment(pin: pin, label: i2sMaxPairs > 1 ? "I2S RX \(pair + 1)" : "I2S RX", role: .input)
-            }
-        }
-        if consumer != .dacMute,
-           dacHwMuteConfig.enabled,
-           dacHwMuteConfig.pin != DAC_HW_MUTE_PIN_NONE,
-           pin == dacHwMuteConfig.pin {
-            return PinAssignment(pin: pin, label: "DAC Mute", role: .utility)
-        }
-        // ADAT owns its GPIO only while enabled (mirrors the firmware: a
-        // disabled ADAT stream holds no pin, so its GPIO is free for other uses).
-        // The ADAT input may deliberately share the ADAT output pin (zero-hardware
-        // loopback self-test), so an ADAT-input assignment never sees the output
-        // pin as taken - the sharing exception is one-directional (input onto
-        // output), so every other consumer still does.
-        if consumer != .adatOut, consumer != .adatIn, adatSupported, adatEnabled, pin == adatPin {
-            return PinAssignment(pin: pin, label: "ADAT Output", role: .output)
-        }
-        // ADAT input owns its GPIO only while enabled (same rule as the output).
-        // Reserved against every other consumer, including the ADAT output - the
-        // loopback exception is one-directional, so an output assignment still
-        // sees the input pin as taken.
-        if consumer != .adatIn, adatInputSupported, adatInputEnabled,
-           adatInputPin != ADAT_INPUT_PIN_UNSET, pin == adatInputPin {
-            return PinAssignment(pin: pin, label: "ADAT Input", role: .input)
-        }
-        // External control interfaces reserve their pins only while LIVE (a
-        // disabled interface, or one kept down by a boot pin-collision, holds
-        // no GPIOs) - mirrors the firmware's is_pin_in_use rule (spec §5.3).
-        if consumer != .uartCtrl, ctrlIfaceStatus.uartLive,
-           pin == uartCtrlConfig.txPin || pin == uartCtrlConfig.rxPin {
-            return PinAssignment(pin: pin, label: "UART Control", role: .control)
-        }
-        if consumer != .i2cCtrl, ctrlIfaceStatus.i2cLive,
-           pin == i2cCtrlConfig.sdaPin || pin == i2cCtrlConfig.sclPin {
-            return PinAssignment(pin: pin, label: "I2C Control", role: .control)
-        }
-        // Control Surfaces reserve their GPIO(s) only while the binding is LIVE
-        // (its active_mask bit is set) - a cleared binding, or one kept down by
-        // a boot pin-collision, holds no GPIOs.  Mirrors the firmware's
-        // control_surfaces_owns_pin rule (spec §10).
-        for slot in 0..<min(csBindings.count, CS_MAX_BINDINGS)
-        where consumer != .controlSurface(slot) && csStatus.isSlotActive(slot) {
-            let bind = csBindings[slot]
-            if bind.gpio0 == pin || (bind.gpio1 != CS_GPIO_UNUSED && bind.gpio1 == pin) {
-                return PinAssignment(pin: pin, label: "Control Surface \(slot + 1)", role: .control)
-            }
-        }
-        return nil
-    }
-
-    /// Every GPIO currently claimed, in pin order.  Walks the same valid-GPIO
-    /// list the pin pickers offer and asks the one authority about each, so the
-    /// Overview cannot disagree with what a picker will let you choose.
-    func activePinAssignments(from pins: [UInt8]) -> [PinAssignment] {
-        pins.compactMap { pinAssignment($0) }
-    }
 
     /// Serializes display config and page SETs against each other - they share
     /// a deferred-outcome tag for the config and page 0, so two in flight at
@@ -2642,6 +2505,7 @@ class DSPViewModel: ObservableObject {
     init(transport: any DeviceTransport = AppState.shared.usb) {
         self.transport = transport
         self.rta = RtaEngine(transport: transport)
+        self.pinMap = PinMap(transport: transport)
 
         // Initialize Default Data (V16 unified model: inputs 0..chOut1-1 are
         // first-class EQ channels; outputs chOut1..numChannels-1 add crossover).
@@ -2803,8 +2667,31 @@ class DSPViewModel: ObservableObject {
         // factory reset, another host's bulk write).  The per-parameter events
         // are suppressed inside that bracket, so a full re-read is the only way
         // to learn what changed.
-        AppState.shared.interruptMonitor.onBulkInvalidated = { [weak self] _ in
+        AppState.shared.interruptMonitor.onBulkInvalidated = { [weak self] source in
             self?.scheduleDeviceResync()
+            // Also the synthetic one a Link RESYNC raises: a board that
+            // rebooted behind a hub restarts its pin generation at 0, so the
+            // pin map is re-read whatever the counter says.
+            self?.refreshPinMap(force: true)
+            // A preset load or bulk apply validates its pins as a unit and may
+            // have replaced some.  Not for the synthetic RESYNC (source 0).
+            if source != 0 {
+                DispatchQueue.global(qos: .utility).async { self?.reportPinSubstitutions() }
+            }
+        }
+
+        // The device's pin map moved (a pin SET, an enable, a deferred apply,
+        // a preset load, another host).  The store skips the sweep when its
+        // cache is already at this generation.
+        // Views read the pin map through the view model; a pin map change is
+        // rare, so redrawing the view model's observers is cheap enough.
+        pinMap.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+
+        AppState.shared.interruptMonitor.onPinMapChanged = { [weak self] generation in
+            guard let self, self.pinMap.snapshot.pinGeneration != generation else { return }
+            self.refreshPinMap()
         }
 
         // A refused write leaves the optimistic UI state wrong; re-read the
@@ -2850,6 +2737,8 @@ class DSPViewModel: ObservableObject {
                         self?.activePresetSlot = 0
                     }
                 }
+                // Pin answers describe one connection; the next starts empty.
+                self?.pinMap.reset()
                 if !connected {
                     AppState.shared.interruptMonitor.stop()
                     self?.rta.deviceDisconnected()
