@@ -40,16 +40,22 @@ final class PinMapLiveTests: XCTestCase {
         }
     }
 
-    /// A disabled optional S/PDIF input: a pin another function holds is
+    /// A S/PDIF input above the block count: a pin another function holds is
     /// accepted as a stored preference, the reply says a start would be
-    /// refused, the enable is refused with the input left off, and the
-    /// generation moves.
+    /// refused, a count raise that would bring it in is refused with the count
+    /// unchanged, and the generation moves.
     func testStoredHeldPinAndRefusedStart() throws {
         let usb = try requirePinMap()
-        guard let index = (1...3).first(where: { i in
-            usb.getData(VC.INPUT.SPDIF_RX_ENABLE, value: UInt16(i), length: 1)?.first == 0
-        }), let pinData = usb.getData(VC.INPUT.SPDIF_RX_PIN, value: UInt16(index), length: 1) else {
-            throw XCTSkip("No optional S/PDIF input is disabled")
+        guard usb.getData(VC.INPUT.SPDIF_RX_ENABLE, length: 1)?.first == 1,
+              let countData = usb.getData(VC.INPUT.SPDIF_RX_COUNT, length: 1),
+              let limit = usb.getData(VC.INPUT.SPDIF_RX_CONFIG, length: 7)?.first,
+              Int(countData[0]) < Int(limit) else {
+            throw XCTSkip("The S/PDIF block is off or already holds every input")
+        }
+        let count = countData[0]
+        let index = Int(count)                     // the first input outside the block
+        guard let pinData = usb.getData(VC.INPUT.SPDIF_RX_PIN, value: UInt16(index), length: 1) else {
+            throw XCTSkip("SPDIF_RX_PIN \(index) unreadable")
         }
         let original = pinData[0]
         func avail() throws -> PinAvailability {
@@ -69,8 +75,8 @@ final class PinMapLiveTests: XCTestCase {
         XCTAssertFalse(after.flags.contains(.startOK))
         XCTAssertNotEqual(after.generation, before.generation)
 
-        XCTAssertEqual(usb.setAndWait(VC.INPUT.SPDIF_RX_ENABLE, value: UInt16(index), data: Data([1])), .vcPinInUse)
-        XCTAssertEqual(usb.getData(VC.INPUT.SPDIF_RX_ENABLE, value: UInt16(index), length: 1)?.first, 0,
-                       "a refused start leaves the input off")
+        XCTAssertEqual(usb.setAndWait(VC.INPUT.SPDIF_RX_COUNT, data: Data([count + 1])), .vcPinInUse)
+        XCTAssertEqual(usb.getData(VC.INPUT.SPDIF_RX_COUNT, length: 1)?.first, count,
+                       "a refused raise leaves the count as it was")
     }
 }

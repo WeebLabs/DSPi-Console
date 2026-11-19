@@ -442,10 +442,16 @@ private enum ParamOffsetDecoder {
             let v = payload.first ?? 0
             return ("input_config.adat_input_pin", v == 0 ? "unset" : "GPIO \(v)")
         }
-        if off == BULK_INPUT_ADAT_ENABLED_P1_OFFSET && sz == 1 {
+        if off == BULK_INPUT_ENABLE_P1_OFFSET && sz == 1 {
             let v = payload.first ?? 0
-            let label = v == 0 ? "absent" : (v == 2 ? "enabled" : "disabled")
-            return ("input_config.adat_input_enabled_p1", "\(v) (\(label))")
+            guard v != 0 else { return ("input_config.input_enable_p1", "0 (absent)") }
+            let mask = v - 1
+            let on = [(INPUT_ENABLE_SPDIF, "S/PDIF"), (INPUT_ENABLE_I2S, "I2S"), (INPUT_ENABLE_ADAT, "ADAT")]
+                .filter { mask & $0.0 != 0 }.map(\.1)
+            return ("input_config.input_enable_p1", "\(v) (\(on.isEmpty ? "all off" : on.joined(separator: ", ")))")
+        }
+        if off == BULK_INPUT_SPDIF_RX_COUNT_OFFSET && sz == 1 {
+            return ("input_config.spdif_rx_count", "\(payload.first ?? 0)")
         }
         if off == BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET && sz == 1 {
             let v = payload.first ?? 0

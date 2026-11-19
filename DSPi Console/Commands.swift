@@ -2164,47 +2164,39 @@ extension DSPViewModel {
         }
     }
 
-    /// Reads the whole S/PDIF input inventory in one transfer (INPUT.SPDIF_RX_CONFIG,
-    /// firmware v1.1.5+): input count, enable mask, and each input's GPIO pin.  On
-    /// older firmware the request STALLs; we fall back to the single-input pin read
-    /// (INPUT.SPDIF_RX_PIN index 0) and mark multi-input as unsupported.
+    /// Reads the S/PDIF input block in one transfer (INPUT.SPDIF_RX_CONFIG): the
+    /// build's input limit, the block switch, the block count, then one GPIO per
+    /// input.  If the read fails, fall back to input 1's pin alone.
     func fetchSpdifInputConfig() {
-        // The response is 2 + count bytes.  Ask for the largest inventory we know
-        // about; a three-input firmware answers short, which is why the pin list
-        // is sized from the returned count rather than a fixed length.
-        let maxLen = UInt16(2 + SPDIF_RX_NUM_INPUTS)
+        // 3 + limit bytes.  Sized from the limit the device reports, so a build
+        // with fewer inputs answers short without confusing the parse.
+        let maxLen = UInt16(3 + SPDIF_RX_NUM_INPUTS)
         guard let d = transport.getData(VC.INPUT.SPDIF_RX_CONFIG, length: maxLen),
-              d.count >= 3 else {
-            DispatchQueue.main.async {
-                self.multiSpdifSupported = false
-                self.spdifInputCount = 1
-            }
+              d.count >= 4 else {
+            DispatchQueue.main.async { self.multiSpdifSupported = false }
             fetchSpdifRxPin()
             return
         }
-        let count = min(Int(d[0]), min(d.count - 2, SPDIF_RX_NUM_INPUTS))
-        let mask = d[1]
-        let pin0 = d[2]
-        // Keep the ext arrays at full length whatever the device reports, so a
-        // three-input device still has a well-formed slot for a future input 4;
-        // indices past `count` stay at their defaults and are never shown.
+        let limit = max(1, min(Int(d[0]), min(d.count - 3, SPDIF_RX_NUM_INPUTS)))
+        let enabled = d[1] != 0
+        let count = max(1, min(Int(d[2]), limit))
+        let pin0 = d[3]
+        // Keep the ext array at full length whatever the device reports; entries
+        // past the limit stay at their defaults and are never shown.
         var pinsExt = Array(SPDIF_RX_PIN_DEFAULTS.dropFirst())
-        var enabled = Array(repeating: false, count: SPDIF_RX_NUM_INPUTS - 1)
-        for idx in 1..<max(count, 1) {
-            pinsExt[idx - 1] = d[2 + idx]
-            enabled[idx - 1] = (mask & (1 << UInt8(idx))) != 0
-        }
+        for idx in 1..<limit { pinsExt[idx - 1] = d[3 + idx] }
         DispatchQueue.main.async {
             self.multiSpdifSupported = true
-            self.spdifInputCount = max(count, 1)
+            self.spdifInputCount = limit
+            self.spdifRxEnabled = enabled
+            self.spdifRxCount = count
             self.spdifRxPin = pin0
             self.spdifRxPinsExt = pinsExt
-            self.spdifExtEnabled = enabled
         }
     }
 
-    /// `setInputSource` that waits for the verdict: a switch to I2S is
-    /// pin-checked and can be refused.  Blocking: call off main.
+    /// `setInputSource` that waits for the verdict: a source whose input block
+    /// is off is refused.  Blocking: call off main.
     func setInputSourceAndWait(_ source: Int) -> UInt8 {
         let status = transport.setAndWait(VC.INPUT.SOURCE, data: Data([UInt8(source)]))
         if status == .ok { DispatchQueue.main.async { self.inputSource = source } }
@@ -2218,12 +2210,10 @@ extension DSPViewModel {
             self.inputSource = source
         }
 
-        // A switch to I2S starts its clock pair and data pins, and is refused
-        // when another function holds one.
-        sendStart(VC.INPUT.SOURCE, data: byte, what: "switch to the I2S input", function: .i2sRx) { [weak self] in
-            guard let self else { return [] }
-            return self.activeI2SClockPins + Array(self.i2sRxPins.prefix(max(1, self.i2sInputChannels / 2)))
-        }
+        // An input block that is on already holds its pins, so the switch runs
+        // no pin check.  It is refused (VC_ERR_STATE) only when the source's
+        // block is off; the refusal notice resyncs the picker.
+        transport.send(VC.INPUT.SOURCE, data: byte)
 
         // No follow-up fetch here — the firmware emits an
         // `input_config.input_source` notification at the end of its
@@ -2264,23 +2254,28 @@ extension DSPViewModel {
         return 0xFF
     }
 
-    /// Enable or disable an optional S/PDIF input (index 1..3 = SPDIF 2/3/4).
-    /// Input 1 (index 0) is always enabled.  wValue = input index, payload = 1 or 0.
-    /// Returns the firmware PIN_CONFIG_* status.  Enabling validates the configured
-    /// pin; disabling is refused (PIN_IN_USE) while the input is the active source.
+    /// Switch the S/PDIF input block on or off (INPUT.SPDIF_RX_ENABLE).  On claims
+    /// the pins of inputs 1..count as one unit (PIN_IN_USE / INVALID_PIN on a
+    /// clash, nothing changes); off is refused (OUTPUT_ACTIVE) while a S/PDIF
+    /// input is the active or pending source.  Returns a PIN_CONFIG_* status.
     @discardableResult
-    func setSpdifInputEnable(index: Int, _ enable: Bool) -> UInt8 {
-        if let d = transport.legacyAction(VC.INPUT.SPDIF_RX_ENABLE, value: UInt16(index), payload: Data([enable ? 1 : 0]),
-                                            family: .pin, overrides: [.vcState: 2, .vcPinInvalid: 2]),
-           d.count >= 1 {
-            let status = d[0]
-            if status == PIN_CONFIG_SUCCESS, index >= 1, self.spdifExtEnabled.indices.contains(index - 1) {
-                let i = index - 1
-                DispatchQueue.main.async { self.spdifExtEnabled[i] = enable }
-            }
-            return status
-        }
-        return 0xFF
+    func setSpdifRxEnable(_ enable: Bool) -> UInt8 {
+        guard let d = transport.legacyAction(VC.INPUT.SPDIF_RX_ENABLE, payload: Data([enable ? 1 : 0]),
+                                             family: .pin), d.count >= 1 else { return 0xFF }
+        if d[0] == PIN_CONFIG_SUCCESS { DispatchQueue.main.async { self.spdifRxEnabled = enable } }
+        return d[0]
+    }
+
+    /// Set the S/PDIF block count, 1..spdifInputCount (INPUT.SPDIF_RX_COUNT).
+    /// Settable while the block is off.  A raise while on claims every new pin
+    /// as one unit; a cut below the active or pending source is refused
+    /// (OUTPUT_ACTIVE).  Returns a PIN_CONFIG_* status.
+    @discardableResult
+    func setSpdifRxCount(_ count: Int) -> UInt8 {
+        guard let d = transport.legacyAction(VC.INPUT.SPDIF_RX_COUNT, payload: Data([UInt8(clamping: count)]),
+                                             family: .pin), d.count >= 1 else { return 0xFF }
+        if d[0] == PIN_CONFIG_SUCCESS { DispatchQueue.main.async { self.spdifRxCount = count } }
+        return d[0]
     }
 
     // MARK: - I2S Input Commands
@@ -2307,10 +2302,31 @@ extension DSPViewModel {
                 DispatchQueue.main.async { self.i2sRxPins[pair] = p }
             }
         }
+        fetchI2SInputEnable()
         fetchI2SInputChannels()
         fetchInputRate()
         fetchI2SClockMode()
         fetchI2SClockPinMode()
+    }
+
+    /// Reads the I2S input block switch (INPUT.I2S_RX_ENABLE).
+    func fetchI2SInputEnable() {
+        guard let d = transport.getData(VC.INPUT.I2S_RX_ENABLE, length: 1), d.count >= 1 else { return }
+        let on = d[0] != 0
+        DispatchQueue.main.async { self.i2sInputEnabled = on }
+    }
+
+    /// Switch the I2S input block on or off (INPUT.I2S_RX_ENABLE).  On reserves the
+    /// clock pair and the counted data pins as one unit (PIN_IN_USE on a clash);
+    /// the clocks still start only when I2S is selected.  Off is refused
+    /// (OUTPUT_ACTIVE) while I2S is the active or pending source.  Returns a
+    /// PIN_CONFIG_* status.
+    @discardableResult
+    func setI2SInputEnable(_ enable: Bool) -> UInt8 {
+        guard let d = transport.legacyAction(VC.INPUT.I2S_RX_ENABLE, payload: Data([enable ? 1 : 0]),
+                                             family: .pin), d.count >= 1 else { return 0xFF }
+        if d[0] == PIN_CONFIG_SUCCESS { DispatchQueue.main.async { self.i2sInputEnabled = enable } }
+        return d[0]
     }
 
     /// Reads the active I2S input channel count (2/4/6/8).  STALLs on firmware
@@ -2323,9 +2339,9 @@ extension DSPViewModel {
     }
 
     /// Selects the active I2S input channel count (2/4/6/8 → 1..4 stereo pairs).
-    /// Answers a PIN_CONFIG_* status: a raise validates each newly
-    /// activated pair's data pin and is rejected (without changing state) on a
-    /// clash; RP2040 rejects anything but 2.  Part of the output-config block,
+    /// Settable while the block is off.  Answers a PIN_CONFIG_* status: while the
+    /// block is on, a raise validates each newly counted pair's data pin and is
+    /// rejected (without changing state) on a clash; RP2040 rejects anything but 2.  Part of the output-config block,
     /// so callers should mark it dirty (beginOutputEdit).  On success the device
     /// pushes NOTIFY_EVT_INPUT_FORMAT so the channel strips relayout.
     @discardableResult
@@ -3522,22 +3538,20 @@ extension DSPViewModel {
         let bulkI2SRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 5],
                                          data[BULK_INPUT_CONFIG_OFFSET + 6],
                                          data[BULK_INPUT_CONFIG_OFFSET + 7]]
-        // Optional S/PDIF inputs 2/3/4: pins at +8/+9/+10 (0 = keep live), enable
-        // mask "plus one" at +11 (0 = field absent; otherwise mask = enc-1,
-        // bit0 = SPDIF2 .. bit2 = SPDIF4).  The +1 encoding lets old hosts push
-        // zeros meaning "absent" rather than "disable them all".  V28 grew the
-        // pin array from 2 to 3, which is what shifted this and the fields below.
+        // Optional S/PDIF inputs 2/3/4: pins at +8/+9/+10 (0 = keep live), and
+        // the S/PDIF block count at +11 (V34, 1..4, 0 = absent).
         let bulkSpdifRxPinsExt: [UInt8] = [data[BULK_INPUT_CONFIG_OFFSET + 8],
                                            data[BULK_INPUT_CONFIG_OFFSET + 9],
                                            data[BULK_INPUT_CONFIG_OFFSET + 10]]
-        let bulkSpdifEnabledExtP1 = data[BULK_INPUT_CONFIG_OFFSET + 11]
+        let bulkSpdifRxCount = Int(data[BULK_INPUT_SPDIF_RX_COUNT_OFFSET])
         // V21+ I2S clock mode at +12 (0=master, 1=slave).
         let bulkI2SClockMode = data[BULK_INPUT_I2S_CLOCK_MODE_OFFSET]
-        // V24+ ADAT input at +13/+14/+15 (RP2350).  Pin: 0 = unset (0xFF never on
-        // the wire).  Enable / clock mode are +1 encoded (0 = absent/keep live).
+        // ADAT input pin at +13 (0 = unset; 0xFF never on the wire) and clock mode
+        // at +15, and the input block switch mask at +14 (V34).  Both +1 encoded
+        // (0 = absent/keep live).
         let bulkAdatInputPinRaw = data[BULK_INPUT_ADAT_PIN_OFFSET]
         let bulkAdatInputPin: UInt8 = bulkAdatInputPinRaw == 0 ? ADAT_INPUT_PIN_UNSET : bulkAdatInputPinRaw
-        let bulkAdatInputEnabledP1 = data[BULK_INPUT_ADAT_ENABLED_P1_OFFSET]
+        let bulkInputEnableP1 = data[BULK_INPUT_ENABLE_P1_OFFSET]
         let bulkAdatInputClockModeP1 = data[BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET]
 
 
@@ -3757,19 +3771,25 @@ extension DSPViewModel {
             self.inputSource = bulkInputSource
             self.inputSourceSupported = true
             self.spdifRxPin = bulkSpdifRxPin
-            // Optional S/PDIF 2/3/4: a non-zero enable-mask+1 byte marks the
-            // multiple-input feature present and carries the live enable state;
-            // ext pins of 0 mean "absent, keep the live pin".  The count comes
-            // from the 0xEF inventory (fetchSpdifInputConfig), which is the only
-            // thing that knows how many inputs this firmware actually has; bulk
-            // just fills in the state.  Assume the full count until it lands.
-            if bulkSpdifEnabledExtP1 != 0 {
+            // S/PDIF block: the count and ext pins (0 = absent, keep live).  The
+            // build's input limit comes from SPDIF_RX_CONFIG
+            // (fetchSpdifInputConfig); assume the full limit until it lands.
+            if bulkSpdifRxCount != 0 {
                 self.multiSpdifSupported = true
                 if self.spdifInputCount < 2 { self.spdifInputCount = SPDIF_RX_NUM_INPUTS }
-                let mask = bulkSpdifEnabledExtP1 - 1
-                for i in 0..<(SPDIF_RX_NUM_INPUTS - 1) {
-                    self.spdifExtEnabled[i] = (mask & (1 << UInt8(i))) != 0
-                    if bulkSpdifRxPinsExt[i] != 0 { self.spdifRxPinsExt[i] = bulkSpdifRxPinsExt[i] }
+                self.spdifRxCount = min(bulkSpdifRxCount, SPDIF_RX_NUM_INPUTS)
+                for i in 0..<(SPDIF_RX_NUM_INPUTS - 1) where bulkSpdifRxPinsExt[i] != 0 {
+                    self.spdifRxPinsExt[i] = bulkSpdifRxPinsExt[i]
+                }
+            }
+            if bulkInputEnableP1 != 0 {
+                let mask = bulkInputEnableP1 - 1
+                self.spdifRxEnabled = mask & INPUT_ENABLE_SPDIF != 0
+                self.i2sInputEnabled = mask & INPUT_ENABLE_I2S != 0
+                if platform == "RP2350" {
+                    let en = mask & INPUT_ENABLE_ADAT != 0
+                    self.adatInputEnabled = en
+                    self.adatInputStatus.enabled = en
                 }
             }
             self.i2sInputSupported = true
@@ -3807,11 +3827,6 @@ extension DSPViewModel {
             self.adatInputSupported = (platform == "RP2350")
             self.adatInputPin = bulkAdatInputPin
             self.adatInputStatus.pin = bulkAdatInputPin
-            if bulkAdatInputEnabledP1 != 0 {
-                let en = bulkAdatInputEnabledP1 == 2
-                self.adatInputEnabled = en
-                self.adatInputStatus.enabled = en
-            }
             if bulkAdatInputClockModeP1 != 0 {
                 let mode = bulkAdatInputClockModeP1 == 2 ? ADAT_INPUT_CLOCK_MODE_SLAVE : ADAT_INPUT_CLOCK_MODE_MASTER
                 self.adatInputClockMode = mode
@@ -4427,12 +4442,26 @@ extension DSPViewModel {
             return
         }
 
-        // input_config.adat_input_enabled_p1 (offset 4729, +1 encoded: 1=disabled,
-        // 2=enabled).  Fires when 0x68 toggles the input, on bulk, and on preset.
-        if off == BULK_INPUT_ADAT_ENABLED_P1_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
-            let en = payload[0] == 2
-            if self.adatInputEnabled != en { self.adatInputEnabled = en }
-            self.adatInputStatus.enabled = en
+        // input_config.input_enable_p1: the S/PDIF / I2S / ADAT block switches as
+        // a mask plus one.  Fires on every block switch SET (any of the three).
+        if off == BULK_INPUT_ENABLE_P1_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            let mask = payload[0] - 1
+            let spdif = mask & INPUT_ENABLE_SPDIF != 0
+            let i2s = mask & INPUT_ENABLE_I2S != 0
+            let adat = mask & INPUT_ENABLE_ADAT != 0
+            if self.spdifRxEnabled != spdif { self.spdifRxEnabled = spdif }
+            if self.i2sInputEnabled != i2s { self.i2sInputEnabled = i2s }
+            if self.adatInputSupported {
+                if self.adatInputEnabled != adat { self.adatInputEnabled = adat }
+                self.adatInputStatus.enabled = adat
+            }
+            return
+        }
+
+        // input_config.spdif_rx_count (1..4).  Fires on INPUT.SPDIF_RX_COUNT.
+        if off == BULK_INPUT_SPDIF_RX_COUNT_OFFSET && sz == 1 && payload.count >= 1, payload[0] != 0 {
+            let count = min(Int(payload[0]), SPDIF_RX_NUM_INPUTS)
+            if self.spdifRxCount != count { self.spdifRxCount = count }
             return
         }
 

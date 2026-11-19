@@ -523,11 +523,19 @@ struct PresetDocument: Codable {
         /// input 3, bit 2 = input 4.  Bit 2 is additive - a reader that only
         /// knows two optional inputs simply ignores it.
         var spdifEnabledExt: UInt8 = 0
+        /// additive: the S/PDIF input block switch and count (firmware 1.1.7).
+        /// When absent, the block is on and the count is the highest input
+        /// `spdifEnabledExt` enables, the same migration the firmware applies.
+        var spdifInputEnabled: Bool?
+        var spdifInputCount: Int?
 
         /// I2S RX data GPIOs for pairs 0..3.
         var i2sRxPins: [UInt8] = I2S_RX_PIN_DEFAULTS
         var i2sInputChannels: Int = 2
         var i2sInputRateHz: UInt32 = 48000
+        /// additive: the I2S input block switch (firmware 1.1.7).  When absent,
+        /// it is on only if the document selects I2S as the input source.
+        var i2sInputEnabled: Bool?
 
         var adatEnabled = false
         var adatPin: UInt8 = ADAT_PIN_DEFAULT
@@ -536,6 +544,23 @@ struct PresetDocument: Codable {
         var adatInputClockMode: UInt8 = 0
 
         var dacHwMute: DacHwMuteBlock?
+
+        /// The S/PDIF block switch, from the additive field or its migration.
+        var resolvedSpdifEnabled: Bool { spdifInputEnabled ?? true }
+
+        /// The S/PDIF block count, 1..4, from the additive field or, for an
+        /// older document, the highest input the enable mask names.  A sparse
+        /// mask (only input 3) becomes count 3: inputs are never renumbered.
+        var resolvedSpdifCount: Int {
+            if let n = spdifInputCount { return max(1, min(n, SPDIF_RX_NUM_INPUTS)) }
+            let mask = spdifEnabledExt & 0x07
+            return mask == 0 ? 1 : 1 + (8 - mask.leadingZeroBitCount)
+        }
+
+        /// The I2S block switch, from the additive field or its migration.
+        func resolvedI2sEnabled(inputSource: Int) -> Bool {
+            i2sInputEnabled ?? (inputSource == INPUT_SOURCE_I2S)
+        }
 
         init() {}
 
@@ -553,9 +578,12 @@ struct PresetDocument: Codable {
             spdifRxPins = c.value(.spdifRxPins, Array(SPDIF_RX_PIN_DEFAULTS.prefix(3)))
             spdifRxPin4 = c.value(.spdifRxPin4, nil)
             spdifEnabledExt = c.value(.spdifEnabledExt, 0)
+            spdifInputEnabled = c.value(.spdifInputEnabled, nil)
+            spdifInputCount = c.value(.spdifInputCount, nil)
             i2sRxPins = c.value(.i2sRxPins, I2S_RX_PIN_DEFAULTS)
             i2sInputChannels = c.value(.i2sInputChannels, 2)
             i2sInputRateHz = c.value(.i2sInputRateHz, 48000)
+            i2sInputEnabled = c.value(.i2sInputEnabled, nil)
             adatEnabled = c.value(.adatEnabled, false)
             adatPin = c.value(.adatPin, ADAT_PIN_DEFAULT)
             adatInputEnabled = c.value(.adatInputEnabled, false)

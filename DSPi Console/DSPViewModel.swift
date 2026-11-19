@@ -1429,24 +1429,29 @@ class DSPViewModel: ObservableObject {
     @Published var inputSourceSupported: Bool = false  // false if firmware STALLs 0xE1
     @Published var spdifRxPin: UInt8 = 11             // GPIO pin for S/PDIF input 1
 
-    // Multiple S/PDIF inputs (firmware v1.1.5+, probed via INPUT.SPDIF_RX_CONFIG).
-    // `multiSpdifSupported` is false on older firmware that STALLs 0xEF, in which
-    // case only input 1 (`spdifRxPin`) exists.  Inputs 2/3/4 are optional and
-    // disabled by default; a disabled input's pin is a stored preference only.
-    // `spdifInputCount` is the device's own inventory size, so firmware that
-    // predates the fourth input simply reports 3 and the extra row never appears.
+    // S/PDIF input block (firmware input_enable_plan.md, probed via
+    // INPUT.SPDIF_RX_CONFIG).  The block has a switch and a count: while on, inputs
+    // 1..count hold their pins and are selectable; while off it holds none.  The
+    // count is remembered while off.  `spdifInputCount` is the device's own limit
+    // (how many inputs this build has), not the block count.
     @Published var multiSpdifSupported: Bool = false
     @Published var spdifInputCount: Int = 1
     /// GPIO pins for the optional S/PDIF inputs 2/3/4 (indices 1..3).  Always
-    /// SPDIF_RX_NUM_INPUTS-1 long; entries past the device's count are unused.
+    /// SPDIF_RX_NUM_INPUTS-1 long; entries past the device's limit are unused.
     @Published var spdifRxPinsExt: [UInt8] = Array(SPDIF_RX_PIN_DEFAULTS.dropFirst())
-    /// Enable state for the optional S/PDIF inputs 2/3/4 (indices 1..3).
-    @Published var spdifExtEnabled: [Bool] = Array(repeating: false, count: SPDIF_RX_NUM_INPUTS - 1)
+    /// S/PDIF block switch (INPUT.SPDIF_RX_ENABLE).  On by default on a fresh unit.
+    @Published var spdifRxEnabled: Bool = true
+    /// S/PDIF block count, 1..spdifInputCount (INPUT.SPDIF_RX_COUNT).
+    @Published var spdifRxCount: Int = 1
 
     // I2S input state (firmware wire format V12+).  `i2sInputSupported` is
     // false on older firmware that STALLs INPUT.I2S_RX_PIN or returns
     // a pre-V12 bulk payload.  See i2s_multi_input.md.
     @Published var i2sInputSupported: Bool = false
+    /// I2S input block switch (INPUT.I2S_RX_ENABLE).  While on it holds the clock
+    /// pair and the counted data pins, selected or not; the clocks themselves
+    /// start only when I2S is selected.
+    @Published var i2sInputEnabled: Bool = false
     /// Active I2S input channel count: 2 / 4 / 6 / 8 (1..4 stereo pairs).
     /// Multichannel (>2) is RP2350-only; RP2040 is stereo (always 2).
     @Published var i2sInputChannels: Int = 2
@@ -1525,11 +1530,11 @@ class DSPViewModel: ObservableObject {
         return SPDIF_RX_PIN_DEFAULTS[min(index, SPDIF_RX_PIN_DEFAULTS.count - 1)]
     }
 
-    /// Whether a S/PDIF input index is enabled.  Input 1 is always enabled.
+    /// Whether a S/PDIF input index is in the block: the block is on and the
+    /// index is within its count.  Only such an input holds its pin or can be
+    /// selected.
     func spdifInputEnabled(index: Int) -> Bool {
-        if index == 0 { return true }
-        let i = index - 1
-        return spdifExtEnabled.indices.contains(i) ? spdifExtEnabled[i] : false
+        spdifRxEnabled && index < spdifRxCount
     }
 
     /// Map a S/PDIF input index (0..3) to its InputSource enum value (1/4/5/6).
@@ -1547,39 +1552,42 @@ class DSPViewModel: ObservableObject {
         return (1..<SPDIF_RX_NUM_INPUTS).contains(i) ? i : nil
     }
 
-    /// True when any optional S/PDIF input (2, 3 or 4) is enabled — used to
-    /// decide whether input 1 should be labelled "S/PDIF 1" vs the bare "S/PDIF".
-    var anyOptionalSpdifEnabled: Bool { spdifExtEnabled.contains(true) }
-
-    /// Number of S/PDIF inputs treated as active for the count-selector UI:
-    /// the highest enabled input index + 1 (input 1 is always counted).  A
-    /// non-consecutive enable state (e.g. only input 3 on) still reports 3 so
-    /// every row up to the highest is shown; re-selecting a count normalises it.
-    var spdifEnabledCount: Int {
-        for idx in stride(from: spdifInputCount - 1, through: 1, by: -1)
-        where spdifInputEnabled(index: idx) {
-            return idx + 1
-        }
-        return 1
-    }
+    /// True when the block holds more than one S/PDIF input - decides whether
+    /// input 1 is labelled "S/PDIF 1" or the bare "S/PDIF".
+    var anyOptionalSpdifEnabled: Bool { spdifRxCount > 1 }
 
     /// The list of selectable input-source values for the current device config,
-    /// in menu order: USB, S/PDIF 1, any enabled optional S/PDIF inputs, then I2S.
+    /// in menu order: USB, the S/PDIF inputs in the block, I2S, then ADAT.  The
+    /// firmware refuses a source whose block is off (VC_ERR_STATE), so those
+    /// are never offered.  The live source is kept in the list whatever its
+    /// block says, so the picker always shows what is playing.
     var inputSourceOptions: [Int] {
-        var opts: [Int] = [INPUT_SOURCE_USB, INPUT_SOURCE_SPDIF]
-        if multiSpdifSupported {
-            for idx in 1..<spdifInputCount where spdifInputEnabled(index: idx) {
-                opts.append(spdifSource(forIndex: idx))
-            }
+        allInputSources.filter { inputSourceSelectable($0) || $0 == inputSource }
+    }
+
+    /// Every source this board has, selectable or not, in menu order.  Source
+    /// names are independent of the input blocks, so they list these.
+    var allInputSources: [Int] {
+        var all: [Int] = [INPUT_SOURCE_USB]
+        all += (0..<(multiSpdifSupported ? spdifInputCount : 1)).map(spdifSource(forIndex:))
+        if i2sInputSupported { all.append(INPUT_SOURCE_I2S) }
+        if adatInputSupported { all.append(INPUT_SOURCE_ADAT) }
+        return all
+    }
+
+    /// Whether the device would accept `source` now (firmware
+    /// input_source_selectable): its block is on and, for S/PDIF, within the
+    /// count.  ADAT also needs a pin.
+    func inputSourceSelectable(_ source: Int) -> Bool {
+        switch source {
+        case INPUT_SOURCE_USB: return true
+        case INPUT_SOURCE_I2S: return i2sInputSupported && i2sInputEnabled
+        case INPUT_SOURCE_ADAT: return adatInputSupported && adatInputEnabled && adatInputPin != ADAT_INPUT_PIN_UNSET
+        default:
+            guard let idx = spdifIndex(forSource: source) else { return false }
+            let count = multiSpdifSupported ? min(spdifRxCount, spdifInputCount) : 1
+            return spdifRxEnabled && idx < count
         }
-        if i2sInputSupported { opts.append(INPUT_SOURCE_I2S) }
-        // ADAT is selectable only once it has been enabled with a valid pin
-        // (a disabled or pin-less ADAT source is consumed as a no-op by the
-        // firmware switch handler, so never offer it).
-        if adatInputSupported && adatInputEnabled && adatInputPin != ADAT_INPUT_PIN_UNSET {
-            opts.append(INPUT_SOURCE_ADAT)
-        }
-        return opts
     }
 
     /// User names per input source ID, device-global (not per preset).  Empty
@@ -3018,7 +3026,9 @@ class DSPViewModel: ObservableObject {
             mckMultiplier: mckMultiplier,
             spdifRxPin: spdifRxPin,
             spdifRxPinsExt: multiSpdifSupported ? spdifRxPinsExt : nil,
-            spdifExtEnabled: multiSpdifSupported ? spdifExtEnabled : nil,
+            spdifRxEnabled: inputSourceSupported ? spdifRxEnabled : nil,
+            spdifRxCount: multiSpdifSupported ? spdifRxCount : nil,
+            i2sInputEnabled: i2sInputSupported ? i2sInputEnabled : nil,
             inputSource: inputSourceSupported ? inputSource : nil,
             i2sRxPins: i2sInputSupported ? Array(i2sRxPins.prefix(i2sMaxPairs)) : nil,
             i2sInputChannels: i2sInputSupported ? i2sInputChannels : nil,

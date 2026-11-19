@@ -77,7 +77,7 @@ final class TubeWireTests: XCTestCase {
     /// V31 appended WireTubeParams (48 bytes) at 5980, taking the flat layout
     /// from 5980 to 6028 bytes.  V32 appended the limiter after it.
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 34)
         XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_TUBE_OFFSET, 5980)
         XCTAssertEqual(WIRE_TUBE_PARAMS_SIZE, 48)

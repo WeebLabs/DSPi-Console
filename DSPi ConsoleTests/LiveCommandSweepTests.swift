@@ -133,8 +133,6 @@ final class LiveCommandSweepTests: XCTestCase {
     /// Every valid address of the command.  Kinds whose size the board shape
     /// gives are enumerated; the rest are walked once (see `walk`).
     private func addresses(for info: VendorCommandInfo) -> [UInt16] {
-        // Only optional inputs 1-3 have an enable; input 0 is always on.
-        if info.command == VC.INPUT.SPDIF_RX_ENABLE { return [1, 2, 3] }
         if info.command == VC.CS.AUX_STATE || info.command == VC.CS.AUX_LEVEL { return auxSlot.map { [$0] } ?? [] }
         let firstOutCh = shape.channels - shape.outputs
         func range(_ n: Int) -> [UInt16] { (0..<n).map(UInt16.init) }
@@ -275,7 +273,7 @@ final class LiveCommandSweepTests: XCTestCase {
         }
         let walkKinds: Set<VendorAddressKind> = [.slot, .pinOutput, .source, .spdifRx, .i2sPair, .role, .csNoun, .index]
         for info in VendorCommandRegistry.all where info.hasGet && walkKinds.contains(info.address)
-            && info.command != VC.INPUT.SPDIF_RX_ENABLE && implemented(info.command, set: false) {
+            && implemented(info.command, set: false) {
             walk(info)
         }
         // A SET-only command of a walked kind uses its GET sibling's count.
@@ -687,9 +685,10 @@ final class LiveCommandSweepTests: XCTestCase {
         statusCase("setAdatInputEnable", VC.INPUT.ADAT_RX_ENABLE, values: [1, 0]) { vm, v in vm.setAdatInputEnable(v == 1) }
         statusCase("setAdatInputClockMode", VC.INPUT.ADAT_RX_CLOCK_MODE, values: [1, 0]) { vm, v in vm.setAdatInputClockMode(v) }
         statusCase("setMckEnable", VC.CLOCK.MCK_ENABLE, values: [1, 0]) { vm, v in vm.setMckEnable(v == 1) }
-        statusCase("setSpdifInputEnable(3)", VC.INPUT.SPDIF_RX_ENABLE, 3, neighbour: 1, values: [1, 0]) { vm, v in
-            vm.setSpdifInputEnable(index: 3, v == 1)
-        }
+        // The count is a store while the block is off, so toggle it there and
+        // leave the block's own switch to the I2S-style toggle below.
+        statusCase("setSpdifRxCount", VC.INPUT.SPDIF_RX_COUNT, values: [2, 1]) { vm, v in vm.setSpdifRxCount(Int(v)) }
+        statusCase("setI2SInputEnable", VC.INPUT.I2S_RX_ENABLE, values: [1, 0]) { vm, v in vm.setI2SInputEnable(v == 1) }
         statusCase("setI2SInputChannels", VC.INPUT.I2S_RX_CHANNELS, values: [4, 2]) { vm, v in vm.setI2SInputChannels(Int(v)) }
         statusCase("setI2SClockPinMode", VC.CLOCK.I2S_CLOCK_PIN_MODE, values: [1, 0]) { vm, v in vm.setI2SClockPinMode(v) }
         statusCase("setOutputSlotType(3)", VC.OUTPUT.TYPE, 3, neighbour: 0, values: [1, 0]) { vm, v in vm.setOutputSlotType(slot: 3, type: v) }
@@ -1785,8 +1784,10 @@ final class LiveCommandSweepTests: XCTestCase {
         expect("SPDIF_RX_CONFIG pin 0 vs SPDIF_RX_PIN[0]", vm.spdifRxPin, readData(VC.INPUT.SPDIF_RX_PIN, 0)?.first)
         for i in 1..<vm.spdifInputCount {
             expect("SPDIF_RX_CONFIG pin \(i) vs SPDIF_RX_PIN[\(i)]", vm.spdifRxPinsExt[i - 1], readData(VC.INPUT.SPDIF_RX_PIN, UInt16(i))?.first)
-            expect("SPDIF_RX_CONFIG enable \(i) vs SPDIF_RX_ENABLE[\(i)]", vm.spdifExtEnabled[i - 1], readData(VC.INPUT.SPDIF_RX_ENABLE, UInt16(i)).map { $0[0] != 0 })
         }
+        expect("SPDIF_RX_CONFIG switch vs SPDIF_RX_ENABLE", vm.spdifRxEnabled, readData(VC.INPUT.SPDIF_RX_ENABLE).map { $0[0] != 0 })
+        expect("SPDIF_RX_CONFIG count vs SPDIF_RX_COUNT", vm.spdifRxCount, readData(VC.INPUT.SPDIF_RX_COUNT).map { Int($0[0]) })
+        expect("I2S_RX_ENABLE", vm.i2sInputEnabled, readData(VC.INPUT.I2S_RX_ENABLE).map { $0[0] != 0 })
         for pair in 0..<(walked[VC.INPUT.I2S_RX_PIN.id] ?? 1) {
             expect("I2S_RX_PIN[\(pair)]", vm.i2sRxPins[pair], readData(VC.INPUT.I2S_RX_PIN, UInt16(pair))?.first)
         }

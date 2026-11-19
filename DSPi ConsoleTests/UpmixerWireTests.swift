@@ -59,7 +59,7 @@ final class UpmixerWireTests: XCTestCase {
     /// 5900, growing the flat layout to 5944 bytes; V26 claims its reserved byte
     /// +3 for presence_q1 with no size change (spec §7).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 34)
         XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_UPMIX_OFFSET, 5900)
         XCTAssertEqual(UPMIX_CONFIG_PACKET_SIZE, 44)

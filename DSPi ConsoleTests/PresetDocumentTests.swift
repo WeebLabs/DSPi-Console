@@ -69,6 +69,9 @@ final class PresetDocumentTests: XCTestCase {
 
         doc.io.spdifRxPin4 = 22
         doc.io.spdifEnabledExt = 0b101
+        doc.io.spdifInputEnabled = false
+        doc.io.spdifInputCount = 3
+        doc.io.i2sInputEnabled = true
         doc.io.dacHwMute = PresetDocument.DacHwMuteBlock(
             DacHwMuteConfig(enabled: true, activeLow: false, pin: 9, holdMs: 20, releaseMs: 40))
 
@@ -111,6 +114,9 @@ final class PresetDocumentTests: XCTestCase {
 
         XCTAssertEqual(decoded.io.spdifRxPin4, 22)
         XCTAssertEqual(decoded.io.spdifEnabledExt, 0b101)
+        XCTAssertEqual(decoded.io.spdifInputEnabled, false)
+        XCTAssertEqual(decoded.io.spdifInputCount, 3)
+        XCTAssertEqual(decoded.io.i2sInputEnabled, true)
         XCTAssertEqual(decoded.io.dacHwMute?.config,
                        DacHwMuteConfig(enabled: true, activeLow: false, pin: 9, holdMs: 20, releaseMs: 40))
     }
@@ -427,6 +433,51 @@ final class PresetDocumentTests: XCTestCase {
         try XCTAssertTrue(keys(["io", "dacHwMute"]).isSuperset(of: [
             "enabled", "activeLow", "pin", "holdMs", "releaseMs",
         ]))
+    }
+
+    /// A document without the input block fields migrates as the firmware
+    /// does: S/PDIF on, count = highest input the mask enables (a sparse mask
+    /// is not renumbered), I2S on only when it is the selected source.
+    func testInputBlockMigrationFromOldDocument() {
+        var io = PresetDocument.IoBlock()
+        XCTAssertTrue(io.resolvedSpdifEnabled)
+        XCTAssertEqual(io.resolvedSpdifCount, 1)
+        io.spdifEnabledExt = 0b001
+        XCTAssertEqual(io.resolvedSpdifCount, 2)
+        io.spdifEnabledExt = 0b010              // only input 3
+        XCTAssertEqual(io.resolvedSpdifCount, 3)
+        io.spdifEnabledExt = 0b111
+        XCTAssertEqual(io.resolvedSpdifCount, 4)
+        XCTAssertTrue(io.resolvedI2sEnabled(inputSource: INPUT_SOURCE_I2S))
+        XCTAssertFalse(io.resolvedI2sEnabled(inputSource: INPUT_SOURCE_SPDIF))
+
+        // The additive fields win over the migration.
+        io.spdifInputEnabled = false
+        io.spdifInputCount = 2
+        io.i2sInputEnabled = false
+        XCTAssertFalse(io.resolvedSpdifEnabled)
+        XCTAssertEqual(io.resolvedSpdifCount, 2)
+        XCTAssertFalse(io.resolvedI2sEnabled(inputSource: INPUT_SOURCE_I2S))
+    }
+
+    /// Capture writes the block fields and keeps the old mask in step for
+    /// readers that predate them.
+    func testCaptureWritesInputBlocks() {
+        let vm = AppState.shared.viewModel
+        let saved = (vm.spdifRxEnabled, vm.spdifRxCount, vm.i2sInputEnabled)
+        defer { (vm.spdifRxEnabled, vm.spdifRxCount, vm.i2sInputEnabled) = saved }
+        vm.spdifRxEnabled = true
+        vm.spdifRxCount = 3
+        vm.i2sInputEnabled = true
+        var io = PresetDocument.capture(from: vm).io
+        XCTAssertEqual(io.spdifInputEnabled, true)
+        XCTAssertEqual(io.spdifInputCount, 3)
+        XCTAssertEqual(io.i2sInputEnabled, true)
+        XCTAssertEqual(io.spdifEnabledExt, 0b011)
+        vm.spdifRxEnabled = false
+        io = PresetDocument.capture(from: vm).io
+        XCTAssertEqual(io.spdifEnabledExt, 0, "an older reader sees only input 1")
+        XCTAssertEqual(io.spdifInputCount, 3, "the count is kept while off")
     }
 
     /// The shared schema's S/PDIF pin array is three long.  Writing a fourth

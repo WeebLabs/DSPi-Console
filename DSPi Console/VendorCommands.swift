@@ -102,12 +102,14 @@ enum VC {
         static let SPDIF_RX_CH_STATUS = VendorCommand(0x0321)
         /// GPIO of one S/PDIF input; 0xFF restores its default. GET and SET.
         static let SPDIF_RX_PIN = VendorCommand(0x0322)
-        /// Enable of optional S/PDIF input 1-3. GET and SET.
-        static let SPDIF_RX_ENABLE = VendorCommand(0x0323)
-        /// Input count, enable mask over all inputs, then one GPIO per input. GET.
+        /// Input count limit, block switch, block count, then one GPIO per input. GET.
         static let SPDIF_RX_CONFIG = VendorCommand(0x0324)
         /// Pins one S/PDIF input could take: status, flags, generation, valid and free masks. GET.
         static let SPDIF_RX_PIN_AVAIL = VendorCommand(0x0325)
+        /// S/PDIF inputs in the block, 1 to 4; inputs 1 to N hold their pins while the block is on. GET and SET.
+        static let SPDIF_RX_COUNT = VendorCommand(0x0326)
+        /// S/PDIF input block switch, 0 or 1. GET and SET.
+        static let SPDIF_RX_ENABLE = VendorCommand(0x0327)
         /// Data GPIO of one I2S RX stereo pair; 0xFF restores its default. GET and SET.
         static let I2S_RX_PIN = VendorCommand(0x0330)
         /// I2S input channel count, 2, 4, 6 or 8. GET and SET.
@@ -116,6 +118,8 @@ enum VC {
         static let I2S_RX_RATE = VendorCommand(0x0332)
         /// Pins one I2S RX pair could take: status, flags, generation, valid and free masks. GET.
         static let I2S_RX_PIN_AVAIL = VendorCommand(0x0333)
+        /// I2S input block switch, 0 or 1; on holds the clock pair and counted data pins. GET and SET.
+        static let I2S_RX_ENABLE = VendorCommand(0x0334)
         /// ADAT input enable. GET and SET, PICO_RP2350 builds only.
         static let ADAT_RX_ENABLE = VendorCommand(0x0340)
         /// ADAT input GPIO; 0xFF clears it while the input is disabled. GET and SET, PICO_RP2350 builds only.
@@ -698,17 +702,21 @@ extension VendorCommandRegistry {
                           hasGet: true, hasSet: true, address: .spdifRx,
                           getLength: .fixed(1), setMin: 1, setMax: 1,
                           flags: [.deferred, .restart], build: nil),
-        VendorCommandInfo(command: VC.INPUT.SPDIF_RX_ENABLE, pageName: "INPUT", name: "SPDIF_RX_ENABLE",
-                          hasGet: true, hasSet: true, address: .spdifRx,
-                          getLength: .fixed(1), setMin: 1, setMax: 1,
-                          flags: [], build: nil),
         VendorCommandInfo(command: VC.INPUT.SPDIF_RX_CONFIG, pageName: "INPUT", name: "SPDIF_RX_CONFIG",
                           hasGet: true, hasSet: false, address: .none,
-                          getLength: .fixed(6), setMin: 0, setMax: 0,
+                          getLength: .fixed(7), setMin: 0, setMax: 0,
                           flags: [], build: nil),
         VendorCommandInfo(command: VC.INPUT.SPDIF_RX_PIN_AVAIL, pageName: "INPUT", name: "SPDIF_RX_PIN_AVAIL",
                           hasGet: true, hasSet: false, address: .spdifRx,
                           getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
+        VendorCommandInfo(command: VC.INPUT.SPDIF_RX_COUNT, pageName: "INPUT", name: "SPDIF_RX_COUNT",
+                          hasGet: true, hasSet: true, address: .none,
+                          getLength: .fixed(1), setMin: 1, setMax: 1,
+                          flags: [], build: nil),
+        VendorCommandInfo(command: VC.INPUT.SPDIF_RX_ENABLE, pageName: "INPUT", name: "SPDIF_RX_ENABLE",
+                          hasGet: true, hasSet: true, address: .none,
+                          getLength: .fixed(1), setMin: 1, setMax: 1,
                           flags: [], build: nil),
         VendorCommandInfo(command: VC.INPUT.I2S_RX_PIN, pageName: "INPUT", name: "I2S_RX_PIN",
                           hasGet: true, hasSet: true, address: .i2sPair,
@@ -725,6 +733,10 @@ extension VendorCommandRegistry {
         VendorCommandInfo(command: VC.INPUT.I2S_RX_PIN_AVAIL, pageName: "INPUT", name: "I2S_RX_PIN_AVAIL",
                           hasGet: true, hasSet: false, address: .i2sPair,
                           getLength: .fixed(24), setMin: 0, setMax: 0,
+                          flags: [], build: nil),
+        VendorCommandInfo(command: VC.INPUT.I2S_RX_ENABLE, pageName: "INPUT", name: "I2S_RX_ENABLE",
+                          hasGet: true, hasSet: true, address: .none,
+                          getLength: .fixed(1), setMin: 1, setMax: 1,
                           flags: [], build: nil),
         VendorCommandInfo(command: VC.INPUT.ADAT_RX_ENABLE, pageName: "INPUT", name: "ADAT_RX_ENABLE",
                           hasGet: true, hasSet: true, address: .none,

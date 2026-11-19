@@ -517,6 +517,10 @@ let OUTPUT_CONFIG_MODE_WITH_PRESET: Int = 1   // Saved with each preset, restore
 /// Wire format V32 (Output Limiter): appends a 108-byte WireLimiterParams
 /// section at offset 6028, one 12-byte record per output slot, growing the flat
 /// layout from 6028 to 6136 bytes.  Present on both platforms.
+/// Wire format V34 (input blocks): WireInputConfig byte +11 becomes
+/// `spdif_rx_count` (1..4, 0 absent) and byte +14 becomes `input_enable_p1`,
+/// the S/PDIF / I2S / ADAT block switch mask plus one (0 absent).  No size or
+/// offset change.  V33 belongs to an unmerged firmware branch and never shipped.
 /// Wire format V31 (Tube Modeller): appends a 48-byte WireTubeParams section at
 /// offset 5980, growing the flat layout from 5980 to 6028 bytes.  Present on
 /// both platforms (float kernel on RP2350, Q28 on RP2040).
@@ -566,8 +570,8 @@ let OUTPUT_CONFIG_MODE_WITH_PRESET: Int = 1   // Saved with each preset, restore
 /// (appending the detector/apply channel masks), shifting every section after the
 /// leveller by +4 and the flat layout from 5872 to 5876 bytes (RP2350).
 /// Compatibility is intentionally broken - only this layout is accepted.
-let WIRE_FORMAT_VERSION: Int            = 32
-/// Full V32 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
+let WIRE_FORMAT_VERSION: Int            = 34
+/// Full V34 bulk transfer size (RP2350; RP2040 zero-pads the same layout).
 /// V26/V27/V28 all reused bytes inside existing sections; V29 appended the
 /// subharm section, V30 grew it from 16 to 36 bytes, V31 appended tube and V32
 /// appended the limiter.
@@ -593,17 +597,21 @@ let BULK_LEVELLER_OFFSET: Int           = 4648  // WireLevellerConfig, 20 bytes 
 let BULK_PREAMP_OFFSET: Int             = 4668  // preamp_db[8]
 let BULK_MASTER_VOLUME_OFFSET: Int      = 4700
 let BULK_INPUT_CONFIG_OFFSET: Int       = 4716  // input_source, spdif_rx_pin, i2s_rx_pin, i2s_rate
+/// Bytes +8/+9/+10 are the optional SPDIF 2/3/4 pins; +11 is the S/PDIF block
+/// count (V34, 1..4, 0 = absent).
+let BULK_INPUT_SPDIF_RX_COUNT_OFFSET: Int = 4727
 /// Byte +12 within WireInputConfig: i2s_clock_mode (0=master, 1=slave; V21+).
-/// Bytes +8/+9/+10 are the optional SPDIF 2/3/4 pins and +11 the enable mask
-/// (V28 grew the pin array from 2 to 3, pushing everything below it down one).
 let BULK_INPUT_I2S_CLOCK_MODE_OFFSET: Int = 4728
-/// ADAT input (V24+), claimed from WireInputConfig reserved bytes +13/+14/+15.
-/// All use the 0 = "absent, keep live" convention; enable/clock-mode are +1
-/// encoded (0=absent, 1=disabled/master, 2=enabled/slave) and the pin is a raw
-/// GPIO with 0 = unset (0xFF never appears on the wire).
+/// ADAT input pin (+13) and clock mode (+15), and the input block switches (+14,
+/// V34).  All keep 0 as "absent, keep live": the clock mode and the switch mask
+/// are stored plus one, and the pin is a raw GPIO with 0 = unset.
 let BULK_INPUT_ADAT_PIN_OFFSET: Int          = 4729
-let BULK_INPUT_ADAT_ENABLED_P1_OFFSET: Int   = 4730
+let BULK_INPUT_ENABLE_P1_OFFSET: Int         = 4730
 let BULK_INPUT_ADAT_CLOCK_MODE_P1_OFFSET: Int = 4731
+/// Bits of the input block switch mask (`input_enable_p1` minus one).
+let INPUT_ENABLE_SPDIF: UInt8 = 0x01
+let INPUT_ENABLE_I2S: UInt8   = 0x02
+let INPUT_ENABLE_ADAT: UInt8  = 0x04
 let BULK_LG_OFFSET: Int                 = 4732
 let BULK_USER_VOLUME_OFFSET: Int        = 4748  // user_volume_db, user_mute
 let BULK_DAC_HW_MUTE_OFFSET: Int        = 4764

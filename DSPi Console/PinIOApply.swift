@@ -16,6 +16,9 @@ import Foundation
 //   4. start     switch things on again, checking every answer
 //
 // It works from the device's answers, so it needs no copy of the pin rules.
+// Input blocks (S/PDIF, I2S, ADAT) hold their pins while on, selected or not,
+// so the input source itself never needs a pin; it only steps aside when the
+// target switches its block off.
 
 /// A hardware IO configuration.  As a target, nil means "leave it as it is";
 /// as the current state, nil means "this board does not have it".
@@ -32,8 +35,13 @@ struct PinIOConfig: Equatable {
     var mckPin: UInt8?
     var mckMultiplier: Int?
     var spdifPins: [UInt8]?
-    /// Index 0 is always true; inputs 2-4 have an enable.
-    var spdifEnabled: [Bool]?
+    /// The S/PDIF input block: a switch and a count.  While on, inputs
+    /// 0..<count hold their pins whether or not one is selected.
+    var spdifEnabled: Bool?
+    var spdifCount: Int?
+    /// The I2S input block switch.  While on it holds the clock pair and the
+    /// data pins of the counted pairs, selected or not.
+    var i2sEnabled: Bool?
     var i2sChannels: Int?
     var i2sRxPins: [UInt8]?
     var i2sRate: UInt32?
@@ -57,7 +65,9 @@ enum PinIOOp: Equatable {
     case mckPin(UInt8)
     case mckMultiplier(Int)
     case spdifPin(Int, UInt8)
-    case spdifEnable(Int, Bool)
+    case spdifEnable(Bool)
+    case spdifCount(Int)
+    case i2sEnable(Bool)
     case i2sChannels(Int)
     case i2sRxPin(Int, UInt8)
     case i2sRate(UInt32)
@@ -108,8 +118,27 @@ final class PinIOApply {
         self.device = device
         self.cur = current
         self.orig = current
-        self.tgt = target
+        var t = target
+        var kept: String?
+        // A target that leaves the source alone keeps the block of the source
+        // that is playing, as the firmware's own restores do, rather than
+        // knocking the device back to USB.
+        if t.inputSource == nil, let src = current.inputSource {
+            switch src {
+            case INPUT_SOURCE_I2S where t.i2sEnabled == false:
+                t.i2sEnabled = true; kept = "The I2S input"
+            case INPUT_SOURCE_ADAT where t.adatInEnabled == false:
+                t.adatInEnabled = true; kept = "The ADAT input"
+            case INPUT_SOURCE_SPDIF, INPUT_SOURCE_SPDIF2, INPUT_SOURCE_SPDIF3, INPUT_SOURCE_SPDIF4:
+                let i = src == INPUT_SOURCE_SPDIF ? 0 : src - INPUT_SOURCE_SPDIF2 + 1
+                if t.spdifEnabled == false { t.spdifEnabled = true; kept = "The S/PDIF input" }
+                if let n = t.spdifCount, n <= i { t.spdifCount = i + 1; kept = "S/PDIF input \(i + 1)" }
+            default: break
+            }
+        }
+        self.tgt = t
         self.restoreRefusedPdm = restoreRefusedPdm
+        if let kept { notes.append("\(kept) stayed on because it is the input source") }
     }
 
     // MARK: Naming
@@ -127,7 +156,9 @@ final class PinIOApply {
         case .mckPin: return "MCK pin"
         case .mckMultiplier: return "MCK multiplier"
         case .spdifPin(let i, _): return i == 0 ? "S/PDIF RX pin" : "S/PDIF \(i + 1) RX pin"
-        case .spdifEnable(let i, _): return "S/PDIF input \(i + 1)"
+        case .spdifEnable: return "S/PDIF input"
+        case .spdifCount: return "S/PDIF input count"
+        case .i2sEnable: return "I2S input"
         case .i2sChannels: return "I2S input channels"
         case .i2sRxPin(let p, _): return "I2S serial data \(p + 1) pin"
         case .i2sRate: return "I2S input rate"
@@ -195,17 +226,25 @@ final class PinIOApply {
         case .bckPin(_, let p): return [p, p &+ 1]
         case .pdmEnable: return cur.outputPins.map { [$0[pdmIndex]] } ?? []
         case .mckEnable: return cur.mckPin.map { [$0] } ?? []
-        case .spdifEnable(let i, _): return cur.spdifPins.map { [$0[i]] } ?? []
+        case .spdifEnable: return spdifPins(0..<(cur.spdifCount ?? 1))
+        case .spdifCount(let n):
+            let have = cur.spdifCount ?? 1
+            return cur.spdifEnabled == true && n > have ? spdifPins(have..<n) : []
+        case .i2sEnable:
+            let data = cur.i2sRxPins.map { Array($0.prefix((cur.i2sChannels ?? 2) / 2)) } ?? []
+            return (anyI2SSlot ? [] : clock) + data
         case .adatEnable: return cur.adatPin.map { [$0] } ?? []
         case .adatInEnable: return cur.adatInPin.map { [$0] } ?? []
         case .slotType, .clockMode, .clockPinMode: return clock
-        case .inputSource(let src) where src == INPUT_SOURCE_I2S:
-            let data = cur.i2sRxPins.map { Array($0.prefix((cur.i2sChannels ?? 2) / 2)) } ?? []
-            return clock + data
         case .i2sChannels(let n):
             return cur.i2sRxPins.map { Array($0.prefix(n / 2)) } ?? []
         default: return []
         }
+    }
+
+    private func spdifPins(_ range: Range<Int>) -> [UInt8] {
+        guard let pins = cur.spdifPins else { return [] }
+        return range.filter { $0 < pins.count }.map { pins[$0] }
     }
 
     private func apply(_ op: PinIOOp) {
@@ -220,7 +259,9 @@ final class PinIOApply {
         case .mckPin(let p): cur.mckPin = p
         case .mckMultiplier(let m): cur.mckMultiplier = m
         case .spdifPin(let i, let p): cur.spdifPins?[i] = p
-        case .spdifEnable(let i, let e): cur.spdifEnabled?[i] = e
+        case .spdifEnable(let e): cur.spdifEnabled = e
+        case .spdifCount(let n): cur.spdifCount = n
+        case .i2sEnable(let e): cur.i2sEnabled = e
         case .i2sChannels(let c): cur.i2sChannels = c
         case .i2sRxPin(let i, let p): cur.i2sRxPins?[i] = p
         case .i2sRate(let r): cur.i2sRate = r
@@ -245,15 +286,16 @@ final class PinIOApply {
     }
 
     private var anyI2SSlot: Bool { cur.slotTypes?.contains(1) ?? false }
-    private var i2sIsSource: Bool { cur.inputSource == INPUT_SOURCE_I2S }
+    private var i2sBlockOn: Bool { cur.i2sEnabled == true }
 
     /// The clock pair the running clocks use (firmware `outputs_clock_pair`).
     private var activeClockPair: Int {
         (cur.clockPinMode == I2S_CLOCK_PIN_MODE_SPLIT && cur.clockMode == I2S_CLOCK_MODE_SLAVE) ? 1 : 0
     }
 
-    private func bckInUse(_ role: Int) -> Bool { (anyI2SSlot || i2sIsSource) && role == activeClockPair }
-    private func i2sPairInUse(_ p: Int) -> Bool { i2sIsSource && p < (cur.i2sChannels ?? 2) / 2 }
+    private func bckInUse(_ role: Int) -> Bool { (anyI2SSlot || i2sBlockOn) && role == activeClockPair }
+    private func i2sPairInUse(_ p: Int) -> Bool { i2sBlockOn && p < (cur.i2sChannels ?? 2) / 2 }
+    private func spdifInUse(_ i: Int) -> Bool { cur.spdifEnabled == true && i < (cur.spdifCount ?? 1) }
     private var pdmIndex: Int { (cur.outputPins?.count ?? 1) - 1 }
 
     // MARK: Run
@@ -273,14 +315,18 @@ final class PinIOApply {
     /// Where PDM ran before it was stopped to move its pin.
     private var pdmPinBefore: UInt8?
 
-    /// Whether `source` can be selected with the enables in `c`.
+    /// Whether `source` can be selected with the input blocks in `c`.  The
+    /// device refuses a source whose block is off (VC_ERR_STATE), and refuses to
+    /// switch off or cut the block of the active or pending source.
     private func sourceUsable(_ source: Int, in c: PinIOConfig) -> Bool {
         switch source {
+        case INPUT_SOURCE_USB: return true
         case INPUT_SOURCE_ADAT: return c.adatInEnabled == true
+        case INPUT_SOURCE_I2S: return c.i2sEnabled == true
+        case INPUT_SOURCE_SPDIF: return c.spdifEnabled ?? true
         case INPUT_SOURCE_SPDIF2, INPUT_SOURCE_SPDIF3, INPUT_SOURCE_SPDIF4:
             let i = source - INPUT_SOURCE_SPDIF2 + 1
-            return c.spdifEnabled.map { i < $0.count && $0[i] } ?? false
-        case INPUT_SOURCE_I2S: return false   // handled as a start of its own
+            return c.spdifEnabled == true && i < (c.spdifCount ?? 1)
         default: return true
         }
     }
@@ -289,25 +335,24 @@ final class PinIOApply {
     private var finalSource: Int? { tgt.inputSource ?? orig.inputSource }
 
     private func release() {
-        // The source steps aside first when it is I2S and I2S is being left
-        // or reworked, or when its own input is about to be switched off:
-        // the device refuses to disable the input it is playing.
+        // The source steps aside first when its input block is about to be
+        // switched off or cut below it.  A block that stays on holds its pins
+        // whether selected or not, so nothing else needs it to move.
         if let src = cur.inputSource {
             var after = cur
             if tgt.adatInEnabled == false { after.adatInEnabled = false }
-            if let t = tgt.spdifEnabled, var e = after.spdifEnabled {
-                for i in e.indices.dropFirst() where i < t.count && !t[i] { e[i] = false }
-                after.spdifEnabled = e
-            }
-            let leaving = finalSource != src
-            let lostInput = src != INPUT_SOURCE_I2S && !sourceUsable(src, in: after) && src != INPUT_SOURCE_USB
-                && src != INPUT_SOURCE_SPDIF
-            if (src == INPUT_SOURCE_I2S && leaving) || lostInput {
-                let interim = finalSource.flatMap { $0 != INPUT_SOURCE_I2S && sourceUsable($0, in: after) ? $0 : nil }
-                    ?? INPUT_SOURCE_USB
+            if tgt.i2sEnabled == false { after.i2sEnabled = false }
+            if tgt.spdifEnabled == false { after.spdifEnabled = false }
+            if let n = tgt.spdifCount, let c = after.spdifCount, n < c { after.spdifCount = n }
+            if !sourceUsable(src, in: after) {
+                let interim = finalSource.flatMap { sourceUsable($0, in: after) ? $0 : nil } ?? INPUT_SOURCE_USB
                 send(.inputSource(interim))
             }
         }
+        // Input blocks and counts that end off or smaller.
+        if let n = change(tgt.spdifCount, cur.spdifCount), n < cur.spdifCount! { send(.spdifCount(n)) }
+        if cur.spdifEnabled == true, tgt.spdifEnabled == false { send(.spdifEnable(false)) }
+        if cur.i2sEnabled == true, tgt.i2sEnabled == false { send(.i2sEnable(false)) }
         if let n = change(tgt.i2sChannels, cur.i2sChannels), n < cur.i2sChannels! {
             send(.i2sChannels(n))
         }
@@ -333,11 +378,6 @@ final class PinIOApply {
         }
         if cur.adatEnabled == true, tgt.adatEnabled == false { send(.adatEnable(false)) }
         if cur.adatInEnabled == true, tgt.adatInEnabled == false { send(.adatInEnable(false)) }
-        if let en = cur.spdifEnabled {
-            for i in en.indices.dropFirst() where en[i] && element(tgt.spdifEnabled, cur.spdifEnabled, i) == false {
-                send(.spdifEnable(i, false))
-            }
-        }
         if cur.pdmEnabled == true, cur.outputPins != nil {
             let moving = element(tgt.outputPins, cur.outputPins, pdmIndex) != nil
             if tgt.pdmEnabled == false || moving {
@@ -357,8 +397,8 @@ final class PinIOApply {
             if let p = element(tgt.bckPins, cur.bckPins, role) { send(.bckPin(role: role, p)) }
         }
         if cur.mckEnabled != true, let p = change(tgt.mckPin, cur.mckPin) { send(.mckPin(p)) }
-        if let en = cur.spdifEnabled {
-            for i in en.indices.dropFirst() where !en[i] {
+        if let pins = cur.spdifPins {
+            for i in pins.indices where !spdifInUse(i) {
                 if let p = element(tgt.spdifPins, cur.spdifPins, i) { send(.spdifPin(i, p)) }
             }
         }
@@ -409,7 +449,7 @@ final class PinIOApply {
         let slots = max(0, (cur.outputPins?.count ?? 0) - 1)
         all += (0..<slots).map { .output($0) }
         if cur.pdmEnabled == true { all.append(.output(pdmIndex)) }
-        if let en = cur.spdifEnabled { all += en.indices.filter { en[$0] }.map { .spdif($0) } }
+        if let pins = cur.spdifPins { all += pins.indices.filter { spdifInUse($0) }.map { .spdif($0) } }
         if let pins = cur.i2sRxPins { all += pins.indices.filter { i2sPairInUse($0) }.map { .i2sRx($0) } }
         all += (0..<2).filter { bckInUse($0) }.map { .bck($0) }
         if cur.adatEnabled == true { all.append(.adatTx) }
@@ -478,10 +518,20 @@ final class PinIOApply {
         }
     }
 
-    /// The pending mover whose target pin `m` currently holds, if any.
+    /// Every pin a mover occupies: the clock pair is BCK and LRCLK (BCK + 1).
+    private func heldPins(of m: Mover, in c: PinIOConfig) -> [UInt8] {
+        guard let p = pin(of: m, in: c) else { return [] }
+        if case .bck = m { return [p, p &+ 1] }
+        return [p]
+    }
+
+    /// The pending mover holding a pin `m` wants, if any.  Counts the LRCLK
+    /// pin, so a swap with the clock pair (now held whenever the I2S input
+    /// block is on) is seen and broken through a temporary pin.
     private func blocking(_ m: Mover) -> Mover? {
-        guard let want = pin(of: m, in: tgt) else { return nil }
-        return pendingMoves().first { $0 != m && pin(of: $0, in: cur) == want }
+        let want = heldPins(of: m, in: tgt)
+        guard !want.isEmpty else { return nil }
+        return pendingMoves().first { $0 != m && !Set(heldPins(of: $0, in: cur)).isDisjoint(with: want) }
     }
 
     /// Choose who moves to a temporary pin, and which pin.  An input in the
@@ -537,20 +587,19 @@ final class PinIOApply {
 
         // Enables, back to the target or to how they were.  Their pins were
         // stored above, so a refusal here means another function holds one.
+        // A count raise goes before its block switch: while the block is off it
+        // is a plain store, and the switch then claims every input as one unit.
         if (tgt.mckEnabled ?? orig.mckEnabled) == true, cur.mckEnabled == false { send(.mckEnable(true)) }
-        if let en = cur.spdifEnabled {
-            for i in en.indices.dropFirst() where !en[i] {
-                let want = tgt.spdifEnabled ?? orig.spdifEnabled
-                if let want, i < want.count, want[i] { send(.spdifEnable(i, true)) }
-            }
-        }
+        if let n = change(tgt.spdifCount, cur.spdifCount), n > cur.spdifCount! { send(.spdifCount(n)) }
+        if (tgt.spdifEnabled ?? orig.spdifEnabled) == true, cur.spdifEnabled == false { send(.spdifEnable(true)) }
+        if (tgt.i2sEnabled ?? orig.i2sEnabled) == true, cur.i2sEnabled == false { send(.i2sEnable(true)) }
         if let m = change(tgt.adatInClockMode, cur.adatInClockMode) { send(.adatInClockMode(m)) }
         if (tgt.adatEnabled ?? orig.adatEnabled) == true, cur.adatEnabled == false { send(.adatEnable(true)) }
         if (tgt.adatInEnabled ?? orig.adatInEnabled) == true, cur.adatInEnabled == false { send(.adatInEnable(true)) }
         // The source last: its input is running again by now.  A source whose
         // input the target leaves off cannot come back; say where it stayed.
         if let src = finalSource, let now = cur.inputSource, now != src {
-            if src == INPUT_SOURCE_I2S || sourceUsable(src, in: cur) {
+            if sourceUsable(src, in: cur) {
                 send(.inputSource(src))
             } else {
                 notes.append("The input source stayed on \(now == INPUT_SOURCE_USB ? "USB" : "source \(now)") because its input is now switched off")

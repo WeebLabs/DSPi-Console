@@ -1129,7 +1129,9 @@ struct OutputConfigSnapshot: Equatable {
     var mckMultiplier: Int
     var spdifRxPin: UInt8
     var spdifRxPinsExt: [UInt8]
-    var spdifExtEnabled: [Bool]
+    var spdifRxEnabled: Bool
+    var spdifRxCount: Int
+    var i2sInputEnabled: Bool
     var i2sRxPins: [UInt8]
     var i2sInputChannels: Int
     var i2sInputRateHz: UInt32
@@ -1255,7 +1257,9 @@ final class SettingsSaveCoordinator: ObservableObject {
             mckMultiplier: vm.mckMultiplier,
             spdifRxPin: vm.spdifRxPin,
             spdifRxPinsExt: vm.spdifRxPinsExt,
-            spdifExtEnabled: vm.spdifExtEnabled,
+            spdifRxEnabled: vm.spdifRxEnabled,
+            spdifRxCount: vm.spdifRxCount,
+            i2sInputEnabled: vm.i2sInputEnabled,
             i2sRxPins: vm.i2sRxPins,
             i2sInputChannels: vm.i2sInputChannels,
             i2sInputRateHz: vm.i2sInputRateHz,
@@ -1488,11 +1492,11 @@ final class SettingsSaveCoordinator: ObservableObject {
                     target.spdifPins = pins.indices.map { i in
                         i == 0 ? base.spdifRxPin : (i - 1 < base.spdifRxPinsExt.count ? base.spdifRxPinsExt[i - 1] : pins[i])
                     }
-                    target.spdifEnabled = pins.indices.map { i in
-                        i == 0 || (i - 1 < base.spdifExtEnabled.count && base.spdifExtEnabled[i - 1])
-                    }
+                    target.spdifEnabled = base.spdifRxEnabled
+                    target.spdifCount = min(base.spdifRxCount, pins.count)
                 }
                 if let pins = current.i2sRxPins {
+                    target.i2sEnabled = base.i2sInputEnabled
                     target.i2sChannels = base.i2sInputChannels
                     target.i2sRxPins = pins.indices.map { $0 < base.i2sRxPins.count ? base.i2sRxPins[$0] : pins[$0] }
                     target.i2sRate = base.i2sInputRateHz
@@ -8342,6 +8346,12 @@ struct HardwareSettingsTab: View {
                 Text("GPIO data pin for input channels \(pair * 2 + 1)-\(pair * 2 + 2)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                if pair < vm.i2sActivePairs, vm.i2sRxPins.indices.contains(pair),
+                   let warning = startWarning(.i2sRx(pair), function: .i2sRx, index: pair, pin: vm.i2sRxPins[pair]) {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
             }
             Spacer()
             pinMenu(.i2sRx(pair), function: .i2sRx, index: pair,
@@ -8942,11 +8952,33 @@ struct HardwareSettingsTab: View {
             // MARK: Inputs
             if section == .spdif && vm.inputSourceSupported {
                 Section {
-                    // Number of S/PDIF inputs — 1..N, where N is whatever the
-                    // device reports (3 or 4).  The optional inputs share the
-                    // single receiver; the count selector enables inputs 1..N and
-                    // disables the rest.  Only shown on firmware that advertises
-                    // the optional inputs (multiSpdifSupported).
+                    // Block switch.  While on, inputs 1..N hold their pins and are
+                    // selectable whether or not one is playing; off holds none.
+                    // Refused while a S/PDIF input is the source.
+                    Toggle(isOn: Binding(
+                        get: { vm.spdifRxEnabled },
+                        set: { setSpdifBlockEnabled($0) }
+                    )) {
+                        HStack {
+                            Image(systemName: "power")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enable S/PDIF Input")
+                                    .font(.body)
+                                Text("While on, every input below holds its GPIO, so switching between sources never fails on a pin clash. Turn off to free the pins for other functions.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .padding(.vertical, 4)
+
+                    // Number of S/PDIF inputs in the block - 1..N, where N is
+                    // the device's limit.  The inputs share one receiver.  Usable
+                    // while the block is off; the count is remembered.
                     if vm.multiSpdifSupported {
                         HStack {
                             Image(systemName: "arrow.down.to.line")
@@ -8956,13 +8988,13 @@ struct HardwareSettingsTab: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text("Instances")
                                     .font(.body)
-                                Text("\(vm.spdifEnabledCount) selectable input\(vm.spdifEnabledCount == 1 ? "" : "s") sharing one receiver")
+                                Text("\(vm.spdifRxCount) selectable input\(vm.spdifRxCount == 1 ? "" : "s") sharing one receiver")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
                             Spacer()
                             Picker("", selection: Binding(
-                                get: { vm.spdifEnabledCount },
+                                get: { vm.spdifRxCount },
                                 set: { setSpdifInputCount($0) }
                             )) {
                                 ForEach(1...max(1, vm.spdifInputCount), id: \.self) { count in
@@ -8975,9 +9007,10 @@ struct HardwareSettingsTab: View {
                         }
                     }
 
-                    // One GPIO pin row per active input (1..N).  Rows appear/hide
-                    // as the count selector above changes.
-                    let shownCount = vm.multiSpdifSupported ? vm.spdifEnabledCount : 1
+                    // One GPIO pin row per counted input (1..N).  Rows appear/hide
+                    // as the count selector above changes; while the block is off
+                    // the pins are stored and hold nothing.
+                    let shownCount = vm.multiSpdifSupported ? min(vm.spdifRxCount, vm.spdifInputCount) : 1
                     ForEach(Array(0..<shownCount), id: \.self) { idx in
                         spdifInputRow(index: idx)
                     }
@@ -9026,6 +9059,30 @@ struct HardwareSettingsTab: View {
             // MARK: I2S Input
             if section == .spdif && vm.i2sInputSupported {
                 Section {
+                    // Block switch.  On reserves the clock pair and the counted
+                    // data pins whether or not I2S is selected; the clocks start
+                    // only on selection.  Refused while I2S is the source.
+                    Toggle(isOn: Binding(
+                        get: { vm.i2sInputEnabled },
+                        set: { setI2SBlockEnabled($0) }
+                    )) {
+                        HStack {
+                            Image(systemName: "power")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Enable I2S Input")
+                                    .font(.body)
+                                Text("While on, the bit clock pair and the data pins below are reserved for the I2S input, so it can be selected without a pin clash. The clocks start only when I2S is the input source.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .padding(.vertical, 4)
+
                     // Clock mode — MASTER (DSPi drives BCK/LRCLK, app picks the
                     // rate) or SLAVE (an external master drives the clocks and the
                     // rate is auto-detected).  Only meaningful while the input
@@ -9397,7 +9454,7 @@ struct HardwareSettingsTab: View {
                     // Not `id: \.self`: a bare source number collides with the
                     // S/PDIF and I2S pin rows' 0-based ids in this Form, and
                     // focusing USB's field (source 0) scrolled to "S/PDIF 1".
-                    ForEach(vm.inputSourceOptions.map(InputSourceNameRow.ID.init)) { row in
+                    ForEach(vm.allInputSources.map(InputSourceNameRow.ID.init)) { row in
                         InputSourceNameRow(source: row.source)
                     }
                 } header: {
@@ -9617,7 +9674,7 @@ struct HardwareSettingsTab: View {
                 DispatchQueue.main.async {
                     switch status {
                     case PIN_CONFIG_SUCCESS:
-                        let off = index > 0 && !vm.spdifInputEnabled(index: index)
+                        let off = !vm.spdifInputEnabled(index: index)
                         statusMessage = "S/PDIF \(index + 1) RX pin set to GPIO \(newPin)"
                             + (off ? storedPinNote(newPin, .spdifRx, index) : "")
                         statusIsError = false
@@ -9643,57 +9700,95 @@ struct HardwareSettingsTab: View {
         }
     }
 
-    /// Set how many S/PDIF inputs are active (1..N): enables inputs 1..target
-    /// and disables the rest.  Enables run low→high so a lower input frees its
-    /// state first; disables run high→low.  Surfaces the firmware's reason on
-    /// the first rejection (pin conflict when enabling, or "switch away first"
-    /// when disabling the live source) and re-syncs from the device.
+    /// Set the S/PDIF block count (1..N) in one SET.  A raise while the block
+    /// is on claims every new input's pin as one unit; a cut below the input
+    /// that is playing is refused.  While the block is off it is a plain store.
     private func setSpdifInputCount(_ target: Int) {
-        guard target != vm.spdifEnabledCount else { return }
+        guard target != vm.spdifRxCount else { return }
+        let from = vm.spdifRxCount
+        let blockOn = vm.spdifRxEnabled
         SettingsSaveCoordinator.shared.beginOutputEdit()
         DispatchQueue.global(qos: .userInitiated).async {
-            var failure: String? = nil
-
-            // Enable optional inputs up to the target (ascending).
-            if target >= 2 {
-                for idx in 1...(target - 1) where !vm.spdifInputEnabled(index: idx) {
-                    let s = vm.setSpdifInputEnable(index: idx, true)
-                    if s != PIN_CONFIG_SUCCESS {
-                        let pin = vm.spdifPin(index: idx)
-                        if let owner = owner(pin, .spdifRx, idx) {
-                            failure = "Can't enable S/PDIF \(idx + 1): GPIO \(pin) is assigned to \(owner)"
-                        } else {
-                            failure = "Can't enable S/PDIF \(idx + 1): GPIO \(pin) is unavailable"
-                        }
-                        break
-                    }
-                }
-            }
-
-            // Disable inputs above the target (descending).
-            if failure == nil {
-                for idx in stride(from: vm.spdifInputCount - 1, through: 1, by: -1)
-                where idx >= target && vm.spdifInputEnabled(index: idx) {
-                    let s = vm.setSpdifInputEnable(index: idx, false)
-                    if s != PIN_CONFIG_SUCCESS {
-                        failure = "Switch the input source away from S/PDIF \(idx + 1) before reducing the input count"
-                        break
-                    }
-                }
-            }
-
+            let status = vm.setSpdifRxCount(target)
+            let conflict = status == PIN_CONFIG_PIN_IN_USE && blockOn && target > from
+                ? spdifClaimConflicts(from..<target) : nil
             DispatchQueue.main.async {
-                if let failure = failure {
-                    statusMessage = failure
-                    statusIsError = true
-                } else {
-                    statusMessage = "S/PDIF inputs set to \(target)"
-                    statusIsError = false
-                }
-                // Re-sync the enable mask / pins from the device so a partial or
-                // rejected change reflects the true hardware state.
+                handleInputBlockStatus(status, done: "S/PDIF inputs set to \(target)",
+                                       what: "S/PDIF \(target > from ? "inputs \(from + 1)-\(target)" : "input count")",
+                                       source: "S/PDIF \(target + 1) or above", conflict: conflict)
                 vm.fetchSpdifInputConfig()
             }
+        }
+    }
+
+    /// Switch the S/PDIF input block.  On claims inputs 1..count as one unit.
+    private func setSpdifBlockEnabled(_ on: Bool) {
+        guard on != vm.spdifRxEnabled else { return }
+        let count = vm.spdifRxCount
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setSpdifRxEnable(on)
+            let conflict = status == PIN_CONFIG_PIN_IN_USE && on ? spdifClaimConflicts(0..<count) : nil
+            DispatchQueue.main.async {
+                handleInputBlockStatus(status, done: "S/PDIF input \(on ? "enabled" : "disabled")",
+                                       what: "the S/PDIF input", source: "S/PDIF", conflict: conflict)
+                vm.fetchSpdifInputConfig()
+            }
+        }
+    }
+
+    /// Switch the I2S input block.  On reserves the clock pair (when no I2S
+    /// output already runs it) and the counted data pins as one unit.
+    private func setI2SBlockEnabled(_ on: Bool) {
+        guard on != vm.i2sInputEnabled else { return }
+        let pins = (vm.anySlotIsI2S ? [] : vm.activeI2SClockPins) + Array(vm.i2sRxPins.prefix(vm.i2sActivePairs))
+        SettingsSaveCoordinator.shared.beginOutputEdit()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = vm.setI2SInputEnable(on)
+            let conflict = status == PIN_CONFIG_PIN_IN_USE && on
+                ? vm.describePinConflict(for: .i2sRx, pins: pins) : nil
+            DispatchQueue.main.async {
+                handleInputBlockStatus(status, done: "I2S input \(on ? "enabled" : "disabled")",
+                                       what: "the I2S input", source: "I2S", conflict: conflict)
+                vm.fetchI2SInputEnable()
+            }
+        }
+    }
+
+    /// Who holds the pins of S/PDIF inputs in `range`, or two of them sharing a
+    /// pin (the device checks them as one unit).  Off the main thread.
+    private func spdifClaimConflicts(_ range: Range<Int>) -> String? {
+        let pins = DispatchQueue.main.sync { range.map { vm.spdifPin(index: $0) } }
+        var parts: [String] = []
+        for (n, i) in range.enumerated() {
+            if let dup = range.prefix(n).firstIndex(where: { pins[$0 - range.lowerBound] == pins[n] }) {
+                parts.append("GPIO \(pins[n]) is set on both S/PDIF \(dup + 1) and \(i + 1)")
+            }
+        }
+        if let who = vm.describePinConflict(for: .spdifRx, pins: pins) { parts.insert(who, at: 0) }
+        return parts.isEmpty ? nil : parts.joined(separator: "; ")
+    }
+
+    /// Status row text for an input block switch or count SET.  The device
+    /// changed nothing on a refusal; the caller resyncs.
+    private func handleInputBlockStatus(_ status: UInt8, done: String, what: String, source: String,
+                                        conflict: String?) {
+        switch status {
+        case PIN_CONFIG_SUCCESS:
+            statusMessage = done
+            statusIsError = false
+        case PIN_CONFIG_PIN_IN_USE, PIN_CONFIG_INVALID_PIN:
+            statusMessage = "Can't enable \(what): " + (conflict ?? "a pin it needs is in use or invalid")
+            statusIsError = true
+        case PIN_CONFIG_OUTPUT_ACTIVE:
+            statusMessage = "Switch the input source away from \(source) first"
+            statusIsError = true
+        case PIN_CONFIG_INVALID_PARAM:
+            statusMessage = "The device doesn't support that value"
+            statusIsError = true
+        default:
+            statusMessage = "Failed to change \(what)"
+            statusIsError = true
         }
     }
 

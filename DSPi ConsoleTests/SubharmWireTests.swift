@@ -54,7 +54,7 @@ final class SubharmWireTests: XCTestCase {
     /// 5944; V30 grew it to 36 by tail-appending, taking the flat layout from
     /// 5960 to 5980 bytes (spec §4).
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 34)
         XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_SUBHARM_OFFSET, 5944)
         XCTAssertEqual(WIRE_SUBHARM_PARAMS_SIZE, 36)

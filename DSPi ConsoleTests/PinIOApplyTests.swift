@@ -3,7 +3,8 @@ import XCTest
 
 /// A device that follows the 1.1.7 pin rules closely enough to show order
 /// bugs: a function holds its pins only while in use, a store never conflicts,
-/// a start or a move of a running function does.  RP2350 shape: four slots
+/// a start or a move of a running function does.  Input blocks hold their pins
+/// while on, selected or not, and the source switch needs no pin.  RP2350 shape: four slots
 /// plus PDM at OUTPUT.PIN index 4.
 private final class FakePinDevice: PinIODevice {
     var c: PinIOConfig
@@ -29,7 +30,15 @@ private final class FakePinDevice: PinIODevice {
 
     private var anyI2S: Bool { c.slotTypes!.contains(1) }
     private var pair: Int { (c.clockPinMode == I2S_CLOCK_PIN_MODE_SPLIT && c.clockMode == I2S_CLOCK_MODE_SLAVE) ? 1 : 0 }
-    private var clocksRun: Bool { anyI2S || c.inputSource == INPUT_SOURCE_I2S }
+    private var clocksRun: Bool { anyI2S || c.i2sEnabled == true }
+    private func spdifHeld(_ i: Int) -> Bool { c.spdifEnabled == true && i < c.spdifCount! }
+    private var spdifSourceIndex: Int? {
+        switch c.inputSource! {
+        case INPUT_SOURCE_SPDIF: return 0
+        case INPUT_SOURCE_SPDIF2...INPUT_SOURCE_SPDIF4: return c.inputSource! - INPUT_SOURCE_SPDIF2 + 1
+        default: return nil
+        }
+    }
 
     /// Active claims as (owner, pin).
     func active() -> [(String, UInt8)] {
@@ -38,8 +47,8 @@ private final class FakePinDevice: PinIODevice {
         if c.pdmEnabled == true || pdmRunning { out.append(("out4", c.outputPins![4])) }
         if clocksRun { let b = c.bckPins![pair]; out += [("bck\(pair)", b), ("bck\(pair)", b + 1)] }
         if c.mckEnabled == true { out.append(("mck", c.mckPin!)) }
-        for (i, p) in c.spdifPins!.enumerated() where i == 0 || c.spdifEnabled![i] { out.append(("spdif\(i)", p)) }
-        if c.inputSource == INPUT_SOURCE_I2S {
+        for (i, p) in c.spdifPins!.enumerated() where spdifHeld(i) { out.append(("spdif\(i)", p)) }
+        if c.i2sEnabled == true {
             for p in 0..<(c.i2sChannels! / 2) { out.append(("i2s\(p)", c.i2sRxPins![p])) }
         }
         if c.adatEnabled == true { out.append(("adat", c.adatPin!)) }
@@ -98,38 +107,53 @@ private final class FakePinDevice: PinIODevice {
             let b = c.bckPins![pair]
             return claim([b, b + 1], "bck\(pair)")
         case .inputSource(let s):
+            // No pin check; a source whose block is off is VC_ERR_STATE.
             switch s {
-            case INPUT_SOURCE_I2S:
-                var pins = (0..<(c.i2sChannels! / 2)).map { c.i2sRxPins![$0] }
-                if !clocksRun { pins += [c.bckPins![pair], c.bckPins![pair] + 1] }
-                for p in 0..<(c.i2sChannels! / 2) where claim([c.i2sRxPins![p]], "i2s\(p)") != 0 { return PIN_CONFIG_PIN_IN_USE }
-                return clocksRun ? PIN_CONFIG_SUCCESS : claim([c.bckPins![pair], c.bckPins![pair] + 1], "bck\(pair)")
-            case INPUT_SOURCE_ADAT: return c.adatInEnabled == true ? 0 : PIN_CONFIG_INVALID_PARAM
+            case INPUT_SOURCE_I2S: return c.i2sEnabled == true ? 0 : PIN_CONFIG_OUTPUT_ACTIVE
+            case INPUT_SOURCE_ADAT: return c.adatInEnabled == true ? 0 : PIN_CONFIG_OUTPUT_ACTIVE
+            case INPUT_SOURCE_SPDIF: return spdifHeld(0) ? 0 : PIN_CONFIG_OUTPUT_ACTIVE
             case INPUT_SOURCE_SPDIF2...INPUT_SOURCE_SPDIF4:
-                return c.spdifEnabled![s - INPUT_SOURCE_SPDIF2 + 1] ? 0 : PIN_CONFIG_INVALID_PARAM
+                return spdifHeld(s - INPUT_SOURCE_SPDIF2 + 1) ? 0 : PIN_CONFIG_OUTPUT_ACTIVE
             default: return 0
             }
         case .mckEnable(let on): return on ? claim([c.mckPin!], "mck") : 0
         case .mckPin(let p): return c.mckEnabled == true ? PIN_CONFIG_OUTPUT_ACTIVE : store([p])
-        case .spdifPin(let i, let p): return i == 0 || c.spdifEnabled![i] ? claim([p], "spdif\(i)") : store([p])
-        case .spdifEnable(let i, let on):
-            if !on { return c.inputSource == INPUT_SOURCE_SPDIF2 + i - 1 ? PIN_CONFIG_PIN_IN_USE : 0 }
-            return claim([c.spdifPins![i]], "spdif\(i)")
+        case .spdifPin(let i, let p): return spdifHeld(i) ? claim([p], "spdif\(i)") : store([p])
+        case .spdifEnable(let on):
+            if !on { return spdifSourceIndex != nil ? PIN_CONFIG_OUTPUT_ACTIVE : 0 }
+            return claimSpdif(0..<c.spdifCount!)
+        case .spdifCount(let n):
+            guard (1...4).contains(n) else { return PIN_CONFIG_INVALID_PARAM }
+            if let src = spdifSourceIndex, src >= n { return PIN_CONFIG_OUTPUT_ACTIVE }
+            return c.spdifEnabled == true && n > c.spdifCount! ? claimSpdif(c.spdifCount!..<n) : 0
+        case .i2sEnable(let on):
+            if !on { return c.inputSource == INPUT_SOURCE_I2S ? PIN_CONFIG_OUTPUT_ACTIVE : 0 }
+            for p in 0..<(c.i2sChannels! / 2) where claim([c.i2sRxPins![p]], "i2s\(p)") != 0 { return PIN_CONFIG_PIN_IN_USE }
+            return clocksRun ? PIN_CONFIG_SUCCESS : claim([c.bckPins![pair], c.bckPins![pair] + 1], "bck\(pair)")
         case .i2sRxPin(let p, let g):
-            let inUse = c.inputSource == INPUT_SOURCE_I2S && p < c.i2sChannels! / 2
+            let inUse = c.i2sEnabled == true && p < c.i2sChannels! / 2
             return inUse ? claim([g], "i2s\(p)") : store([g])
         case .i2sChannels(let n):
-            guard c.inputSource == INPUT_SOURCE_I2S, n > c.i2sChannels! else { return 0 }
+            guard c.i2sEnabled == true, n > c.i2sChannels! else { return 0 }
             for p in (c.i2sChannels! / 2)..<(n / 2) where claim([c.i2sRxPins![p]], "i2s\(p)") != 0 { return PIN_CONFIG_PIN_IN_USE }
             return 0
         case .adatPin(let p): return c.adatEnabled == true ? claim([p], "adat") : store([p])
         case .adatEnable(let on): return on ? claim([c.adatPin!], "adat") : 0
         case .adatInPin(let p): return c.adatInEnabled == true ? claim([p], "adatIn") : store([p])
         case .adatInEnable(let on):
-            if !on { return c.inputSource == INPUT_SOURCE_ADAT ? PIN_CONFIG_PIN_IN_USE : 0 }
+            if !on { return c.inputSource == INPUT_SOURCE_ADAT ? PIN_CONFIG_OUTPUT_ACTIVE : 0 }
             return claim([c.adatInPin!], "adatIn")
         case .clockPinMode, .clockMode, .mckMultiplier, .i2sRate, .adatInClockMode: return 0
         }
+    }
+
+    /// Inputs in `range` claimed as one unit: all or nothing.
+    private func claimSpdif(_ range: Range<Int>) -> UInt8 {
+        for i in range {
+            let s = claim([c.spdifPins![i]], "spdif\(i)")
+            if s != 0 { return s }
+        }
+        return 0
     }
 
     private func commit(_ op: PinIOOp) {
@@ -144,7 +168,9 @@ private final class FakePinDevice: PinIODevice {
         case .mckPin(let p): c.mckPin = p
         case .mckMultiplier(let m): c.mckMultiplier = m
         case .spdifPin(let i, let p): c.spdifPins![i] = p
-        case .spdifEnable(let i, let e): c.spdifEnabled![i] = e
+        case .spdifEnable(let e): c.spdifEnabled = e
+        case .spdifCount(let n): c.spdifCount = n
+        case .i2sEnable(let e): c.i2sEnabled = e
         case .i2sChannels(let n): c.i2sChannels = n
         case .i2sRxPin(let i, let p): c.i2sRxPins![i] = p
         case .i2sRate(let r): c.i2sRate = r
@@ -192,7 +218,7 @@ final class PinIOApplyTests: XCTestCase {
         PinIOConfig(slotTypes: [0, 0, 0, 0], outputPins: [6, 7, 8, 9, 10], pdmEnabled: false,
                     bckPins: [14, 26], clockPinMode: I2S_CLOCK_PIN_MODE_UNIFIED, clockMode: I2S_CLOCK_MODE_MASTER,
                     mckEnabled: false, mckPin: 13, mckMultiplier: 0,
-                    spdifPins: [5, 20, 21, 22], spdifEnabled: [true, false, false, false],
+                    spdifPins: [5, 20, 21, 22], spdifEnabled: true, spdifCount: 1, i2sEnabled: false,
                     i2sChannels: 2, i2sRxPins: [1, 2, 3, 4], i2sRate: 48000, inputSource: INPUT_SOURCE_USB,
                     adatPin: 12, adatEnabled: false, adatInPin: ADAT_INPUT_PIN_UNSET, adatInClockMode: 0, adatInEnabled: false)
     }
@@ -208,7 +234,7 @@ final class PinIOApplyTests: XCTestCase {
     /// clock pair; here the pair is stored before the slot goes to I2S.
     func testClockPinsBeforeSlotType() {
         var cur = base()
-        cur.spdifEnabled = [true, true, false, false]
+        cur.spdifCount = 2
         cur.spdifPins = [5, 14, 21, 22]           // S/PDIF 2 holds GPIO 14
         let dev = FakePinDevice(cur)
         var tgt = cur
@@ -234,17 +260,21 @@ final class PinIOApplyTests: XCTestCase {
         XCTAssertEqual(dev.c.slotTypes, [1, 1, 0, 0])
     }
 
-    /// Switching the source to I2S comes after the data pins are in place.
+    /// The I2S block switches on once its data pins are in place, then the
+    /// source follows.
     func testSourceAfterRxPins() {
         let cur = base()
         let dev = FakePinDevice(cur)
         var tgt = cur
         tgt.spdifPins = [19, 20, 21, 22]           // S/PDIF 1 leaves GPIO 5
         tgt.i2sRxPins = [5, 2, 3, 4]               // I2S data takes it
+        tgt.i2sEnabled = true
         tgt.inputSource = INPUT_SOURCE_I2S
         let r = apply(dev, tgt)
         XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(dev.c.i2sEnabled, true)
         XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_I2S)
+        XCTAssertLessThan(dev.log.firstIndex(of: .i2sEnable(true))!, dev.log.firstIndex(of: .inputSource(INPUT_SOURCE_I2S))!)
         XCTAssertEqual(dev.c.i2sRxPins?[0], 5)
         XCTAssertEqual(dev.c.spdifPins?[0], 19)
     }
@@ -358,19 +388,100 @@ final class PinIOApplyTests: XCTestCase {
         XCTAssertEqual(dev.c.pdmEnabled, true)
     }
 
-    /// Disabling the input that is the source: the source steps aside first.
-    func testSourceStepsAsideBeforeItsInputIsDisabled() {
+    /// Cutting the count below the input that is the source: the source steps
+    /// aside first.
+    func testSourceStepsAsideBeforeItsInputIsCut() {
         var cur = base()
-        cur.spdifEnabled = [true, true, false, false]
+        cur.spdifCount = 2
         cur.inputSource = INPUT_SOURCE_SPDIF2
         let dev = FakePinDevice(cur)
         var tgt = cur
-        tgt.spdifEnabled = [true, false, false, false]
+        tgt.spdifCount = 1
         tgt.inputSource = INPUT_SOURCE_SPDIF
         let r = apply(dev, tgt)
         XCTAssertEqual(r.problems, [])
         XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_SPDIF)
-        XCTAssertEqual(dev.c.spdifEnabled, [true, false, false, false])
+        XCTAssertEqual(dev.c.spdifCount, 1)
+    }
+
+    /// Switching a whole block off under the source: it steps aside to the
+    /// target source first, here I2S, whose block the target turns on - so
+    /// it goes via USB and ends on I2S.
+    func testSourceLeavesABlockThatGoesOff() {
+        var cur = base()
+        cur.inputSource = INPUT_SOURCE_SPDIF
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.spdifEnabled = false
+        tgt.i2sEnabled = true
+        tgt.inputSource = INPUT_SOURCE_I2S
+        let r = apply(dev, tgt)
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(dev.c.spdifEnabled, false)
+        XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_I2S)
+        XCTAssertEqual(dev.log.first, .inputSource(INPUT_SOURCE_USB))
+    }
+
+    /// A source switch into a block that is already on needs no pin at all,
+    /// even while another function sits on a pin the block does not use.
+    func testSourceSwitchIntoAnOnBlockNeedsNoPins() {
+        var cur = base()
+        cur.i2sEnabled = true
+        cur.spdifCount = 3
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.inputSource = INPUT_SOURCE_SPDIF3
+        let r = apply(dev, tgt)
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(dev.log, [.inputSource(INPUT_SOURCE_SPDIF3)])
+    }
+
+    /// The I2S block claims its clock pair even with no I2S output: a held
+    /// BCK pin refuses the switch and the source stays where it was.
+    func testI2SBlockOnRefusedOnHeldClockPin() {
+        var cur = base()
+        cur.outputPins = [6, 15, 8, 9, 10]          // Output 2 sits on LRCLK
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.i2sEnabled = true
+        tgt.inputSource = INPUT_SOURCE_I2S
+        let r = apply(dev, tgt)
+        XCTAssertEqual(dev.c.i2sEnabled, false)
+        XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_USB)
+        XCTAssertTrue(r.problems.contains { $0.hasPrefix("I2S input rejected") })
+        XCTAssertTrue(r.notes.contains { $0.contains("stayed on USB") })
+    }
+
+    /// A count raise claims every new input as one unit: one held pin and the
+    /// count stays where it was.
+    func testSpdifCountRaiseIsAllOrNothing() {
+        var cur = base()
+        cur.spdifPins = [5, 20, 7, 22]             // input 3 on Output 2's pin
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.spdifCount = 4
+        let r = apply(dev, tgt)
+        XCTAssertEqual(dev.c.spdifCount, 1)
+        XCTAssertTrue(r.problems.contains { $0.hasPrefix("S/PDIF input count rejected") })
+    }
+
+    /// While the block is off its count and pins are plain stores; the switch
+    /// then claims them all at once.
+    func testSpdifCountAndPinsStoreWhileOffThenSwitchOn() {
+        var cur = base()
+        cur.spdifEnabled = false
+        cur.spdifPins = [5, 6, 21, 22]             // input 2 stored on Output 1's pin
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.spdifEnabled = true
+        tgt.spdifCount = 2
+        tgt.spdifPins = [5, 19, 21, 22]
+        let r = apply(dev, tgt)
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(dev.c.spdifEnabled, true)
+        XCTAssertEqual(dev.c.spdifCount, 2)
+        XCTAssertEqual(dev.c.spdifPins?[1], 19)
+        XCTAssertLessThan(dev.log.firstIndex(of: .spdifCount(2))!, dev.log.firstIndex(of: .spdifEnable(true))!)
     }
 
     /// A queued switch that never lands is reported, and the routine does not
@@ -387,19 +498,53 @@ final class PinIOApplyTests: XCTestCase {
         XCTAssertEqual(dev.c.bckPins?[0], 14, "the pair could not move under running clocks")
     }
 
-    /// The source cannot return to an input the target switched off: it stays on USB, with a note.
-    func testSourceStaysAsideWhenItsInputGoesOff() {
+    /// With the I2S block on (not selected, no I2S output) the clock pair is in
+    /// use, so an output swapping onto LRCLK while the pair moves onto the
+    /// output's pin is broken through a temporary pin.
+    func testSwapWithClockPairWhileI2SBlockOn() {
         var cur = base()
-        cur.spdifEnabled = [true, true, false, false]
+        cur.i2sEnabled = true
+        cur.outputPins = [16, 7, 8, 9, 10]
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.bckPins = [16, 26]
+        tgt.outputPins = [15, 7, 8, 9, 10]
+        let r = apply(dev, tgt)
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(dev.c.bckPins?[0], 16)
+        XCTAssertEqual(dev.c.outputPins?[0], 15)
+    }
+
+    /// A target that leaves the source alone keeps the playing input's block,
+    /// as the firmware's restores do: the count is not cut below it.
+    func testLiveSourceKeepsItsBlock() {
+        var cur = base()
+        cur.spdifCount = 2
         cur.inputSource = INPUT_SOURCE_SPDIF2
         let dev = FakePinDevice(cur)
         var tgt = cur
-        tgt.spdifEnabled = [true, false, false, false]
+        tgt.spdifCount = 1
         tgt.inputSource = nil                      // Settings Revert leaves the source alone
         let r = apply(dev, tgt)
         XCTAssertEqual(r.problems, [])
-        XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_USB)
-        XCTAssertFalse(r.notes.isEmpty)
+        XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_SPDIF2)
+        XCTAssertEqual(dev.c.spdifCount, 2)
+        XCTAssertTrue(r.notes.contains { $0.contains("S/PDIF input 2 stayed on") })
+    }
+
+    /// The same for an I2S source whose block the target switches off.
+    func testLiveI2SSourceKeepsItsBlock() {
+        var cur = base()
+        cur.i2sEnabled = true
+        cur.inputSource = INPUT_SOURCE_I2S
+        let dev = FakePinDevice(cur)
+        var tgt = cur
+        tgt.i2sEnabled = false
+        tgt.inputSource = nil
+        let r = apply(dev, tgt)
+        XCTAssertEqual(r.problems, [])
+        XCTAssertEqual(dev.c.i2sEnabled, true)
+        XCTAssertEqual(dev.c.inputSource, INPUT_SOURCE_I2S)
     }
 
     /// A function that is off stores a held pin; enabling it there is refused and reported.

@@ -133,7 +133,9 @@ struct PresetSnapshot: Equatable {
     let mckMultiplier: Int
     let spdifRxPin: UInt8
     var spdifRxPinsExt: [UInt8]? = nil   // optional S/PDIF 2/3 pins; nil when unsupported
-    var spdifExtEnabled: [Bool]? = nil   // optional S/PDIF 2/3 enable state; nil when unsupported
+    var spdifRxEnabled: Bool? = nil      // S/PDIF input block switch; nil when unsupported
+    var spdifRxCount: Int? = nil         // S/PDIF input block count (1..4); nil when unsupported
+    var i2sInputEnabled: Bool? = nil     // I2S input block switch; nil when unsupported
     let inputSource: Int?  // nil when firmware doesn't support input switching
     let i2sRxPins: [UInt8]?    // per-pair I2S RX data pins; nil when unsupported (pre-V12)
     let i2sInputChannels: Int? // active I2S input channel count (2/4/6/8); nil when unsupported
@@ -605,15 +607,19 @@ extension PresetSnapshot {
             if old.spdifRxPin != new.spdifRxPin {
                 changes.append(.init(category: "S/PDIF", description: "S/PDIF RX pin: GPIO \(old.spdifRxPin) → GPIO \(new.spdifRxPin)"))
             }
-            if let oldEn = old.spdifExtEnabled, let newEn = new.spdifExtEnabled {
-                for i in 0..<min(oldEn.count, newEn.count) where oldEn[i] != newEn[i] {
-                    changes.append(.init(category: "S/PDIF", description: "S/PDIF \(i + 2) input: \(newEn[i] ? "enabled" : "disabled")"))
-                }
+            if let oldEn = old.spdifRxEnabled, let newEn = new.spdifRxEnabled, oldEn != newEn {
+                changes.append(.init(category: "S/PDIF", description: "S/PDIF input: \(newEn ? "enabled" : "disabled")"))
+            }
+            if let oldCount = old.spdifRxCount, let newCount = new.spdifRxCount, oldCount != newCount {
+                changes.append(.init(category: "S/PDIF", description: "S/PDIF inputs: \(oldCount) → \(newCount)"))
             }
             if let oldPins = old.spdifRxPinsExt, let newPins = new.spdifRxPinsExt {
                 for i in 0..<min(oldPins.count, newPins.count) where oldPins[i] != newPins[i] {
                     changes.append(.init(category: "S/PDIF", description: "S/PDIF \(i + 2) RX pin: GPIO \(oldPins[i]) → GPIO \(newPins[i])"))
                 }
+            }
+            if let oldEn = old.i2sInputEnabled, let newEn = new.i2sInputEnabled, oldEn != newEn {
+                changes.append(.init(category: "I2S Input", description: "I2S input: \(newEn ? "enabled" : "disabled")"))
             }
             if let oldCount = old.i2sInputChannels, let newCount = new.i2sInputChannels, oldCount != newCount {
                 changes.append(.init(category: "I2S Input", description: "I2S input channels: \(oldCount) → \(newCount)"))

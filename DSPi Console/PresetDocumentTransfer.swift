@@ -213,6 +213,10 @@ extension PresetDocument {
         // travels in its own additive field.
         io.spdifRxPins = (0..<3).map { vm.spdifPin(index: $0) }
         if SPDIF_RX_NUM_INPUTS > 3 { io.spdifRxPin4 = vm.spdifPin(index: 3) }
+        // The block model in its own fields; the old per-input mask is kept
+        // for readers that predate it (inputs 2..count while the block is on).
+        io.spdifInputEnabled = vm.spdifRxEnabled
+        io.spdifInputCount = vm.spdifRxCount
         io.spdifEnabledExt = (1..<SPDIF_RX_NUM_INPUTS).reduce(into: UInt8(0)) { mask, index in
             if vm.spdifInputEnabled(index: index) { mask |= UInt8(1) << (index - 1) }
         }
@@ -220,6 +224,7 @@ extension PresetDocument {
         io.i2sRxPins = vm.i2sRxPins
         io.i2sInputChannels = vm.i2sInputChannels
         io.i2sInputRateHz = vm.i2sInputRateHz
+        io.i2sInputEnabled = vm.i2sInputEnabled
 
         io.adatEnabled = vm.adatEnabled
         io.adatPin = vm.adatPin
@@ -573,8 +578,13 @@ enum PresetDocumentApply {
         if !setSource {
             // Applied with the pins, by the hardware IO step.
         } else if vm.inputSourceSupported {
-            if vm.inputSource != doc.global.inputSource {
-                vm.setInputSource(doc.global.inputSource)
+            // Without the hardware IO step the input blocks stay as they are,
+            // and the device refuses a source whose block is off.
+            let src = doc.global.inputSource
+            if vm.inputSource != src, vm.inputSourceSelectable(src) {
+                vm.setInputSource(src)
+            } else if vm.inputSource != src {
+                report.skip("Input source \(vm.builtInInputSourceTitle(src)) (its input is switched off on this device; apply Hardware IO too, or turn it on in Settings)")
             }
         } else if doc.global.inputSource != INPUT_SOURCE_USB {
             report.skip("Input source (not supported by this firmware)")
@@ -750,9 +760,12 @@ enum PresetDocumentApply {
             target.spdifPins = pins.indices.map { i in
                 i == 0 ? (io.spdifRxPins.first ?? pins[0]) : (documentSpdifPin(io, index: i) ?? pins[i])
             }
-            target.spdifEnabled = pins.indices.map { $0 == 0 || io.spdifEnabledExt & (UInt8(1) << ($0 - 1)) != 0 }
-            if pins.count == 1 && io.spdifEnabledExt != 0 {
-                report.skip("Additional S/PDIF inputs (not supported by this firmware)")
+            target.spdifEnabled = io.resolvedSpdifEnabled
+            if current.spdifCount != nil {
+                target.spdifCount = min(io.resolvedSpdifCount, pins.count)
+            }
+            if io.resolvedSpdifCount > pins.count {
+                report.skip("S/PDIF inputs above \(pins.count) (not supported by this firmware)")
             }
             // The source belongs to the audio processing option; with it
             // ticked it is applied here, after the pins it needs.
@@ -763,6 +776,7 @@ enum PresetDocumentApply {
         if let pins = current.i2sRxPins {
             let channels = min(io.i2sInputChannels, vm.i2sMaxInputChannels)
             if [2, 4, 6, 8].contains(channels) { target.i2sChannels = channels }
+            target.i2sEnabled = io.resolvedI2sEnabled(inputSource: doc.global.inputSource)
             target.i2sRxPins = pins.indices.map { $0 < io.i2sRxPins.count ? io.i2sRxPins[$0] : pins[$0] }
             target.i2sRate = io.i2sInputRateHz
         }

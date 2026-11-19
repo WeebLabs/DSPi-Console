@@ -45,7 +45,7 @@ final class LimiterWireTests: XCTestCase {
     /// V32 appends WireLimiterParams (9 x 12 bytes) as the final section at
     /// 6028, taking the flat layout to 6136 bytes.
     func testWireFormatSizing() {
-        XCTAssertEqual(WIRE_FORMAT_VERSION, 32)
+        XCTAssertEqual(WIRE_FORMAT_VERSION, 34)
         XCTAssertEqual(BULK_PARAMS_SIZE, 6136)
         XCTAssertEqual(BULK_LIMITER_OFFSET, 6028)
         XCTAssertEqual(WIRE_LIMITER_OUTPUT_SIZE, 12)

@@ -23,7 +23,9 @@ final class ViewModelPinIODevice: PinIODevice {
         case .mckPin(let p): return vm.setMckPin(p)
         case .mckMultiplier(let m): return vm.setMckMultiplier(m)
         case .spdifPin(let i, let p): return vm.setSpdifRxPin(index: i, p)
-        case .spdifEnable(let i, let on): return vm.setSpdifInputEnable(index: i, on)
+        case .spdifEnable(let on): return vm.setSpdifRxEnable(on)
+        case .spdifCount(let n): return vm.setSpdifRxCount(n)
+        case .i2sEnable(let on): return vm.setI2SInputEnable(on)
         case .i2sChannels(let n): return vm.setI2SInputChannels(n)
         case .i2sRxPin(let pair, let p): return vm.setI2SRxPin(pair: pair, p)
         case .i2sRate(let r): return vm.setInputRateAndWait(r)
@@ -124,11 +126,13 @@ extension DSPViewModel {
         if i2sClockModeSupported { c.clockMode = i2sClockMode }
         if inputSourceSupported {
             c.inputSource = inputSource
-            let count = multiSpdifSupported ? spdifInputCount : 1
-            c.spdifPins = (0..<count).map { spdifPin(index: $0) }
-            c.spdifEnabled = (0..<count).map { $0 == 0 || spdifInputEnabled(index: $0) }
+            let limit = multiSpdifSupported ? spdifInputCount : 1
+            c.spdifPins = (0..<limit).map { spdifPin(index: $0) }
+            c.spdifEnabled = spdifRxEnabled
+            if multiSpdifSupported { c.spdifCount = min(spdifRxCount, limit) }
         }
         if i2sInputSupported {
+            c.i2sEnabled = i2sInputEnabled
             c.i2sChannels = i2sInputChannels
             c.i2sRxPins = Array(i2sRxPins.prefix(i2sMaxPairs))
             c.i2sRate = i2sInputRateHz
